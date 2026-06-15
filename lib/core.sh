@@ -25,10 +25,12 @@ WASPFLOW_HOME="${WASPFLOW_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/waspflow}"
 WASPFLOW_LANES_DIR="$WASPFLOW_HOME/lanes"
 
 # ---- machine-specific knobs (env-overridable) -------------------------------
-# Codex routes its model calls through a local proxy (headroom) by default on
-# this machine. The adapter preflights this URL before spawning a Codex lane.
-# Override or disable (set empty) when Codex talks to a model directly.
-WASPFLOW_CODEX_BACKEND_HEALTH_URL="${WASPFLOW_CODEX_BACKEND_HEALTH_URL:-http://127.0.0.1:8787/health}"
+# If Codex is configured to route its model calls through a local proxy, set this
+# to that proxy's health URL; the codex adapter preflights it before spawning a
+# Codex lane, since a turn never completes if the proxy is down. Leave EMPTY
+# (the default) when Codex reaches its model directly — then no preflight runs.
+# Example: export WASPFLOW_CODEX_BACKEND_HEALTH_URL=http://127.0.0.1:8787/health
+WASPFLOW_CODEX_BACKEND_HEALTH_URL="${WASPFLOW_CODEX_BACKEND_HEALTH_URL:-}"
 
 # tmux session that holds all waspflow windows. Keeping them in one named
 # session makes list/attach/reap predictable and avoids polluting the user's

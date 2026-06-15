@@ -15,8 +15,9 @@
 #   - IDLE when the last rollout event is  event_msg / payload.type == task_complete.
 #   - Revise headlessly:  codex exec resume <SID> "<msg>" -o <FILE>
 #     (re-enters the SAME session with full context; -o gives a clean last-message).
-#   - Codex routes model calls through a local backend (headroom :8787 by default).
-#     Spawning without it up yields a turn that never completes — so we PREFLIGHT it.
+#   - If Codex is configured to route model calls through a local proxy, spawning
+#     without it up yields a turn that never completes — so we PREFLIGHT a
+#     configurable health URL ($WASPFLOW_CODEX_BACKEND_HEALTH_URL) when set.
 
 CODEX_SESSIONS_DIR="${CODEX_SESSIONS_DIR:-$HOME/.codex/sessions}"
 
@@ -32,8 +33,8 @@ codex_preflight() {
     local code
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 "$url" 2>/dev/null || echo 000)"
     if [[ "$code" != "200" ]]; then
-      err "Codex backend not healthy ($url -> $code). If you use headroom, run: headroom proxy"
-      err "  (or set WASPFLOW_CODEX_BACKEND_HEALTH_URL='' to skip this check when Codex talks to a model directly)"
+      err "Codex model proxy not healthy ($url -> $code). Start the proxy Codex is configured to use,"
+      err "  or unset WASPFLOW_CODEX_BACKEND_HEALTH_URL to skip this check when Codex talks to a model directly."
       return 1
     fi
   fi

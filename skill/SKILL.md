@@ -32,9 +32,10 @@ Do **not** use it for trivial work you can just do yourself, or when a single
 waspflow doctor
 ```
 
-Green = ready. If it warns the **Codex backend** is down and you intend to spawn
-Codex, that backend must be up first (on this machine: `headroom proxy`). Claude
-needs no backend gate. If `waspflow` isn't on PATH, run the repo's `install.sh`.
+Green = ready. If `doctor` warns the **Codex model proxy** is down (only when
+`WASPFLOW_CODEX_BACKEND_HEALTH_URL` is set for a proxy-routed Codex), start that
+proxy before spawning Codex. Claude needs no backend gate. If `waspflow` isn't on
+PATH, run the repo's `install.sh`.
 
 ## The core loop
 

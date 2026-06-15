@@ -44,13 +44,15 @@ Full loop, with real worker output:
 7. **Revise (headless, after exit)**: `codex exec resume <SID> "<msg>" -o <FILE>`
    re-enters the same session with full context; `-o` gives a clean last message.
    (`codex resume` = interactive; `codex exec resume` = headless.)
-8. **Backend dependency**: Codex routes model calls through a local proxy
-   (headroom :8787 here). With it down, a turn never completes — so the adapter
-   preflights `$WASPFLOW_CODEX_BACKEND_HEALTH_URL` before spawning.
+8. **Optional proxy dependency**: some setups route Codex's model calls through a
+   local proxy. With such a proxy down, a turn never completes — so when
+   `$WASPFLOW_CODEX_BACKEND_HEALTH_URL` is set, the adapter preflights it before
+   spawning. Unset (the default) = no preflight (Codex reaches its model directly).
 9. Benign noise: spawned Codex inherits the user's global session hooks (a
    `UserPromptSubmit` hook may inject text into the prompt); and a
-   `codex_models_manager … missing field 'models'` error can appear when the
-   backend's `/v1/models` envelope differs — neither blocks turns.
+   `codex_models_manager … missing field 'models'` error can appear when a
+   proxy's `/v1/models` envelope differs from what Codex expects — neither blocks
+   turns.
 
 ## Claude gotchas (handled in `lib/providers/claude.sh`)
 
@@ -64,9 +66,8 @@ Full loop, with real worker output:
    Enter until the JSONL grows.
 4. **Headless revise**: `claude --resume <session-id> --print "<msg>"` returns the
    reply with full prior context.
-5. On some machines `claude` is itself wrapped to route through a local proxy
-   (headroom). That wrapper owns its own health and is transparent to waspflow —
-   no gate needed.
+5. On some setups `claude` is itself wrapped to route through a local proxy. Such
+   a wrapper owns its own health and is transparent to waspflow — no gate needed.
 
 ## Design consequences
 

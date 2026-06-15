@@ -103,10 +103,11 @@ rewrite:
 
 - No hardcoded project paths; runs from any cwd.
 - State lives under `$WASPFLOW_HOME` (default `~/.local/state/waspflow`).
-- The Codex model backend health check is `$WASPFLOW_CODEX_BACKEND_HEALTH_URL`
-  (default `http://127.0.0.1:8787/health`, the local **headroom** proxy). Set it
-  empty to skip the check when Codex talks to a model directly, or point it at a
-  different backend.
+- The Codex model-proxy health check is `$WASPFLOW_CODEX_BACKEND_HEALTH_URL`
+  (default empty = no check). If your Codex is configured to route through a
+  local proxy, set this to that proxy's health URL so waspflow refuses to spawn a
+  Codex lane while the proxy is down (a turn would otherwise hang). Leave empty
+  when Codex reaches its model directly.
 - All tmux windows live in a dedicated session (`$WASPFLOW_TMUX_SESSION`, default
   `waspflow`) so the user's own tmux is never disturbed.
 
@@ -116,7 +117,7 @@ rewrite:
 |---|---|---|
 | `WASPFLOW_HOME` | `~/.local/state/waspflow` | Lane state + transcripts |
 | `WASPFLOW_TMUX_SESSION` | `waspflow` | tmux session holding all windows |
-| `WASPFLOW_CODEX_BACKEND_HEALTH_URL` | `http://127.0.0.1:8787/health` | Codex backend preflight (empty = skip) |
+| `WASPFLOW_CODEX_BACKEND_HEALTH_URL` | _(empty)_ | If set, preflight this URL before spawning Codex (for setups where Codex routes through a local model proxy) |
 | `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Where Claude writes session JSONL |
 | `CODEX_SESSIONS_DIR` | `~/.codex/sessions` | Where Codex writes rollout JSONL |
 

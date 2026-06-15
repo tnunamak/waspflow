@@ -2,8 +2,8 @@
 #
 # claude.sh — waspflow provider adapter for Claude Code.
 #
-# Mechanics verified against scripts/claude-workstream.sh:invoke_claude_interactive
-# (pdpp) and the 2026-06-15 live spike:
+# Mechanics verified empirically against an interactive `claude` session and the
+# 2026-06-15 live spike:
 #   - Interactive (resumable) claude = drop --print AND --no-session-persistence,
 #     add --session-id <uuid> (the addressable resume handle) and --name <lane>.
 #     (--session-name does NOT exist; -n/--name is cosmetic.)
@@ -17,11 +17,10 @@
 
 CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
 
-# Preflight: claude on PATH. Claude reaches its model directly (Anthropic) by
-# default, so there's no mandatory local-proxy gate like Codex's. NOTE: on some
-# setups `claude` is itself wrapped to route through a local proxy (e.g. headroom
-# on :8787); that wrapper owns its own health and is transparent to us, so we do
-# not gate on it here.
+# Preflight: claude on PATH. Claude reaches its model directly by default, so
+# there's no mandatory local-proxy gate like Codex's. NOTE: on some setups
+# `claude` is itself wrapped to route through a local proxy; such a wrapper owns
+# its own health and is transparent to us, so we do not gate on it here.
 claude_preflight() {
   command -v claude >/dev/null 2>&1 || { err "claude not found on PATH"; return 1; }
   return 0
