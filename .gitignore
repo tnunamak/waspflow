@@ -1,0 +1,5 @@
+# waspflow runtime state lives under $WASPFLOW_HOME (default ~/.local/state),
+# not in the repo. Nothing runtime should land here, but guard anyway.
+*.log
+/tmp/
+.DS_Store

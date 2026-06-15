@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+#
+# waspflow — turnkey live orchestration of Claude/Codex agents in tmux.
+#
+# An orchestrating session (itself Claude or Codex, in ANY project dir) uses
+# this to spawn an agent of either provider into a tmux window, watch it stream,
+# steer/revise it live or after teardown, wait for it to go idle, and reap it —
+# all surviving the orchestrator's own compaction (the windows + lane state
+# persist on disk).
+#
+# Verbs:
+#   spawn   --provider <claude|codex> --lane <name> [opts] -- <task prompt>
+#   list                                  show all lanes + status
+#   status  <lane>                        one lane's state (json)
+#   peek    <lane> [--lines N]            de-escaped tail of the live pane
+#   wait    <lane> [--timeout S] [--interval S]   block until idle
+#   revise  <lane> [--out FILE] -- <message>      steer live, or resume if exited
+#   attach  <lane>                        attach your terminal to the pane
+#   reap    <lane> [--force] [--keep-worktree]    kill window + clean up
+#   doctor                                check deps + backends
+#
+# State:    $WASPFLOW_HOME (default ~/.local/state/waspflow)
+# tmux:     all windows live in session "$WASPFLOW_TMUX_SESSION" (default waspflow)
+
+set -euo pipefail
+
+# ---- locate the engine ------------------------------------------------------
+# Resolve symlinks so `waspflow` works when symlinked onto PATH.
+_self="${BASH_SOURCE[0]}"
+while [[ -h "$_self" ]]; do
+  _dir="$(cd "$(dirname "$_self")" && pwd)"
+  _self="$(readlink "$_self")"
+  [[ "$_self" != /* ]] && _self="$_dir/$_self"
+done
+WASPFLOW_BIN_DIR="$(cd "$(dirname "$_self")" && pwd)"
+WASPFLOW_ROOT="$(cd "$WASPFLOW_BIN_DIR/.." && pwd)"
+WASPFLOW_LIB="$WASPFLOW_ROOT/lib"
+export WASPFLOW_ROOT WASPFLOW_LIB
+
+# shellcheck disable=SC1090
+source "$WASPFLOW_LIB/core.sh"
+# shellcheck disable=SC1090
+source "$WASPFLOW_LIB/worktree.sh"
+
+usage() { sed -n '3,40p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# ---- arg splitting ----------------------------------------------------------
+# Split argv at the first literal `--` into FLAGS (before) and REST (after).
+# REST is the free-text prompt/message so it never needs quoting gymnastics.
+split_after_ddash() {
+  FLAGS=(); REST=()
+  local seen=0
+  for a in "$@"; do
+    if [[ $seen -eq 0 && "$a" == "--" ]]; then seen=1; continue; fi
+    if [[ $seen -eq 0 ]]; then FLAGS+=("$a"); else REST+=("$a"); fi
+  done
+}
+
+# ============================================================================
+# verbs
+# ============================================================================
+
+cmd_spawn() {
+  local provider="" lane="" model="" cwd="$PWD" isolate=0
+  local -a extra=()
+  split_after_ddash "$@"
+  set -- "${FLAGS[@]:-}"
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --provider) provider="${2:-}"; shift 2 ;;
+      --lane)     lane="${2:-}"; shift 2 ;;
+      --model)    model="${2:-}"; shift 2 ;;
+      --cwd)      cwd="${2:-}"; shift 2 ;;
+      --isolate|--worktree) isolate=1; shift ;;
+      --arg)      extra+=("${2:-}"); shift 2 ;;   # repeatable pass-through to the agent CLI
+      "")         shift ;;
+      *) die "spawn: unknown option '$1'" ;;
+    esac
+  done
+  local prompt="${REST[*]:-}"
+
+  [[ -n "$provider" ]] || die "spawn: --provider is required (claude|codex)"
+  is_known_provider "$provider" || die "spawn: unknown provider '$provider'"
+  [[ -n "$lane" ]] || die "spawn: --lane is required"
+  validate_lane_name "$lane"
+  [[ -n "$prompt" ]] || die "spawn: a task prompt is required after '--'"
+  cwd="$(cd "$cwd" && pwd)" || die "spawn: --cwd does not exist"
+
+  if lane_exists "$lane" && [[ "$(lane_get "$lane" status)" == "live" ]]; then
+    die "lane '$lane' is already live (reap it first or pick another name)"
+  fi
+
+  require_cmd tmux jq
+  load_provider "$provider"
+  "${provider}_preflight" || die "spawn aborted: $provider preflight failed"
+
+  # Worktree isolation (opt-in, only inside a git repo).
+  local work_cwd="$cwd" wt_path="" repo_root=""
+  if [[ "$isolate" -eq 1 ]]; then
+    repo_root="$(worktree_repo_root "$cwd")"
+    wt_path="$(worktree_create "$lane" "$cwd")" || die "spawn: worktree isolation failed"
+    work_cwd="$wt_path"
+    log "isolated worktree: $wt_path"
+  fi
+
+  local session_id transcript
+  session_id="$(new_uuid)"           # claude uses this; codex mints its own
+  mkdir -p "$(lane_dir "$lane")"
+  transcript="$(lane_transcript "$lane")"
+  : >"$transcript"
+
+  # Record state BEFORE spawn so a crash mid-spawn is still recoverable.
+  lane_set "$lane" \
+    provider "$provider" \
+    status "live" \
+    cwd "$work_cwd" \
+    origin_cwd "$cwd" \
+    model "$model" \
+    session_id "$([[ "$provider" == claude ]] && echo "$session_id" || echo "")" \
+    rollout "" \
+    worktree "$wt_path" \
+    repo_root "$repo_root" \
+    transcript "$transcript" \
+    spawn_epoch "$(date +%s)" \
+    prompt "$prompt"
+
+  "${provider}_spawn" "$lane" "$work_cwd" "$model" "$session_id" "$transcript" "$prompt" "${extra[@]}"
+
+  log "spawned $provider lane '$lane' (tmux: $WASPFLOW_TMUX_SESSION:$lane)"
+  log "  peek:   waspflow peek $lane"
+  log "  wait:   waspflow wait $lane"
+  log "  revise: waspflow revise $lane -- \"<message>\""
+  log "  reap:   waspflow reap $lane"
+}
+
+cmd_list() {
+  local lanes; lanes="$(list_lanes)"
+  if [[ -z "$lanes" ]]; then echo "(no lanes)"; return 0; fi
+  printf '%-20s %-8s %-8s %-38s %s\n' LANE PROVIDER STATUS SESSION CWD
+  local lane
+  while IFS= read -r lane; do
+    [[ -n "$lane" ]] || continue
+    local provider status sid cwd live
+    provider="$(lane_get "$lane" provider)"
+    status="$(lane_get "$lane" status)"
+    sid="$(lane_get "$lane" session_id)"
+    cwd="$(lane_get "$lane" cwd)"
+    if tmux_window_exists "$lane"; then live="live"; else live="exited"; fi
+    [[ "$status" == "reaped" ]] && live="reaped"
+    printf '%-20s %-8s %-8s %-38s %s\n' "$lane" "$provider" "$live" "${sid:--}" "$cwd"
+  done <<<"$lanes"
+}
+
+cmd_status() {
+  local lane="${1:-}"; [[ -n "$lane" ]] || die "status: <lane> required"
+  lane_exists "$lane" || die "no such lane '$lane'"
+  jq . "$(lane_state_file "$lane")"
+}
+
+cmd_peek() {
+  local lane="${1:-}" lines=40; shift || true
+  while [[ $# -gt 0 ]]; do case "$1" in --lines) lines="${2:-40}"; shift 2 ;; *) shift ;; esac; done
+  [[ -n "$lane" ]] || die "peek: <lane> required"
+  if tmux_window_exists "$lane"; then
+    tmux capture-pane -p -t "$(tmux_window_target "$lane")" -S -"$lines" 2>/dev/null \
+      | strip_ansi | grep -v '^$' | tail -"$lines"
+  else
+    local t; t="$(lane_get "$lane" transcript)"
+    [[ -f "$t" ]] || die "peek: lane '$lane' has no live window and no transcript"
+    strip_ansi <"$t" | grep -v '^$' | tail -"$lines"
+  fi
+}
+
+cmd_wait() {
+  local lane="${1:-}" timeout=600 interval=2; shift || true
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --timeout) timeout="${2:-600}"; shift 2 ;;
+      --interval) interval="${2:-2}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [[ -n "$lane" ]] || die "wait: <lane> required"
+  lane_exists "$lane" || die "no such lane '$lane'"
+  local provider; provider="$(lane_get "$lane" provider)"
+  load_provider "$provider"
+  require_cmd jq
+
+  local deadline=$(( $(date +%s) + timeout ))
+  log "wait: lane '$lane' ($provider) timeout=${timeout}s"
+  while :; do
+    if "${provider}_is_idle" "$lane"; then
+      log "wait: lane '$lane' is IDLE"
+      return 0
+    fi
+    if [[ "$(date +%s)" -ge "$deadline" ]]; then
+      warn "wait: TIMEOUT after ${timeout}s (lane '$lane' never went idle)"
+      return 1
+    fi
+    sleep "$interval"
+  done
+}
+
+cmd_revise() {
+  split_after_ddash "$@"
+  local lane="" out=""
+  set -- "${FLAGS[@]:-}"
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --out) out="${2:-}"; shift 2 ;;
+      "") shift ;;
+      *) [[ -z "$lane" ]] && { lane="$1"; shift; } || die "revise: unexpected arg '$1'" ;;
+    esac
+  done
+  local message="${REST[*]:-}"
+  [[ -n "$lane" ]] || die "revise: <lane> required"
+  [[ -n "$message" ]] || die "revise: a message is required after '--'"
+  lane_exists "$lane" || die "no such lane '$lane'"
+  local provider; provider="$(lane_get "$lane" provider)"
+  load_provider "$provider"
+  if tmux_window_exists "$lane"; then
+    log "revise: steering live pane for lane '$lane'"
+  else
+    log "revise: lane '$lane' window exited; resuming session headlessly"
+  fi
+  "${provider}_revise" "$lane" "$message" "$out"
+}
+
+cmd_attach() {
+  local lane="${1:-}"; [[ -n "$lane" ]] || die "attach: <lane> required"
+  tmux_window_exists "$lane" || die "attach: lane '$lane' has no live window"
+  log "attaching to $WASPFLOW_TMUX_SESSION:$lane (detach with Ctrl-b d)"
+  tmux select-window -t "$(tmux_window_target "$lane")"
+  tmux attach-session -t "$WASPFLOW_TMUX_SESSION"
+}
+
+cmd_reap() {
+  local lane="${1:-}" force=0 keep_wt=0; shift || true
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force) force=1; shift ;;
+      --keep-worktree) keep_wt=1; shift ;;
+      *) shift ;;
+    esac
+  done
+  [[ -n "$lane" ]] || die "reap: <lane> required"
+  lane_exists "$lane" || die "no such lane '$lane'"
+
+  if tmux_window_exists "$lane"; then
+    tmux kill-window -t "$(tmux_window_target "$lane")" 2>/dev/null || true
+    log "reap: killed window for lane '$lane'"
+  fi
+
+  local wt; wt="$(lane_get "$lane" worktree)"
+  if [[ -n "$wt" && "$keep_wt" -ne 1 ]]; then
+    local repo_root; repo_root="$(lane_get "$lane" repo_root)"
+    if worktree_remove "$lane" "$wt" "$repo_root" "$force"; then
+      log "reap: removed worktree $wt"
+    fi
+  fi
+
+  lane_set "$lane" status "reaped"
+  log "reap: lane '$lane' reaped (state retained; rm $(lane_dir "$lane") to purge)"
+}
+
+cmd_doctor() {
+  echo "waspflow doctor"
+  echo "  WASPFLOW_HOME = $WASPFLOW_HOME"
+  echo "  tmux session  = $WASPFLOW_TMUX_SESSION"
+  local ok=1
+  for c in tmux jq git; do
+    if command -v "$c" >/dev/null 2>&1; then echo "  [ok]   $c"; else echo "  [MISS] $c (required)"; ok=0; fi
+  done
+  for c in claude codex curl uuidgen; do
+    command -v "$c" >/dev/null 2>&1 && echo "  [ok]   $c" || echo "  [warn] $c (optional)"
+  done
+  # Codex backend
+  local url="$WASPFLOW_CODEX_BACKEND_HEALTH_URL"
+  if [[ -n "$url" ]] && command -v curl >/dev/null 2>&1; then
+    local code; code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 "$url" 2>/dev/null || echo 000)"
+    if [[ "$code" == "200" ]]; then echo "  [ok]   codex backend $url"; else
+      echo "  [warn] codex backend $url -> $code (run 'headroom proxy', or unset WASPFLOW_CODEX_BACKEND_HEALTH_URL)"; fi
+  fi
+  [[ "$ok" -eq 1 ]] || { echo "  -> missing required deps"; return 1; }
+  echo "  -> ready"
+}
+
+# ============================================================================
+main() {
+  local verb="${1:-}"; shift || true
+  case "$verb" in
+    spawn)  cmd_spawn "$@" ;;
+    list|ls) cmd_list "$@" ;;
+    status) cmd_status "$@" ;;
+    peek)   cmd_peek "$@" ;;
+    wait)   cmd_wait "$@" ;;
+    revise) cmd_revise "$@" ;;
+    attach) cmd_attach "$@" ;;
+    reap)   cmd_reap "$@" ;;
+    doctor) cmd_doctor "$@" ;;
+    -h|--help|help|"") usage ;;
+    *) die "unknown command '$verb' (try: waspflow help)" ;;
+  esac
+}
+main "$@"
