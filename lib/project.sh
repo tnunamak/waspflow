@@ -134,12 +134,14 @@ project_check_worktrees() {
           else
             _check_info "clean worktree branch=$branch path=$path"
           fi
-          ahead_behind="$(_git_ahead_behind "$path")"
-          if [[ -n "$ahead_behind" ]]; then
-            behind="${ahead_behind%%[[:space:]]*}"
-            ahead="${ahead_behind##*[[:space:]]}"
-            if [[ "$ahead" -gt 0 || "$behind" -gt 0 ]]; then
-              _check_warn "worktree branch=$branch upstream delta ahead=$ahead behind=$behind path=$path"
+          if [[ "$path" != "$root" ]]; then
+            ahead_behind="$(_git_ahead_behind "$path")"
+            if [[ -n "$ahead_behind" ]]; then
+              behind="${ahead_behind%%[[:space:]]*}"
+              ahead="${ahead_behind##*[[:space:]]}"
+              if [[ "$ahead" -gt 0 || "$behind" -gt 0 ]]; then
+                _check_warn "worktree branch=$branch upstream delta ahead=$ahead behind=$behind path=$path"
+              fi
             fi
           fi
         fi
@@ -164,12 +166,14 @@ project_check_worktrees() {
     else
       _check_info "clean worktree branch=$branch path=$path"
     fi
-    ahead_behind="$(_git_ahead_behind "$path")"
-    if [[ -n "$ahead_behind" ]]; then
-      behind="${ahead_behind%%[[:space:]]*}"
-      ahead="${ahead_behind##*[[:space:]]}"
-      if [[ "$ahead" -gt 0 || "$behind" -gt 0 ]]; then
-        _check_warn "worktree branch=$branch upstream delta ahead=$ahead behind=$behind path=$path"
+    if [[ "$path" != "$root" ]]; then
+      ahead_behind="$(_git_ahead_behind "$path")"
+      if [[ -n "$ahead_behind" ]]; then
+        behind="${ahead_behind%%[[:space:]]*}"
+        ahead="${ahead_behind##*[[:space:]]}"
+        if [[ "$ahead" -gt 0 || "$behind" -gt 0 ]]; then
+          _check_warn "worktree branch=$branch upstream delta ahead=$ahead behind=$behind path=$path"
+        fi
       fi
     fi
   fi
