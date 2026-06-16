@@ -1,19 +1,26 @@
 # waspflow
 
-Run Claude Code and Codex workers you can watch, steer, and clean up.
+<p align="center">
+  <img src="assets/waspflow-logo.svg" alt="waspflow logo" width="180">
+</p>
 
-Waspflow starts each worker in its own tmux pane, keeps the transcript and git
-diff, and lets you send another instruction without starting over. It is for the
-moments when a one-shot agent command is not enough: you want to see the work,
-redirect it, keep the evidence, and close the lane deliberately.
+Give your main agent a live workflow for managing worker agents.
+
+Waspflow is an agent-operable control loop for Claude Code and Codex workers:
+spawn a worker, watch its live stream, steer it with another instruction,
+preserve the transcript and diff, and reap the lane deliberately. Humans can use
+the same CLI directly; the deeper point is that an orchestrating agent gets a
+small, durable tool surface instead of fire-and-forget subprocesses and loose
+notes.
 
 Use it when you want to:
 
+- let a main agent delegate work without losing control of the worker;
 - watch what a coding agent is doing before it finishes;
 - correct a worker mid-run;
 - run multiple workers in isolated git worktrees;
 - require a report, transcript, and diff instead of "done, trust me";
-- recover the workers after your main agent or terminal loses context.
+- recover worker state after your main agent or terminal loses context.
 
 ## First Run
 
@@ -61,12 +68,13 @@ waspflow reap fixbug
 ## Why Not Just Run Codex Or Claude Directly?
 
 Direct CLI sessions are great for one focused conversation. Waspflow adds a
-small control layer when you want workers to be observable, resumable, and
-reviewable.
+small workflow layer when a human or orchestrating agent needs workers to be
+observable, steerable, resumable, and reviewable.
 
 | Need | Direct `codex` / `claude` | `waspflow` |
 |---|---|---|
 | Start a normal coding session | Yes | Yes |
+| Give a main agent stable worker-agent verbs | Shell out and hope | `spawn`, `wait`, `peek`, `revise`, `reap` |
 | Watch another agent while you keep working | Manual tmux setup | Built in |
 | Send a correction after launch | Same terminal only | `waspflow revise <lane>` |
 | Run several workers without file collisions | Manual worktrees | `--isolate` |
