@@ -10,6 +10,8 @@
 #
 # Verbs:
 #   spawn   --provider <claude|codex> --lane <name> [opts] -- <task prompt>
+#   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
+#   demo    --provider <claude|codex> [--run]                 guided first lane
 #   list                                  show all lanes + status
 #   status  <lane>                        one lane's state (json)
 #   peek    <lane> [--lines N]            de-escaped tail of the live pane
@@ -51,8 +53,15 @@ usage() {
   cat <<EOF
 waspflow — turnkey live orchestration of Claude/Codex agents in tmux.
 
+First successful run:
+  waspflow doctor
+  waspflow demo --provider codex
+  waspflow demo --provider codex --run
+
 Verbs:
   spawn   --provider <claude|codex> --lane <name> [opts] -- <task prompt>
+  init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
+  demo    --provider <claude|codex> [--run]                 guided first lane
   list                                  show all lanes + status
   status  <lane>                        one lane's state (json)
   peek    <lane> [--lines N]            de-escaped tail of the live pane
@@ -60,7 +69,7 @@ Verbs:
   revise  <lane> [--out FILE] -- <message>      steer live, or resume if exited
   attach  <lane>                        attach your terminal to the pane
   reap    <lane> [--force] [--keep-worktree]    kill window + clean up
-  check   [--cwd DIR] [--config FILE] [--no-fail] project integrity gate
+  check   [--cwd DIR] [--config FILE] [--no-fail] [--explain] project integrity gate
   doctor                                check deps + backends
 
 Spawn opts:
@@ -187,6 +196,63 @@ cmd_spawn() {
   log "  wait:   waspflow wait $lane"
   log "  revise: waspflow revise $lane -- \"<message>\""
   log "  reap:   waspflow reap $lane"
+}
+
+cmd_demo() {
+  local provider="" lane="" run=0 cwd="$PWD"
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --provider) provider="${2:-}"; shift 2 ;;
+      --lane) lane="${2:-}"; shift 2 ;;
+      --cwd) cwd="${2:-}"; shift 2 ;;
+      --run) run=1; shift ;;
+      -h|--help)
+        cat <<'EOF'
+waspflow demo --provider <claude|codex> [--run] [--lane NAME] [--cwd DIR]
+
+Without --run, prints a safe first-run walkthrough.
+With --run, performs spawn -> wait -> peek -> reap using a tiny no-edit task.
+EOF
+        return 0
+        ;;
+      *) die "demo: unknown option '$1'" ;;
+    esac
+  done
+
+  if [[ -z "$provider" ]]; then
+    if command -v codex >/dev/null 2>&1; then provider="codex"
+    elif command -v claude >/dev/null 2>&1; then provider="claude"
+    else die "demo: no provider found on PATH (install codex or claude, or pass --provider)"
+    fi
+  fi
+  is_known_provider "$provider" || die "demo: unknown provider '$provider'"
+  cwd="$(cd "$cwd" && pwd)" || die "demo: --cwd does not exist"
+  lane="${lane:-demo-$(date +%s)}"
+  validate_lane_name "$lane"
+
+  local prompt="This is a waspflow first-run demo. Do not edit files. Reply with exactly one sentence that starts with 'waspflow demo ready'."
+  if [[ "$run" -ne 1 ]]; then
+    cat <<EOF
+waspflow demo
+
+This will prove the core loop with a no-edit task:
+
+  waspflow spawn --provider $provider --lane $lane --cwd "$cwd" -- "$prompt"
+  waspflow wait $lane --timeout 300
+  waspflow peek $lane --lines 8
+  waspflow reap $lane
+
+Run it now:
+
+  waspflow demo --provider $provider --lane $lane --cwd "$cwd" --run
+EOF
+    return 0
+  fi
+
+  cmd_spawn --provider "$provider" --lane "$lane" --cwd "$cwd" -- "$prompt"
+  cmd_wait "$lane" --timeout 300
+  cmd_peek "$lane" --lines 8
+  cmd_reap "$lane"
 }
 
 cmd_list() {
@@ -368,6 +434,8 @@ main() {
   local verb="${1:-}"; shift || true
   case "$verb" in
     spawn)  cmd_spawn "$@" ;;
+    init)   cmd_init "$@" ;;
+    demo)   cmd_demo "$@" ;;
     list|ls) cmd_list "$@" ;;
     status) cmd_status "$@" ;;
     peek)   cmd_peek "$@" ;;

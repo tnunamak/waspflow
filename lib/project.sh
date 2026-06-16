@@ -12,6 +12,7 @@ set -euo pipefail
 
 WASPFLOW_CHECK_RISKS=0
 WASPFLOW_CHECK_WARNINGS=0
+WASPFLOW_CHECK_ADVICE=()
 
 _project_abs_dir() {
   local dir="$1"
@@ -51,12 +52,35 @@ project_find_config() {
 _check_section() { printf '\n## %s\n' "$*"; }
 _check_ok() { printf 'OK: %s\n' "$*"; }
 _check_info() { printf '%s\n' "- $*"; }
+_check_advice() {
+  local code="$1" existing
+  for existing in "${WASPFLOW_CHECK_ADVICE[@]:-}"; do
+    [[ "$existing" == "$code" ]] && return 0
+  done
+  WASPFLOW_CHECK_ADVICE+=("$code")
+}
+
+_check_advice_for() {
+  local msg="$*"
+  case "$msg" in
+    DIRTY\ current\ worktree*|DIRTY\ worktree*) _check_advice dirty ;;
+    current\ branch\ upstream\ delta*|worktree\ branch=*upstream\ delta*|current\ branch\ has\ no\ upstream*) _check_advice branch ;;
+    unreaped\ exited\ lane*) _check_advice unreaped ;;
+    lane\ has\ failed\ deliverable*) _check_advice deliverable ;;
+    mutex\ *\ is\ OPEN*) _check_advice mutex ;;
+    found\ *) _check_advice blocker ;;
+    command\ *\ failed*|*\ failed\ rc=*) _check_advice command ;;
+  esac
+}
+
 _check_warn() {
   WASPFLOW_CHECK_WARNINGS=$((WASPFLOW_CHECK_WARNINGS + 1))
+  _check_advice_for "$*"
   printf '! %s\n' "$*"
 }
 _check_risk() {
   WASPFLOW_CHECK_RISKS=$((WASPFLOW_CHECK_RISKS + 1))
+  _check_advice_for "$*"
   printf '! %s\n' "$*"
 }
 
@@ -212,7 +236,6 @@ project_check_lanes() {
     if ! _project_path_in_scope "$root" "$cwd" && ! _project_path_in_scope "$root" "$origin"; then
       continue
     fi
-    any=1
     provider="$(lane_get "$lane" provider)"
     status="$(lane_get "$lane" status)"
     result="$(lane_get "$lane" result)"
@@ -220,6 +243,10 @@ project_check_lanes() {
     live="exited"
     tmux_window_exists "$lane" && live="live"
     [[ "$status" == "reaped" ]] && live="reaped"
+    if [[ "$status" == "reaped" && ( "$result" == "succeeded" || "$result" == "recovered" || -z "$result" ) ]]; then
+      continue
+    fi
+    any=1
     label="lane=$lane provider=${provider:-?} status=${status:-?} window=$live result=${result:-none} cwd=$cwd"
     if [[ "$status" == "live" && "$live" == "exited" ]]; then
       _check_risk "unreaped exited lane: $label"
@@ -377,7 +404,7 @@ project_check_commands() {
 
 project_check_usage() {
   cat <<'EOF'
-waspflow check [--cwd DIR] [--config FILE] [--no-fail]
+waspflow check [--cwd DIR] [--config FILE] [--no-fail] [--explain]
 
 Run a generic project integrity gate:
   - current git worktree dirty/ahead state
@@ -404,14 +431,142 @@ Config example:
 EOF
 }
 
+project_check_explain() {
+  _check_section "What To Do Next"
+  if [[ "$WASPFLOW_CHECK_RISKS" -eq 0 && "$WASPFLOW_CHECK_WARNINGS" -eq 0 ]]; then
+    _check_info "Nothing is blocking orchestration. You can spawn a lane, continue review, or close out."
+    return 0
+  fi
+
+  local code any=0
+  for code in "${WASPFLOW_CHECK_ADVICE[@]:-}"; do
+    any=1
+    case "$code" in
+      dirty) printf '%s\n' '- Dirty worktree: run `git status --short`, then deliberately commit, stash, or remove the changes.' ;;
+      branch) printf '%s\n' '- Branch sync: pull with `git pull --ff-only`, push accepted commits, or set an upstream if this branch is intentionally local.' ;;
+      unreaped) printf '%s\n' '- Unreaped exited lane: inspect with `waspflow peek <lane>` and `waspflow status <lane>`, then `waspflow reap <lane>`.' ;;
+      deliverable) printf '%s\n' '- Failed/missing report: revise the lane or treat it as failed; do not convert it to success without the deliverable.' ;;
+      mutex) printf '%s\n' '- Open mutex: read the mutex file and wait for the owner/operator window to close before touching that protected resource.' ;;
+      blocker) printf '%s\n' '- Blocker file: open the listed blocker and resolve or explicitly accept the risk before launching more work.' ;;
+      command) printf '%s\n' '- Project command failure: fix the command output or mark that command as warning-only in config if it is advisory.' ;;
+    esac
+  done
+  [[ "$any" -eq 1 ]] || _check_info "Review the warnings above; this check type has no specific remediation yet."
+}
+
+project_init_usage() {
+  cat <<'EOF'
+waspflow init [--cwd DIR] [--profile NAME]... [--force] [--print]
+
+Write .waspflow/config.json for a project. Profiles are composable:
+  basic             lane staleness threshold only
+  reports           show recent tmp/workstreams/*.md reports
+  blockers          treat .git/workstreams/blockers/* as action-blocking
+  live-stack-mutex  check tmp/workstreams/current-state.md for "Status: OPEN"
+  openspec          run `openspec validate --all --strict` as a project command
+  serious-repo      basic + reports + blockers
+
+Examples:
+  waspflow init
+  waspflow init --profile serious-repo
+  waspflow init --profile serious-repo --profile openspec
+  waspflow init --profile live-stack-mutex --print
+EOF
+}
+
+project_init_has_profile() {
+  local want="$1"; shift
+  local p
+  for p in "$@"; do [[ "$p" == "$want" ]] && return 0; done
+  return 1
+}
+
+project_init_build_json() {
+  local profiles=("$@")
+  local expr='{ lanes: { stale_seconds: 14400 } }'
+
+  if project_init_has_profile reports "${profiles[@]}"; then
+    expr="$expr + { reports: { globs: [\"tmp/workstreams/*.md\"], limit: 20 } }"
+  fi
+  if project_init_has_profile blockers "${profiles[@]}"; then
+    expr="$expr + { blockers: { globs: [\".git/workstreams/blockers/*\"] } }"
+  fi
+  if project_init_has_profile live-stack-mutex "${profiles[@]}"; then
+    expr="$expr + { mutexes: [{ name: \"live-stack\", file: \"tmp/workstreams/current-state.md\", open_pattern: \"^- Status: OPEN\" }] }"
+  fi
+  if project_init_has_profile openspec "${profiles[@]}"; then
+    expr="$expr + { commands: [{ name: \"OpenSpec validate\", command: \"openspec validate --all --strict\", severity: \"risk\" }] }"
+  fi
+
+  jq -n "$expr"
+}
+
+project_init_expand_profiles() {
+  local expanded=()
+  local p
+  for p in "$@"; do
+    case "$p" in
+      basic) expanded+=(basic) ;;
+      reports) expanded+=(reports) ;;
+      blockers) expanded+=(blockers) ;;
+      live-stack-mutex) expanded+=(live-stack-mutex) ;;
+      openspec) expanded+=(openspec) ;;
+      serious-repo) expanded+=(basic reports blockers) ;;
+      *) die "init: unknown profile '$p' (try: waspflow init --help)" ;;
+    esac
+  done
+  printf '%s\n' "${expanded[@]}" | awk '!seen[$0]++'
+}
+
+cmd_init() {
+  local cwd="$PWD" force=0 print_only=0
+  local -a profiles=()
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --) shift ;;
+      --cwd) cwd="${2:-}"; shift 2 ;;
+      --profile) profiles+=("${2:-}"); shift 2 ;;
+      --force) force=1; shift ;;
+      --print) print_only=1; shift ;;
+      -h|--help) project_init_usage; return 0 ;;
+      *) die "init: unknown option '$1'" ;;
+    esac
+  done
+
+  require_cmd jq
+  cwd="$(_project_abs_dir "$cwd")"
+  local root config_dir config profiles_expanded json
+  root="$(project_root_for "$cwd")"
+  config_dir="$root/.waspflow"
+  config="$config_dir/config.json"
+  [[ "${#profiles[@]}" -gt 0 ]] || profiles=(basic)
+  mapfile -t profiles_expanded < <(project_init_expand_profiles "${profiles[@]}")
+  json="$(project_init_build_json "${profiles_expanded[@]}")"
+
+  if [[ "$print_only" -eq 1 ]]; then
+    printf '%s\n' "$json"
+    return 0
+  fi
+
+  if [[ -e "$config" && "$force" -ne 1 ]]; then
+    die "init: $config already exists (use --force to overwrite, or --print to inspect)"
+  fi
+  mkdir -p "$config_dir"
+  printf '%s\n' "$json" >"$config"
+  log "wrote $config"
+  log "profiles: ${profiles_expanded[*]}"
+  log "next: waspflow check --explain"
+}
+
 cmd_check() {
-  local cwd="$PWD" config="" no_fail=0
+  local cwd="$PWD" config="" no_fail=0 explain=0
   while [[ $# -gt 0 ]]; do
     case "${1:-}" in
       --) shift ;;
       --cwd) cwd="${2:-}"; shift 2 ;;
       --config) config="${2:-}"; shift 2 ;;
       --no-fail) no_fail=1; shift ;;
+      --explain) explain=1; shift ;;
       -h|--help) project_check_usage; return 0 ;;
       *) die "check: unknown option '$1'" ;;
     esac
@@ -424,6 +579,7 @@ cmd_check() {
 
   WASPFLOW_CHECK_RISKS=0
   WASPFLOW_CHECK_WARNINGS=0
+  WASPFLOW_CHECK_ADVICE=()
   printf '# waspflow check\n'
   printf 'Generated: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'Project root: %s\n' "$root"
@@ -445,6 +601,7 @@ cmd_check() {
   _check_section "Summary"
   printf 'Risks: %s\n' "$WASPFLOW_CHECK_RISKS"
   printf 'Warnings: %s\n' "$WASPFLOW_CHECK_WARNINGS"
+  [[ "$explain" -eq 1 ]] && project_check_explain
   if [[ "$WASPFLOW_CHECK_RISKS" -gt 0 && "$no_fail" -ne 1 ]]; then
     return 2
   fi

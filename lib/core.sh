@@ -135,6 +135,19 @@ tmux_window_exists() {
     | grep -qxF "$1"
 }
 
+# Paste literal text into a tmux pane without key-name parsing. Use this for
+# prompts/messages; `tmux send-keys -- "$text"` is unreliable for long text and
+# can mangle spaces or special characters.
+tmux_paste_text() {
+  local target="$1" text="$2" tmp buffer
+  tmp="$(mktemp)"
+  buffer="waspflow-$$-$RANDOM"
+  printf '%s' "$text" >"$tmp"
+  tmux load-buffer -b "$buffer" "$tmp"
+  tmux paste-buffer -d -b "$buffer" -t "$target"
+  rm -f "$tmp"
+}
+
 # Strip ANSI escapes from captured pane text for human/log consumption.
 strip_ansi() { sed -E 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b[()][AB0]//g'; }
 

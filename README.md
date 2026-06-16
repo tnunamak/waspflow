@@ -30,11 +30,21 @@ git clone <this-repo> ~/code/waspflow
 waspflow doctor                   # check deps + backends
 ```
 
-Requires: `tmux`, `jq`, `git`, and at least one of `claude` / `codex` on PATH.
+Requires: `tmux`, `jq`, `git`, `curl`, `uuidgen`, and at least one of
+`claude` / `codex` on PATH.
 
 ## Quickstart
 
+See [docs/first-run.md](docs/first-run.md) for the friendliest walkthrough.
+
+A **lane** is one durable unit of delegated work: provider, prompt, cwd,
+session, transcript, diff, report contract, and result.
+
 ```bash
+# First prove the loop with a no-edit task:
+waspflow demo --provider codex
+waspflow demo --provider codex --run
+
 # From ANY project directory:
 waspflow spawn --provider codex --lane fixbug -- "Find and fix the off-by-one in src/pager.ts"
 waspflow peek  fixbug                  # de-escaped tail of the live pane
@@ -45,6 +55,26 @@ waspflow reap  fixbug                  # kill the window (state retained)
 ```
 
 Swap `--provider codex` for `--provider claude` — same verbs, same flow.
+
+### Serious repo setup, without bespoke scripts
+
+`waspflow` works with no project config. If a repo has durable process rules,
+generate a small declarative config instead of writing local orchestration
+scripts:
+
+```bash
+waspflow init --profile serious-repo
+waspflow check --explain
+```
+
+Profiles are composable:
+
+```bash
+waspflow init --profile serious-repo --profile openspec
+waspflow init --profile live-stack-mutex --print
+```
+
+The project still owns its facts. `waspflow` owns the machinery.
 
 ### Worktree isolation (parallel fleets)
 
@@ -62,6 +92,8 @@ only if it's clean (use `--force` to discard, `--keep-worktree` to keep).
 | Command | What it does |
 |---|---|
 | `spawn --provider <p> --lane <n> [--model M] [--effort E] [--cwd D] [--isolate] [--report F] [--no-recovery] [--arg X]… -- <task>` | Launch an agent into a tmux window |
+| `init [--profile NAME] [--cwd DIR] [--force] [--print]` | Write `.waspflow/config.json` from reusable policy profiles |
+| `demo --provider <p> [--run]` | Guided first-run demo; with `--run`, performs spawn → wait → peek → reap |
 | `list` | All lanes + live/exited/reaped status |
 | `status <lane>` | One lane's full state (JSON) |
 | `peek <lane> [--lines N]` | De-escaped tail of the live pane (or transcript if exited) |
@@ -69,7 +101,7 @@ only if it's clean (use `--force` to discard, `--keep-worktree` to keep).
 | `revise <lane> [--out FILE] -- <message>` | Steer the live pane, or resume the session headlessly if the window exited |
 | `attach <lane>` | Attach your terminal to the pane (Ctrl-b d to detach) |
 | `reap <lane> [--force] [--keep-worktree]` | Finalize the lane (verify deliverable, capture diff), kill the window, clean up |
-| `check [--cwd DIR] [--config FILE] [--no-fail]` | Run the project integrity gate: git/worktrees/lanes plus optional project checks |
+| `check [--cwd DIR] [--config FILE] [--no-fail] [--explain]` | Run the project integrity gate: git/worktrees/lanes plus optional project checks |
 | `doctor` | Check deps + backends |
 
 Spawn flags worth knowing:
@@ -117,36 +149,34 @@ With no config, it still works as a generic git + lane inventory:
 
 ```bash
 waspflow check
+waspflow check --explain   # include remediation guidance
 waspflow check --no-fail   # readable snapshot without failing the caller
 ```
 
-A project can add its own local process rules without forking waspflow:
+A project can add its own local process rules without forking waspflow. Prefer
+`waspflow init` over hand-writing this:
 
-```json
-{
-  "lanes": { "stale_seconds": 14400 },
-  "mutexes": [
-    {
-      "name": "live-stack",
-      "file": "tmp/workstreams/current-state.md",
-      "open_pattern": "^- Status: OPEN"
-    }
-  ],
-  "blockers": { "globs": [".git/workstreams/blockers/*"] },
-  "reports": { "globs": ["tmp/workstreams/*.md"], "limit": 10 },
-  "commands": [
-    {
-      "name": "OpenSpec status",
-      "command": "node scripts/openspec-status.mjs",
-      "severity": "warn"
-    }
-  ]
-}
+```bash
+waspflow init --profile serious-repo
+waspflow init --profile serious-repo --profile openspec
 ```
+
+See [docs/project-checks.md](docs/project-checks.md) for the full config shape.
 
 This is the intended migration path for bespoke project scripts: keep the
 project-specific policy in the project config, keep the implementation in
 waspflow.
+
+### Init profiles
+
+| Profile | Adds |
+|---|---|
+| `basic` | lane staleness threshold |
+| `reports` | recent `tmp/workstreams/*.md` report listing |
+| `blockers` | action-blocking `.git/workstreams/blockers/*` files |
+| `live-stack-mutex` | a generic `tmp/workstreams/current-state.md` mutex check |
+| `openspec` | `openspec validate --all --strict` as a project command |
+| `serious-repo` | `basic` + `reports` + `blockers` |
 
 ## How idle is detected (no screen-scraping)
 
@@ -212,6 +242,16 @@ One engine, multiple faces:
 
 Adding a provider = adding one `lib/providers/<name>.sh` implementing the five
 contract functions. Nothing else changes.
+
+## Verify
+
+```bash
+scripts/verify.sh
+```
+
+The verify script checks shell syntax, config initialization, policy profiles,
+mutex/blocker detection, `check --explain`, successful-reaped-lane filtering,
+and demo preview output without calling a model.
 
 ## Status
 

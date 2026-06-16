@@ -9,11 +9,23 @@ output, or closing out a multi-agent pass.
 
 ```bash
 waspflow check
+waspflow check --explain
 waspflow check --no-fail
 ```
 
 `--no-fail` prints the same inventory but exits successfully even when risks are
 found. Use it for a readable checkpoint; do not use it to ignore real risks.
+
+Use `waspflow init` to create config from reusable profiles:
+
+```bash
+waspflow init --profile serious-repo
+waspflow init --profile serious-repo --profile openspec
+waspflow init --profile live-stack-mutex --print
+```
+
+Profiles are just config generators. They do not change waspflow's global
+behavior.
 
 ## Built-in checks
 
@@ -30,7 +42,8 @@ These are universal orchestration facts. They are not tied to any one repo.
 ## Project config
 
 Add `.waspflow/config.json` when a project has local rules that should be
-checked by the same gate:
+checked by the same gate. Prefer generating it with `waspflow init`, then edit
+the project-specific facts:
 
 ```json
 {

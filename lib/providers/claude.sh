@@ -154,7 +154,7 @@ claude_is_idle() {
 }
 
 # Revise: re-enter the session and run one turn. Two paths:
-#   - If the lane's tmux window is still live, steer in-pane via send-keys.
+#   - If the lane's tmux window is still live, steer in-pane via paste-buffer.
 #   - Otherwise resume headlessly:  claude --resume <session-id> --print "<msg>"
 # Writes the headless reply to $out_file when resuming; for in-pane steering the
 # reply lands in the pane transcript. Args: lane message out_file
@@ -169,12 +169,15 @@ claude_revise() {
   if tmux_window_exists "$lane"; then
     # Live in-pane steer. The Enter can race the composer (esp. through hook
     # output), so VERIFY the turn started by watching the JSONL grow, re-sending
-    # Enter if it didn't take. Separate text and Enter send-keys calls.
+    # Enter if it didn't take. Text is pasted literally; send-keys can mangle
+    # long prompts or special characters.
     local target jsonl before after attempt j
     target="$(tmux_window_target "$lane")"
     jsonl="$(find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
     before="$(wc -l <"$jsonl" 2>/dev/null || echo 0)"
-    tmux send-keys -t "$target" -- "$message"
+    tmux send-keys -t "$target" C-u
+    sleep 0.3
+    tmux_paste_text "$target" "$message"
     sleep 1
     for attempt in 1 2 3 4 5; do
       tmux send-keys -t "$target" Enter

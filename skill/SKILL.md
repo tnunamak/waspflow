@@ -44,6 +44,21 @@ checks from `.waspflow/config.json`. Run it before launching lanes, reporting
 status, or closing out a multi-agent pass. Use `--no-fail` when you need a
 readable snapshot without aborting the current command.
 
+For a first-time user, run the guided demo before delegating real work:
+
+```bash
+waspflow demo --provider codex
+waspflow demo --provider codex --run
+```
+
+For a serious project that needs local policy, initialize config instead of
+creating repo-local orchestration scripts:
+
+```bash
+waspflow init --profile serious-repo
+waspflow check --explain
+```
+
 ## The core loop
 
 ```bash
@@ -144,5 +159,5 @@ Prefer `wait` over polling `peek`.
 
 ## Full command reference
 
-`spawn · list · status · peek · wait · revise · attach · reap · doctor` — run
+`spawn · init · demo · list · status · peek · wait · revise · attach · reap · check · doctor` — run
 `waspflow help` or see the repo README.

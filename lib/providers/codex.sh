@@ -166,8 +166,12 @@ _codex_wait_composer_ready() {
 # failure is the Enter racing hook output). Up to a few attempts.
 _codex_submit_prompt() {
   local lane="$1" cwd="$2" target="$3" prompt="$4" attempt
-  # Type the prompt once (separate from Enter to avoid composer races).
-  tmux send-keys -t "$target" -- "$prompt"
+  # Clear any starter text ("Implement {feature}") and paste literally. Plain
+  # send-keys is brittle for long prompts: it can mangle spaces and queue text
+  # as a follow-up instead of submitting the intended first turn.
+  tmux send-keys -t "$target" C-u
+  sleep 0.3
+  tmux_paste_text "$target" "$prompt"
   sleep 1
   for attempt in 1 2 3 4 5; do
     tmux send-keys -t "$target" Enter
@@ -224,7 +228,7 @@ codex_is_idle() {
   [[ "$last" == "task_complete" ]]
 }
 
-# Revise. If the tmux window is live, steer in-pane via send-keys; otherwise
+# Revise. If the tmux window is live, steer in-pane via paste-buffer; otherwise
 # resume headlessly via `codex exec resume <SID> "<msg>" -o <FILE>`.
 # Args: lane message out_file
 codex_revise() {
@@ -243,7 +247,9 @@ codex_revise() {
     rollout="$(lane_get "$lane" rollout)"
     [[ -n "$rollout" && -f "$rollout" ]] || rollout="$(_codex_find_rollout_for_cwd "$cwd" || true)"
     before="$(wc -l <"$rollout" 2>/dev/null || echo 0)"
-    tmux send-keys -t "$target" -- "$message"
+    tmux send-keys -t "$target" C-u
+    sleep 0.3
+    tmux_paste_text "$target" "$message"
     sleep 1
     for attempt in 1 2 3 4 5; do
       tmux send-keys -t "$target" Enter
