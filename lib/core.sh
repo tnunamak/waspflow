@@ -150,7 +150,7 @@ load_provider() {
   # shellcheck disable=SC1090
   source "$f"
   local fn
-  for fn in spawn is_idle revise preflight discover_session; do
+  for fn in spawn is_idle revise preflight discover_session session_resumable; do
     declare -F "${provider}_${fn}" >/dev/null \
       || die "provider '$provider' adapter is missing function ${provider}_${fn}"
   done

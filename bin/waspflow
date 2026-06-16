@@ -41,6 +41,8 @@ export WASPFLOW_ROOT WASPFLOW_LIB
 source "$WASPFLOW_LIB/core.sh"
 # shellcheck disable=SC1090
 source "$WASPFLOW_LIB/worktree.sh"
+# shellcheck disable=SC1090
+source "$WASPFLOW_LIB/artifacts.sh"
 
 usage() { sed -n '3,40p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -61,7 +63,7 @@ split_after_ddash() {
 # ============================================================================
 
 cmd_spawn() {
-  local provider="" lane="" model="" cwd="$PWD" isolate=0
+  local provider="" lane="" model="" cwd="$PWD" isolate=0 effort="" report="" no_recovery=0
   local -a extra=()
   split_after_ddash "$@"
   set -- "${FLAGS[@]:-}"
@@ -70,8 +72,11 @@ cmd_spawn() {
       --provider) provider="${2:-}"; shift 2 ;;
       --lane)     lane="${2:-}"; shift 2 ;;
       --model)    model="${2:-}"; shift 2 ;;
+      --effort)   effort="${2:-}"; shift 2 ;;
       --cwd)      cwd="${2:-}"; shift 2 ;;
       --isolate|--worktree) isolate=1; shift ;;
+      --report)   report="${2:-}"; shift 2 ;;     # opt-in deliverable contract
+      --no-recovery) no_recovery=1; shift ;;
       --arg)      extra+=("${2:-}"); shift 2 ;;   # repeatable pass-through to the agent CLI
       "")         shift ;;
       *) die "spawn: unknown option '$1'" ;;
@@ -85,6 +90,9 @@ cmd_spawn() {
   validate_lane_name "$lane"
   [[ -n "$prompt" ]] || die "spawn: a task prompt is required after '--'"
   cwd="$(cd "$cwd" && pwd)" || die "spawn: --cwd does not exist"
+  if [[ -n "$effort" && ! "$effort" =~ ^(low|medium|high|xhigh|max)$ ]]; then
+    die "spawn: --effort must be one of low|medium|high|xhigh|max (got: $effort)"
+  fi
 
   if lane_exists "$lane" && [[ "$(lane_get "$lane" status)" == "live" ]]; then
     die "lane '$lane' is already live (reap it first or pick another name)"
@@ -109,24 +117,42 @@ cmd_spawn() {
   transcript="$(lane_transcript "$lane")"
   : >"$transcript"
 
+  # Resolve a --report path to absolute against the worker's working dir so the
+  # agent writes it where we'll look for it.
+  local report_abs=""
+  if [[ -n "$report" ]]; then
+    case "$report" in
+      /*) report_abs="$report" ;;
+      *)  report_abs="$work_cwd/$report" ;;
+    esac
+  fi
+
   # Record state BEFORE spawn so a crash mid-spawn is still recoverable.
   lane_set "$lane" \
     provider "$provider" \
     status "live" \
+    result "" \
     cwd "$work_cwd" \
     origin_cwd "$cwd" \
     model "$model" \
+    effort "$effort" \
     session_id "$([[ "$provider" == claude ]] && echo "$session_id" || echo "")" \
     rollout "" \
     worktree "$wt_path" \
     repo_root "$repo_root" \
     transcript "$transcript" \
+    report "$report_abs" \
+    no_recovery "$([[ "$no_recovery" -eq 1 ]] && echo true || echo false)" \
     spawn_epoch "$(date +%s)" \
     prompt "$prompt"
+
+  # Durable artifacts: prompt + git-status-before, automatically (no flag).
+  artifacts_capture_before "$lane" "$work_cwd" "$prompt"
 
   "${provider}_spawn" "$lane" "$work_cwd" "$model" "$session_id" "$transcript" "$prompt" "${extra[@]}"
 
   log "spawned $provider lane '$lane' (tmux: $WASPFLOW_TMUX_SESSION:$lane)"
+  [[ -n "$report_abs" ]] && log "  deliverable contract: $report_abs (verified on idle; one recovery pass if missing)"
   log "  peek:   waspflow peek $lane"
   log "  wait:   waspflow wait $lane"
   log "  revise: waspflow revise $lane -- \"<message>\""
@@ -190,6 +216,10 @@ cmd_wait() {
   log "wait: lane '$lane' ($provider) timeout=${timeout}s"
   while :; do
     if "${provider}_is_idle" "$lane"; then
+      # Capture the change so far (cheap, idempotent). Deliverable enforcement +
+      # the honest result happen at reap (the explicit end-of-run), so an
+      # intermediate idle between revise turns doesn't trigger premature recovery.
+      artifacts_capture_after "$lane"
       log "wait: lane '$lane' is IDLE"
       return 0
     fi
@@ -245,6 +275,14 @@ cmd_reap() {
   done
   [[ -n "$lane" ]] || die "reap: <lane> required"
   lane_exists "$lane" || die "no such lane '$lane'"
+  local provider; provider="$(lane_get "$lane" provider)"
+  load_provider "$provider"
+
+  # Finalize FIRST (before killing the window or removing the worktree): capture
+  # the diff, enforce any --report contract, and — if the report is missing —
+  # run one recovery pass. Recovery may resume the live pane OR the exited
+  # session, and needs the worktree intact to read the diff + write the report.
+  local result; result="$(artifacts_finalize "$lane" "$provider")"
 
   if tmux_window_exists "$lane"; then
     tmux kill-window -t "$(tmux_window_target "$lane")" 2>/dev/null || true
@@ -260,7 +298,17 @@ cmd_reap() {
   fi
 
   lane_set "$lane" status "reaped"
-  log "reap: lane '$lane' reaped (state retained; rm $(lane_dir "$lane") to purge)"
+  case "$result" in
+    succeeded)       log "reap: lane '$lane' reaped — result=succeeded" ;;
+    recovered)       warn "reap: lane '$lane' reaped — result=recovered (report rebuilt by recovery pass)" ;;
+    report_missing)  err  "reap: lane '$lane' reaped — result=report_missing (recovery disabled)" ;;
+    failed)          err  "reap: lane '$lane' reaped — result=failed (required report never produced)" ;;
+    *)               log "reap: lane '$lane' reaped" ;;
+  esac
+  log "reap: state retained ($(lane_dir "$lane")); rm it to purge"
+  # Nonzero exit on an unmet deliverable contract so callers/CI can key on it.
+  case "$result" in failed|report_missing) return 2 ;; esac
+  return 0
 }
 
 cmd_doctor() {
@@ -278,8 +326,8 @@ cmd_doctor() {
   local url="$WASPFLOW_CODEX_BACKEND_HEALTH_URL"
   if [[ -n "$url" ]] && command -v curl >/dev/null 2>&1; then
     local code; code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 "$url" 2>/dev/null || echo 000)"
-    if [[ "$code" == "200" ]]; then echo "  [ok]   codex backend $url"; else
-      echo "  [warn] codex backend $url -> $code (run 'headroom proxy', or unset WASPFLOW_CODEX_BACKEND_HEALTH_URL)"; fi
+    if [[ "$code" == "200" ]]; then echo "  [ok]   codex model proxy $url"; else
+      echo "  [warn] codex model proxy $url -> $code (start your Codex proxy, or unset WASPFLOW_CODEX_BACKEND_HEALTH_URL)"; fi
   fi
   [[ "$ok" -eq 1 ]] || { echo "  -> missing required deps"; return 1; }
   echo "  -> ready"

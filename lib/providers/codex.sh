@@ -87,9 +87,18 @@ codex_spawn() {
 
   local model_args=()
   [[ -n "$model" ]] && model_args=(-m "$model")
+  # Map waspflow effort → codex model_reasoning_effort (minimal|low|medium|high).
+  # Codex has no xhigh/max, so those clamp to high.
+  local effort_args=() effort
+  effort="$(lane_get "$lane" effort)"
+  case "$effort" in
+    low)             effort_args=(-c model_reasoning_effort=low) ;;
+    medium)          effort_args=(-c model_reasoning_effort=medium) ;;
+    high|xhigh|max)  effort_args=(-c model_reasoning_effort=high) ;;
+  esac
 
   # Bare interactive codex (NO --skip-git-repo-check — that's exec-only).
-  local argv=(codex "${model_args[@]}" "${extra[@]}")
+  local argv=(codex "${model_args[@]}" "${effort_args[@]}" "${extra[@]}")
   local quoted=""
   local a
   for a in "${argv[@]}"; do quoted+=" $(printf '%q' "$a")"; done
@@ -191,6 +200,14 @@ _codex_find_rollout_for_cwd() {
   return 1
 }
 
+# Is the session resumable yet? For Codex the rollout file is written eagerly, so
+# once we can discover the session it is resumable. Args: lane
+codex_session_resumable() {
+  local lane="$1" sid
+  sid="$(codex_discover_session "$lane")"
+  [[ -n "$sid" ]]
+}
+
 # IDLE predicate: last rollout event is task_complete.
 # Args: lane
 codex_is_idle() {
@@ -243,10 +260,15 @@ codex_revise() {
   fi
 
   # Headless resumed turn. Run from the lane's cwd so any repo context resolves.
+  # Grant workspace-write + non-interactive approvals explicitly so a resumed
+  # turn can write files (e.g. a recovery report) regardless of the user's
+  # default sandbox config — keeps behavior portable, not reliant on a permissive
+  # global config.
   local model_args=()
   [[ -n "$model" ]] && model_args=(-m "$model")
   local tmp; tmp="${out_file:-$(mktemp)}"
-  ( cd "${cwd:-$PWD}" && codex exec resume "$sid" "$message" "${model_args[@]}" -o "$tmp" ) \
+  ( cd "${cwd:-$PWD}" && codex exec resume "$sid" "$message" "${model_args[@]}" \
+      -c sandbox_mode=workspace-write -c approval_policy=never -o "$tmp" ) \
     >/dev/null 2>&1
   if [[ -z "$out_file" ]]; then cat "$tmp"; rm -f "$tmp"; fi
   return 0

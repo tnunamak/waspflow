@@ -44,6 +44,9 @@ claude_spawn() {
 
   local model_args=()
   [[ -n "$model" ]] && model_args=(--model "$model")
+  local effort_args=() effort
+  effort="$(lane_get "$lane" effort)"
+  [[ -n "$effort" ]] && effort_args=(--effort "$effort")
 
   # Build the command run INSIDE the tmux window. We pass the prompt as a
   # positional arg (interactive claude reads the PTY, not piped stdin) and do
@@ -53,6 +56,7 @@ claude_spawn() {
   # We assemble an argv array and quote it for the tmux shell.
   local argv=(claude
     "${model_args[@]}"
+    "${effort_args[@]}"
     --session-id "$session_id"
     --name "$lane"
     --dangerously-skip-permissions
@@ -125,6 +129,17 @@ _claude_verify_started() {
   return 0
 }
 
+# Is the session resumable yet? After a window is killed, the JSONL may not be
+# flushed; `claude --resume` then says "No conversation found". True once the
+# transcript exists with real content. Args: lane
+claude_session_resumable() {
+  local lane="$1" session_id jsonl
+  session_id="$(claude_discover_session "$lane")"
+  [[ -n "$session_id" ]] || return 1
+  jsonl="$(find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
+  [[ -n "$jsonl" && -s "$jsonl" ]]
+}
+
 # IDLE predicate: last assistant event's stop_reason == end_turn.
 # Args: lane
 claude_is_idle() {
@@ -145,10 +160,11 @@ claude_is_idle() {
 # reply lands in the pane transcript. Args: lane message out_file
 claude_revise() {
   local lane="$1" message="$2" out_file="${3:-}"
-  local session_id model
+  local session_id model cwd
   session_id="$(claude_discover_session "$lane")"
   [[ -n "$session_id" ]] || { err "no session_id recorded for lane '$lane'"; return 1; }
   model="$(lane_get "$lane" model)"
+  cwd="$(lane_get "$lane" cwd)"   # claude --resume is cwd-scoped — MUST resume from here
 
   if tmux_window_exists "$lane"; then
     # Live in-pane steer. The Enter can race the composer (esp. through hook
@@ -174,14 +190,29 @@ claude_revise() {
     return 0
   fi
 
-  # Headless resume after the pane exited.
+  # Headless resume after the pane exited. Redirect stdin from /dev/null:
+  # `claude --print` reads stdin even when the prompt is a positional arg, and
+  # blocks ~3s waiting for it otherwise. The message is the positional prompt.
+  #
+  # A session killed moments ago may not be registered for --resume yet even
+  # though its JSONL is on disk ("No conversation found"). Retry with backoff —
+  # the file-existence check alone is insufficient; the real signal is the
+  # resume succeeding. Args already validated above.
   local model_args=()
   [[ -n "$model" ]] && model_args=(--model "$model")
-  if [[ -n "$out_file" ]]; then
-    claude --resume "$session_id" --print "${model_args[@]}" \
-      --dangerously-skip-permissions "$message" >"$out_file" 2>&1
-  else
-    claude --resume "$session_id" --print "${model_args[@]}" \
-      --dangerously-skip-permissions "$message"
-  fi
+  local tmp; tmp="${out_file:-$(mktemp)}"
+  local attempt rc
+  for attempt in 1 2 3 4 5; do
+    rc=0
+    # Resume from the lane's cwd: claude --resume is scoped to the project dir.
+    ( cd "${cwd:-$PWD}" && claude --resume "$session_id" --print "${model_args[@]}" \
+        --dangerously-skip-permissions "$message" </dev/null ) >"$tmp" 2>&1 || rc=$?
+    if grep -q "No conversation found" "$tmp" 2>/dev/null; then
+      sleep $(( attempt * 2 ))
+      continue
+    fi
+    break
+  done
+  [[ -n "$out_file" ]] || { cat "$tmp"; rm -f "$tmp"; }
+  return "${rc:-0}"
 }

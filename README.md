@@ -61,15 +61,44 @@ only if it's clean (use `--force` to discard, `--keep-worktree` to keep).
 
 | Command | What it does |
 |---|---|
-| `spawn --provider <p> --lane <n> [--model M] [--cwd D] [--isolate] [--arg X]… -- <task>` | Launch an agent into a tmux window |
+| `spawn --provider <p> --lane <n> [--model M] [--effort E] [--cwd D] [--isolate] [--report F] [--no-recovery] [--arg X]… -- <task>` | Launch an agent into a tmux window |
 | `list` | All lanes + live/exited/reaped status |
 | `status <lane>` | One lane's full state (JSON) |
 | `peek <lane> [--lines N]` | De-escaped tail of the live pane (or transcript if exited) |
 | `wait <lane> [--timeout S] [--interval S]` | Block until the agent is idle |
 | `revise <lane> [--out FILE] -- <message>` | Steer the live pane, or resume the session headlessly if the window exited |
 | `attach <lane>` | Attach your terminal to the pane (Ctrl-b d to detach) |
-| `reap <lane> [--force] [--keep-worktree]` | Kill the window + clean up |
+| `reap <lane> [--force] [--keep-worktree]` | Finalize the lane (verify deliverable, capture diff), kill the window, clean up |
 | `doctor` | Check deps + backends |
+
+Spawn flags worth knowing:
+- `--effort <low\|medium\|high\|xhigh\|max>` — reasoning effort. Maps to `claude --effort` and Codex `model_reasoning_effort` (Codex has no xhigh/max → clamped to high).
+- `--report <path>` — a **deliverable contract** (see below). Without it, finishing the turn cleanly is success.
+- `--no-recovery` — disable the one recovery pass for a missing report.
+
+## Durable artifacts (automatic — no flags)
+
+Every lane writes, into `$WASPFLOW_HOME/lanes/<lane>/`:
+`prompt.txt`, `git-status-before.txt`, `git-status-after.txt`, `git-diff.txt` (stat + patch),
+`transcript.log`, and `state.json`. The git captures answer *"what did this agent actually
+change?"* with zero setup. (Git captures are skipped, not errored, when the cwd isn't a repo.)
+
+## Deliverable contract + honest results
+
+Pass `--report <path>` and waspflow holds the agent to producing that file:
+
+- On `reap` (the explicit end-of-run), waspflow verifies the report exists and is substantial
+  (≥ `WASPFLOW_REPORT_MIN_BYTES`, default 200 — guards against stub/panic reports).
+- If it's missing, **one recovery pass** runs: the session is resumed headlessly with write
+  access, asked to reconstruct the report from the transcript + git diff, and explicitly told
+  to report `INCOMPLETE` rather than fabricate completion when the evidence doesn't support it.
+- The lane's `result` is then one of: `succeeded` · `recovered` · `report_missing`
+  (recovery disabled) · `failed`. `reap` exits **nonzero** on `failed`/`report_missing`, so a
+  caller or CI can key on it. Without a `--report` contract, `result` is `succeeded` once the
+  agent finished its turn.
+
+This is the "don't silently lose a worker's output" guarantee — you always get either the
+deliverable or an honest failure, never a false green.
 
 ## How idle is detected (no screen-scraping)
 

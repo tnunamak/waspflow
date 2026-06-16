@@ -70,6 +70,26 @@ waspflow reap parser
 - `--arg <x>` (repeatable) passes an extra flag straight to the underlying agent
   CLI when you need provider-specific behavior.
 
+## Holding a worker to a deliverable (`--report`)
+
+When you delegate work that must produce a written result, pass `--report`:
+
+```bash
+waspflow spawn --provider codex --lane audit --report findings.md -- "Audit auth.ts for issues, write findings.md"
+waspflow wait audit
+waspflow reap audit          # verifies findings.md exists + is substantial
+```
+
+If the agent finishes without writing `findings.md`, `reap` runs **one recovery
+pass** (resumes the session, write-enabled, to reconstruct the report from the
+transcript + git diff) and then stamps an honest `result`:
+`succeeded` / `recovered` / `failed`. `reap` exits nonzero on `failed`, so you
+know — you never get a false "done." Check `waspflow status <lane>` → `.result`.
+
+Every lane also auto-saves `git-diff.txt`, `git-status-before/after.txt`, and
+`prompt.txt` under its state dir — so "what did this agent change?" is always
+answerable without you setting anything up.
+
 ## Running a fleet (parallel, isolated)
 
 ```bash

@@ -69,6 +69,30 @@ Full loop, with real worker output:
 5. On some setups `claude` is itself wrapped to route through a local proxy. Such
    a wrapper owns its own health and is transparent to waspflow — no gate needed.
 
+## Durable-artifact + recovery findings (generalized from a prior single-provider harness)
+
+1. **`claude --resume` is cwd-scoped.** Resuming from the wrong directory →
+   "No conversation found with session ID" even though the JSONL exists. The
+   headless revise/recovery MUST `cd` into the lane's cwd first. (This was a
+   latent bug in the plain revise path too, not just recovery.)
+2. **`claude --print` reads stdin even with a positional prompt** — blocks ~3s
+   ("no stdin data received") unless you redirect `</dev/null`.
+3. **Recovery must use the headless resume path, not in-pane send-keys.** A
+   multi-line recovery prompt typed into a live TUI gets mangled (newlines don't
+   submit cleanly), and the rollout still "grows," giving a false success. So
+   recovery kills the live window first (worktree stays), then headless-resumes.
+4. **Codex resumed turns need explicit write grant to be portable.** `codex exec
+   resume … -c sandbox_mode=workspace-write -c approval_policy=never` lets the
+   recovery turn write the report regardless of the user's default sandbox
+   config. `--sandbox` is NOT a valid flag (use `-c sandbox_mode=…`).
+5. **A just-killed session may not be resumable for a moment.** Codex is fine
+   (rollout written eagerly); Claude can lag — retry the resume on "No
+   conversation found" with backoff rather than trusting file-existence alone.
+6. **Finalize at reap, not at every idle.** A `--report` lane goes idle on each
+   revise turn; verifying/recovering on every idle would trigger premature
+   recovery. `reap` is the explicit end-of-run where the contract is enforced;
+   `wait` only captures the diff (cheap, idempotent).
+
 ## Design consequences
 
 - Idle/discovery read provider session logs; panes are only for human `peek`/
