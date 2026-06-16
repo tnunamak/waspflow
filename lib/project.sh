@@ -327,10 +327,15 @@ project_check_reports() {
     _check_ok "none found"
     return 0
   fi
-  sort -rn "$tmp" | head -"$limit" | while read -r _ path; do
+  local sorted shown=0
+  sorted="$(mktemp)"
+  sort -rn "$tmp" >"$sorted"
+  while read -r _ path; do
     _check_info "$path"
-  done
-  rm -f "$tmp"
+    shown=$((shown + 1))
+    [[ "$shown" -ge "$limit" ]] && break
+  done <"$sorted"
+  rm -f "$tmp" "$sorted"
 }
 
 project_check_commands() {
