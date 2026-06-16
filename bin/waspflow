@@ -412,12 +412,25 @@ cmd_doctor() {
   echo "  WASPFLOW_HOME = $WASPFLOW_HOME"
   echo "  tmux session  = $WASPFLOW_TMUX_SESSION"
   local ok=1
+  local agent_ok=0
   for c in tmux jq git; do
     if command -v "$c" >/dev/null 2>&1; then echo "  [ok]   $c"; else echo "  [MISS] $c (required)"; ok=0; fi
   done
+  command -v curl >/dev/null 2>&1 || ok=0
+  command -v uuidgen >/dev/null 2>&1 || [[ -r /proc/sys/kernel/random/uuid ]] || ok=0
   for c in claude codex curl uuidgen; do
-    command -v "$c" >/dev/null 2>&1 && echo "  [ok]   $c" || echo "  [warn] $c (optional)"
+    if command -v "$c" >/dev/null 2>&1; then
+      echo "  [ok]   $c"
+      [[ "$c" == "claude" || "$c" == "codex" ]] && agent_ok=1
+    elif [[ "$c" == "curl" || "$c" == "uuidgen" ]]; then
+      echo "  [MISS] $c (required on systems without an equivalent)"
+    else
+      echo "  [warn] $c (install at least one agent CLI)"
+    fi
   done
+  if ! command -v uuidgen >/dev/null 2>&1 && [[ -r /proc/sys/kernel/random/uuid ]]; then
+    echo "  [ok]   /proc/sys/kernel/random/uuid"
+  fi
   # Codex backend
   local url="$WASPFLOW_CODEX_BACKEND_HEALTH_URL"
   if [[ -n "$url" ]] && command -v curl >/dev/null 2>&1; then
@@ -425,7 +438,12 @@ cmd_doctor() {
     if [[ "$code" == "200" ]]; then echo "  [ok]   codex model proxy $url"; else
       echo "  [warn] codex model proxy $url -> $code (start your Codex proxy, or unset WASPFLOW_CODEX_BACKEND_HEALTH_URL)"; fi
   fi
-  [[ "$ok" -eq 1 ]] || { echo "  -> missing required deps"; return 1; }
+  [[ "$agent_ok" -eq 1 ]] || ok=0
+  [[ "$ok" -eq 1 ]] || {
+    echo "  -> missing prerequisites"
+    echo "     see: $WASPFLOW_ROOT/docs/prerequisites.md"
+    return 1
+  }
   echo "  -> ready"
 }
 

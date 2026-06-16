@@ -418,7 +418,7 @@ Config example:
   "mutexes": [
     {
       "name": "live-stack",
-      "file": "tmp/workstreams/ri-owner-current-state.md",
+      "file": "tmp/workstreams/current-state.md",
       "open_pattern": "^- Status: OPEN"
     }
   ],

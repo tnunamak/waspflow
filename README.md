@@ -31,7 +31,8 @@ waspflow doctor                   # check deps + backends
 ```
 
 Requires: `tmux`, `jq`, `git`, `curl`, `uuidgen`, and at least one of
-`claude` / `codex` on PATH.
+`claude` / `codex` on PATH. See
+[docs/prerequisites.md](docs/prerequisites.md) for install links.
 
 ## Quickstart
 
@@ -252,6 +253,10 @@ scripts/verify.sh
 The verify script checks shell syntax, config initialization, policy profiles,
 mutex/blocker detection, `check --explain`, successful-reaped-lane filtering,
 and demo preview output without calling a model.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
 
 ## Status
 

@@ -10,7 +10,8 @@ git clone <waspflow-repo-url> ~/code/waspflow
 ```
 
 You need `tmux`, `jq`, `git`, `curl`, `uuidgen`, and at least one agent CLI:
-`codex` or `claude`.
+`codex` or `claude`. If any are missing, use
+[Prerequisites](prerequisites.md).
 
 ## 2. Check the machine
 
