@@ -69,6 +69,7 @@ only if it's clean (use `--force` to discard, `--keep-worktree` to keep).
 | `revise <lane> [--out FILE] -- <message>` | Steer the live pane, or resume the session headlessly if the window exited |
 | `attach <lane>` | Attach your terminal to the pane (Ctrl-b d to detach) |
 | `reap <lane> [--force] [--keep-worktree]` | Finalize the lane (verify deliverable, capture diff), kill the window, clean up |
+| `check [--cwd DIR] [--config FILE] [--no-fail]` | Run the project integrity gate: git/worktrees/lanes plus optional project checks |
 | `doctor` | Check deps + backends |
 
 Spawn flags worth knowing:
@@ -99,6 +100,53 @@ Pass `--report <path>` and waspflow holds the agent to producing that file:
 
 This is the "don't silently lose a worker's output" guarantee — you always get either the
 deliverable or an honest failure, never a false green.
+
+## Project integrity gate
+
+Live worker control is only half of orchestration. The other half is not losing
+repo/process state while delegating. `waspflow check` is the generic safety gate:
+
+- current git worktree dirty/ahead state;
+- every git worktree for the repo;
+- waspflow lanes associated with the project, including unreaped exited lanes
+  and failed deliverable contracts;
+- optional project-defined mutex, blocker, report, and command checks from
+  `.waspflow/config.json` or `.waspflow.json`.
+
+With no config, it still works as a generic git + lane inventory:
+
+```bash
+waspflow check
+waspflow check --no-fail   # readable snapshot without failing the caller
+```
+
+A project can add its own local process rules without forking waspflow:
+
+```json
+{
+  "lanes": { "stale_seconds": 14400 },
+  "mutexes": [
+    {
+      "name": "live-stack",
+      "file": "tmp/workstreams/current-state.md",
+      "open_pattern": "^- Status: OPEN"
+    }
+  ],
+  "blockers": { "globs": [".git/workstreams/blockers/*"] },
+  "reports": { "globs": ["tmp/workstreams/*.md"], "limit": 10 },
+  "commands": [
+    {
+      "name": "OpenSpec status",
+      "command": "node scripts/openspec-status.mjs",
+      "severity": "warn"
+    }
+  ]
+}
+```
+
+This is the intended migration path for bespoke project scripts: keep the
+project-specific policy in the project config, keep the implementation in
+waspflow.
 
 ## How idle is detected (no screen-scraping)
 
@@ -156,7 +204,8 @@ One engine, multiple faces:
 
 - **Engine** — `lib/core.sh` (state store, tmux helpers, dispatch) + provider
   adapters `lib/providers/{claude,codex}.sh` (each: `*_spawn`, `*_is_idle`,
-  `*_revise`, `*_preflight`, `*_discover_session`) + `lib/worktree.sh`.
+  `*_revise`, `*_preflight`, `*_discover_session`) + `lib/worktree.sh` +
+  `lib/project.sh` (generic repo/process integrity checks).
 - **CLI** — `bin/waspflow`, a thin verb router over the engine.
 - **Skill** — `skill/SKILL.md`, teaches an orchestrating agent the workflow.
 - **MCP** — a future adapter over the same engine (see `docs/mcp.md`).

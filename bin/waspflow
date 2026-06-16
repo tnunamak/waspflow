@@ -17,6 +17,7 @@
 #   revise  <lane> [--out FILE] -- <message>      steer live, or resume if exited
 #   attach  <lane>                        attach your terminal to the pane
 #   reap    <lane> [--force] [--keep-worktree]    kill window + clean up
+#   check   [--cwd DIR] [--config FILE] [--no-fail] project integrity gate
 #   doctor                                check deps + backends
 #
 # State:    $WASPFLOW_HOME (default ~/.local/state/waspflow)
@@ -43,8 +44,37 @@ source "$WASPFLOW_LIB/core.sh"
 source "$WASPFLOW_LIB/worktree.sh"
 # shellcheck disable=SC1090
 source "$WASPFLOW_LIB/artifacts.sh"
+# shellcheck disable=SC1090
+source "$WASPFLOW_LIB/project.sh"
 
-usage() { sed -n '3,40p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() {
+  cat <<EOF
+waspflow — turnkey live orchestration of Claude/Codex agents in tmux.
+
+Verbs:
+  spawn   --provider <claude|codex> --lane <name> [opts] -- <task prompt>
+  list                                  show all lanes + status
+  status  <lane>                        one lane's state (json)
+  peek    <lane> [--lines N]            de-escaped tail of the live pane
+  wait    <lane> [--timeout S] [--interval S]   block until idle
+  revise  <lane> [--out FILE] -- <message>      steer live, or resume if exited
+  attach  <lane>                        attach your terminal to the pane
+  reap    <lane> [--force] [--keep-worktree]    kill window + clean up
+  check   [--cwd DIR] [--config FILE] [--no-fail] project integrity gate
+  doctor                                check deps + backends
+
+Spawn opts:
+  --model <id>       provider model override
+  --effort <level>   low|medium|high|xhigh|max
+  --cwd <dir>        worker cwd (default: current dir)
+  --isolate          create an isolated git worktree
+  --report <path>    require a deliverable report at reap
+  --arg <flag>       pass an extra arg to the provider CLI
+
+State: $WASPFLOW_HOME (default ~/.local/state/waspflow)
+tmux:  $WASPFLOW_TMUX_SESSION (default waspflow)
+EOF
+}
 
 # ---- arg splitting ----------------------------------------------------------
 # Split argv at the first literal `--` into FLAGS (before) and REST (after).
@@ -345,6 +375,7 @@ main() {
     revise) cmd_revise "$@" ;;
     attach) cmd_attach "$@" ;;
     reap)   cmd_reap "$@" ;;
+    check)  cmd_check "$@" ;;
     doctor) cmd_doctor "$@" ;;
     -h|--help|help|"") usage ;;
     *) die "unknown command '$verb' (try: waspflow help)" ;;

@@ -30,12 +30,19 @@ Do **not** use it for trivial work you can just do yourself, or when a single
 
 ```bash
 waspflow doctor
+waspflow check --no-fail
 ```
 
 Green = ready. If `doctor` warns the **Codex model proxy** is down (only when
 `WASPFLOW_CODEX_BACKEND_HEALTH_URL` is set for a proxy-routed Codex), start that
 proxy before spawning Codex. Claude needs no backend gate. If `waspflow` isn't on
 PATH, run the repo's `install.sh`.
+
+`check` is the project/process gate. It inventories git worktrees, dirty state,
+waspflow lanes for this project, and any project-configured mutex/blocker/report
+checks from `.waspflow/config.json`. Run it before launching lanes, reporting
+status, or closing out a multi-agent pass. Use `--no-fail` when you need a
+readable snapshot without aborting the current command.
 
 ## The core loop
 
@@ -108,6 +115,7 @@ they don't collide. `reap` keeps a dirty worktree unless you pass `--force`.
 The lanes outlive your context. To pick back up:
 
 ```bash
+waspflow check --no-fail        # repo/process state + project-configured gates
 waspflow list                   # every lane + live/exited/reaped
 waspflow status <lane>          # full JSON: provider, session_id, cwd, prompt
 waspflow peek <lane>            # what it's doing / last said
