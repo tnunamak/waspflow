@@ -1,7 +1,7 @@
 # waspflow
 
 <p align="center">
-  <img src="assets/waspflow-logo.svg" alt="waspflow logo" width="180">
+  <img src="assets/waspflow-logo.png" alt="waspflow logo" width="180">
 </p>
 
 Give your main agent a live workflow for managing worker agents.
