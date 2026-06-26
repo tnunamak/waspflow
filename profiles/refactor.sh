@@ -49,9 +49,23 @@ profile_classify_prompt() {
 You are CLASSIFY+RANK in a behavior-preserving refactoring loop. Intent: "$intent".
 The DETERMINISTIC linter already ran (do NOT re-run it or change the count). GROUND-TRUTH over-complex functions (file:line:complexity): $rawjson
 For EACH finding, read the code at file:line, name the function symbol, and classify: safe-incidental | essential-complexity | protocol-sensitive | high-value-owner-gated, each with whyNotSafe (""=safe). You MUST inspect the no-go-prone areas and list which in hardAreasInspected: $LOOP_NOGO. Do NOT exclude-then-conclude "nothing exists" (the under-reach failure).
-For each SAFE-INCIDENTAL finding add a safeTargets entry: a behavior-preserving move (decomplect/name/early-return/delete-dead/extract-only-deep — NOT inline-a-named-wrapper), value (scales with how often the code is read/changed), and the package dir. ALSO carry the EXACT linter "line" for that finding into the entry (the oracle uses it to verify the diagnostic cleared — do NOT omit or alter it). Do NOT propose a test command; the engine derives the required test deterministically from the package.
-Write ONLY this JSON to your report file (no prose):
-{"classified":[{"file","symbol","line","complexity","classification","whyNotSafe"}],"hardAreasInspected":[...],"safeTargets":[{"file","symbol","line","complexity","move","value","package"}],"recommendation":"go-loop|one-pr-no-loop|non-finding|needs-owner","note":""}
+For each SAFE-INCIDENTAL finding add a safeTargets entry: a behavior-preserving move (decomplect/name/early-return/delete-dead/extract-only-deep — NOT inline-a-named-wrapper), value (integer, scales with how often the code is read/changed), and the package dir. ALSO carry the EXACT linter "line" AND "complexity" for that finding into the entry (the oracle joins on file+line+complexity — do NOT omit, rename, or alter them). Do NOT propose a test command; the engine derives the required test deterministically from the package.
+
+OUTPUT CONTRACT — this is parsed by a STRICT machine, not a human. Write ONLY this JSON object to your report file (no prose, no markdown fences, no extra keys at the top level). You MUST use these EXACT top-level key names — "classified", "hardAreasInspected", "safeTargets", "recommendation", "note". Any other names (e.g. "findings", "safe_targets", "no_go_count", snake_case variants) will be REJECTED and the run fails closed. "recommendation" MUST be exactly one of: go-loop | one-pr-no-loop | non-finding | needs-owner. Every one of the $(printf '%s' "$rawjson" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))' 2>/dev/null) findings MUST appear in "classified".
+
+Copy this skeleton exactly and fill it:
+{
+  "classified": [
+    {"file":"path/x.ts","symbol":"fnName","line":123,"complexity":31,"classification":"safe-incidental","whyNotSafe":""},
+    {"file":"path/y.ts","symbol":"authThing","line":50,"complexity":40,"classification":"protocol-sensitive","whyNotSafe":"auth/token no-go zone"}
+  ],
+  "hardAreasInspected": ["auth/grant/consent/token","scheduler/controller/recovery"],
+  "safeTargets": [
+    {"file":"path/x.ts","symbol":"fnName","line":123,"complexity":31,"move":"extract a deep helper","value":8,"package":"packages/operator-ui/src"}
+  ],
+  "recommendation": "go-loop",
+  "note": ""
+}
 PROMPT
 }
 
