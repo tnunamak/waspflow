@@ -191,6 +191,23 @@ check "re-gate: clean target span + tests pass → targetDiagnosticCleared=True"
 check "re-gate: count NOT dropped (0->0) is a separate fact, doesn't block clearing" "False" "$(echo "$out" | jqget complexityCountDropped)"
 
 
+# ── 18. RE-GATE catches a NEW non-target diagnostic (Codex re-verify-4) ──
+# Target span clean, but a NEW lint diagnostic appears elsewhere in the file → newDiagnosticsCount>0.
+# The dispatcher regate must reject (it requires newDiagnosticsCount==0). Here we assert the FACT.
+mkdir -p "$TMP/ndrepo"; ( cd "$TMP" && git init -q ndrepo && cd ndrepo && git config user.email t@t && git config user.name t
+  printf 'export function widget(x) {\n  return x + 1;\n}\n' > src.ts
+  git add src.ts && git commit -q -m init
+  git remote add origin "$TMP/ndrepo" 2>/dev/null; git update-ref refs/remotes/origin/main HEAD; git checkout -q -b work
+  printf 'export function widget(x) {\n  const r = x + 1;\n  return r;\n}\n' > src.ts; git add src.ts && git commit -q -m change )
+echo 'true' > "$TMP/ndtc.sh"
+# baseline: file had ZERO style findings. post: introduces ONE new noNonNullAssertion (non-complexity, non-target).
+echo '{"diagnostics":{}}' > "$TMP/ndbl.json"
+nd_post() { echo "src.ts:9:1 lint/style/noNonNullAssertion ---"; }; export -f nd_post
+out="$(oracle_gate "$TMP/ndrepo" "work" "src.ts" "widget" "$TMP/ndtc.sh" "$TMP/ndbl.json" "nd_post" "1")"
+check "re-gate: new non-target diagnostic → newDiagnosticsCount=1 (regate rejects)" "1" "$(echo "$out" | jqget newDiagnosticsCount)"
+check "re-gate: target span still clean → targetDiagnosticCleared=True (but newDiag blocks it)" "True" "$(echo "$out" | jqget targetDiagnosticCleared)"
+
+
 echo ""
 echo "loop-oracle smoke: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
