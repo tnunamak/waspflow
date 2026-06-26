@@ -102,6 +102,40 @@ maker=$(_loop_caprank claude opus high); chk=$(_loop_caprank claude sonnet mediu
 [ "$chk" -lt "$maker" ] && weak=rejected || weak=accepted
 check "caprank: sonnet-checker vs opus-maker → weaker (rejected)" "rejected" "$weak"
 
+# ── 12. lineage is FAMILY not raw string (Codex review-5 #2 bypass fix) ──
+# opus-high maker vs opus-xhigh checker: stronger rank BUT same lineage → must be rejected.
+check "family: opus-high → opus" "opus" "$(_loop_family claude opus-high high)"
+check "family: opus-xhigh → opus" "opus" "$(_loop_family claude opus-xhigh xhigh)"
+check "family: gpt-5.5 → gpt" "gpt" "$(_loop_family codex gpt-5.5 high)"
+mfam=$(_loop_family claude opus-high high); cfam=$(_loop_family claude opus-xhigh xhigh)
+[ "$cfam" = "$mfam" ] && lineage=same-rejected || lineage=different-ok
+check "family: opus-high maker vs opus-xhigh checker → SAME lineage (rejected)" "same-rejected" "$lineage"
+# gpt checker vs opus maker → genuinely different lineage → allowed.
+mfam=$(_loop_family claude opus high); cfam=$(_loop_family codex gpt-5.5 high)
+[ "$cfam" != "$mfam" ] && lineage=different-ok || lineage=same-rejected
+check "family: opus maker vs gpt checker → DIFFERENT lineage (allowed)" "different-ok" "$lineage"
+
+# ── 13. target line must be ORACLE-grounded, not agent-trusted (Codex review-5 #1) ──
+# Exercises the REAL engine fn _loop_ground_target_line (sourced from lib/loop.sh).
+RAW='[{"file":"src/foo.ts","line":62,"complexity":31}]'
+# Honest target (line matches a raw finding) → oracle line returned.
+check "target-ground: correct line (62) → grounded" "62" "$(_loop_ground_target_line "$RAW" '{"file":"src/foo.ts","line":62}')"
+# Dishonest target (agent set line:1, real diagnostic is at 62) → empty → engine fails closed.
+check "target-ground: WRONG line (1) → empty (engine fails closed)" "" "$(_loop_ground_target_line "$RAW" '{"file":"src/foo.ts","line":1}')"
+# Wrong file → empty too.
+check "target-ground: wrong file → empty" "" "$(_loop_ground_target_line "$RAW" '{"file":"src/other.ts","line":62}')"
+# Right (file,line) but MISLABELED complexity → empty (complexity must match too).
+check "target-ground: right line wrong complexity → empty" "" "$(_loop_ground_target_line "$RAW" '{"file":"src/foo.ts","line":62,"complexity":99}')"
+
+# ── 14. unknown model family (haiku/fable/future) → rank 0 → never a valid checker ──
+check "family: haiku → unknown" "unknown" "$(_loop_family claude haiku medium)"
+check "family: fable → unknown" "unknown" "$(_loop_family claude fable high)"
+check "caprank: unknown family → rank 0 (weakest)" "0" "$(_loop_caprank claude haiku high)"
+# An unknown-family checker can NEVER outrank a real maker → always rejected.
+mr=$(_loop_caprank claude sonnet medium); cr=$(_loop_caprank claude haiku high)
+[ "$cr" -lt "$mr" ] && uok=rejected || uok=accepted
+check "family: unknown checker vs sonnet maker → rejected" "rejected" "$uok"
+
 echo ""
 echo "loop-oracle smoke: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -65,23 +65,51 @@ loop_gate_passed() {
 # Emit a fail-closed outcome JSON. $1 outcome  $2 note
 _loop_fail() { printf '{"outcome":"%s","note":%s}\n' "$1" "$(printf '%s' "$2" | _oracle_json_escape)"; }
 
-# Capability rank (owner-given): gpt-5.5 high > Opus xhigh > gpt-5.5 low > Opus high
-# > Opus low > Sonnet. The checker MUST be >= the maker AND a different lineage
-# (self-grading fails empirically). Returns the integer rank for "<provider>:<model>:<effort>".
-_loop_caprank() {
+# Classify a provider/model/effort into a normalized FAMILY and capability RANK.
+# Family ∈ {gpt, opus, sonnet, unknown} — the lineage that the "different lineage"
+# rule compares (Codex review-5 #2: must compare families, NOT raw strings, else
+# opus-high vs opus-xhigh would read as different lineage). ONE source of truth.
+# Rank (owner table): gpt high=6 > opus xhigh=5 > gpt low=4 > opus high=3 > opus low=2 > sonnet=1.
+# Prints "<family> <rank>".
+_loop_classify_model() {
   python3 -c '
 import sys
 prov, model, eff = (sys.argv[1] or "").lower(), (sys.argv[2] or "").lower(), (sys.argv[3] or "medium").lower()
-# lineage: codex/gpt vs claude/opus/sonnet
-gpt = ("codex" in prov) or ("gpt" in model) or ("gpt" in prov)
-opus = "opus" in model or (prov=="claude" and "sonnet" not in model)
-sonnet = "sonnet" in model
+# Explicit known families ONLY; everything else → unknown (which fails closed in the gate).
+# A bare "claude" provider with NO model is opus lineage (the default Claude tier here).
+if ("codex" in prov) or ("gpt" in model): fam="gpt"
+elif "sonnet" in model: fam="sonnet"
+elif "opus" in model: fam="opus"
+elif prov=="claude" and not model: fam="opus"
+else: fam="unknown"   # haiku, fable, future/unrecognized → unknown → checker rejected
 hi = eff in ("high","xhigh","max")
-if gpt:    rank = 6 if hi else 4          # gpt-5.5 high=6, gpt-5.5 low=4
-elif opus: rank = 5 if eff in ("xhigh","max") else (3 if hi else 2)  # opus xhigh=5, high=3, low=2
-elif sonnet: rank = 1
-else: rank = 2                             # unknown claude ~ opus low
-print(rank)' "$1" "$2" "$3"
+if fam=="gpt":    rank = 6 if hi else 4
+elif fam=="opus": rank = 5 if eff in ("xhigh","max") else (3 if hi else 2)
+elif fam=="sonnet": rank = 1
+else: rank = 0   # unknown is the WEAKEST rank — never qualifies as a checker
+print(fam, rank)' "$1" "$2" "$3"
+}
+_loop_caprank() { _loop_classify_model "$1" "$2" "$3" | awk '{print $2}'; }
+_loop_family()  { _loop_classify_model "$1" "$2" "$3" | awk '{print $1}'; }
+
+# Ground a target's line against the RAW ORACLE FINDINGS (Codex review-5 #1): the
+# agent-carried line is NOT trusted. Echoes the oracle's line iff the target matches a
+# raw finding on (file, line, AND complexity) — complexity is included so the agent
+# can't point at a REAL finding's line while mislabeling its severity. Echoes empty
+# otherwise (→ fail closed). $1 raw-findings-json  $2 target-json
+_loop_ground_target_line() {
+  printf '%s\t%s' "$1" "$2" | python3 -c '
+import json,sys
+raw_s, tgt_s = sys.stdin.read().split("\t", 1)
+try: raw=json.loads(raw_s); tgt=json.loads(tgt_s)
+except Exception: print(""); sys.exit(0)
+f, ln, cx = tgt.get("file"), tgt.get("line"), tgt.get("complexity")
+for r in (raw if isinstance(raw,list) else []):
+    if r.get("file")==f and str(r.get("line"))==str(ln) and (cx is None or str(r.get("complexity"))==str(cx)):
+        print(r["line"]); break
+else:
+    print("")  # no oracle finding at this (file,line[,complexity]) → caller fails closed
+' 2>/dev/null
 }
 
 # The loop. $1 worktree  $2 intent  $3 provider  (profile already sourced)
@@ -95,17 +123,18 @@ loop_run() {
   local LOOP_MAKER_MODEL="${LOOP_MAKER_MODEL:-}" LOOP_MAKER_EFFORT="${LOOP_MAKER_EFFORT:-}"
   local LOOP_CHECKER_PROVIDER="${LOOP_CHECKER_PROVIDER:-$provider}"
   local LOOP_CHECKER_MODEL="${LOOP_CHECKER_MODEL:-}" LOOP_CHECKER_EFFORT="${LOOP_CHECKER_EFFORT:-}"
-  local mrank crank
+  local mrank crank mfam cfam
   mrank="$(_loop_caprank "$provider" "$LOOP_MAKER_MODEL" "$LOOP_MAKER_EFFORT")"
   crank="$(_loop_caprank "$LOOP_CHECKER_PROVIDER" "$LOOP_CHECKER_MODEL" "$LOOP_CHECKER_EFFORT")"
-  # Different lineage = the cheap, reliable proxy: provider differs OR model family differs.
-  local diff_lineage=true
-  [ "$provider" = "$LOOP_CHECKER_PROVIDER" ] && [ "$LOOP_MAKER_MODEL" = "$LOOP_CHECKER_MODEL" ] && diff_lineage=false
-  if [ "$crank" -lt "$mrank" ] || [ "$diff_lineage" != true ]; then
-    _loop_fail "checker-too-weak" "Checker (rank $crank: ${LOOP_CHECKER_PROVIDER}/${LOOP_CHECKER_MODEL:-default}/${LOOP_CHECKER_EFFORT:-medium}) must be >= maker (rank $mrank: ${provider}/${LOOP_MAKER_MODEL:-default}/${LOOP_MAKER_EFFORT:-medium}) AND a different lineage. Set LOOP_CHECKER_PROVIDER/MODEL/EFFORT. (maker/checker split can't self-grade.)"
+  mfam="$(_loop_family "$provider" "$LOOP_MAKER_MODEL" "$LOOP_MAKER_EFFORT")"
+  cfam="$(_loop_family "$LOOP_CHECKER_PROVIDER" "$LOOP_CHECKER_MODEL" "$LOOP_CHECKER_EFFORT")"
+  # Codex review-5 #2: lineage is the normalized FAMILY (gpt|opus|sonnet), NOT raw strings
+  # — opus-high vs opus-xhigh are the SAME lineage and must NOT count as different.
+  if [ "$crank" -lt "$mrank" ] || [ "$cfam" = "$mfam" ] || [ "$cfam" = "unknown" ]; then
+    _loop_fail "checker-too-weak" "Checker ($cfam rank $crank: ${LOOP_CHECKER_PROVIDER}/${LOOP_CHECKER_MODEL:-default}/${LOOP_CHECKER_EFFORT:-medium}) must be >= maker ($mfam rank $mrank: ${provider}/${LOOP_MAKER_MODEL:-default}/${LOOP_MAKER_EFFORT:-medium}) AND a DIFFERENT lineage family. Set LOOP_CHECKER_PROVIDER/MODEL/EFFORT. (maker/checker split can't self-grade.)"
     return 0
   fi
-  log "loop: maker rank $mrank, checker rank $crank, different-lineage=$diff_lineage — strength enforced"
+  log "loop: maker $mfam(rank $mrank), checker $cfam(rank $crank) — strength + lineage enforced"
 
   # S0 PREFLIGHT (oracle, fail-closed)
   local pre; pre="$(oracle_preflight "$wt")"
@@ -141,8 +170,14 @@ except: print(0)')"
   fi
   local tfile tsym tline
   tfile="$(printf '%s' "$target" | _loop_jget file)"; tsym="$(printf '%s' "$target" | _loop_jget symbol)"
-  tline="$(printf '%s' "$target" | _loop_jget line)"   # original linter line (Codex review-4 #4)
-  log "loop: target = $tfile::$tsym (highest-value safe)"
+  # Codex review-5 #1: the agent-carried line is NOT trusted. Ground it against the RAW
+  # ORACLE FINDINGS; if no raw finding matches (file,line), the agent invented/mis-copied
+  # it → FAIL CLOSED. (Same fn the smoke suite exercises — one source of truth.)
+  tline="$(_loop_ground_target_line "$raw" "$target")"
+  if [ -z "$tline" ]; then
+    _loop_fail "target-not-oracle-grounded" "Selected target $tfile::$tsym claims line '$(printf '%s' "$target" | _loop_jget line)' but NO raw oracle finding matches (file,line). The agent invented or mis-copied the line; refusing to measure an unverified location."; return 0
+  fi
+  log "loop: target = $tfile::$tsym @ oracle-line $tline (highest-value safe, oracle-grounded)"
 
   # baseline (oracle) + write the test command to a file (engine-owned, not agent)
   local baseline="$rundir/baseline.json" testcmd_file="$rundir/testcmd.sh"
