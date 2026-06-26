@@ -212,17 +212,17 @@ print(", ".join(parts))' 2>/dev/null)"
     if printf '%s' "$makeprose" | grep -qiE '^[[:space:]]*ABANDON:'; then
       _loop_fail "maker-abandoned" "Maker abandoned $tfile:$tline after attempt $attempt: $(printf '%s' "$makeprose" | grep -iE 'ABANDON:' | head -1). Next: engine would select the next deterministic target (or ESCALATE after repeated abandons)."; return 0
     fi
-    branch="$(printf '%s' "$makeprose" | grep -oE 'refactor/[a-z0-9._-]+' | head -1 | sed 's/[._-]*$//')"
-    # If the maker didn't name a refactor/ branch in prose, discover what it actually committed:
-    # the highest-priority is a branch that descends from origin/main and isn't main itself.
-    if [ -z "$branch" ]; then
-      branch="$(git -C "$wt" for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null \
-        | while read -r b; do
-            [ "$b" = "main" ] && continue
-            if git -C "$wt" merge-base --is-ancestor origin/main "$b" 2>/dev/null \
-               && [ -n "$(git -C "$wt" rev-list origin/main.."$b" 2>/dev/null | head -1)" ]; then echo "$b"; fi
-          done | grep -E '^(refactor|waspflow)/' | head -1)"
+    # Prefer the branch the maker is CURRENTLY on (it commits on its own new branch and
+    # leaves HEAD there). tr -d trims the trailing newline that broke checkout before.
+    # Only trust it if it's a refactor/ branch with commits ahead of origin/main.
+    branch=""
+    local head_branch; head_branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null | tr -d '[:space:]')"
+    if printf '%s' "$head_branch" | grep -qE '^refactor/' \
+       && [ -n "$(git -C "$wt" rev-list origin/main.."$head_branch" 2>/dev/null | head -1)" ]; then
+      branch="$head_branch"
     fi
+    # else fall back to the maker's prose-named branch (trailing punctuation stripped).
+    [ -z "$branch" ] && branch="$(printf '%s' "$makeprose" | grep -oE 'refactor/[a-z0-9._-]+' | head -1 | sed 's/[._-]*$//')"
     [ -z "$branch" ] && branch="waspflow/loop-make-$rid-$attempt"  # last-resort fallback
 
     # ORACLE gate (engine process — un-fakeable). MANDATORY: VERDICT: LAND alone never lands.
