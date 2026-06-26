@@ -54,7 +54,16 @@ claude_spawn() {
   # transcript). --dangerously-skip-permissions because the lane is unattended.
   #
   # We assemble an argv array and quote it for the tmux shell.
-  local argv=(claude
+  # Wrap with `tokensmash launch claude --` when available. CRITICAL: that prefix
+  # ALREADY names `claude` as the program, so the argv must NOT repeat `claude`
+  # after it — `tokensmash launch claude -- claude ... "$prompt"` makes claude see
+  # a literal `claude` in its FIRST POSITIONAL (the prompt slot), so the real prompt
+  # is lost and every session opens with the bare word "claude" and no task.
+  # (Bug found dogfooding the refactor-loop: every spawned agent got no prompt.)
+  local launcher=(claude)
+  command -v tokensmash >/dev/null 2>&1 && launcher=(tokensmash launch claude --)
+
+  local argv=("${launcher[@]}"
     "${model_args[@]}"
     "${effort_args[@]}"
     --session-id "$session_id"
@@ -68,6 +77,8 @@ claude_spawn() {
   for a in "${argv[@]}"; do quoted+=" $(printf '%q' "$a")"; done
 
   tmux_ensure_session
+  # Pre-trust the cwd so the folder-trust gate does NOT eat the positional prompt.
+  _claude_pretrust_cwd "$cwd"
   tmux new-window -d -t "$WASPFLOW_TMUX_SESSION" -n "$lane" -c "$cwd" "bash -lc${quoted:+ }$(printf '%q' "${quoted# }")"
   local target; target="$(tmux_window_target "$lane")"
   # Capture a live transcript via pipe-pane (parity with codex).
@@ -86,6 +97,33 @@ claude_spawn() {
 
 # Pane snapshot, de-escaped.
 _claude_pane() { tmux capture-pane -p -t "$1" -S -60 2>/dev/null | strip_ansi; }
+
+# Pre-accept Claude's folder-trust dialog for a cwd BEFORE launch, by marking it
+# trusted in ~/.claude.json. Without this, launching `claude "$prompt"` in an
+# untrusted dir shows the trust gate FIRST, which consumes/discards the positional
+# prompt — claude then sits at an empty interactive composer with no task (the
+# silent-no-prompt bug). Idempotent; best-effort (never fails the spawn).
+_claude_pretrust_cwd() {
+  local cwd="$1" cfg="${HOME}/.claude.json"
+  [[ -d "$cwd" ]] || return 0
+  python3 - "$cfg" "$cwd" <<'PY' 2>/dev/null || true
+import json, sys, os
+cfg, cwd = sys.argv[1], sys.argv[2]
+try:
+    d = json.load(open(cfg)) if os.path.exists(cfg) else {}
+except Exception:
+    sys.exit(0)   # unreadable/corrupt config → leave it alone, fall back to post-launch trust clearing
+projects = d.setdefault("projects", {})
+p = projects.setdefault(cwd, {})
+# Only write if not already accepted (keep the file churn-free).
+if p.get("hasTrustDialogAccepted") is not True:
+    p["hasTrustDialogAccepted"] = True
+    p.setdefault("hasCompletedProjectOnboarding", True)
+    tmp = cfg + ".waspflow.tmp"
+    json.dump(d, open(tmp, "w"))
+    os.replace(tmp, cfg)
+PY
+}
 
 # Answer Claude's folder-trust prompt ("Yes, I trust this folder" = option 1)
 # if/when it appears. No-op for already-trusted dirs.
