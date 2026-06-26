@@ -77,19 +77,27 @@ print(json.dumps({"rawLinterCount":len(out),"findings":out}))
 }
 
 # ── baseline: pre-change lint diagnostics-by-rule for one file ──
+# Codex review-4 #3: emit lintFileExitCode + ok; FAIL CLOSED if the file-lint command
+# errors AND produced no parseable diagnostics (else a broken cmd → {} → false-pass).
 oracle_baseline() {
   local wt="${1:?worktree}" file="${2:?file}" lintfile_cmd="${3:?lintfile_cmd}"
-  local diags
-  diags="$( ( cd "$wt" && eval "$lintfile_cmd" ) 2>&1 | grep -oE 'lint/[a-z]+/[A-Za-z]+' \
+  local out rc diags
+  out="$( ( cd "$wt" && eval "$lintfile_cmd" ) 2>&1 )"; rc=$?
+  diags="$(printf '%s' "$out" | grep -oE 'lint/[a-z]+/[A-Za-z]+' \
     | sort | uniq -c | python3 -c 'import sys,json;d={};[d.update({p[1]:int(p[0])}) for p in (l.split() for l in sys.stdin if len(l.split())==2)];print(json.dumps(d))' 2>/dev/null )"
-  printf '{"file":%s,"diagnostics":%s}\n' "$(printf '%s' "$file" | _oracle_json_escape)" "${diags:-\{\}}"
+  # A nonzero exit that emitted NO lint diagnostic lines means the linter itself broke.
+  local ok=true
+  if [ "$rc" -ne 0 ] && ! printf '%s' "$out" | grep -q 'lint/'; then ok=false; fi
+  printf '{"ok":%s,"file":%s,"lintFileExitCode":%s,"diagnostics":%s}\n' \
+    "$ok" "$(printf '%s' "$file" | _oracle_json_escape)" "$rc" "${diags:-\{\}}"
 }
 
 # ── gate: the post-change objective receipts (FAIL-CLOSED on checkout/test/cmd problems) ──
-# $1 wt  $2 branch  $3 file  $4 symbol  $5 testcmd_file  $6 baseline_json  $7 lintfile_cmd
+# $1 wt  $2 branch  $3 file  $4 symbol  $5 testcmd_file  $6 baseline_json  $7 lintfile_cmd  $8 target_line
 oracle_gate() {
   local wt="${1:?wt}" branch="${2:?branch}" file="${3:?file}" symbol="${4:?symbol}"
   local testcmd_file="${5:?testcmd-file}" baseline_path="${6:?baseline}" lintfile_cmd="${7:?lintfile_cmd}"
+  local target_line="${8:-}"   # original linter line for the target (Codex review-4 #4)
 
   # Codex review-3 #4: missing/empty test command is a HARD FAIL (eval "" exits 0 = false-pass).
   if [ ! -s "$testcmd_file" ]; then
@@ -115,14 +123,33 @@ oracle_gate() {
   local rundir; rundir="$(dirname "$baseline_path")"
   ( cd "$wt" && eval "$testcmd" ) >"$rundir/test.log" 2>&1; testrc=$?
 
-  # post-change lint for the file
-  local post; post="$( ( cd "$wt" && eval "$lintfile_cmd" ) 2>&1 )"
-  # target complexity diagnostic for THIS symbol still present near its def?
-  local sym_line target_cleared=true
-  sym_line="$(grep -nE "(function|const|export function) $symbol[ (<]" "$wt/$file" 2>/dev/null | head -1 | cut -d: -f1)"
+  # post-change lint for the file (Codex review-4 #3: capture exit code, fail closed on broken lint)
+  local post postrc; post="$( ( cd "$wt" && eval "$lintfile_cmd" ) 2>&1 )"; postrc=$?
+  if [ "$postrc" -ne 0 ] && ! printf '%s' "$post" | grep -q 'lint/'; then
+    printf '{"ok":false,"reason":"post-lint-failed","lintFileExitCode":%s,"tail":%s}\n' \
+      "$postrc" "$(printf '%s' "$post" | tail -5 | _oracle_json_escape)"; return 0
+  fi
+  # Locate the target by the ORIGINAL linter line; fall back to a symbol grep.
+  # Codex review-4 #4: if we CANNOT locate it, FAIL CLOSED — do NOT default cleared=true.
+  local sym_line=""
+  if [ -n "$target_line" ] && printf '%s' "$target_line" | grep -qE '^[0-9]+$'; then
+    sym_line="$target_line"
+  elif [ -n "$symbol" ]; then
+    # Fallback grep MUST be anchored on the symbol (Codex review-4 #4): a declaration of
+    # THIS symbol as function/method/const-arrow/class. Bare `function`/`const` branches
+    # would match any line → false target-cleared, so every branch contains the symbol.
+    local sq; sq="$(printf '%s' "$symbol" | sed 's/[][\.^$*+?(){}|/]/\\&/g')"
+    sym_line="$(grep -nE "((async[[:space:]]+)?function[[:space:]]+$sq[[:space:]]*[(<]|(export[[:space:]]+)?(async[[:space:]]+)?function[[:space:]]+$sq\b|\b$sq[[:space:]]*[:=][[:space:]]*(async[[:space:]]*)?\(|\b$sq[[:space:]]*\([^)]*\)[[:space:]]*[:{]|class[[:space:]]+$sq\b)" "$wt/$file" 2>/dev/null | head -1 | cut -d: -f1)"
+  fi
+  if [ -z "$sym_line" ]; then
+    printf '{"ok":false,"reason":"target-symbol-unlocatable","symbol":%s,"file":%s,"note":"Cannot locate the target by line or symbol; refusing to default targetDiagnosticCleared=true."}\n' \
+      "$(printf '%s' "$symbol" | _oracle_json_escape)" "$(printf '%s' "$file" | _oracle_json_escape)"; return 0
+  fi
+  # target complexity diagnostic still present near the target line?
+  local target_cleared=true
   if printf '%s' "$post" | grep -q 'noExcessiveCognitiveComplexity'; then
     while read -r dl; do
-      [ -n "$sym_line" ] && [ -n "$dl" ] && [ "$(( dl>sym_line ? dl-sym_line : sym_line-dl ))" -le 3 ] && target_cleared=false
+      [ -n "$dl" ] && [ "$(( dl>sym_line ? dl-sym_line : sym_line-dl ))" -le 5 ] && target_cleared=false
     done < <(printf '%s' "$post" | grep -oE ":[0-9]+:[0-9]+ lint/complexity/noExcessiveCognitiveComplexity" | grep -oE '^:[0-9]+' | tr -d ':' )
   fi
   # baseline-relative NEW diagnostics (Codex review-2 #9)
@@ -135,7 +162,7 @@ for l in sys.stdin:
     p=l.split()
     if len(p)==2: now[p[1]]=int(p[0])
 print(sum(max(0, now.get(k,0)-base.get(k,0)) for k in now))' "$baseline_path" 2>/dev/null )"
-  printf '{"ok":true,"testCommandPresent":true,"commitSha":"%s","branch":%s,"head":"%s","mergeBase":"%s","diffFiles":%s,"testExitCode":%s,"diffCheckExitCode":%s,"targetDiagnosticCleared":%s,"newDiagnosticsCount":%s}\n' \
+  printf '{"ok":true,"testCommandPresent":true,"commitSha":"%s","branch":%s,"head":"%s","mergeBase":"%s","diffFiles":%s,"testExitCode":%s,"diffCheckExitCode":%s,"lintFileExitCode":%s,"targetLine":%s,"targetDiagnosticCleared":%s,"newDiagnosticsCount":%s}\n' \
     "${head:0:12}" "$(printf '%s' "$branch" | _oracle_json_escape)" "${head:0:12}" "${mergebase:0:12}" \
-    "$diff_files" "$testrc" "$diffcheck" "$target_cleared" "${new_diags:-0}"
+    "$diff_files" "$testrc" "$diffcheck" "$postrc" "${sym_line:-null}" "$target_cleared" "${new_diags:-0}"
 }

@@ -1,19 +1,44 @@
 #!/usr/bin/env bash
-# profiles/refactor.sh — the REFACTORING task profile for the waspflow gated loop.
-# Fills lib/loop.sh's slots with behavior-preserving refactoring content. The
-# methodology + no-go zones mirror the refactor-loop skill (the agent-knowledge);
-# this file is what the ENGINE calls to build prompts + commands.
+# profiles/refactor.sh — the GENERIC behavior-preserving refactoring profile for the
+# waspflow gated loop. This file ships in waspflow and contains NO repo-specific
+# knowledge. ALL repo specifics (lint dirs, no-go zones, package→test map) come from
+# a config file IN THE TARGET REPO, discovered via $LOOP_REFACTOR_CONFIG or
+# <worktree>/.waspflow/refactor.json. The engine sets $LOOP_WORKTREE before sourcing.
 #
-# Repo-tunable via env: LOOP_LINT_DIRS, LOOP_NOGO (else PDPP defaults).
+# Config schema (.waspflow/refactor.json), all optional with safe generic fallbacks:
+#   { "lintDirs": "src",                          # dirs the repo-wide linter scans
+#     "lintCmd":  "npx --yes @biomejs/biome lint", # the linter invocation (must print biome-style output)
+#     "noGo":     "auth, payments, ...",           # human-readable no-touch zones for the classifier
+#     "testMap":  [["src/", "pnpm -s test"], ...] } # file-PREFIX → deterministic test command (longest prefix wins)
+#
+# If no config is found, defaults are conservative and NOT tied to any project.
 
-LOOP_LINT_DIRS="${LOOP_LINT_DIRS:-apps/console/src packages/operator-ui/src reference-implementation packages/polyfill-connectors/src}"
-LOOP_NOGO="${LOOP_NOGO:-auth/grant/consent/token, owner-session/csrf, rs-read/records/db/storage, search/mcp/read-core, scheduler/controller/recovery, manifest semantics, connector internals}"
+_refactor_config() {
+  local cfg="${LOOP_REFACTOR_CONFIG:-}"
+  [ -z "$cfg" ] && [ -n "${LOOP_WORKTREE:-}" ] && cfg="$LOOP_WORKTREE/.waspflow/refactor.json"
+  [ -n "$cfg" ] && [ -f "$cfg" ] && printf '%s' "$cfg"
+}
+# Read one config key with a fallback. $1 jq-path  $2 fallback
+_refactor_cfg_get() {
+  local cfg; cfg="$(_refactor_config)"
+  if [ -n "$cfg" ]; then
+    python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); v=d.get(sys.argv[2])
+print(v if isinstance(v,str) and v else sys.argv[3])' "$cfg" "$2" "$3" 2>/dev/null || printf '%s' "$3"
+  else
+    printf '%s' "$3"
+  fi
+}
+
+LOOP_LINT_DIRS="${LOOP_LINT_DIRS:-$(_refactor_cfg_get x lintDirs "src")}"
+LOOP_LINT_CMD="${LOOP_LINT_CMD:-$(_refactor_cfg_get x lintCmd "npx --yes @biomejs/biome lint")}"
+LOOP_NOGO="${LOOP_NOGO:-$(_refactor_cfg_get x noGo "auth/credentials/secrets, persistence/migrations, public API surface, anything security- or money-sensitive")}"
 
 profile_lint_cmd() {
-  printf 'npx --yes @biomejs/biome lint %s' "$LOOP_LINT_DIRS"
+  printf '%s %s' "$LOOP_LINT_CMD" "$LOOP_LINT_DIRS"
 }
 profile_lint_file_cmd() {
-  printf 'npx --yes @biomejs/biome lint %s' "$1"
+  printf '%s %s' "$LOOP_LINT_CMD" "$1"
 }
 
 # The agent classifies the ORACLE's raw findings and ranks safe targets. It does
@@ -24,9 +49,9 @@ profile_classify_prompt() {
 You are CLASSIFY+RANK in a behavior-preserving refactoring loop. Intent: "$intent".
 The DETERMINISTIC linter already ran (do NOT re-run it or change the count). GROUND-TRUTH over-complex functions (file:line:complexity): $rawjson
 For EACH finding, read the code at file:line, name the function symbol, and classify: safe-incidental | essential-complexity | protocol-sensitive | high-value-owner-gated, each with whyNotSafe (""=safe). You MUST inspect the no-go-prone areas and list which in hardAreasInspected: $LOOP_NOGO. Do NOT exclude-then-conclude "nothing exists" (the under-reach failure).
-For each SAFE-INCIDENTAL finding add a safeTargets entry: a behavior-preserving move (decomplect/name/early-return/delete-dead/extract-only-deep — NOT inline-a-named-wrapper), value (scales with how often the code is read/changed), package dir, and the touched test command.
+For each SAFE-INCIDENTAL finding add a safeTargets entry: a behavior-preserving move (decomplect/name/early-return/delete-dead/extract-only-deep — NOT inline-a-named-wrapper), value (scales with how often the code is read/changed), and the package dir. ALSO carry the EXACT linter "line" for that finding into the entry (the oracle uses it to verify the diagnostic cleared — do NOT omit or alter it). Do NOT propose a test command; the engine derives the required test deterministically from the package.
 Write ONLY this JSON to your report file (no prose):
-{"classified":[{"file","symbol","complexity","classification","whyNotSafe"}],"hardAreasInspected":[...],"safeTargets":[{"file","symbol","complexity","move","value","package","testCmd"}],"recommendation":"go-loop|one-pr-no-loop|non-finding|needs-owner","note":""}
+{"classified":[{"file","symbol","line","complexity","classification","whyNotSafe"}],"hardAreasInspected":[...],"safeTargets":[{"file","symbol","line","complexity","move","value","package"}],"recommendation":"go-loop|one-pr-no-loop|non-finding|needs-owner","note":""}
 PROMPT
 }
 
@@ -40,8 +65,26 @@ s=sorted(d.get("safeTargets",[]), key=lambda x:-(x.get("value",0)))
 print(json.dumps(s[0]) if s and d.get("recommendation")=="go-loop" else "")'
 }
 
+# DETERMINISTIC test command, derived from the touched FILE via the REPO'S testMap
+# (Codex review-4 #2: the agent must NOT author the oracle's test command — it could
+# pick `true`). The map lives in the target repo's .waspflow/refactor.json, NOT here.
+# Longest file-PREFIX wins. Unknown path → empty → the oracle gate FAILS CLOSED.
 profile_test_cmd() {
-  printf '%s' "$1" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("testCmd") or "cd reference-implementation && node --test")'
+  local target="$1" cfg; cfg="$(_refactor_config)"
+  printf '%s' "$target" | python3 -c '
+import json,sys
+d=json.load(sys.stdin); f=(d.get("file") or "")
+cfg=sys.argv[1] if len(sys.argv)>1 and sys.argv[1] else None
+testmap=[]
+if cfg:
+    try:
+        c=json.load(open(cfg)); tm=c.get("testMap") or []
+        testmap=[(p[0],p[1]) for p in tm if isinstance(p,list) and len(p)==2]
+    except Exception: testmap=[]
+for pre,cmd in sorted(testmap, key=lambda x:-len(x[0])):
+    if f.startswith(pre): print(cmd); break
+else: print("")  # no repo testMap match → empty → oracle hard-fails (no false-pass)
+' "${cfg:-}"
 }
 
 profile_make_prompt() {

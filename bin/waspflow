@@ -458,14 +458,18 @@ cmd_loop() {
       --intent)   intent="${2:-}"; shift 2 ;;
       --profile)  profile="${2:-}"; shift 2 ;;
       --provider) provider="${2:-}"; shift 2 ;;
-      *) shift ;;
+      "")         shift ;;
+      *) die "loop: unknown option '$1'" ;;   # Codex review-4 non-blocking #1: no silent typo
     esac
   done
   [[ -n "$worktree" ]] || die "loop: --worktree <clean checkout off origin/main> required"
   [[ -n "$profile" ]]  || die "loop: --profile <name> required (e.g. refactor)"
+  worktree="$(cd "$worktree" && pwd)" || die "loop: --worktree does not exist"
   local pf="$WASPFLOW_LIB/../profiles/${profile}.sh"
   [[ -f "$pf" ]] || die "loop: no such profile '$profile' ($pf)"
   source "$WASPFLOW_LIB/loop.sh"
+  # The profile reads repo-specific config from the TARGET worktree (NOT from waspflow).
+  export LOOP_WORKTREE="$worktree"
   source "$pf"
   : "${intent:=the most valuable, hardest, most impactful behavior-preserving work, to our standards}"
   loop_run "$worktree" "$intent" "$provider"
