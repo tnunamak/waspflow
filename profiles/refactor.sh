@@ -67,6 +67,7 @@ if cfg:
         vendor = [g for g in (c.get("vendorGlobs") or []) if isinstance(g, str)]
     except Exception:
         nogo, vendor = [], []
+pin = (c.get("pinTarget") if cfg else None) or None  # Codex dispatcher-verify #2: exact target pin
 def excluded(path):
     return any(fnmatch.fnmatch(path, g) for g in nogo) or any(fnmatch.fnmatch(path, g) for g in vendor)
 elig = [f for f in (findings if isinstance(findings, list) else [])
@@ -74,9 +75,21 @@ elig = [f for f in (findings if isinstance(findings, list) else [])
         and not excluded(f["file"])]
 if not elig:
     print(""); sys.exit(0)
-# highest complexity wins; stable tiebreak by (file, line) for determinism
-elig.sort(key=lambda f: (-int(f["complexity"]), str(f["file"]), int(f["line"])))
-t = elig[0]
+if pin and isinstance(pin, dict):
+    # PINNED: select EXACTLY the ledgered finding by (file, complexity). Line shifts after
+    # mechanical commits so it is a tiebreak, not a key. If no exact match → FAIL CLOSED (empty),
+    # so a packet can NEVER silently refactor a different (easier/shifted) function in the file.
+    pf, pcx, pln = pin.get("file"), pin.get("complexity"), pin.get("line")
+    matches = [f for f in elig if f["file"] == pf and str(f["complexity"]) == str(pcx)]
+    if not matches:
+        print(""); sys.exit(0)
+    if len(matches) > 1 and pln is not None:
+        matches.sort(key=lambda f: abs(int(f["line"]) - int(pln)))
+    t = matches[0]
+else:
+    # UNPINNED: highest complexity wins; stable tiebreak by (file, line).
+    elig.sort(key=lambda f: (-int(f["complexity"]), str(f["file"]), int(f["line"])))
+    t = elig[0]
 print(json.dumps({"file": t["file"], "line": t["line"], "complexity": t["complexity"],
                   "symbol": t.get("symbol", "")}))
 ' "${cfg:-}"

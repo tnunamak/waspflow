@@ -89,6 +89,8 @@ loop_oracle_passed() {
   [ "$(printf '%s' "$f" | _loop_jget testExitCode)" = "0" ] || return 1
   [ "$(printf '%s' "$f" | _loop_jget diffCheckExitCode)" = "0" ] || return 1
   [ "$(printf '%s' "$f" | _loop_jget targetDiagnosticCleared)" = "True" ] || return 1
+  # Codex dispatcher-verify #1: the COUNT must drop — un-foolable by line movement.
+  [ "$(printf '%s' "$f" | _loop_jget complexityCountDropped)" = "True" ] || return 1
   [ "$(printf '%s' "$f" | _loop_jget newDiagnosticsCount)" = "0" ] || return 1
   printf '%s' "$f" | python3 -c 'import json,sys
 try: d=json.load(sys.stdin)

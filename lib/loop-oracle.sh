@@ -158,6 +158,19 @@ oracle_gate() {
       [ -n "$dl" ] && [ "$(( dl>sym_line ? dl-sym_line : sym_line-dl ))" -le 5 ] && target_cleared=false
     done < <(printf '%s' "$post" | grep -oE ":[0-9]+:[0-9]+ lint/complexity/noExcessiveCognitiveComplexity" | grep -oE '^:[0-9]+' | tr -d ':' )
   fi
+  # Codex dispatcher-verify #1: the proximity check can be fooled if the still-complex function
+  # moves >5 lines. The UN-FOOLABLE gate is the COUNT: the file's complexity-diagnostic count
+  # must drop by >=1 vs baseline. (Line movement can't lower the count; only a real fix can.)
+  local base_cx post_cx cx_dropped
+  base_cx="$(python3 -c 'import json,sys,os
+p=sys.argv[1]
+d=json.load(open(p)).get("diagnostics",{}) if os.path.exists(p) else {}
+print(d.get("lint/complexity/noExcessiveCognitiveComplexity",0))' "$baseline_path" 2>/dev/null)"
+  post_cx="$(printf '%s' "$post" | grep -c 'lint/complexity/noExcessiveCognitiveComplexity')"
+  if [ "${post_cx:-0}" -lt "${base_cx:-0}" ]; then cx_dropped=true; else cx_dropped=false; fi
+  # The authoritative target-cleared is BOTH: proximity says the target line is clean AND the
+  # count actually dropped. Either failing → not cleared.
+  [ "$cx_dropped" = true ] || target_cleared=false
   # baseline-relative NEW diagnostics (Codex review-2 #9)
   local new_diags
   new_diags="$(printf '%s' "$post" | grep -oE 'lint/[a-z]+/[A-Za-z]+' | sort | uniq -c | python3 -c '
@@ -168,7 +181,7 @@ for l in sys.stdin:
     p=l.split()
     if len(p)==2: now[p[1]]=int(p[0])
 print(sum(max(0, now.get(k,0)-base.get(k,0)) for k in now))' "$baseline_path" 2>/dev/null )"
-  printf '{"ok":true,"testCommandPresent":true,"commitSha":"%s","branch":%s,"head":"%s","mergeBase":"%s","diffFiles":%s,"testExitCode":%s,"diffCheckExitCode":%s,"lintFileExitCode":%s,"targetLine":%s,"targetDiagnosticCleared":%s,"newDiagnosticsCount":%s}\n' \
+  printf '{"ok":true,"testCommandPresent":true,"commitSha":"%s","branch":%s,"head":"%s","mergeBase":"%s","diffFiles":%s,"testExitCode":%s,"diffCheckExitCode":%s,"lintFileExitCode":%s,"targetLine":%s,"targetDiagnosticCleared":%s,"complexityCountDropped":%s,"baselineComplexityCount":%s,"postComplexityCount":%s,"newDiagnosticsCount":%s}\n' \
     "${head:0:12}" "$(printf '%s' "$branch" | _oracle_json_escape)" "${head:0:12}" "${mergebase:0:12}" \
-    "$diff_files" "$testrc" "$diffcheck" "$postrc" "${sym_line:-null}" "$target_cleared" "${new_diags:-0}"
+    "$diff_files" "$testrc" "$diffcheck" "$postrc" "${sym_line:-null}" "$target_cleared" "${cx_dropped}" "${base_cx:-0}" "${post_cx:-0}" "${new_diags:-0}"
 }
