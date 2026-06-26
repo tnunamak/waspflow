@@ -448,9 +448,33 @@ cmd_doctor() {
 }
 
 # ============================================================================
+# loop — run a gated engineering loop (deterministic oracle + maker/checker gate).
+# The oracle runs IN THIS PROCESS (un-fakeable); agents do only semantic steps.
+cmd_loop() {
+  local worktree="" intent="" profile="" provider="claude"
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --worktree) worktree="${2:-}"; shift 2 ;;
+      --intent)   intent="${2:-}"; shift 2 ;;
+      --profile)  profile="${2:-}"; shift 2 ;;
+      --provider) provider="${2:-}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [[ -n "$worktree" ]] || die "loop: --worktree <clean checkout off origin/main> required"
+  [[ -n "$profile" ]]  || die "loop: --profile <name> required (e.g. refactor)"
+  local pf="$WASPFLOW_LIB/../profiles/${profile}.sh"
+  [[ -f "$pf" ]] || die "loop: no such profile '$profile' ($pf)"
+  source "$WASPFLOW_LIB/loop.sh"
+  source "$pf"
+  : "${intent:=the most valuable, hardest, most impactful behavior-preserving work, to our standards}"
+  loop_run "$worktree" "$intent" "$provider"
+}
+
 main() {
   local verb="${1:-}"; shift || true
   case "$verb" in
+    loop)   cmd_loop "$@" ;;
     spawn)  cmd_spawn "$@" ;;
     init)   cmd_init "$@" ;;
     demo)   cmd_demo "$@" ;;
