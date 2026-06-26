@@ -118,14 +118,16 @@ check "family: opus maker vs gpt checker → DIFFERENT lineage (allowed)" "diffe
 # ── 13. target line must be ORACLE-grounded, not agent-trusted (Codex review-5 #1) ──
 # Exercises the REAL engine fn _loop_ground_target_line (sourced from lib/loop.sh).
 RAW='[{"file":"src/foo.ts","line":62,"complexity":31}]'
-# Honest target (line matches a raw finding) → oracle line returned.
-check "target-ground: correct line (62) → grounded" "62" "$(_loop_ground_target_line "$RAW" '{"file":"src/foo.ts","line":62}')"
+# Honest target (full descriptor matches a raw finding) → oracle line returned.
+check "target-ground: correct (file,line,complexity) → grounded" "62" "$(_loop_ground_target_line "$RAW" '{"file":"src/foo.ts","line":62,"complexity":31}')"
 # Dishonest target (agent set line:1, real diagnostic is at 62) → empty → engine fails closed.
-check "target-ground: WRONG line (1) → empty (engine fails closed)" "" "$(_loop_ground_target_line "$RAW" '{"file":"src/foo.ts","line":1}')"
+check "target-ground: WRONG line (1) → empty (engine fails closed)" "" "$(_loop_ground_target_line "$RAW" '{"file":"src/foo.ts","line":1,"complexity":31}')"
 # Wrong file → empty too.
-check "target-ground: wrong file → empty" "" "$(_loop_ground_target_line "$RAW" '{"file":"src/other.ts","line":62}')"
+check "target-ground: wrong file → empty" "" "$(_loop_ground_target_line "$RAW" '{"file":"src/other.ts","line":62,"complexity":31}')"
 # Right (file,line) but MISLABELED complexity → empty (complexity must match too).
 check "target-ground: right line wrong complexity → empty" "" "$(_loop_ground_target_line "$RAW" '{"file":"src/foo.ts","line":62,"complexity":99}')"
+# Codex review-6: complexity is MANDATORY — a target OMITTING it must NOT downgrade to (file,line).
+check "target-ground: missing complexity → empty (mandatory)" "" "$(_loop_ground_target_line "$RAW" '{"file":"src/foo.ts","line":62}')"
 
 # ── 14. unknown model family (haiku/fable/future) → rank 0 → never a valid checker ──
 check "family: haiku → unknown" "unknown" "$(_loop_family claude haiku medium)"

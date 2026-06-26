@@ -94,9 +94,10 @@ _loop_family()  { _loop_classify_model "$1" "$2" "$3" | awk '{print $1}'; }
 
 # Ground a target's line against the RAW ORACLE FINDINGS (Codex review-5 #1): the
 # agent-carried line is NOT trusted. Echoes the oracle's line iff the target matches a
-# raw finding on (file, line, AND complexity) — complexity is included so the agent
-# can't point at a REAL finding's line while mislabeling its severity. Echoes empty
-# otherwise (→ fail closed). $1 raw-findings-json  $2 target-json
+# raw finding on (file, line, AND complexity) — ALL THREE MANDATORY (Codex review-6:
+# an optional complexity let an agent omit it and silently downgrade the join to
+# (file,line) only, the very false-pass class this closes). A target missing complexity
+# → empty → fail closed. $1 raw-findings-json  $2 target-json
 _loop_ground_target_line() {
   printf '%s\t%s' "$1" "$2" | python3 -c '
 import json,sys
@@ -104,11 +105,13 @@ raw_s, tgt_s = sys.stdin.read().split("\t", 1)
 try: raw=json.loads(raw_s); tgt=json.loads(tgt_s)
 except Exception: print(""); sys.exit(0)
 f, ln, cx = tgt.get("file"), tgt.get("line"), tgt.get("complexity")
+if f is None or ln is None or cx is None:
+    print(""); sys.exit(0)   # incomplete target descriptor → fail closed (complexity mandatory)
 for r in (raw if isinstance(raw,list) else []):
-    if r.get("file")==f and str(r.get("line"))==str(ln) and (cx is None or str(r.get("complexity"))==str(cx)):
+    if r.get("file")==f and str(r.get("line"))==str(ln) and str(r.get("complexity"))==str(cx):
         print(r["line"]); break
 else:
-    print("")  # no oracle finding at this (file,line[,complexity]) → caller fails closed
+    print("")  # no oracle finding at this (file,line,complexity) → caller fails closed
 ' 2>/dev/null
 }
 
