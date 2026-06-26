@@ -29,11 +29,15 @@ oracle_run_dir() {
 oracle_preflight() {
   local wt="${1:?worktree}"
   if [ ! -e "$wt/.git" ]; then echo '{"ok":false,"reason":"worktree-missing"}'; return 0; fi
-  git -C "$wt" fetch origin main -q 2>/dev/null
+  # The base ref the worktree must descend from. Default origin/main; a multi-target sweep sets
+  # LOOP_BASE_REF to the accumulating branch's base commit so per-target worktrees (cut from the
+  # sweep HEAD) are correctly descendants of it, even as live origin/main advances during the run.
+  local base_ref="${LOOP_BASE_REF:-origin/main}"
+  [ "$base_ref" = "origin/main" ] && git -C "$wt" fetch origin main -q 2>/dev/null
   local porcelain head base clean descended
   porcelain="$(git -C "$wt" status --porcelain 2>/dev/null | grep -v 'node_modules' | head -1)"
   head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)"
-  base="$(git -C "$wt" rev-parse origin/main 2>/dev/null)"
+  base="$(git -C "$wt" rev-parse "$base_ref" 2>/dev/null)"
   [ -z "$porcelain" ] && clean=true || clean=false
   if git -C "$wt" merge-base --is-ancestor "$base" "$head" 2>/dev/null; then descended=true; else descended=false; fi
   printf '{"ok":%s,"clean":%s,"descendedFromMain":%s,"head":"%s","originMain":"%s","dirtyExample":%s}\n' \
@@ -111,7 +115,10 @@ oracle_gate() {
   fi
   local testcmd; testcmd="$(cat "$testcmd_file")"
 
-  git -C "$wt" fetch origin main -q 2>/dev/null
+  # Diff base: default origin/main; a sweep sets LOOP_BASE_REF to the accumulating branch's base
+  # so diffFiles is THIS target's change only (not all prior lands). (consistent with preflight.)
+  local base_ref="${LOOP_BASE_REF:-origin/main}"
+  [ "$base_ref" = "origin/main" ] && git -C "$wt" fetch origin main -q 2>/dev/null
   # Codex review-3 #5: checkout failure must HARD FAIL (never measure the wrong branch).
   if ! git -C "$wt" checkout "$branch" -q 2>/dev/null; then
     printf '{"ok":false,"reason":"checkout-failed","branch":%s,"currentBranch":%s}\n' \
@@ -121,10 +128,10 @@ oracle_gate() {
   fi
   local head mergebase diff_files diffcheck testrc
   head="$(git -C "$wt" rev-parse HEAD)"
-  mergebase="$(git -C "$wt" merge-base origin/main HEAD 2>/dev/null)"
-  diff_files="$(git -C "$wt" diff --name-only origin/main...HEAD 2>/dev/null \
+  mergebase="$(git -C "$wt" merge-base "$base_ref" HEAD 2>/dev/null)"
+  diff_files="$(git -C "$wt" diff --name-only "$base_ref"...HEAD 2>/dev/null \
     | python3 -c 'import sys,json;print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')"
-  git -C "$wt" diff --check origin/main...HEAD >/dev/null 2>&1; diffcheck=$?
+  git -C "$wt" diff --check "$base_ref"...HEAD >/dev/null 2>&1; diffcheck=$?
 
   local rundir; rundir="$(dirname "$baseline_path")"
   ( cd "$wt" && eval "$testcmd" ) >"$rundir/test.log" 2>&1; testrc=$?
