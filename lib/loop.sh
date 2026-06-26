@@ -131,6 +131,8 @@ _loop_family()  { _loop_classify_model "$1" "$2" "$3" | awk '{print $1}'; }
 
 # The loop. $1 worktree  $2 intent  $3 provider  (profile already sourced)
 loop_run() {
+  set +e   # the loop orchestrates fallible steps (linters, tests, agent spawns) and gates on
+           # their captured exit codes; a caller's `set -e` (bin/waspflow has it) must not abort us.
   local wt="$1" intent="$2" provider="${3:-claude}"
   local rid; rid="$(date +%s)-$$"
   local rundir; rundir="$(oracle_run_dir "$rid")"

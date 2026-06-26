@@ -44,6 +44,7 @@ oracle_preflight() {
 # ── discover: run a profile-supplied linter command; emit raw findings (FAIL-CLOSED on error) ──
 # $1 worktree   $2 the lint command to eval (must print biome-style output)   $3 run dir
 oracle_discover() {
+  set +e   # linters exit nonzero when they find issues; never let a caller's set -e abort us.
   local wt="${1:?worktree}" lintcmd="${2:?lintcmd}" rundir="${3:-$(oracle_run_dir)}"
   mkdir -p "$rundir"
   local raw="$rundir/discover-raw.txt"
@@ -80,6 +81,8 @@ print(json.dumps({"rawLinterCount":len(out),"findings":out}))
 # Codex review-4 #3: emit lintFileExitCode + ok; FAIL CLOSED if the file-lint command
 # errors AND produced no parseable diagnostics (else a broken cmd → {} → false-pass).
 oracle_baseline() {
+  set +e   # the oracle RUNS commands expected to exit nonzero (linters) and captures their
+           # codes; a caller's `set -e` must never abort us mid-measurement. (bin/waspflow has set -e.)
   local wt="${1:?worktree}" file="${2:?file}" lintfile_cmd="${3:?lintfile_cmd}"
   local out rc diags
   out="$( ( cd "$wt" && eval "$lintfile_cmd" ) 2>&1 )"; rc=$?
@@ -95,6 +98,7 @@ oracle_baseline() {
 # ── gate: the post-change objective receipts (FAIL-CLOSED on checkout/test/cmd problems) ──
 # $1 wt  $2 branch  $3 file  $4 symbol  $5 testcmd_file  $6 baseline_json  $7 lintfile_cmd  $8 target_line
 oracle_gate() {
+  set +e   # runs tests/linters that exit nonzero by design; capture codes, never abort on them.
   local wt="${1:?wt}" branch="${2:?branch}" file="${3:?file}" symbol="${4:?symbol}"
   local testcmd_file="${5:?testcmd-file}" baseline_path="${6:?baseline}" lintfile_cmd="${7:?lintfile_cmd}"
   local target_line="${8:-}"   # original linter line for the target (Codex review-4 #4)
