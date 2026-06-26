@@ -161,6 +161,21 @@ mr=$(_loop_caprank claude sonnet medium); cr=$(_loop_caprank claude haiku high)
 [ "$cr" -lt "$mr" ] && uok=rejected || uok=accepted
 check "family: unknown checker vs sonnet maker → rejected" "rejected" "$uok"
 
+# ── 16. SPAN-grounded target clearing (Codex re-verify #1: count-drop alone is foolable) ──
+# A diagnostic remaining INSIDE the target function's span → cleared=False, even if file count dropped.
+mkdir -p "$TMP/spanrepo"; ( cd "$TMP" && git init -q spanrepo && cd spanrepo && git config user.email t@t && git config user.name t
+  printf 'function targetFn(x) {\n  return x + 1;\n}\n\n\nfunction siblingFn(y) {\n  return y + 2;\n}\n' > src.ts
+  git add src.ts && git commit -q -m init
+  git remote add origin "$TMP/spanrepo" 2>/dev/null; git update-ref refs/remotes/origin/main HEAD; git checkout -q -b work )
+echo 'true' > "$TMP/sptc.sh"; echo '{"diagnostics":{"lint/complexity/noExcessiveCognitiveComplexity":2}}' > "$TMP/spbl.json"
+sp_target() { echo "src.ts:2:1 lint/complexity/noExcessiveCognitiveComplexity"; }; export -f sp_target
+out="$(oracle_gate "$TMP/spanrepo" "work" "src.ts" "targetFn" "$TMP/sptc.sh" "$TMP/spbl.json" "sp_target" "1")"
+check "span: diagnostic INSIDE target span → cleared=False" "False" "$(echo "$out" | jqget targetDiagnosticCleared)"
+sp_sibling() { echo "src.ts:6:1 lint/complexity/noExcessiveCognitiveComplexity"; }; export -f sp_sibling
+out="$(oracle_gate "$TMP/spanrepo" "work" "src.ts" "targetFn" "$TMP/sptc.sh" "$TMP/spbl.json" "sp_sibling" "1")"
+check "span: diagnostic in SIBLING span, target clean → cleared=True" "True" "$(echo "$out" | jqget targetDiagnosticCleared)"
+
+
 echo ""
 echo "loop-oracle smoke: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

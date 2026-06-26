@@ -137,25 +137,58 @@ oracle_gate() {
   fi
   # Locate the target by the ORIGINAL linter line; fall back to a symbol grep.
   # Codex review-4 #4: if we CANNOT locate it, FAIL CLOSED — do NOT default cleared=true.
+  # Codex re-verify #1: prefer SYMBOL resolution (robust to the refactor moving the function)
+  # over the now-stale original line. Symbol-anchored grep finds the declaration of THIS symbol
+  # (function/method/const-arrow/class) — every branch contains the symbol, so it can't match
+  # an unrelated line. Fall back to the original line only if no symbol was given.
   local sym_line=""
-  if [ -n "$target_line" ] && printf '%s' "$target_line" | grep -qE '^[0-9]+$'; then
-    sym_line="$target_line"
-  elif [ -n "$symbol" ]; then
-    # Fallback grep MUST be anchored on the symbol (Codex review-4 #4): a declaration of
-    # THIS symbol as function/method/const-arrow/class. Bare `function`/`const` branches
-    # would match any line → false target-cleared, so every branch contains the symbol.
+  if [ -n "$symbol" ]; then
     local sq; sq="$(printf '%s' "$symbol" | sed 's/[][\.^$*+?(){}|/]/\\&/g')"
     sym_line="$(grep -nE "((async[[:space:]]+)?function[[:space:]]+$sq[[:space:]]*[(<]|(export[[:space:]]+)?(async[[:space:]]+)?function[[:space:]]+$sq\b|\b$sq[[:space:]]*[:=][[:space:]]*(async[[:space:]]*)?\(|\b$sq[[:space:]]*\([^)]*\)[[:space:]]*[:{]|class[[:space:]]+$sq\b)" "$wt/$file" 2>/dev/null | head -1 | cut -d: -f1)"
   fi
+  if [ -z "$sym_line" ] && [ -n "$target_line" ] && printf '%s' "$target_line" | grep -qE '^[0-9]+$'; then
+    sym_line="$target_line"
+  fi
   if [ -z "$sym_line" ]; then
-    printf '{"ok":false,"reason":"target-symbol-unlocatable","symbol":%s,"file":%s,"note":"Cannot locate the target by line or symbol; refusing to default targetDiagnosticCleared=true."}\n' \
+    printf '{"ok":false,"reason":"target-symbol-unlocatable","symbol":%s,"file":%s,"note":"Cannot locate the target by symbol or line; refusing to default targetDiagnosticCleared=true."}\n' \
       "$(printf '%s' "$symbol" | _oracle_json_escape)" "$(printf '%s' "$file" | _oracle_json_escape)"; return 0
   fi
-  # target complexity diagnostic still present near the target line?
+  # Codex re-verify #1: target-clearing must be SYMBOL/SPAN-grounded, not line-proximity.
+  # Resolve the target function's SPAN [sym_line .. end_line] by walking to where indentation
+  # returns to the declaration's level (its closing brace). Then targetDiagnosticCleared = NO
+  # complexity diagnostic falls within that span. This can't be fooled by clearing a SIBLING
+  # finding + moving the real target away (the ±5 proximity hole). file-count-drop stays as an
+  # ADDITIONAL sanity check (cx_dropped above), not the proof.
+  local end_line
+  end_line="$(python3 -c '
+import sys
+path, start = sys.argv[1], int(sys.argv[2])
+lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+if start < 1 or start > len(lines): print(start); sys.exit(0)
+def indent(s):
+    n=0
+    for ch in s:
+        if ch==" ": n+=1
+        elif ch=="\t": n+=8
+        else: break
+    return n
+base = indent(lines[start-1])
+end = len(lines)
+# find the first line AFTER start whose indent <= base and that is non-blank and looks like a
+# block close or a new top-level declaration — that bounds the function body.
+for i in range(start, len(lines)):
+    s = lines[i]
+    if not s.strip(): continue
+    if indent(s) <= base and (s.strip().startswith(("}", ")", "],")) or indent(s) < base or
+       (indent(s)==base and i>start and s.strip() and not s.strip().startswith(("//","*","/*")))):
+        end = i+1  # 1-based inclusive of the closing line
+        break
+print(end)' "$wt/$file" "$sym_line" 2>/dev/null)"
+  [ -z "$end_line" ] && end_line="$sym_line"
   local target_cleared=true
   if printf '%s' "$post" | grep -q 'noExcessiveCognitiveComplexity'; then
     while read -r dl; do
-      [ -n "$dl" ] && [ "$(( dl>sym_line ? dl-sym_line : sym_line-dl ))" -le 5 ] && target_cleared=false
+      [ -n "$dl" ] && [ "$dl" -ge "$sym_line" ] && [ "$dl" -le "$end_line" ] && target_cleared=false
     done < <(printf '%s' "$post" | grep -oE ":[0-9]+:[0-9]+ lint/complexity/noExcessiveCognitiveComplexity" | grep -oE '^:[0-9]+' | tr -d ':' )
   fi
   # Codex dispatcher-verify #1: the proximity check can be fooled if the still-complex function
