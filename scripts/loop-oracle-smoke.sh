@@ -176,6 +176,21 @@ out="$(oracle_gate "$TMP/spanrepo" "work" "src.ts" "targetFn" "$TMP/sptc.sh" "$T
 check "span: diagnostic in SIBLING span, target clean → cleared=True" "True" "$(echo "$out" | jqget targetDiagnosticCleared)"
 
 
+# ── 17. RE-GATE of a CLEAN target passes (Codex re-verify-3 #1: count-drop folded in false-rejected) ──
+# A target with NO complexity diagnostic in its span, tests pass, real diff → targetDiagnosticCleared=True
+# even though the file complexity count is 0→0 (no drop). count-drop is a SEPARATE fact, not folded in.
+mkdir -p "$TMP/cleanrepo"; ( cd "$TMP" && git init -q cleanrepo && cd cleanrepo && git config user.email t@t && git config user.name t
+  printf 'export function widget(x) {\n  return x + 1;\n}\n' > src.ts
+  git add src.ts && git commit -q -m init
+  git remote add origin "$TMP/cleanrepo" 2>/dev/null; git update-ref refs/remotes/origin/main HEAD; git checkout -q -b work
+  printf 'export function widget(x) {\n  const r = x + 1;\n  return r;\n}\n' > src.ts; git add src.ts && git commit -q -m change )
+echo 'true' > "$TMP/cltc.sh"; echo '{"diagnostics":{}}' > "$TMP/clbl.json"
+clean_post() { echo "Checked 1 file. No fixes applied."; }; export -f clean_post
+out="$(oracle_gate "$TMP/cleanrepo" "work" "src.ts" "widget" "$TMP/cltc.sh" "$TMP/clbl.json" "clean_post" "1")"
+check "re-gate: clean target span + tests pass → targetDiagnosticCleared=True" "True" "$(echo "$out" | jqget targetDiagnosticCleared)"
+check "re-gate: count NOT dropped (0->0) is a separate fact, doesn't block clearing" "False" "$(echo "$out" | jqget complexityCountDropped)"
+
+
 echo ""
 echo "loop-oracle smoke: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

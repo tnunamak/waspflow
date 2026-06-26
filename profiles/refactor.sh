@@ -85,9 +85,14 @@ if pin and isinstance(pin, dict):
     pf, pcx, pln, psym = pin.get("file"), pin.get("complexity"), pin.get("line"), pin.get("symbol","")
     matches = [f for f in elig if f["file"] == pf and str(f["complexity"]) == str(pcx)]
     if pln is not None:
+        # Codex re-verify-3 #2: when a line is pinned, REQUIRE a match within the tight window.
+        # If none → FAIL CLOSED (do NOT fall back to any same-complexity finding — that would let
+        # a stale pin silently select the wrong same-(file,complexity) function).
         near = [f for f in matches if abs(int(f["line"]) - int(pln)) <= 30]
-        matches = near or matches
-        matches.sort(key=lambda f: abs(int(f["line"]) - int(pln)))
+        if not near:
+            print(""); sys.exit(0)
+        near.sort(key=lambda f: abs(int(f["line"]) - int(pln)))
+        matches = near
     if not matches:
         print(""); sys.exit(0)
     t = matches[0]

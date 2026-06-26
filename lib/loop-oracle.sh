@@ -185,6 +185,11 @@ for i in range(start, len(lines)):
         break
 print(end)' "$wt/$file" "$sym_line" 2>/dev/null)"
   [ -z "$end_line" ] && end_line="$sym_line"
+  # targetDiagnosticCleared is now PURELY span-based: no complexity diagnostic within the target's
+  # span. It does NOT fold in count-drop (Codex re-verify-3 #1: count-drop is wrong for a RE-GATE of
+  # an already-clean target — count is 0→0). The initial gate still requires the drop SEPARATELY via
+  # loop_oracle_passed (which checks BOTH targetDiagnosticCleared AND complexityCountDropped); the
+  # re-gate checks only span-cleared + tests. Decoupling fixes the false-reject of good integrations.
   local target_cleared=true
   if printf '%s' "$post" | grep -q 'noExcessiveCognitiveComplexity'; then
     while read -r dl; do
@@ -201,9 +206,9 @@ d=json.load(open(p)).get("diagnostics",{}) if os.path.exists(p) else {}
 print(d.get("lint/complexity/noExcessiveCognitiveComplexity",0))' "$baseline_path" 2>/dev/null)"
   post_cx="$(printf '%s' "$post" | grep -c 'lint/complexity/noExcessiveCognitiveComplexity')"
   if [ "${post_cx:-0}" -lt "${base_cx:-0}" ]; then cx_dropped=true; else cx_dropped=false; fi
-  # The authoritative target-cleared is BOTH: proximity says the target line is clean AND the
-  # count actually dropped. Either failing → not cleared.
-  [ "$cx_dropped" = true ] || target_cleared=false
+  # NOTE: cx_dropped is emitted as a SEPARATE fact (complexityCountDropped). It is NOT folded into
+  # target_cleared — the INITIAL gate requires both (via loop_oracle_passed); a RE-GATE of an
+  # already-clean target requires only span-cleared (count is 0→0 there). (Codex re-verify-3 #1.)
   # baseline-relative NEW diagnostics (Codex review-2 #9)
   local new_diags
   new_diags="$(printf '%s' "$post" | grep -oE 'lint/[a-z]+/[A-Za-z]+' | sort | uniq -c | python3 -c '
