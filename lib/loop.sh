@@ -4,19 +4,24 @@
 # THE STRUCTURAL ENFORCEMENT: this engine runs in ITS OWN process. The objective
 # oracle (lib/loop-oracle.sh) runs here, in bash — no agent in the command path,
 # so the facts are un-fakeable. Agents (driven via waspflow spawn/wait/reap) do
-# ONLY the irreducibly-semantic steps: classify, make, judge-the-diff, judge-ambition.
-# The loop GATES on the oracle's facts, never on an agent's claim.
+# ONLY the irreducibly-semantic steps: make-the-change, judge-the-diff, judge-ambition.
+# The loop GATES on the oracle's facts; an agent's contribution is ONE fail-closed sentinel
+# token (ABANDON / VERDICT: LAND|REVISE / DONE|CONTINUE|ESCALATE) + prose — never telemetry.
+#
+# DECOMPLECTED (Claude+Codex SLVP-ideal): there is NO classify agent. Target selection is
+# DETERMINISTIC in the engine over the oracle's raw findings (highest complexity not in a
+# no-go path-glob). Strict schemas live ONLY at deterministic boundaries (oracle output,
+# repo config), never between a model and a parser.
 #
 # A PROFILE (a sourced .sh, e.g. profiles/refactor.sh) fills the task slots:
 #   profile_lint_cmd            → repo-wide linter command (prints biome output)
 #   profile_lint_file_cmd FILE  → linter for one file
-#   profile_classify_prompt RAWJSON INTENT   → the classify-and-rank agent prompt
-#   profile_make_prompt TARGETJSON REPORT    → the maker agent prompt (writes REPORT)
-#   profile_revise_prompt TARGETJSON FACTS SEM REPORT
-#   profile_check_prompt TARGETJSON BRANCH FACTS REPORT
-#   profile_done_prompt TARGETJSON FACTS HARDLIST INTENT REPORT
-#   profile_select_target CLASSIFY_JSON      → echoes the chosen target JSON (highest value, safe)
-#   profile_test_cmd TARGETJSON              → the shell test command for the touched file
+#   profile_select_target       → reads ORACLE findings JSON on stdin, echoes ONE target JSON
+#   profile_test_cmd TARGETJSON → the deterministic test command for the touched file
+#   profile_make_prompt TARGETJSON REPORT          → maker prompt (writes a branch diff or ABANDON:)
+#   profile_revise_prompt TARGETJSON FACTS VERDICT REPORT
+#   profile_check_prompt TARGETJSON BRANCH FACTS REPORT   → checker prompt (ends VERDICT: LAND|REVISE)
+#   profile_done_prompt TARGETJSON FACTS REMAINING INTENT REPORT  → ends DONE|CONTINUE|ESCALATE
 # The engine owns control flow, gating, fail-closed, and the run report.
 
 set -uo pipefail
@@ -27,13 +32,25 @@ source "$_LOOP_DIR/loop-oracle.sh"
 _loop_jget() { python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get(sys.argv[1],"") if isinstance(d,dict) else "")' "$1" 2>/dev/null; }
 _loop_jbool() { [ "$(_loop_jget "$1")" = "True" ]; }
 
+# Universal NON-INTERACTIVE WORKER preamble prepended to EVERY loop agent prompt.
+# Dogfood finding: a capable model dropped into a rich repo, given a task but no
+# worker framing, will INTERVIEW the "user" (build a menu, ask "what do you want?")
+# instead of executing. The loop has no human in the lane — asking = a dead lane.
+# This is a loop invariant, so it lives at the engine layer (one source of truth),
+# not duplicated per profile prompt.
+_LOOP_WORKER_PREAMBLE='You are a NON-INTERACTIVE WORKER in an automated loop. There is NO human in this session to answer questions. Do the task in this message NOW, autonomously, using the repo you are in. Do NOT ask for confirmation, do NOT present options or a menu, do NOT wait for input — if something is ambiguous, make the most reasonable assumption and proceed. Your ONLY deliverable is to write the requested file; when it is written, stop. Ignore the branch name, commit history, and any dogfooding/feedback notes — they are not your task. THE TASK:
+
+'
+
 # Drive ONE semantic agent IN THE TARGET WORKTREE. spawn --cwd $wt --report, wait,
 # read report, reap. Echoes report content. The --cwd is the Codex review-4 #1 fix:
 # without it the maker/checker could edit/read a DIFFERENT checkout than the oracle
 # measures. Model/effort forwarded so checker strength is ENFORCED, not just prompted.
+# Every prompt is prefixed with the non-interactive worker preamble.
 # $1 wt  $2 lane  $3 provider  $4 report-path  $5 prompt  [$6 model]  [$7 effort]
 loop_run_agent() {
   local wt="$1" lane="$2" provider="$3" report="$4" prompt="$5" model="${6:-}" effort="${7:-}"
+  prompt="${_LOOP_WORKER_PREAMBLE}${prompt}"
   local -a spawn_args=(spawn --provider "$provider" --lane "$lane" --cwd "$wt" --report "$report")
   [ -n "$model" ] && spawn_args+=(--model "$model")
   [ -n "$effort" ] && spawn_args+=(--effort "$effort")
@@ -45,20 +62,35 @@ loop_run_agent() {
   printf '%s' "$out"
 }
 
-# The structural gate: PASS iff the ORACLE facts AND the semantic verdict are all good.
-# $1 facts-json  $2 sem-json
-loop_gate_passed() {
-  local f="$1" s="$2"
+# Extract a fail-closed SENTINEL token from an agent's prose report. Matches a line of
+# the form "<KEY>: <TOKEN>" (e.g. "VERDICT: LAND", "DONE") where TOKEN ∈ the allowed set.
+# Decomplected design: the engine parses ONLY this one token, never agent telemetry. A
+# missing/ambiguous token returns empty → caller fails closed.
+# $1 prose  $2 key (e.g. VERDICT, or "" for a bare token)  $3.. allowed tokens
+_loop_sentinel() {
+  local prose="$1" key="$2"; shift 2
+  local allowed=" $* "
+  # Prefer "KEY: TOKEN"; for bare tokens (key empty) match a standalone allowed word.
+  local tok
+  if [ -n "$key" ]; then
+    tok="$(printf '%s' "$prose" | grep -oiE "${key}:[[:space:]]*[A-Za-z_]+" | tail -1 | sed -E "s/.*:[[:space:]]*//" | tr '[:lower:]' '[:upper:]')"
+  else
+    tok="$(printf '%s' "$prose" | grep -owiE "$(printf '%s' "$*" | tr ' ' '|')" | tail -1 | tr '[:lower:]' '[:upper:]')"
+  fi
+  case "$allowed" in *" $tok "*) printf '%s' "$tok" ;; *) printf '' ;; esac
+}
+
+# The OBJECTIVE half of the gate: the oracle facts alone. The checker LAND verdict is a
+# SEPARATE, ADDITIONAL requirement (Codex: "VERDICT: LAND alone never lands; oracle pass
+# remains mandatory"). $1 facts-json
+loop_oracle_passed() {
+  local f="$1"
+  [ "$(printf '%s' "$f" | _loop_jget ok)" = "True" ] || return 1
   [ "$(printf '%s' "$f" | _loop_jget testExitCode)" = "0" ] || return 1
   [ "$(printf '%s' "$f" | _loop_jget diffCheckExitCode)" = "0" ] || return 1
   [ "$(printf '%s' "$f" | _loop_jget targetDiagnosticCleared)" = "True" ] || return 1
   [ "$(printf '%s' "$f" | _loop_jget newDiagnosticsCount)" = "0" ] || return 1
   printf '%s' "$f" | python3 -c 'import json,sys;d=json.load(sys.stdin);sys.exit(0 if isinstance(d.get("diffFiles"),list) and len(d["diffFiles"])>0 else 1)' || return 1
-  [ "$(printf '%s' "$s" | _loop_jget behaviorPreserving)" = "True" ] || return 1
-  [ "$(printf '%s' "$s" | _loop_jget methodologyAligned)" = "True" ] || return 1
-  [ "$(printf '%s' "$s" | _loop_jget callerCountsVerified)" = "True" ] || return 1
-  [ "$(printf '%s' "$s" | _loop_jget surfaceUnchanged)" = "True" ] || return 1
-  local ev; ev="$(printf '%s' "$s" | _loop_jget evidence)"; [ "${#ev}" -gt 80 ] || return 1
   return 0
 }
 
@@ -92,28 +124,10 @@ print(fam, rank)' "$1" "$2" "$3"
 _loop_caprank() { _loop_classify_model "$1" "$2" "$3" | awk '{print $2}'; }
 _loop_family()  { _loop_classify_model "$1" "$2" "$3" | awk '{print $1}'; }
 
-# Ground a target's line against the RAW ORACLE FINDINGS (Codex review-5 #1): the
-# agent-carried line is NOT trusted. Echoes the oracle's line iff the target matches a
-# raw finding on (file, line, AND complexity) — ALL THREE MANDATORY (Codex review-6:
-# an optional complexity let an agent omit it and silently downgrade the join to
-# (file,line) only, the very false-pass class this closes). A target missing complexity
-# → empty → fail closed. $1 raw-findings-json  $2 target-json
-_loop_ground_target_line() {
-  printf '%s\t%s' "$1" "$2" | python3 -c '
-import json,sys
-raw_s, tgt_s = sys.stdin.read().split("\t", 1)
-try: raw=json.loads(raw_s); tgt=json.loads(tgt_s)
-except Exception: print(""); sys.exit(0)
-f, ln, cx = tgt.get("file"), tgt.get("line"), tgt.get("complexity")
-if f is None or ln is None or cx is None:
-    print(""); sys.exit(0)   # incomplete target descriptor → fail closed (complexity mandatory)
-for r in (raw if isinstance(raw,list) else []):
-    if r.get("file")==f and str(r.get("line"))==str(ln) and str(r.get("complexity"))==str(cx):
-        print(r["line"]); break
-else:
-    print("")  # no oracle finding at this (file,line,complexity) → caller fails closed
-' 2>/dev/null
-}
+# NOTE: target selection is now DETERMINISTIC in the engine (profile_select_target over
+# the oracle's raw findings), so the target line is oracle-sourced by construction — there
+# is no agent-carried line to ground. The old _loop_ground_target_line is deleted with the
+# classify agent (decomplected design).
 
 # The loop. $1 worktree  $2 intent  $3 provider  (profile already sourced)
 loop_run() {
@@ -152,82 +166,75 @@ loop_run() {
   if [ "${rawcount:-0}" -eq 0 ]; then _loop_fail "no-complexity-findings" "Linter ran cleanly and found 0 over-complex functions."; return 0; fi
   log "loop: discover — $rawcount over-complex functions (oracle-sourced)"
 
-  # S2 CLASSIFY+RANK (agent classifies the ORACLE'S findings; fail-closed if under-covered)
-  local clsrep="$rundir/classify.json"
-  local cls; cls="$(loop_run_agent "$wt" "loop-classify-$rid" "$provider" "$clsrep" "$(profile_classify_prompt "$raw" "$intent")" "$LOOP_MAKER_MODEL" "$LOOP_MAKER_EFFORT")"
-  # The agent writes JSON to the report; parse it.
-  local covered hard
-  covered="$(printf '%s' "$cls" | python3 -c 'import json,sys
-try: d=json.loads(sys.stdin.read()); print(len(d.get("classified",[])))
-except: print(0)')"
-  hard="$(printf '%s' "$cls" | python3 -c 'import json,sys
-try: d=json.loads(sys.stdin.read()); print(len(d.get("hardAreasInspected",[])))
-except: print(0)')"
-  if [ "${covered:-0}" -lt "$(( rawcount * 8 / 10 ))" ] || [ "${hard:-0}" -lt 3 ]; then
-    _loop_fail "classification-fail-closed" "Classify covered $covered/$rawcount findings, $hard hard areas — under-reach guard tripped."; return 0
-  fi
-  # Select the highest-value SAFE target (profile decides ranking).
-  local target; target="$(printf '%s' "$cls" | profile_select_target)"
-  if [ -z "$target" ] || [ "$target" = "null" ]; then
-    _loop_fail "non-finding" "No safe-incidental target cleared the bar. Full classified map in $clsrep. (Honest non-finding — the gate working.)"; return 0
+  # S2 SELECT TARGET — DETERMINISTIC, engine-side, over the oracle's raw findings.
+  # NO classify agent: pre-implementation "is this safe?" is a guess; the behavior-preserving
+  # oracle gate + checker on the REAL diff are strictly stronger. no-go is path-globs (repo
+  # config). The chosen line is oracle-sourced by construction.
+  local target; target="$(printf '%s' "$raw" | profile_select_target)"
+  if [ -z "$target" ]; then
+    _loop_fail "no-eligible-target" "All $rawcount over-complex findings were excluded by no-go/vendor globs or ungroundable. Honest non-finding (the gate working)."; return 0
   fi
   local tfile tsym tline
   tfile="$(printf '%s' "$target" | _loop_jget file)"; tsym="$(printf '%s' "$target" | _loop_jget symbol)"
-  # Codex review-5 #1: the agent-carried line is NOT trusted. Ground it against the RAW
-  # ORACLE FINDINGS; if no raw finding matches (file,line), the agent invented/mis-copied
-  # it → FAIL CLOSED. (Same fn the smoke suite exercises — one source of truth.)
-  tline="$(_loop_ground_target_line "$raw" "$target")"
-  if [ -z "$tline" ]; then
-    _loop_fail "target-not-oracle-grounded" "Selected target $tfile::$tsym claims line '$(printf '%s' "$target" | _loop_jget line)' but NO raw oracle finding matches (file,line). The agent invented or mis-copied the line; refusing to measure an unverified location."; return 0
-  fi
-  log "loop: target = $tfile::$tsym @ oracle-line $tline (highest-value safe, oracle-grounded)"
+  tline="$(printf '%s' "$target" | _loop_jget line)"
+  log "loop: target = $tfile @ line $tline (highest-complexity eligible, engine-selected)"
+
+  # remaining eligible findings (for the ambition check + under-reach visibility).
+  # NB: no f-string with escaped quotes inside python3 -c '...' (breaks the single-quote block).
+  local remaining; remaining="$(printf '%s' "$raw" | python3 -c '
+import json, sys
+fs = json.load(sys.stdin)
+parts = ["{}:{}(c{})".format(f.get("file"), f.get("line"), f.get("complexity")) for f in fs[:12]]
+print(", ".join(parts))' 2>/dev/null)"
+  [ -z "$remaining" ] && remaining="(none listed)"
 
   # baseline (oracle) + write the test command to a file (engine-owned, not agent)
   local baseline="$rundir/baseline.json" testcmd_file="$rundir/testcmd.sh"
   oracle_baseline "$wt" "$tfile" "$(profile_lint_file_cmd "$tfile")" > "$baseline"
   profile_test_cmd "$target" > "$testcmd_file"
 
-  # S3..S6 MAKE → ORACLE → SEMANTIC CHECK → bounded REVISE
-  local facts="" sem="" makerep branch attempt
+  # S3..S6 MAKE → ORACLE → CHECK(sentinel) → bounded REVISE.
+  # A change LANDS iff: oracle passes AND checker says VERDICT: LAND. Either missing → no land.
+  local facts="" checkprose="" verdict="" makeprose branch attempt landed=0
   for attempt in 1 2 3; do
     makerep="$rundir/make-$attempt.md"
     local mprompt
     if [ "$attempt" -eq 1 ]; then mprompt="$(profile_make_prompt "$target" "$makerep")"
-    else mprompt="$(profile_revise_prompt "$target" "$facts" "$sem" "$makerep")"; fi
-    local mout; mout="$(loop_run_agent "$wt" "loop-make-$rid-$attempt" "$provider" "$makerep" "$mprompt" "$LOOP_MAKER_MODEL" "$LOOP_MAKER_EFFORT")"
-    branch="$(printf '%s' "$mout" | grep -oE 'refactor/[a-z0-9._-]+' | head -1)"
+    else mprompt="$(profile_revise_prompt "$target" "$facts" "$checkprose" "$makerep")"; fi
+    makeprose="$(loop_run_agent "$wt" "loop-make-$rid-$attempt" "$provider" "$makerep" "$mprompt" "$LOOP_MAKER_MODEL" "$LOOP_MAKER_EFFORT")"
+
+    # Maker abandon sentinel → stop this target.
+    if printf '%s' "$makeprose" | grep -qiE '^[[:space:]]*ABANDON:'; then
+      _loop_fail "maker-abandoned" "Maker abandoned $tfile:$tline after attempt $attempt: $(printf '%s' "$makeprose" | grep -iE 'ABANDON:' | head -1). Next: engine would select the next deterministic target (or ESCALATE after repeated abandons)."; return 0
+    fi
+    branch="$(printf '%s' "$makeprose" | grep -oE 'refactor/[a-z0-9._-]+' | head -1)"
     [ -z "$branch" ] && branch="waspflow/loop-make-$rid-$attempt"  # waspflow's own lane branch as fallback
 
-    # ORACLE gate (engine process — un-fakeable)
+    # ORACLE gate (engine process — un-fakeable). MANDATORY: VERDICT: LAND alone never lands.
     facts="$(oracle_gate "$wt" "$branch" "$tfile" "$tsym" "$testcmd_file" "$baseline" "$(profile_lint_file_cmd "$tfile")" "$tline")"
+    if ! loop_oracle_passed "$facts"; then
+      # oracle failed — only revise if there's actually a diff to fix; else stop.
+      printf '%s' "$facts" | python3 -c 'import json,sys;d=json.load(sys.stdin);sys.exit(0 if isinstance(d.get("diffFiles"),list) and d["diffFiles"] else 1)' || break
+      verdict=""; continue
+    fi
 
-    # SEMANTIC check (stronger model judges the diff; objective facts handed in, not asked for)
-    local semrep="$rundir/check-$attempt.json"
-    sem="$(loop_run_agent "$wt" "loop-check-$rid-$attempt" "$LOOP_CHECKER_PROVIDER" "$semrep" "$(profile_check_prompt "$target" "$branch" "$facts" "$semrep")" "$LOOP_CHECKER_MODEL" "$LOOP_CHECKER_EFFORT")"
-
-    if loop_gate_passed "$facts" "$sem"; then break; fi
-    printf '%s' "$mout" | grep -qiE '\babandon\b' && break
-    printf '%s' "$facts" | python3 -c 'import json,sys;d=json.load(sys.stdin);sys.exit(0 if isinstance(d.get("diffFiles"),list) and d["diffFiles"] else 1)' || break
+    # CHECK (stronger/different model) reads the REAL diff; emits VERDICT: LAND|REVISE.
+    checkprose="$(loop_run_agent "$wt" "loop-check-$rid-$attempt" "$LOOP_CHECKER_PROVIDER" "$rundir/check-$attempt.md" "$(profile_check_prompt "$target" "$branch" "$facts" "$rundir/check-$attempt.md")" "$LOOP_CHECKER_MODEL" "$LOOP_CHECKER_EFFORT")"
+    verdict="$(_loop_sentinel "$checkprose" VERDICT LAND REVISE)"
+    if [ "$verdict" = "LAND" ]; then landed=1; break; fi
+    # REVISE or missing/ambiguous (fail-closed) → loop to revise.
   done
 
-  # S7 DONE/AMBITION gate + report
-  if loop_gate_passed "$facts" "$sem"; then
-    local hardlist donerep done
-    hardlist="$(printf '%s' "$cls" | python3 -c 'import json,sys
-try: d=json.loads(sys.stdin.read()); print(", ".join(f["symbol"] for f in d.get("classified",[]) if f.get("classification")!="safe-incidental")[:200])
-except: print("")')"
-    donerep="$rundir/done.json"
-    done="$(loop_run_agent "$wt" "loop-done-$rid" "$LOOP_CHECKER_PROVIDER" "$donerep" "$(profile_done_prompt "$target" "$facts" "$hardlist" "$intent" "$donerep")" "$LOOP_CHECKER_MODEL" "$LOOP_CHECKER_EFFORT")"
-    local dv; dv="$(printf '%s' "$done" | _loop_jget verdict)"
-    if [ "$dv" = "complete-and-commensurate" ]; then
-      printf '{"outcome":"change-passed-gate","target":"%s","facts":%s,"reportDir":"%s","note":"Passed deterministic oracle + stronger-model semantic check + done/ambition gate. Open a tight PR; owner reviews; no merge/deploy."}\n' \
-        "$tfile::$tsym" "$facts" "$rundir"
-    else
-      printf '{"outcome":"complete-but-under-ambitious","target":"%s","done":%s,"reportDir":"%s","note":"A safe change passed BUT under-ambitious vs the ask. Surface to owner; do not present as satisfying the big ask."}\n' \
-        "$tfile::$tsym" "$done" "$rundir"
-    fi
-  else
-    printf '{"outcome":"rejected-or-stopped","target":"%s","facts":%s,"sem":%s,"reportDir":"%s","note":"Target did not pass the gate. Honest result (gate working)."}\n' \
-      "$tfile::$tsym" "$facts" "$sem" "$rundir"
+  # S7 — outcome. Land requires BOTH oracle pass AND checker LAND.
+  if [ "$landed" -ne 1 ]; then
+    _loop_fail "rejected-or-stopped" "Target $tfile:$tline did not land. Oracle facts: $facts. Checker verdict: ${verdict:-<none/ambiguous → fail-closed>}. Honest result (the gate working). reportDir: $rundir"; return 0
   fi
+
+  # DONE/AMBITION — loop control ONLY (cannot rescue a failed gate; the gate already passed).
+  local doneprose decision
+  doneprose="$(loop_run_agent "$wt" "loop-done-$rid" "$LOOP_CHECKER_PROVIDER" "$rundir/done.md" "$(profile_done_prompt "$target" "$facts" "$remaining" "$intent" "$rundir/done.md")" "$LOOP_CHECKER_MODEL" "$LOOP_CHECKER_EFFORT")"
+  decision="$(_loop_sentinel "$doneprose" "" DONE CONTINUE ESCALATE)"
+  [ -z "$decision" ] && decision="DONE"   # missing ambition token does NOT unland a passed change; default DONE
+  printf '{"outcome":"change-landed","target":"%s","branch":"%s","ambition":"%s","facts":%s,"reportDir":"%s","note":"Passed deterministic oracle AND stronger-model checker LAND. Ambition: %s. Open a tight PR; owner reviews; no merge/deploy."}\n' \
+    "$tfile:$tline" "$branch" "$decision" "$facts" "$rundir" "$decision"
 }

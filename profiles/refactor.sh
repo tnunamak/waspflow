@@ -1,24 +1,35 @@
 #!/usr/bin/env bash
 # profiles/refactor.sh — the GENERIC behavior-preserving refactoring profile for the
-# waspflow gated loop. This file ships in waspflow and contains NO repo-specific
-# knowledge. ALL repo specifics (lint dirs, no-go zones, package→test map) come from
-# a config file IN THE TARGET REPO, discovered via $LOOP_REFACTOR_CONFIG or
-# <worktree>/.waspflow/refactor.json. The engine sets $LOOP_WORKTREE before sourcing.
+# waspflow gated loop. Ships in waspflow; NO repo-specific knowledge. All repo specifics
+# (lint dirs/cmd, no-go globs, file→test map) come from a config file IN THE TARGET REPO,
+# discovered via $LOOP_REFACTOR_CONFIG or <worktree>/.waspflow/refactor.json.
 #
-# Config schema (.waspflow/refactor.json), all optional with safe generic fallbacks:
-#   { "lintDirs": "src",                          # dirs the repo-wide linter scans
-#     "lintCmd":  "npx --yes @biomejs/biome lint", # the linter invocation (must print biome-style output)
-#     "noGo":     "auth, payments, ...",           # human-readable no-touch zones for the classifier
-#     "testMap":  [["src/", "pnpm -s test"], ...] } # file-PREFIX → deterministic test command (longest prefix wins)
+# DECOMPLECTED DESIGN (Claude+Codex, SLVP-ideal). Strict schemas live ONLY at deterministic
+# boundaries (oracle output, repo config). NO agent hands structured telemetry to the engine:
+#   - target selection is DETERMINISTIC in the engine over the ORACLE's raw findings — there
+#     is NO classify agent (it would only guess "safe?" before a diff exists; the oracle gate
+#     + checker on the real diff are strictly stronger). no-go is a path-glob list.
+#   - the MAKER writes a real branch diff, or one `ABANDON: <reason>` line. The engine reads
+#     git, not a maker report.
+#   - the CHECKER reads the real diff and emits one token: `VERDICT: LAND` | `VERDICT: REVISE`.
+#   - the DONE agent emits one token: `DONE` | `CONTINUE` | `ESCALATE`.
+# Facts the engine can measure, the engine measures. Judgment stays prose. A missing/ambiguous
+# token FAILS CLOSED.
 #
-# If no config is found, defaults are conservative and NOT tied to any project.
+# Config schema (.waspflow/refactor.json), all optional with conservative generic fallbacks:
+#   { "lintCmd":  "npx --yes @biomejs/biome lint",
+#     "lintDirs": "src",
+#     "noGoGlobs":["**/auth/**","**/*credential*"],   # PATH globs excluded from selection (machine-checkable)
+#     "noGo":     "auth, payments, ...",               # human-readable no-go note for the maker (prose only)
+#     "vendorGlobs":["**/node_modules/**","**/*.gen.ts"],
+#     "testMap":  [["src/","pnpm -s test"], ...] }     # file-PREFIX → test cmd (longest prefix wins)
 
 _refactor_config() {
   local cfg="${LOOP_REFACTOR_CONFIG:-}"
   [ -z "$cfg" ] && [ -n "${LOOP_WORKTREE:-}" ] && cfg="$LOOP_WORKTREE/.waspflow/refactor.json"
   [ -n "$cfg" ] && [ -f "$cfg" ] && printf '%s' "$cfg"
 }
-# Read one config key with a fallback. $1 jq-path  $2 fallback
+# Read one STRING config key with a fallback. $1 (ignored, kept for call-site clarity) $2 key $3 fallback
 _refactor_cfg_get() {
   local cfg; cfg="$(_refactor_config)"
   if [ -n "$cfg" ]; then
@@ -34,55 +45,45 @@ LOOP_LINT_DIRS="${LOOP_LINT_DIRS:-$(_refactor_cfg_get x lintDirs "src")}"
 LOOP_LINT_CMD="${LOOP_LINT_CMD:-$(_refactor_cfg_get x lintCmd "npx --yes @biomejs/biome lint")}"
 LOOP_NOGO="${LOOP_NOGO:-$(_refactor_cfg_get x noGo "auth/credentials/secrets, persistence/migrations, public API surface, anything security- or money-sensitive")}"
 
-profile_lint_cmd() {
-  printf '%s %s' "$LOOP_LINT_CMD" "$LOOP_LINT_DIRS"
-}
-profile_lint_file_cmd() {
-  printf '%s %s' "$LOOP_LINT_CMD" "$1"
-}
+profile_lint_cmd()      { printf '%s %s' "$LOOP_LINT_CMD" "$LOOP_LINT_DIRS"; }
+profile_lint_file_cmd() { printf '%s %s' "$LOOP_LINT_CMD" "$1"; }
 
-# The agent classifies the ORACLE's raw findings and ranks safe targets. It does
-# NOT source the linter count. Writes JSON {classified,hardAreasInspected,safeTargets,recommendation}.
-profile_classify_prompt() {
-  local rawjson="$1" intent="$2"
-  cat <<PROMPT
-You are CLASSIFY+RANK in a behavior-preserving refactoring loop. Intent: "$intent".
-The DETERMINISTIC linter already ran (do NOT re-run it or change the count). GROUND-TRUTH over-complex functions (file:line:complexity): $rawjson
-For EACH finding, read the code at file:line, name the function symbol, and classify: safe-incidental | essential-complexity | protocol-sensitive | high-value-owner-gated, each with whyNotSafe (""=safe). You MUST inspect the no-go-prone areas and list which in hardAreasInspected: $LOOP_NOGO. Do NOT exclude-then-conclude "nothing exists" (the under-reach failure).
-For each SAFE-INCIDENTAL finding add a safeTargets entry: a behavior-preserving move (decomplect/name/early-return/delete-dead/extract-only-deep — NOT inline-a-named-wrapper), value (integer, scales with how often the code is read/changed), and the package dir. ALSO carry the EXACT linter "line" AND "complexity" for that finding into the entry (the oracle joins on file+line+complexity — do NOT omit, rename, or alter them). Do NOT propose a test command; the engine derives the required test deterministically from the package.
-
-OUTPUT CONTRACT — this is parsed by a STRICT machine, not a human. Write ONLY this JSON object to your report file (no prose, no markdown fences, no extra keys at the top level). You MUST use these EXACT top-level key names — "classified", "hardAreasInspected", "safeTargets", "recommendation", "note". Any other names (e.g. "findings", "safe_targets", "no_go_count", snake_case variants) will be REJECTED and the run fails closed. "recommendation" MUST be exactly one of: go-loop | one-pr-no-loop | non-finding | needs-owner. Every one of the $(printf '%s' "$rawjson" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))' 2>/dev/null) findings MUST appear in "classified".
-
-Copy this skeleton exactly and fill it:
-{
-  "classified": [
-    {"file":"path/x.ts","symbol":"fnName","line":123,"complexity":31,"classification":"safe-incidental","whyNotSafe":""},
-    {"file":"path/y.ts","symbol":"authThing","line":50,"complexity":40,"classification":"protocol-sensitive","whyNotSafe":"auth/token no-go zone"}
-  ],
-  "hardAreasInspected": ["auth/grant/consent/token","scheduler/controller/recovery"],
-  "safeTargets": [
-    {"file":"path/x.ts","symbol":"fnName","line":123,"complexity":31,"move":"extract a deep helper","value":8,"package":"packages/operator-ui/src"}
-  ],
-  "recommendation": "go-loop",
-  "note": ""
-}
-PROMPT
-}
-
-# Highest-value safe target as JSON, or empty/null.
+# ── DETERMINISTIC TARGET SELECTION (engine-side, over ORACLE findings) ───────────────
+# Reads the oracle's raw findings JSON on stdin (list of {file,line,complexity,...}),
+# applies repo no-go + vendor PATH globs, and echoes ONE target JSON {file,line,complexity}
+# = the highest-complexity eligible finding (stable tiebreak: lowest file then line).
+# Empty output → engine reports an honest non-finding. NO agent involved.
 profile_select_target() {
+  local cfg; cfg="$(_refactor_config)"
   python3 -c '
-import json,sys
-try: d=json.loads(sys.stdin.read())
-except: print(""); sys.exit(0)
-s=sorted(d.get("safeTargets",[]), key=lambda x:-(x.get("value",0)))
-print(json.dumps(s[0]) if s and d.get("recommendation")=="go-loop" else "")'
+import json, sys, fnmatch
+findings = json.load(sys.stdin)
+cfg = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else None
+nogo, vendor = [], []
+if cfg:
+    try:
+        c = json.load(open(cfg))
+        nogo   = [g for g in (c.get("noGoGlobs")   or []) if isinstance(g, str)]
+        vendor = [g for g in (c.get("vendorGlobs") or []) if isinstance(g, str)]
+    except Exception:
+        nogo, vendor = [], []
+def excluded(path):
+    return any(fnmatch.fnmatch(path, g) for g in nogo) or any(fnmatch.fnmatch(path, g) for g in vendor)
+elig = [f for f in (findings if isinstance(findings, list) else [])
+        if f.get("file") and f.get("line") is not None and f.get("complexity") is not None
+        and not excluded(f["file"])]
+if not elig:
+    print(""); sys.exit(0)
+# highest complexity wins; stable tiebreak by (file, line) for determinism
+elig.sort(key=lambda f: (-int(f["complexity"]), str(f["file"]), int(f["line"])))
+t = elig[0]
+print(json.dumps({"file": t["file"], "line": t["line"], "complexity": t["complexity"],
+                  "symbol": t.get("symbol", "")}))
+' "${cfg:-}"
 }
 
-# DETERMINISTIC test command, derived from the touched FILE via the REPO'S testMap
-# (Codex review-4 #2: the agent must NOT author the oracle's test command — it could
-# pick `true`). The map lives in the target repo's .waspflow/refactor.json, NOT here.
-# Longest file-PREFIX wins. Unknown path → empty → the oracle gate FAILS CLOSED.
+# DETERMINISTIC test command from the touched FILE via the repo testMap. Unknown path →
+# empty → oracle gate fails closed. Agent never authors this.
 profile_test_cmd() {
   local target="$1" cfg; cfg="$(_refactor_config)"
   printf '%s' "$target" | python3 -c '
@@ -97,53 +98,90 @@ if cfg:
     except Exception: testmap=[]
 for pre,cmd in sorted(testmap, key=lambda x:-len(x[0])):
     if f.startswith(pre): print(cmd); break
-else: print("")  # no repo testMap match → empty → oracle hard-fails (no false-pass)
+else: print("")
 ' "${cfg:-}"
 }
 
+# ── AGENT PROMPTS — each reduces to a real artifact + ONE fail-closed sentinel ───────
+
+# MAKER: one behavior-preserving refactor of the engine-chosen target, or ABANDON.
+# The engine reads GIT (branch diff), not a maker report. Sentinel: ABANDON: <reason>.
 profile_make_prompt() {
   local target="$1" report="$2"
-  local file sym mv; file="$(printf '%s' "$target" | python3 -c 'import json,sys;print(json.load(sys.stdin)["file"])')"
-  sym="$(printf '%s' "$target" | python3 -c 'import json,sys;print(json.load(sys.stdin)["symbol"])')"
-  mv="$(printf '%s' "$target" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("move",""))')"
+  local file line; file="$(printf '%s' "$target" | python3 -c 'import json,sys;print(json.load(sys.stdin)["file"])')"
+  line="$(printf '%s' "$target" | python3 -c 'import json,sys;print(json.load(sys.stdin)["line"])')"
   cat <<PROMPT
-MAKER. ONE behavior-preserving refactor: $file :: $sym. Move: $mv.
-RULES: behavior-preserving EXACTLY (no logic/order/string change). grep-verify caller counts before any inline/delete. Do NOT inline a NAMED+COMMENTED helper. No new file/export/wrapper unless a genuinely deep extraction. ONE commit on a NEW branch named refactor/<short> off origin/main. If NOT behavior-preserving or the target is wrong, STOP and write "abandon" + why.
-Write a short report to $report stating: the branch name (must match refactor/<short>), the commit sha, what burden you removed in one sentence.
+MAKER in an automated behavior-preserving refactoring loop. TARGET (engine-selected, the
+highest-complexity eligible function): $file, around line $line. It has an over-complexity
+lint diagnostic. Decomplect it (extract a genuinely deep helper / introduce an early return /
+delete dead code / name a magic value) so the diagnostic clears — WITHOUT changing behavior.
+
+RULES (behavior-preserving EXACTLY): no logic/order/string/output change. grep-verify caller
+counts before any inline or delete. Do NOT inline a NAMED+COMMENTED helper. No new export/route/
+file/wrapper unless it is a genuinely deep extraction. Stay within $file unless a caller MUST
+change. Repo no-go areas (do not refactor sensitive logic): $LOOP_NOGO.
+
+Commit ONE change on a NEW branch named refactor/<short-slug> off origin/main.
+
+OUTPUT (the engine reads git, not your prose): write a 1-2 sentence note to $report saying the
+branch name and what burden you removed. If this target is essential complexity, unsafe, or
+cannot be done behavior-preservingly, make NO commit and write exactly one line to $report:
+ABANDON: <one-sentence reason>
 PROMPT
 }
 
+# REVISE: same target, the gate failed; fix on the SAME branch, or ABANDON.
 profile_revise_prompt() {
-  local target="$1" facts="$2" sem="$3" report="$4"
-  local file sym; file="$(printf '%s' "$target" | python3 -c 'import json,sys;print(json.load(sys.stdin)["file"])')"
-  sym="$(printf '%s' "$target" | python3 -c 'import json,sys;print(json.load(sys.stdin)["symbol"])')"
+  local target="$1" facts="$2" verdict="$3" report="$4"
+  local file; file="$(printf '%s' "$target" | python3 -c 'import json,sys;print(json.load(sys.stdin)["file"])')"
   cat <<PROMPT
-MAKER, REVISING $file :: $sym. The gate FAILED.
-Objective oracle facts (un-fakeable): $facts
-Semantic verdict: $sem
-Fix EXACTLY what failed, amend/commit on the SAME branch. If fundamentally wrong (behavior change / laundering), write "abandon" + why to $report.
+MAKER, REVISING your refactor of $file. The gate did NOT pass.
+Objective oracle facts (un-fakeable, the engine measured these): $facts
+Independent checker verdict + reasons: $verdict
+Fix EXACTLY what failed and amend/commit on the SAME branch (keep it behavior-preserving). If
+the target is fundamentally essential/unsafe or your change can't be made behavior-preserving,
+write exactly one line to $report: ABANDON: <reason>
 PROMPT
 }
 
+# CHECKER (stronger/different model): reads the REAL diff. Sentinel: VERDICT: LAND | REVISE.
+# The oracle already passed before this runs; the checker catches semantic behavior changes the
+# oracle can't prove. It is given ONLY the diff + oracle facts (NOT a maker summary).
 profile_check_prompt() {
   local target="$1" branch="$2" facts="$3" report="$4"
-  local file sym; file="$(printf '%s' "$target" | python3 -c 'import json,sys;print(json.load(sys.stdin)["file"])')"
-  sym="$(printf '%s' "$target" | python3 -c 'import json,sys;print(json.load(sys.stdin)["symbol"])')"
+  local file; file="$(printf '%s' "$target" | python3 -c 'import json,sys;print(json.load(sys.stdin)["file"])')"
   cat <<PROMPT
-INDEPENDENT CHECKER (stronger model than the maker). The OBJECTIVE ORACLE ALREADY RAN — these are facts, you do NOT report exit codes: $facts
-Your job is ONLY the semantic judgment the script can't make. READ the diff: \`git diff origin/main...$branch -- $file\`. Judge and write ONLY this JSON to $report:
-{"behaviorPreserving":bool (no logic/order/string change; a clarity-fix changing a set/condition = false), "methodologyAligned":bool (decomplect/name/delete not slop — AI-slop checklist: net-positive prod LOC suspect, new 1-caller wrapper reject, named+commented helper inlined = reject, tautological tests reject), "surfaceUnchanged":bool (no export/route/manifest/DB), "callerCountsVerified":bool (grep-confirm any N-caller claim, true if none), "evidence":"cite the diff, >80 chars", "reason":""}
+INDEPENDENT CHECKER (stronger/different model than the maker). The deterministic ORACLE ALREADY
+PASSED — these are FACTS, do not restate exit codes: $facts
+Your ONE job is the semantic judgment the script cannot make. READ THE ACTUAL DIFF (do not trust
+any summary): \`git diff origin/main...$branch -- $file\` (and any other touched file in the diff).
+Judge ONLY: is this a genuine behavior-preserving decomplection (no logic/order/string/output
+change; caller counts intact; no slop — no net-positive prod LOC for its own sake, no new 1-caller
+wrapper, no named+commented helper inlined, no tautological tests; no export/route/manifest/DB
+surface change)?
+
+Write your reasoning as prose to $report, then end with EXACTLY ONE line, nothing after it:
+VERDICT: LAND      (iff it is a real behavior-preserving decomplection)
+VERDICT: REVISE    (any behavior risk, slop, surface change, OR if you could not read the diff)
+If you are unsure or evidence is missing, choose REVISE.
 PROMPT
 }
 
+# DONE/AMBITION (independent): loop control ONLY — cannot rescue a failed gate.
+# Sentinel: DONE | CONTINUE | ESCALATE.
 profile_done_prompt() {
-  local target="$1" facts="$2" hardlist="$3" intent="$4" report="$5"
-  local file sym; file="$(printf '%s' "$target" | python3 -c 'import json,sys;print(json.load(sys.stdin)["file"])')"
-  sym="$(printf '%s' "$target" | python3 -c 'import json,sys;print(json.load(sys.stdin)["symbol"])')"
+  local target="$1" facts="$2" remaining="$3" intent="$4" report="$5"
+  local file; file="$(printf '%s' "$target" | python3 -c 'import json,sys;print(json.load(sys.stdin)["file"])')"
   cat <<PROMPT
-DONE/AMBITION check (independent, stronger model). A refactor of $file :: $sym passed the structural gate (facts: $facts). Original intent: "$intent".
-Read the committed diff. Write ONLY this JSON to $report:
-{"complete":bool (genuinely done for THIS target, not half), "commensurate":bool (matches the ambition of the ask vs safe-but-small while the real impact sits in owner-gated/no-go findings: $hardlist), "verdict":"complete-and-commensurate|complete-but-under-ambitious|incomplete", "biggerTarget":"the owner-gated target the real impact sits in, or ''", "reason":""}
-If safe-small-vs-big-ask, verdict=complete-but-under-ambitious and name biggerTarget.
+AMBITION / LOOP-CONTROL check (independent, stronger/different model). A behavior-preserving
+refactor of $file just PASSED the oracle + checker gate (facts: $facts). Original ask: "$intent".
+Remaining eligible over-complex findings the engine could pick next: $remaining
+
+Decide ONLY whether the loop should continue, and write prose reasoning to $report ending with
+EXACTLY ONE line, nothing after it:
+DONE       (the ask is satisfied by what landed)
+CONTINUE   (landed change is good but the ask wants more — engine should select the next target)
+ESCALATE   (the real impact sits in essential/owner-gated areas the loop must not touch alone)
+You are NOT judging whether the diff passed (it did). You only decide continue-or-stop.
 PROMPT
 }

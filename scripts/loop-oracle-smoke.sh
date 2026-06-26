@@ -58,7 +58,7 @@ check "gate: missing branch → reason checkout-failed" "checkout-failed" "$(ech
 # ── 7. gate: empty-diff branch → ok:true but diffFiles=[] AND the gate REJECTS it ──
 # (Codex approval-bar item 5: "empty diff fails". A real branch identical to
 #  origin/main produces honest facts with no changed files; loop_gate_passed must reject.)
-source "$HERE/lib/loop.sh"  # for loop_gate_passed, _loop_caprank
+export LOOP_WORKTREE="$TMP/repo"; source "$HERE/lib/loop.sh"; source "$HERE/profiles/refactor.sh"  # engine + profile fns
 # Commit a real source file with a locatable symbol so the gate can find the target.
 ( cd "$TMP/repo" && printf 'export function widget() {\n  return 1;\n}\n' > src.ts \
   && git add src.ts && git commit -q -m "add src.ts" \
@@ -68,10 +68,9 @@ echo 'true' > "$TMP/good-testcmd.sh"
 out="$(oracle_gate "$TMP/repo" "empty-diff-branch" "src.ts" "widget" "$TMP/good-testcmd.sh" "$TMP/baseline.json" "true" "1")"
 check "gate: empty-diff branch → ok:true (oracle reports honest facts)" "True" "$(echo "$out" | jqget ok)"
 check "gate: empty-diff branch → diffFiles is []" "[]" "$(echo "$out" | python3 -c 'import json,sys;print(json.dumps(json.load(sys.stdin).get("diffFiles")))' 2>/dev/null)"
-# The structural gate must REJECT an empty diff even with green facts + a green semantic verdict.
-green_sem='{"behaviorPreserving":true,"methodologyAligned":true,"callerCountsVerified":true,"surfaceUnchanged":true,"evidence":"'"$(printf 'x%.0s' {1..90})"'"}'
-if loop_gate_passed "$out" "$green_sem"; then gate_verdict=accepted; else gate_verdict=rejected; fi
-check "gate: empty-diff branch → loop_gate_passed REJECTS" "rejected" "$gate_verdict"
+# The oracle gate must REJECT an empty diff (loop_oracle_passed requires diffFiles non-empty).
+if loop_oracle_passed "$out"; then gate_verdict=accepted; else gate_verdict=rejected; fi
+check "gate: empty-diff branch → loop_oracle_passed REJECTS" "rejected" "$gate_verdict"
 
 # ── 8. gate: unlocatable target symbol → ok:false (Codex review-4 #4 false-pass fix) ──
 # A symbol that doesn't exist + no usable line must FAIL CLOSED, not default cleared=true.
@@ -115,19 +114,43 @@ mfam=$(_loop_family claude opus high); cfam=$(_loop_family codex gpt-5.5 high)
 [ "$cfam" != "$mfam" ] && lineage=different-ok || lineage=same-rejected
 check "family: opus maker vs gpt checker → DIFFERENT lineage (allowed)" "different-ok" "$lineage"
 
-# ── 13. target line must be ORACLE-grounded, not agent-trusted (Codex review-5 #1) ──
-# Exercises the REAL engine fn _loop_ground_target_line (sourced from lib/loop.sh).
-RAW='[{"file":"src/foo.ts","line":62,"complexity":31}]'
-# Honest target (full descriptor matches a raw finding) → oracle line returned.
-check "target-ground: correct (file,line,complexity) → grounded" "62" "$(_loop_ground_target_line "$RAW" '{"file":"src/foo.ts","line":62,"complexity":31}')"
-# Dishonest target (agent set line:1, real diagnostic is at 62) → empty → engine fails closed.
-check "target-ground: WRONG line (1) → empty (engine fails closed)" "" "$(_loop_ground_target_line "$RAW" '{"file":"src/foo.ts","line":1,"complexity":31}')"
-# Wrong file → empty too.
-check "target-ground: wrong file → empty" "" "$(_loop_ground_target_line "$RAW" '{"file":"src/other.ts","line":62,"complexity":31}')"
-# Right (file,line) but MISLABELED complexity → empty (complexity must match too).
-check "target-ground: right line wrong complexity → empty" "" "$(_loop_ground_target_line "$RAW" '{"file":"src/foo.ts","line":62,"complexity":99}')"
-# Codex review-6: complexity is MANDATORY — a target OMITTING it must NOT downgrade to (file,line).
-check "target-ground: missing complexity → empty (mandatory)" "" "$(_loop_ground_target_line "$RAW" '{"file":"src/foo.ts","line":62}')"
+# ── 13. DETERMINISTIC target selection over ORACLE findings (decomplected: no classify agent) ──
+# Highest complexity wins; no-go + vendor PATH globs exclude; line is oracle-sourced by construction.
+CFG="$TMP/repo/.waspflow/refactor.json"; mkdir -p "$TMP/repo/.waspflow"
+cat > "$CFG" <<'JSON'
+{"noGoGlobs":["**/auth/**","**/*credential*"],"vendorGlobs":["**/*.gen.ts"]}
+JSON
+export LOOP_REFACTOR_CONFIG="$CFG"
+FINDINGS='[{"file":"src/a.ts","line":10,"complexity":25},{"file":"src/auth/login.ts","line":5,"complexity":99},{"file":"src/b.gen.ts","line":3,"complexity":80},{"file":"src/big.ts","line":40,"complexity":31}]'
+sel="$(printf '%s' "$FINDINGS" | profile_select_target)"
+# auth/* (c99) and *.gen.ts (c80) excluded → highest remaining is big.ts c31, NOT a.ts c25.
+check "select: picks highest-complexity ELIGIBLE (no-go/vendor excluded)" "src/big.ts" "$(printf '%s' "$sel" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("file"))' 2>/dev/null)"
+check "select: chosen line is the oracle finding's line" "40" "$(printf '%s' "$sel" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("line"))' 2>/dev/null)"
+# All findings excluded → empty (honest non-finding).
+ALLNOGO='[{"file":"src/auth/x.ts","line":1,"complexity":50},{"file":"src/y.gen.ts","line":2,"complexity":60}]'
+check "select: all excluded → empty (honest non-finding)" "" "$(printf '%s' "$ALLNOGO" | profile_select_target)"
+unset LOOP_REFACTOR_CONFIG
+
+# ── 14. SENTINEL extraction is fail-closed (decomplected agent contract) ──
+check "sentinel: 'VERDICT: LAND' → LAND" "LAND" "$(_loop_sentinel 'prose...
+VERDICT: LAND' VERDICT LAND REVISE)"
+check "sentinel: 'VERDICT: REVISE' → REVISE" "REVISE" "$(_loop_sentinel 'reasons
+VERDICT: REVISE' VERDICT LAND REVISE)"
+check "sentinel: missing token → empty (fail-closed)" "" "$(_loop_sentinel 'I think it looks fine to me' VERDICT LAND REVISE)"
+check "sentinel: garbage token → empty (fail-closed)" "" "$(_loop_sentinel 'VERDICT: MAYBE' VERDICT LAND REVISE)"
+check "sentinel: bare DONE token → DONE" "DONE" "$(_loop_sentinel 'analysis
+DONE' '' DONE CONTINUE ESCALATE)"
+check "sentinel: bare ESCALATE → ESCALATE" "ESCALATE" "$(_loop_sentinel 'the real work is in auth
+ESCALATE' '' DONE CONTINUE ESCALATE)"
+# last-wins: if a model writes both, the FINAL marked line governs.
+check "sentinel: last VERDICT line wins" "LAND" "$(_loop_sentinel 'VERDICT: REVISE
+on reflection
+VERDICT: LAND' VERDICT LAND REVISE)"
+
+# ── 15. ABANDON sentinel detection (maker) ──
+abandon_check() { printf '%s' "$1" | grep -qiE '^[[:space:]]*ABANDON:' && echo yes || echo no; }
+check "abandon: 'ABANDON: essential' detected" "yes" "$(abandon_check 'ABANDON: this is essential domain complexity')"
+check "abandon: normal report not flagged" "no" "$(abandon_check 'Made the refactor on branch refactor/foo')"
 
 # ── 14. unknown model family (haiku/fable/future) → rank 0 → never a valid checker ──
 check "family: haiku → unknown" "unknown" "$(_loop_family claude haiku medium)"
