@@ -99,7 +99,9 @@ oracle_baseline() {
 # $1 wt  $2 branch  $3 file  $4 symbol  $5 testcmd_file  $6 baseline_json  $7 lintfile_cmd  $8 target_line
 oracle_gate() {
   set +e   # runs tests/linters that exit nonzero by design; capture codes, never abort on them.
-  local wt="${1:?wt}" branch="${2:?branch}" file="${3:?file}" symbol="${4:?symbol}"
+  local wt="${1:?wt}" branch="${2:?branch}" file="${3:?file}" symbol="${4:-}"   # symbol OPTIONAL:
+  # decomplected selection grounds by file+LINE (oracle findings carry no symbol). If symbol is
+  # empty, target-clearing is checked purely by the original linter line (the authoritative anchor).
   local testcmd_file="${5:?testcmd-file}" baseline_path="${6:?baseline}" lintfile_cmd="${7:?lintfile_cmd}"
   local target_line="${8:-}"   # original linter line for the target (Codex review-4 #4)
 
