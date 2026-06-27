@@ -164,9 +164,17 @@ oracle_gate() {
   if [ -z "$sym_line" ] && [ -n "$target_line" ] && printf '%s' "$target_line" | grep -qE '^[0-9]+$'; then
     sym_line="$target_line"
   fi
+  # DECOMPOSITION mode: no symbol AND no line means there is no complexity-target to locate (the
+  # gate's job is tsc+tests+diff, not clearing a finding). Set targetDiagnosticCleared=null (n/a)
+  # and skip the span check. (When a symbol/line IS given — the complexity case — still fail closed.)
+  local decompose_mode=false
   if [ -z "$sym_line" ]; then
-    printf '{"ok":false,"reason":"target-symbol-unlocatable","symbol":%s,"file":%s,"note":"Cannot locate the target by symbol or line; refusing to default targetDiagnosticCleared=true."}\n' \
-      "$(printf '%s' "$symbol" | _oracle_json_escape)" "$(printf '%s' "$file" | _oracle_json_escape)"; return 0
+    if [ -z "$symbol" ] && [ -z "$target_line" ]; then
+      decompose_mode=true
+    else
+      printf '{"ok":false,"reason":"target-symbol-unlocatable","symbol":%s,"file":%s,"note":"Cannot locate the target by symbol or line; refusing to default targetDiagnosticCleared=true."}\n' \
+        "$(printf '%s' "$symbol" | _oracle_json_escape)" "$(printf '%s' "$file" | _oracle_json_escape)"; return 0
+    fi
   fi
   # Codex re-verify #1: target-clearing must be SYMBOL/SPAN-grounded, not line-proximity.
   # Resolve the target function's SPAN [sym_line .. end_line] by walking to where indentation
@@ -174,7 +182,12 @@ oracle_gate() {
   # complexity diagnostic falls within that span. This can't be fooled by clearing a SIBLING
   # finding + moving the real target away (the ±5 proximity hole). file-count-drop stays as an
   # ADDITIONAL sanity check (cx_dropped above), not the proof.
-  local end_line
+  # In decomposition mode there is no span to resolve; target_cleared is n/a (emitted as null).
+  local end_line target_cleared
+  if [ "$decompose_mode" = true ]; then
+    sym_line="null"; end_line="null"; target_cleared="null"
+  else
+  end_line=""
   end_line="$(python3 -c '
 import sys
 path, start = sys.argv[1], int(sys.argv[2])
@@ -200,17 +213,14 @@ for i in range(start, len(lines)):
         break
 print(end)' "$wt/$file" "$sym_line" 2>/dev/null)"
   [ -z "$end_line" ] && end_line="$sym_line"
-  # targetDiagnosticCleared is now PURELY span-based: no complexity diagnostic within the target's
-  # span. It does NOT fold in count-drop (Codex re-verify-3 #1: count-drop is wrong for a RE-GATE of
-  # an already-clean target — count is 0→0). The initial gate still requires the drop SEPARATELY via
-  # loop_oracle_passed (which checks BOTH targetDiagnosticCleared AND complexityCountDropped); the
-  # re-gate checks only span-cleared + tests. Decoupling fixes the false-reject of good integrations.
-  local target_cleared=true
+  # targetDiagnosticCleared is PURELY span-based: no complexity diagnostic within the target's span.
+  target_cleared=true
   if printf '%s' "$post" | grep -q 'noExcessiveCognitiveComplexity'; then
     while read -r dl; do
       [ -n "$dl" ] && [ "$dl" -ge "$sym_line" ] && [ "$dl" -le "$end_line" ] && target_cleared=false
     done < <(printf '%s' "$post" | grep -oE ":[0-9]+:[0-9]+ lint/complexity/noExcessiveCognitiveComplexity" | grep -oE '^:[0-9]+' | tr -d ':' )
   fi
+  fi   # end: not decompose_mode
   # Codex dispatcher-verify #1: the proximity check can be fooled if the still-complex function
   # moves >5 lines. The UN-FOOLABLE gate is the COUNT: the file's complexity-diagnostic count
   # must drop by >=1 vs baseline. (Line movement can't lower the count; only a real fix can.)
