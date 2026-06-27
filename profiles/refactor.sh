@@ -147,7 +147,9 @@ counts before any inline or delete. Do NOT inline a NAMED+COMMENTED helper. No n
 file/wrapper unless it is a genuinely deep extraction. Stay within $file unless a caller MUST
 change. Repo no-go areas (do not refactor sensitive logic): $LOOP_NOGO.
 
-Commit ONE change on a NEW branch named refactor/<short-slug> off origin/main.
+Commit ONE change on a NEW branch named refactor/<short-slug> branched off the CURRENT HEAD
+of this worktree (run: git checkout -b refactor/<short-slug>). Do NOT check out origin/main or
+any other base first — the worktree is already on the correct base commit for this task.
 
 OUTPUT (the engine reads git, not your prose): write a 1-2 sentence note to $report saying the
 branch name and what burden you removed. If this target is essential complexity, unsafe, or
