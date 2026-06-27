@@ -87,6 +87,11 @@ loop_oracle_passed() {
   local f="$1"
   [ "$(printf '%s' "$f" | _loop_jget ok)" = "True" ] || return 1
   [ "$(printf '%s' "$f" | _loop_jget testExitCode)" = "0" ] || return 1
+  # Typecheck must pass when a typecheck command was configured (rs-read proved a refactor can be
+  # test-green + lint-clean but type-broken). typeCheckPresent=false → no command → skip this check.
+  if [ "$(printf '%s' "$f" | _loop_jget typeCheckPresent)" = "True" ]; then
+    [ "$(printf '%s' "$f" | _loop_jget typeCheckExitCode)" = "0" ] || return 1
+  fi
   [ "$(printf '%s' "$f" | _loop_jget diffCheckExitCode)" = "0" ] || return 1
   [ "$(printf '%s' "$f" | _loop_jget targetDiagnosticCleared)" = "True" ] || return 1
   # Codex dispatcher-verify #1: the COUNT must drop — un-foolable by line movement.
@@ -228,7 +233,7 @@ print(", ".join(parts))' 2>/dev/null)"
     [ -z "$branch" ] && branch="waspflow/loop-make-$rid-$attempt"  # last-resort fallback
 
     # ORACLE gate (engine process — un-fakeable). MANDATORY: VERDICT: LAND alone never lands.
-    facts="$(oracle_gate "$wt" "$branch" "$tfile" "$tsym" "$testcmd_file" "$baseline" "$(profile_lint_file_cmd "$tfile")" "$tline")"
+    facts="$(oracle_gate "$wt" "$branch" "$tfile" "$tsym" "$testcmd_file" "$baseline" "$(profile_lint_file_cmd "$tfile")" "$tline" "$(profile_typecheck_cmd "$tfile" 2>/dev/null)")"
     if ! loop_oracle_passed "$facts"; then
       # oracle failed — only revise if there's actually a diff to fix; else stop.
       printf '%s' "$facts" | python3 -c 'import json,sys;d=json.load(sys.stdin);sys.exit(0 if isinstance(d.get("diffFiles"),list) and d["diffFiles"] else 1)' || break

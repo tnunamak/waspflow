@@ -136,6 +136,14 @@ oracle_gate() {
   local rundir; rundir="$(dirname "$baseline_path")"
   ( cd "$wt" && eval "$testcmd" ) >"$rundir/test.log" 2>&1; testrc=$?
 
+  # Typecheck (a refactor can be test-passing + lint-clean but TYPE-BROKEN — the rs-read land
+  # proved this slipped through. The typecheck command comes from config; empty → skipped, but
+  # the gate REQUIRES typeCheckExitCode==0 when a command is configured). $9 typecheck command.
+  local typecheck_cmd="${9:-}" typerc=0
+  if [ -n "$typecheck_cmd" ]; then
+    ( cd "$wt" && eval "$typecheck_cmd" ) >"$rundir/typecheck.log" 2>&1; typerc=$?
+  fi
+
   # post-change lint for the file (Codex review-4 #3: capture exit code, fail closed on broken lint)
   local post postrc; post="$( ( cd "$wt" && eval "$lintfile_cmd" ) 2>&1 )"; postrc=$?
   if [ "$postrc" -ne 0 ] && ! printf '%s' "$post" | grep -q 'lint/'; then
@@ -226,7 +234,7 @@ for l in sys.stdin:
     p=l.split()
     if len(p)==2: now[p[1]]=int(p[0])
 print(sum(max(0, now.get(k,0)-base.get(k,0)) for k in now))' "$baseline_path" 2>/dev/null )"
-  printf '{"ok":true,"testCommandPresent":true,"commitSha":"%s","branch":%s,"head":"%s","mergeBase":"%s","diffFiles":%s,"testExitCode":%s,"diffCheckExitCode":%s,"lintFileExitCode":%s,"targetLine":%s,"targetDiagnosticCleared":%s,"complexityCountDropped":%s,"baselineComplexityCount":%s,"postComplexityCount":%s,"newDiagnosticsCount":%s}\n' \
+  printf '{"ok":true,"testCommandPresent":true,"commitSha":"%s","branch":%s,"head":"%s","mergeBase":"%s","diffFiles":%s,"testExitCode":%s,"typeCheckExitCode":%s,"typeCheckPresent":%s,"diffCheckExitCode":%s,"lintFileExitCode":%s,"targetLine":%s,"targetDiagnosticCleared":%s,"complexityCountDropped":%s,"baselineComplexityCount":%s,"postComplexityCount":%s,"newDiagnosticsCount":%s}\n' \
     "${head:0:12}" "$(printf '%s' "$branch" | _oracle_json_escape)" "${head:0:12}" "${mergebase:0:12}" \
-    "$diff_files" "$testrc" "$diffcheck" "$postrc" "${sym_line:-null}" "$target_cleared" "${cx_dropped}" "${base_cx:-0}" "${post_cx:-0}" "${new_diags:-0}"
+    "$diff_files" "$testrc" "$typerc" "$([ -n "$typecheck_cmd" ] && echo true || echo false)" "$diffcheck" "$postrc" "${sym_line:-null}" "$target_cleared" "${cx_dropped}" "${base_cx:-0}" "${post_cx:-0}" "${new_diags:-0}"
 }

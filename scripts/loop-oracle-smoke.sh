@@ -208,6 +208,24 @@ check "re-gate: new non-target diagnostic → newDiagnosticsCount=1 (regate reje
 check "re-gate: target span still clean → targetDiagnosticCleared=True (but newDiag blocks it)" "True" "$(echo "$out" | jqget targetDiagnosticCleared)"
 
 
+# ── 19. TYPECHECK gate (the rs-read hole: test-green + lint-clean but TYPE-BROKEN must reject) ──
+mkdir -p "$TMP/tcrepo"; ( cd "$TMP" && git init -q tcrepo && cd tcrepo && git config user.email t@t && git config user.name t
+  printf 'export function f(x) {\n  return x + 1;\n}\n' > src.ts
+  git add src.ts && git commit -q -m init
+  git remote add origin "$TMP/tcrepo" 2>/dev/null; git update-ref refs/remotes/origin/main HEAD; git checkout -q -b work
+  printf 'export function f(x) {\n  const r = x + 1;\n  return r;\n}\n' > src.ts; git add src.ts && git commit -q -m change )
+echo 'true' > "$TMP/tctc.sh"; echo '{"diagnostics":{}}' > "$TMP/tcbl.json"
+clean_lint_tc() { echo "Checked 1 file. No fixes applied."; }; export -f clean_lint_tc
+# typecheck FAILS (exit 2) → gate must report typeCheckExitCode=2 + typeCheckPresent=true
+type_fail() { echo "error TS2345"; return 2; }; export -f type_fail
+out="$(oracle_gate "$TMP/tcrepo" "work" "src.ts" "f" "$TMP/tctc.sh" "$TMP/tcbl.json" "clean_lint_tc" "1" "type_fail")"
+check "typecheck: broken types → typeCheckExitCode=2" "2" "$(echo "$out" | jqget typeCheckExitCode)"
+check "typecheck: present flag true when command given" "True" "$(echo "$out" | jqget typeCheckPresent)"
+export LOOP_WORKTREE="$TMP/tcrepo"
+if loop_oracle_passed "$out"; then v=accepted; else v=rejected; fi
+check "typecheck: type-broken change → loop_oracle_passed REJECTS" "rejected" "$v"
+
+
 echo ""
 echo "loop-oracle smoke: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

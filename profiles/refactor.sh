@@ -48,6 +48,22 @@ LOOP_NOGO="${LOOP_NOGO:-$(_refactor_cfg_get x noGo "auth/credentials/secrets, pe
 profile_lint_cmd()      { printf '%s %s' "$LOOP_LINT_CMD" "$LOOP_LINT_DIRS"; }
 profile_lint_file_cmd() { printf '%s %s' "$LOOP_LINT_CMD" "$1"; }
 
+# Typecheck command for the touched FILE, from the repo's typeCheckMap (file-PREFIX → tsc cmd).
+# A refactor can be test-green + lint-clean but TYPE-BROKEN; the gate requires this to pass when
+# present. Unknown path → empty → typecheck skipped for that file (not a hard fail; tests still gate).
+profile_typecheck_cmd() {
+  local file="$1" cfg; cfg="$(_refactor_config)"
+  [ -n "$cfg" ] || return 0
+  python3 -c '
+import json,sys
+cfg,f=sys.argv[1],sys.argv[2]
+try: tm=json.load(open(cfg)).get("typeCheckMap") or []
+except Exception: tm=[]
+for pre,cmd in sorted([(p[0],p[1]) for p in tm if isinstance(p,list) and len(p)==2], key=lambda x:-len(x[0])):
+    if f.startswith(pre): print(cmd); break
+' "$cfg" "$file"
+}
+
 # ── DETERMINISTIC TARGET SELECTION (engine-side, over ORACLE findings) ───────────────
 # Reads the oracle's raw findings JSON on stdin (list of {file,line,complexity,...}),
 # applies repo no-go + vendor PATH globs, and echoes ONE target JSON {file,line,complexity}
