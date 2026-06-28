@@ -68,7 +68,9 @@ dg_ledger_record() {
   local swing="$1" judge="$2" verdict="$3" confidence="$4" oracle="$5" \
         first_try="$6" concern_real="$7" reverted="$8" note="${9:-}"
   local path; path="$(dg_ledger_path)"
-  mkdir -p "$(dirname "$path")" 2>/dev/null
+  # pure-bash dirname (mkdir/dirname may be off a stripped PATH; parameter expansion isn't)
+  local dir="${path%/*}"; [ "$dir" = "$path" ] && dir="."
+  mkdir -p "$dir" 2>/dev/null || command mkdir -p "$dir" 2>/dev/null
   # jq builds the row so strings are escaped correctly; booleans/null passed raw via --argjson.
   _dg_jq -cn \
     --arg swing "$swing" --arg judge "$judge" --arg verdict "$verdict" \
