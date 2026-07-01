@@ -90,16 +90,25 @@ out="$(oracle_gate "$TMP/repo" "empty-diff-branch" "src.ts" "widget" "$TMP/good-
 check "gate: broken post-lint → ok:false" "False" "$(echo "$out" | jqget ok)"
 check "gate: broken post-lint → reason post-lint-failed" "post-lint-failed" "$(echo "$out" | jqget reason)"
 
-# ── 11. checker-strength: rank ordering enforces the owner capability table (review-4 #5) ──
-# gpt-5.5 high (6) > opus xhigh (5) > gpt-5.5 low (4) > opus high (3) > opus low (2) > sonnet (1)
-check "caprank: sonnet = 1" "1" "$(_loop_caprank claude sonnet medium)"
-check "caprank: opus high = 3" "3" "$(_loop_caprank claude opus high)"
-check "caprank: opus xhigh = 5" "5" "$(_loop_caprank claude opus xhigh)"
-check "caprank: gpt-5.5 high = 6" "6" "$(_loop_caprank codex gpt-5.5 high)"
-# A sonnet checker (1) is WEAKER than an opus-high maker (3) → must be rejected by rank.
-maker=$(_loop_caprank claude opus high); chk=$(_loop_caprank claude sonnet medium)
+# ── 11. checker-strength: rank ordering enforces the capability table (review-4 #5) ──
+# UPDATED 2026-06-30 for Sonnet 5 (docs/model-economics.md — Sonnet 5 is Opus-band at high+):
+# gpt-hi(7) > opus-max/xhigh(6) ~ sonnet5-max/xhigh(6) > gpt-lo(5) > opus-hi(4) ~ sonnet5-hi(4)
+#   > opus-lo(3) > sonnet5-lo/med(2) > sonnet4.6/legacy(1) > unknown(0).
+check "caprank: sonnet-4-6 = 1 (legacy weak floor)" "1" "$(_loop_caprank claude sonnet-4-6 medium)"
+check "caprank: sonnet-5 med = 2 (cheap value tier)" "2" "$(_loop_caprank claude sonnet-5 medium)"
+check "caprank: sonnet-5 high = 4 (Opus-band)" "4" "$(_loop_caprank claude sonnet-5 high)"
+check "caprank: opus high = 4" "4" "$(_loop_caprank claude opus high)"
+check "caprank: opus xhigh = 6" "6" "$(_loop_caprank claude opus xhigh)"
+check "caprank: gpt-5.5 high = 7" "7" "$(_loop_caprank codex gpt-5.5 high)"
+# A legacy-sonnet checker (1) is WEAKER than an opus-high maker (4) → must be rejected by rank.
+maker=$(_loop_caprank claude opus high); chk=$(_loop_caprank claude sonnet-4-6 medium)
 [ "$chk" -lt "$maker" ] && weak=rejected || weak=accepted
-check "caprank: sonnet-checker vs opus-maker → weaker (rejected)" "rejected" "$weak"
+check "caprank: legacy-sonnet-checker vs opus-maker → weaker (rejected)" "rejected" "$weak"
+# NEW: a Sonnet-5-high maker (4) needs a checker that is >= AND different lineage — an Opus-xhigh (6)
+# checker qualifies on rank; an Opus-high (4) ties on rank (ok, >=) but the gate's lineage rule handles family.
+maker5=$(_loop_caprank claude sonnet-5 high); chkO=$(_loop_caprank claude opus xhigh)
+[ "$chkO" -ge "$maker5" ] && s5ok=ok || s5ok=weak
+check "caprank: opus-xhigh checker >= sonnet-5-high maker" "ok" "$s5ok"
 
 # ── 12. lineage is FAMILY not raw string (Codex review-5 #2 bypass fix) ──
 # opus-high maker vs opus-xhigh checker: stronger rank BUT same lineage → must be rejected.

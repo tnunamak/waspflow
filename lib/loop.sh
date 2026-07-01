@@ -111,7 +111,16 @@ _loop_fail() { printf '{"outcome":"%s","note":%s}\n' "$1" "$(printf '%s' "$2" | 
 # Family ∈ {gpt, opus, sonnet, unknown} — the lineage that the "different lineage"
 # rule compares (Codex review-5 #2: must compare families, NOT raw strings, else
 # opus-high vs opus-xhigh would read as different lineage). ONE source of truth.
-# Rank (owner table): gpt high=6 > opus xhigh=5 > gpt low=4 > opus high=3 > opus low=2 > sonnet=1.
+#
+# RANK is capability, EFFORT-AWARE, grounded in the published cost/pass-rate curves
+# (see docs/model-economics.md — Anthropic Sonnet-5 BrowseComp/OSWorld charts 2026-06-30,
+# OpenAI GPT-5.5 evals). The 2026-06-30 update: Sonnet 5 is NOT the old sonnet=1 floor —
+# on agentic search it MATCHES Opus 4.8 at high effort and its max (84.8%) >= Opus max
+# (84.3%). So Sonnet-5 ranks in the Opus band, scaled by effort; Sonnet 4.6 stays low.
+# Ranks are a total order for the checker>=maker gate; ties are broken by the different-
+# lineage rule (a Sonnet-5-high maker still needs an Opus/GPT checker, never Sonnet).
+# Scale (higher=stronger): gpt-hi=7 > opus-max/xhigh=6 ~ sonnet5-max/xhigh=6 > gpt-lo=5
+#   > opus-hi=4 ~ sonnet5-hi=4 > opus-lo=3 > sonnet5-lo/med=2 > sonnet4.6/legacy-sonnet=1.
 # Prints "<family> <rank>".
 _loop_classify_model() {
   python3 -c '
@@ -125,9 +134,14 @@ elif "opus" in model: fam="opus"
 elif prov=="claude" and not model: fam="opus"
 else: fam="unknown"   # haiku, fable, future/unrecognized → unknown → checker rejected
 hi = eff in ("high","xhigh","max")
-if fam=="gpt":    rank = 6 if hi else 4
-elif fam=="opus": rank = 5 if eff in ("xhigh","max") else (3 if hi else 2)
-elif fam=="sonnet": rank = 1
+top = eff in ("xhigh","max")
+# Sonnet 5 vs 4.6: "5" in the model id (claude-sonnet-5) is the new Opus-band tier.
+# Anything else in the sonnet family (4.6, unversioned legacy) stays the weak floor.
+sonnet5 = fam=="sonnet" and ("sonnet-5" in model or "sonnet5" in model or model=="sonnet")
+if fam=="gpt":    rank = 7 if hi else 5
+elif fam=="opus": rank = 6 if top else (4 if hi else 3)
+elif sonnet5:     rank = 6 if top else (4 if hi else 2)   # Sonnet-5: Opus-band at high+, cheap value tier below
+elif fam=="sonnet": rank = 1                               # Sonnet 4.6 / legacy sonnet — weak floor
 else: rank = 0   # unknown is the WEAKEST rank — never qualifies as a checker
 print(fam, rank)' "$1" "$2" "$3"
 }
