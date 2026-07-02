@@ -42,28 +42,38 @@ codex_preflight() {
 }
 
 # Discover the session UUID + rollout file for a lane. Prefer the recorded value;
-# otherwise locate the rollout by matching the lane's cwd against each candidate
-# file's session_meta.cwd. We match on CWD, never mtime: a background collector
-# re-touches old rollout files (bumping mtime), so "newest by mtime" is wrong —
-# and the per-session rollout records the originating cwd in its first line,
-# which is exact. The filename embeds the session start time, used only as a
-# coarse pre-filter to skip clearly-older files cheaply.
+# otherwise locate marker-bearing Codex lanes by their lane marker. Cwd-only
+# lookup is retained only for older lane state without markers; it is ambiguous
+# when multiple Codex lanes share a repo.
 codex_discover_session() {
-  local lane="$1" recorded lane_cwd
+  local lane="$1" recorded lane_cwd marker
   recorded="$(lane_get "$lane" session_id)"
   if [[ -n "$recorded" ]]; then echo "$recorded"; return 0; fi
 
   lane_cwd="$(lane_get "$lane" cwd)"
   [[ -n "$lane_cwd" ]] || { echo ""; return 0; }
+  marker="$(lane_get "$lane" codex_marker)"
 
-  # The rollout for this lane is the newest file whose session_meta.cwd matches
-  # the lane's cwd. cwd equality is the selector (never mtime — a background
-  # collector bumps mtimes on old files). Shared with the spawn-verify step.
+  if [[ -n "$marker" ]]; then
+    local marker_match marker_sid
+    marker_match="$(_codex_find_rollout_for_marker "$lane_cwd" "$marker" || true)"
+    if [[ -n "$marker_match" ]]; then
+      marker_sid="$(_codex_rollout_session_id "$marker_match")"
+      if [[ -n "$marker_sid" ]]; then
+        lane_set "$lane" session_id "$marker_sid" rollout "$marker_match"
+        echo "$marker_sid"
+        return 0
+      fi
+    fi
+    echo ""
+    return 0
+  fi
+
+  # Legacy fallback for lanes spawned before codex_marker existed.
   local match sid
   match="$(_codex_find_rollout_for_cwd "$lane_cwd" || true)"
   [[ -n "$match" ]] || { echo ""; return 0; }
-  sid="$(head -1 "$match" 2>/dev/null | jq -rc '.payload.id // empty' 2>/dev/null)"
-  [[ -n "$sid" ]] || sid="$(basename "$match" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)"
+  sid="$(_codex_rollout_session_id "$match")"
   if [[ -n "$sid" ]]; then
     lane_set "$lane" session_id "$sid" rollout "$match"
     echo "$sid"
@@ -78,6 +88,9 @@ codex_spawn() {
   local lane="$1" cwd="$2" model="$3" _session_id="$4" transcript="$5" prompt="$6"
   shift 6
   local extra=("$@")
+  local marker
+  marker="WASPFLOW_LANE_MARKER:${lane}:$(new_uuid)"
+  lane_set "$lane" codex_marker "$marker"
 
   # Pre-trust the cwd by ensuring it's a git repo (codex trusts repos it can read).
   # We do NOT modify a real project repo — only git-init if the dir isn't a repo yet.
@@ -97,8 +110,12 @@ codex_spawn() {
     high|xhigh|max)  effort_args=(-c model_reasoning_effort=high) ;;
   esac
 
+  # Wrap with tokensmash launch for study actuation when available.
+  local ts_prefix=()
+  command -v tokensmash >/dev/null 2>&1 && ts_prefix=(tokensmash launch codex --)
+
   # Bare interactive codex (NO --skip-git-repo-check — that's exec-only).
-  local argv=(codex "${model_args[@]}" "${effort_args[@]}" "${extra[@]}")
+  local argv=("${ts_prefix[@]}" codex "${model_args[@]}" "${effort_args[@]}" "${extra[@]}")
   local quoted=""
   local a
   for a in "${argv[@]}"; do quoted+=" $(printf '%q' "$a")"; done
@@ -114,7 +131,7 @@ codex_spawn() {
   # file to appear for THIS cwd — re-sending Enter if it didn't take.
   _codex_clear_trust_prompt "$target"
   _codex_wait_composer_ready "$target"
-  _codex_submit_prompt "$lane" "$cwd" "$target" "$prompt"
+  _codex_submit_prompt "$lane" "$cwd" "$target" "$prompt" "$marker"
 }
 
 # A pane snapshot, de-escaped, for state checks.
@@ -165,20 +182,36 @@ _codex_wait_composer_ready() {
 # session_meta.cwd == our cwd. If none appears, re-send Enter (the most common
 # failure is the Enter racing hook output). Up to a few attempts.
 _codex_submit_prompt() {
-  local lane="$1" cwd="$2" target="$3" prompt="$4" attempt
+  local lane="$1" cwd="$2" target="$3" prompt="$4" marker="${5:-}" attempt
+  local full_prompt="$prompt"
+  if [[ -n "$marker" ]]; then
+    full_prompt="$marker
+Ignore the line above; it is for waspflow session correlation.
+
+$prompt"
+  fi
   # Clear any starter text ("Implement {feature}") and paste literally. Plain
   # send-keys is brittle for long prompts: it can mangle spaces and queue text
   # as a follow-up instead of submitting the intended first turn.
   tmux send-keys -t "$target" C-u
   sleep 0.3
-  tmux_paste_text "$target" "$prompt"
+  tmux_paste_text "$target" "$full_prompt"
   sleep 1
   for attempt in 1 2 3 4 5; do
     tmux send-keys -t "$target" Enter
     # Give the turn a moment to start + write its session_meta line.
     local j
     for j in $(seq 1 6); do
-      if _codex_find_rollout_for_cwd "$cwd" >/dev/null; then
+      local rollout=""
+      if [[ -n "$marker" ]]; then
+        rollout="$(_codex_find_rollout_for_marker "$cwd" "$marker" || true)"
+      else
+        rollout="$(_codex_find_rollout_for_cwd "$cwd" || true)"
+      fi
+      if [[ -n "$rollout" ]]; then
+        local sid
+        sid="$(_codex_rollout_session_id "$rollout")"
+        [[ -n "$sid" ]] && lane_set "$lane" session_id "$sid" rollout "$rollout"
         return 0
       fi
       sleep 1
@@ -187,6 +220,32 @@ _codex_submit_prompt() {
   done
   warn "codex spawn: prompt may not have submitted for lane '$lane' (no rollout for $cwd). Inspect: waspflow attach $lane"
   return 0
+}
+
+# Extract Codex's session id from a rollout path.
+_codex_rollout_session_id() {
+  local rollout="$1" sid
+  sid="$(head -1 "$rollout" 2>/dev/null | jq -rc '.payload.id // .payload.session_id // empty' 2>/dev/null)"
+  [[ -n "$sid" ]] || sid="$(basename "$rollout" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)"
+  echo "$sid"
+}
+
+# Echo the rollout file path whose cwd and lane marker match. This is the
+# authoritative selector for new Codex lanes; cwd alone is ambiguous when several
+# lanes run in the same repo.
+_codex_find_rollout_for_marker() {
+  local cwd="$1" marker="$2" f fcwd
+  [[ -n "$marker" ]] || return 1
+  local listing; listing="$(find "$CODEX_SESSIONS_DIR" -type f -name 'rollout-*.jsonl' -printf '%f\t%p\n' 2>/dev/null | sort -rn | cut -f2-)"
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    fcwd="$(head -1 "$f" 2>/dev/null | jq -rc 'select(.type=="session_meta") | .payload.cwd // empty' 2>/dev/null)"
+    [[ "$fcwd" == "$cwd" ]] || continue
+    grep -Fq "$marker" "$f" 2>/dev/null || continue
+    echo "$f"
+    return 0
+  done <<<"$listing"
+  return 1
 }
 
 # Echo the rollout file path whose session_meta.cwd == $1, newest-first by
