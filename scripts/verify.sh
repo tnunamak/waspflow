@@ -63,4 +63,30 @@ printf '%s\n' "$init_print" | jq -e '.mutexes[0].name == "live-stack"' >/dev/nul
 demo_preview="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" demo --provider codex --lane preview-only)"
 grep -q "waspflow demo --provider codex --lane preview-only" <<<"$demo_preview"
 
+sessions_dir="$(mktemp -d "$scratch/waspflow-codex-sessions-XXXXXX")"
+mkdir -p "$sessions_dir/2026/07/01"
+same_cwd="$fixture"
+cat >"$sessions_dir/2026/07/01/rollout-2026-07-01T00-00-01-11111111-1111-1111-1111-111111111111.jsonl" <<JSONL
+{"type":"session_meta","payload":{"id":"11111111-1111-1111-1111-111111111111","cwd":"$same_cwd"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"WASPFLOW_LANE_MARKER:lane-a:aaa"}}
+{"type":"event_msg","payload":{"type":"task_complete"}}
+JSONL
+cat >"$sessions_dir/2026/07/01/rollout-2026-07-01T00-00-02-22222222-2222-2222-2222-222222222222.jsonl" <<JSONL
+{"type":"session_meta","payload":{"id":"22222222-2222-2222-2222-222222222222","cwd":"$same_cwd"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"WASPFLOW_LANE_MARKER:lane-b:bbb"}}
+{"type":"event_msg","payload":{"type":"task_complete"}}
+JSONL
+(
+  export WASPFLOW_HOME="$state_home"
+  export CODEX_SESSIONS_DIR="$sessions_dir"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/codex.sh"
+  lane_set marker-a provider codex status live cwd "$same_cwd" codex_marker "WASPFLOW_LANE_MARKER:lane-a:aaa"
+  lane_set marker-b provider codex status live cwd "$same_cwd" codex_marker "WASPFLOW_LANE_MARKER:lane-b:bbb"
+  [[ "$(codex_discover_session marker-a)" == "11111111-1111-1111-1111-111111111111" ]]
+  [[ "$(codex_discover_session marker-b)" == "22222222-2222-2222-2222-222222222222" ]]
+)
+
 echo "waspflow verify: ok"
