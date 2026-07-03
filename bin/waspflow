@@ -12,13 +12,15 @@
 #   spawn   --provider <claude|codex> --lane <name> [opts] -- <task prompt>
 #   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
 #   demo    --provider <claude|codex> [--run]                 guided first lane
-#   list                                  show all lanes + status
+#   list    [--status S,...]              show all lanes + status/outcome
 #   status  <lane>                        one lane's state (json)
 #   peek    <lane> [--lines N]            de-escaped tail of the live pane
 #   wait    <lane> [--timeout S] [--interval S]   block until idle
 #   revise  <lane> [--out FILE] -- <message>      steer live, or resume if exited
 #   attach  <lane>                        attach your terminal to the pane
-#   reap    <lane> [--force] [--keep-worktree]    kill window + clean up
+#   close   <lane> --status <...> [--into|--by|--reason ...]  set fan-in outcome
+#   captured <lane> --in <ref>            is lane's work in <ref>? (by content)
+#   reap    <lane|--status S,...> [--force] [--keep-worktree] [--no-archive]
 #   check   [--cwd DIR] [--config FILE] [--no-fail] project integrity gate
 #   doctor                                check deps + backends
 #
@@ -47,6 +49,8 @@ source "$WASPFLOW_LIB/worktree.sh"
 # shellcheck disable=SC1090
 source "$WASPFLOW_LIB/artifacts.sh"
 # shellcheck disable=SC1090
+source "$WASPFLOW_LIB/fanin.sh"
+# shellcheck disable=SC1090
 source "$WASPFLOW_LIB/project.sh"
 
 usage() {
@@ -62,15 +66,24 @@ Verbs:
   spawn   --provider <claude|codex> --lane <name> [opts] -- <task prompt>
   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
   demo    --provider <claude|codex> [--run]                 guided first lane
-  list                                  show all lanes + status
+  list    [--status S,...]              show all lanes (filter by fan-in outcome)
   status  <lane>                        one lane's state (json)
   peek    <lane> [--lines N]            de-escaped tail of the live pane
   wait    <lane> [--timeout S] [--interval S]   block until idle
   revise  <lane> [--out FILE] -- <message>      steer live, or resume if exited
   attach  <lane>                        attach your terminal to the pane
-  reap    <lane> [--force] [--keep-worktree]    kill window + clean up
+  close   <lane> --status <harvested|superseded|abandoned|open> [prov]  fan-in outcome
+  captured <lane> --in <ref>            is lane's work already in <ref>? (by content)
+  reap    <lane|--status S,...> [--force] [--keep-worktree] [--no-archive]  clean up
   check   [--cwd DIR] [--config FILE] [--no-fail] [--explain] project integrity gate
   doctor                                check deps + backends
+
+Fan-in (docs/lane-closeout-and-fan-in.md):
+  close   <lane> --status harvested  --into <pr#|ref>   # work landed here
+  close   <lane> --status superseded --by   <lane|ref>  # a better version won
+  close   <lane> --status abandoned  --reason "..."     # dead end, dropped
+  list    --status harvested,superseded,abandoned        # the reap-safe set
+  reap    --status harvested,superseded,abandoned        # fan-in cleanup, one command
 
 Spawn opts:
   --model <id>       provider model override
@@ -256,21 +269,68 @@ EOF
 }
 
 cmd_list() {
+  local status_filter=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --status) status_filter="${2:-}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
   local lanes; lanes="$(list_lanes)"
   if [[ -z "$lanes" ]]; then echo "(no lanes)"; return 0; fi
-  printf '%-20s %-8s %-8s %-38s %s\n' LANE PROVIDER STATUS SESSION CWD
-  local lane
+  printf '%-20s %-8s %-8s %-11s %s\n' LANE PROVIDER STATE OUTCOME CWD
+  local lane matched=0
   while IFS= read -r lane; do
     [[ -n "$lane" ]] || continue
-    local provider status sid cwd live
+    local provider status cwd live outcome
     provider="$(lane_get "$lane" provider)"
     status="$(lane_get "$lane" status)"
-    sid="$(lane_get "$lane" session_id)"
     cwd="$(lane_get "$lane" cwd)"
+    outcome="$(lane_outcome "$lane")"
+    # --status filters on the fan-in OUTCOME (the reap-safe question).
+    if [[ -n "$status_filter" ]]; then
+      fanin_outcome_matches "$lane" "$status_filter" || continue
+    fi
+    matched=1
     if tmux_window_exists "$lane"; then live="live"; else live="exited"; fi
     [[ "$status" == "reaped" ]] && live="reaped"
-    printf '%-20s %-8s %-8s %-38s %s\n' "$lane" "$provider" "$live" "${sid:--}" "$cwd"
+    printf '%-20s %-8s %-8s %-11s %s\n' "$lane" "$provider" "$live" "$outcome" "$cwd"
   done <<<"$lanes"
+  [[ -n "$status_filter" && "$matched" -eq 0 ]] && echo "(no lanes with outcome in: $status_filter)"
+  return 0
+}
+
+cmd_close() {
+  local lane="" outcome="" pkey="" pval=""
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --status)  outcome="${2:-}"; shift 2 ;;
+      --into)    pkey="into";   pval="${2:-}"; shift 2 ;;
+      --by)      pkey="by";     pval="${2:-}"; shift 2 ;;
+      --reason)  pkey="reason"; pval="${2:-}"; shift 2 ;;
+      "")        shift ;;
+      -*)        die "close: unknown option '$1'" ;;
+      *)         [[ -z "$lane" ]] && { lane="$1"; shift; } || die "close: unexpected arg '$1'" ;;
+    esac
+  done
+  [[ -n "$lane" ]]    || die "close: <lane> required"
+  [[ -n "$outcome" ]] || die "close: --status <harvested|superseded|abandoned|open> required"
+  fanin_close "$lane" "$outcome" "$pkey" "$pval"
+}
+
+cmd_captured() {
+  local lane="" ref=""
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --in) ref="${2:-}"; shift 2 ;;
+      "")   shift ;;
+      -*)   die "captured: unknown option '$1'" ;;
+      *)    [[ -z "$lane" ]] && { lane="$1"; shift; } || die "captured: unexpected arg '$1'" ;;
+    esac
+  done
+  [[ -n "$lane" ]] || die "captured: <lane> required"
+  [[ -n "$ref" ]]  || die "captured: --in <ref> required"
+  fanin_captured "$lane" "$ref"   # prints verdict to stdout, summary to stderr
 }
 
 cmd_status() {
@@ -361,16 +421,44 @@ cmd_attach() {
 }
 
 cmd_reap() {
-  local lane="${1:-}" force=0 keep_wt=0; shift || true
+  local lane="" force=0 keep_wt=0 no_archive=0 status_filter=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --force) force=1; shift ;;
       --keep-worktree) keep_wt=1; shift ;;
-      *) shift ;;
+      --no-archive) no_archive=1; shift ;;
+      --status) status_filter="${2:-}"; shift 2 ;;   # batch: reap the reap-safe set
+      -*) die "reap: unknown option '$1'" ;;
+      "") shift ;;
+      *) [[ -z "$lane" ]] && { lane="$1"; shift; } || die "reap: unexpected arg '$1'" ;;
     esac
   done
-  [[ -n "$lane" ]] || die "reap: <lane> required"
+
+  # Batch mode: reap every lane whose fan-in outcome matches the filter. This is
+  # the one-command fan-in cleanup — `reap --status harvested,superseded,abandoned`.
+  if [[ -n "$status_filter" ]]; then
+    [[ -z "$lane" ]] || die "reap: give a <lane> OR --status, not both"
+    local rc=0 any=0 l
+    while IFS= read -r l; do
+      [[ -n "$l" ]] || continue
+      [[ "$(lane_get "$l" status)" == "reaped" ]] && continue   # already reaped
+      fanin_outcome_matches "$l" "$status_filter" || continue
+      any=1
+      _reap_one "$l" "$force" "$keep_wt" "$no_archive" || rc=$?
+    done < <(list_lanes)
+    [[ "$any" -eq 1 ]] || log "reap: no lanes with outcome in: $status_filter"
+    return "$rc"
+  fi
+
+  [[ -n "$lane" ]] || die "reap: <lane> required (or --status S,... for batch)"
   lane_exists "$lane" || die "no such lane '$lane'"
+  _reap_one "$lane" "$force" "$keep_wt" "$no_archive"
+}
+
+# Reap a single lane. Args: lane force keep_wt no_archive. Returns 2 on an unmet
+# deliverable contract (failed|report_missing) so callers/CI can key on it.
+_reap_one() {
+  local lane="$1" force="$2" keep_wt="$3" no_archive="$4"
   local provider; provider="$(lane_get "$lane" provider)"
   load_provider "$provider"
 
@@ -384,6 +472,11 @@ cmd_reap() {
     tmux kill-window -t "$(tmux_window_target "$lane")" 2>/dev/null || true
     log "reap: killed window for lane '$lane'"
   fi
+
+  # Bundle-before-reap: archive the branch tip to a verified git bundle BEFORE
+  # removing the worktree/branch, so "reaping is cleanup, not data loss" holds
+  # even for unpushed branches. --no-archive opts out for the truly disposable.
+  [[ "$no_archive" -eq 1 ]] || fanin_bundle_lane "$lane" || true
 
   local wt; wt="$(lane_get "$lane" worktree)"
   if [[ -n "$wt" && "$keep_wt" -ne 1 ]]; then
@@ -402,7 +495,6 @@ cmd_reap() {
     *)               log "reap: lane '$lane' reaped" ;;
   esac
   log "reap: state retained ($(lane_dir "$lane")); rm it to purge"
-  # Nonzero exit on an unmet deliverable contract so callers/CI can key on it.
   case "$result" in failed|report_missing) return 2 ;; esac
   return 0
 }
@@ -460,6 +552,8 @@ main() {
     wait)   cmd_wait "$@" ;;
     revise) cmd_revise "$@" ;;
     attach) cmd_attach "$@" ;;
+    close)  cmd_close "$@" ;;
+    captured) cmd_captured "$@" ;;
     reap)   cmd_reap "$@" ;;
     check)  cmd_check "$@" ;;
     doctor) cmd_doctor "$@" ;;
