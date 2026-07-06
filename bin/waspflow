@@ -10,6 +10,7 @@
 #
 # Verbs:
 #   spawn   --provider <claude|codex> --lane <name> [opts] -- <task prompt>
+#   exec    --provider <claude|codex> [opts] [-o FILE] -- <task prompt>
 #   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
 #   demo    --provider <claude|codex> [--run]                 guided first lane
 #   list    [--status S,...]              show all lanes + status/outcome
@@ -45,6 +46,8 @@ export WASPFLOW_ROOT WASPFLOW_LIB
 # shellcheck disable=SC1090
 source "$WASPFLOW_LIB/core.sh"
 # shellcheck disable=SC1090
+source "$WASPFLOW_LIB/exec.sh"
+# shellcheck disable=SC1090
 source "$WASPFLOW_LIB/worktree.sh"
 # shellcheck disable=SC1090
 source "$WASPFLOW_LIB/artifacts.sh"
@@ -64,6 +67,7 @@ First successful run:
 
 Verbs:
   spawn   --provider <claude|codex> --lane <name> [opts] -- <task prompt>
+  exec    --provider <claude|codex> [--model M] [--effort L] [--cwd DIR] [-o FILE] -- <task prompt>
   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
   demo    --provider <claude|codex> [--run]                 guided first lane
   list    [--status S,...]              show all lanes (filter by fan-in outcome)
@@ -92,6 +96,12 @@ Spawn opts:
   --isolate          create an isolated git worktree
   --report <path>    require a deliverable report at reap
   --arg <flag>       pass an extra arg to the provider CLI
+
+Exec opts:
+  --model <id>       provider model override
+  --effort <level>   low|medium|high|xhigh|max
+  --cwd <dir>        worker cwd (default: current dir)
+  -o <file>          write final message to file (default: stdout)
 
 State: $WASPFLOW_HOME (default ~/.local/state/waspflow)
 tmux:  $WASPFLOW_TMUX_SESSION (default waspflow)
@@ -209,6 +219,10 @@ cmd_spawn() {
   log "  wait:   waspflow wait $lane"
   log "  revise: waspflow revise $lane -- \"<message>\""
   log "  reap:   waspflow reap $lane"
+}
+
+cmd_exec() {
+  exec_run "$@"
 }
 
 cmd_demo() {
@@ -544,6 +558,7 @@ main() {
   local verb="${1:-}"; shift || true
   case "$verb" in
     spawn)  cmd_spawn "$@" ;;
+    exec)   cmd_exec "$@" ;;
     init)   cmd_init "$@" ;;
     demo)   cmd_demo "$@" ;;
     list|ls) cmd_list "$@" ;;
