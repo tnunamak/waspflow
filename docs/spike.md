@@ -100,3 +100,28 @@ Full loop, with real worker output:
 - Every "did it submit?" is **verified against the session log**, not assumed —
   the single biggest source of flakiness was blind `send-keys Enter`.
 - cwd is the durable join key for Codex; the minted UUID is it for Claude.
+
+## Testing safety — the tmux socket is keyed by UID, NOT $HOME (READ THIS)
+
+**If you write a test/verification harness that touches tmux, you MUST use an
+isolated tmux socket.** A sandboxed `$HOME` does NOT isolate tmux: the tmux
+server is keyed by UID (`/tmp/tmux-<uid>/default`), so a test that runs
+`tmux new-session -s test-…` lands in the user's **production** tmux server —
+the one holding all their live waspflow lanes. A "cleanup" `tmux kill-server`
+then destroys every running agent session on the machine. This actually happened
+(five times, ~46 live sessions each) before it was caught.
+
+Rules for any tmux use in tests:
+
+1. **Always pass an isolated socket** to every tmux call, cleanup included:
+   `tmux -L wf-test-$$ …`  (or `-S "$tmpdir/sock"`). Set it once, e.g.
+   `TM=(tmux -L "wf-test-$$")` and use `"${TM[@]}" …` everywhere.
+2. **Never run bare `tmux kill-server`.** Prefer
+   `tmux -L wf-test-$$ kill-session -t <name>` — scoped, on the isolated socket.
+3. This applies even when `$WASPFLOW_HOME`/`$HOME` are pointed at a temp dir —
+   those isolate lane *state*, not the tmux *server*.
+
+waspflow's own runtime intentionally shares one named session
+(`$WASPFLOW_TMUX_SESSION`) on the default socket — that is how it drives real
+lanes and is correct. The rule above is for **test harnesses**, which must never
+touch that server.
