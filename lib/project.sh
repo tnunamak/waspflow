@@ -221,7 +221,7 @@ project_check_lanes() {
     stale_seconds="$(jq -r '.lanes.stale_seconds // 0' "$config" 2>/dev/null || echo 0)"
   fi
 
-  local lanes lane any=0 provider status cwd origin result updated now age live label
+  local lanes lane any=0 provider status cwd origin result outcome updated now age live label
   lanes="$(list_lanes || true)"
   if [[ -z "$lanes" ]]; then
     _check_ok "no lanes"
@@ -239,10 +239,14 @@ project_check_lanes() {
     provider="$(lane_get "$lane" provider)"
     status="$(lane_get "$lane" status)"
     result="$(lane_get "$lane" result)"
+    outcome="$(lane_outcome "$lane")"
     updated="$(lane_get "$lane" updated_at)"
     live="exited"
     tmux_window_exists "$lane" && live="live"
     [[ "$status" == "reaped" ]] && live="reaped"
+    if [[ "$status" == "reaped" && ( "$outcome" == "abandoned" || "$outcome" == "superseded" ) ]]; then
+      continue
+    fi
     if [[ "$status" == "reaped" && ( "$result" == "succeeded" || "$result" == "recovered" || -z "$result" ) ]]; then
       continue
     fi
