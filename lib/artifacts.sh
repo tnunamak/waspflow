@@ -17,9 +17,16 @@
 #     disabled and ask it to reconstruct the report from transcript + git diff.
 #   - Finalize an honest result: succeeded | recovered | report_missing | failed.
 #
+# What it adds ONLY when you pass `--verify <cmd>` to spawn:
+#   - At reap, after report finalization and before worktree cleanup, run an
+#     optional prepare command and the verify command in the lane cwd.
+#   - Write local receipts for the command, stdout, stderr, and JSON result.
+#   - Promote a report-satisfied lane from succeeded/recovered to verified, or
+#     stamp verify_failed when the verification contract does not pass.
+#
 # The lane's `result` field (in state.json) is the single source of truth a
-# caller / `wait` keys on. Without a report contract, result is succeeded once
-# the provider reports idle (the agent finished its turn cleanly).
+# caller / `wait` keys on. Without a report or verify contract, result is
+# succeeded once the provider reports idle (the agent finished its turn cleanly).
 
 WASPFLOW_REPORT_MIN_BYTES="${WASPFLOW_REPORT_MIN_BYTES:-200}"
 
@@ -70,7 +77,7 @@ artifacts_report_present() {
 artifacts_finalize() {
   local lane="$1" provider="$2" existing report
   existing="$(lane_get "$lane" result)"
-  case "$existing" in succeeded|recovered|failed|report_missing) echo "$existing"; return 0 ;; esac
+  case "$existing" in succeeded|recovered|failed|report_missing|verified|verify_failed) echo "$existing"; return 0 ;; esac
 
   artifacts_capture_after "$lane"
 
@@ -120,6 +127,141 @@ artifacts_finalize() {
   lane_set "$lane" result "failed" report_state "absent"
   err "lane '$lane': report still missing after recovery — result=failed"
   echo "failed"; return 0
+}
+
+# Run the lane's optional verification contract and return the final result.
+# Args: lane base_result
+artifacts_verify() {
+  local lane="$1" base_result="$2"
+  local verify_command prepare_command verify_name verify_timeout cwd dir
+  case "$base_result" in
+    verified|verify_failed) echo "$base_result"; return 0 ;;
+  esac
+  verify_command="$(lane_get "$lane" verify_command)"
+  [[ -n "$verify_command" ]] || { echo "$base_result"; return 0; }
+
+  cwd="$(lane_get "$lane" cwd)"
+  dir="$(lane_dir "$lane")"
+  verify_name="$(lane_get "$lane" verify_name)"
+  verify_name="${verify_name:-verify}"
+  verify_timeout="$(lane_get "$lane" verify_timeout)"
+  verify_timeout="${verify_timeout:-1800}"
+  prepare_command="$(lane_get "$lane" prepare_command)"
+
+  case "$base_result" in
+    succeeded|recovered) ;;
+    *)
+      _artifacts_write_skipped_verify "$lane" "$verify_name" "$verify_command" "$cwd" "$base_result"
+      echo "$base_result"
+      return 0
+      ;;
+  esac
+
+  if [[ -n "$prepare_command" ]]; then
+    local prepare_state
+    prepare_state="$(_artifacts_run_command "$lane" "$dir/prepare" "prepare" "$prepare_command" "$cwd" "$verify_timeout")"
+    lane_set "$lane" prepare_state "$prepare_state"
+    case "$prepare_state" in
+      passed) ;;
+      *)
+        _artifacts_write_skipped_verify "$lane" "$verify_name" "$verify_command" "$cwd" "prepare_$prepare_state"
+        lane_set "$lane" result "verify_failed"
+        echo "verify_failed"
+        return 0
+        ;;
+    esac
+  fi
+
+  local verify_state
+  verify_state="$(_artifacts_run_command "$lane" "$dir/verify" "$verify_name" "$verify_command" "$cwd" "$verify_timeout")"
+  case "$verify_state" in
+    passed)
+      lane_set "$lane" result "verified"
+      echo "verified"
+      return 0
+      ;;
+    failed|timeout)
+      lane_set "$lane" result "verify_failed"
+      echo "verify_failed"
+      return 0
+      ;;
+    *)
+      lane_set "$lane" result "verify_failed"
+      echo "verify_failed"
+      return 0
+      ;;
+  esac
+}
+
+_artifacts_write_skipped_verify() {
+  local lane="$1" name="$2" command="$3" cwd="$4" reason="$5" dir start
+  dir="$(lane_dir "$lane")"
+  start="$(date +%s)"
+  printf '%s\n' "$command" >"$dir/verify-command.txt"
+  : >"$dir/verify-stdout.txt"
+  printf 'skipped: %s\n' "$reason" >"$dir/verify-stderr.txt"
+  jq -n \
+    --arg name "$name" \
+    --arg command "$command" \
+    --arg cwd "$cwd" \
+    --arg state "skipped" \
+    '{name:$name, command:$command, cwd:$cwd, exit_code:null, duration_seconds:0, state:$state}' \
+    >"$dir/verify-result.json"
+  lane_set "$lane" verify_state "skipped" verify_exit_code "" verify_epoch "$start"
+}
+
+# Run a shell command in cwd and write receipts with the given prefix:
+# <prefix>-command.txt, <prefix>-stdout.txt, <prefix>-stderr.txt,
+# <prefix>-result.json. Echoes passed|failed|timeout.
+_artifacts_run_command() {
+  local lane="$1" prefix="$2" name="$3" command="$4" cwd="$5" timeout_seconds="$6"
+  local stdout="${prefix}-stdout.txt" stderr="${prefix}-stderr.txt"
+  local command_file="${prefix}-command.txt" result_file="${prefix}-result.json"
+  local start end duration rc state timeout_available=0
+
+  printf '%s\n' "$command" >"$command_file"
+  start="$(date +%s)"
+  set +e
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_available=1
+    (cd "$cwd" && timeout "$timeout_seconds" bash -lc "$command") >"$stdout" 2>"$stderr"
+    rc=$?
+  else
+    warn "verify: coreutils 'timeout' not found; running '$name' without a timeout"
+    (cd "$cwd" && bash -lc "$command") >"$stdout" 2>"$stderr"
+    rc=$?
+  fi
+  set -e
+  end="$(date +%s)"
+  duration=$((end - start))
+
+  if [[ "$timeout_available" -eq 1 && "$rc" -eq 124 ]]; then
+    state="timeout"
+  elif [[ "$rc" -eq 0 ]]; then
+    state="passed"
+  else
+    state="failed"
+  fi
+
+  jq -n \
+    --arg name "$name" \
+    --arg command "$command" \
+    --arg cwd "$cwd" \
+    --argjson exit_code "$rc" \
+    --argjson duration_seconds "$duration" \
+    --arg state "$state" \
+    '{name:$name, command:$command, cwd:$cwd, exit_code:$exit_code, duration_seconds:$duration_seconds, state:$state}' \
+    >"$result_file"
+
+  case "$(basename "$prefix")" in
+    verify)
+      lane_set "$lane" verify_state "$state" verify_exit_code "$rc" verify_epoch "$end"
+      ;;
+    prepare)
+      lane_set "$lane" prepare_exit_code "$rc" prepare_epoch "$end"
+      ;;
+  esac
+  echo "$state"
 }
 
 # Run ONE write-disabled recovery turn to reconstruct the report from evidence.

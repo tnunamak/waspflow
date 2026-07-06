@@ -69,6 +69,78 @@ lane_check="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" check --no-fail)"
 grep -q "lane has failed deliverable: lane=old-open-failed" <<<"$lane_check"
 rm -rf "$state_home/lanes/old-open-failed"
 
+long_report="$fixture/R.md"
+printf 'ok %.0s' {1..80} > "$long_report"
+
+mkdir -p "$state_home/lanes/verify-true"
+jq -n \
+  --arg cwd "$fixture" \
+  --arg report "$long_report" \
+  '{provider:"codex", status:"live", result:"", cwd:$cwd, origin_cwd:$cwd, report:$report, no_recovery:"true", git_tracked:"true", verify_command:"true", verify_name:"unit", verify_timeout:"5"}' \
+  > "$state_home/lanes/verify-true/state.json"
+WASPFLOW_HOME="$state_home" "$root/bin/waspflow" reap verify-true --no-archive
+jq -e '.result == "verified" and .verify_state == "passed" and .verify_exit_code == "0"' \
+  "$state_home/lanes/verify-true/state.json" >/dev/null
+jq -e '.name == "unit" and .command == "true" and .state == "passed" and .exit_code == 0' \
+  "$state_home/lanes/verify-true/verify-result.json" >/dev/null
+test -s "$state_home/lanes/verify-true/verify-command.txt"
+test -f "$state_home/lanes/verify-true/verify-stdout.txt"
+test -f "$state_home/lanes/verify-true/verify-stderr.txt"
+
+mkdir -p "$state_home/lanes/verify-false"
+jq -n \
+  --arg cwd "$fixture" \
+  '{provider:"codex", status:"live", result:"", cwd:$cwd, origin_cwd:$cwd, no_recovery:"true", git_tracked:"true", verify_command:"false", verify_name:"unit", verify_timeout:"5"}' \
+  > "$state_home/lanes/verify-false/state.json"
+set +e
+WASPFLOW_HOME="$state_home" "$root/bin/waspflow" reap verify-false --no-archive >/tmp/waspflow-verify-false.txt 2>&1
+rc=$?
+set -e
+[[ "$rc" -eq 2 ]] || { echo "expected verify_false reap rc=2, got $rc" >&2; exit 1; }
+jq -e '.result == "verify_failed" and .verify_state == "failed" and .verify_exit_code == "1"' \
+  "$state_home/lanes/verify-false/state.json" >/dev/null
+lane_check="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" check --no-fail --explain)"
+grep -q "lane has failed verification: lane=verify-false" <<<"$lane_check"
+grep -q "Failed verification:" <<<"$lane_check"
+
+if command -v timeout >/dev/null 2>&1; then
+  mkdir -p "$state_home/lanes/verify-timeout"
+  jq -n \
+    --arg cwd "$fixture" \
+    '{provider:"codex", status:"live", result:"", cwd:$cwd, origin_cwd:$cwd, no_recovery:"true", git_tracked:"true", verify_command:"sleep 2", verify_name:"unit", verify_timeout:"1"}' \
+    > "$state_home/lanes/verify-timeout/state.json"
+  set +e
+  WASPFLOW_HOME="$state_home" "$root/bin/waspflow" reap verify-timeout --no-archive >/tmp/waspflow-verify-timeout.txt 2>&1
+  rc=$?
+  set -e
+  [[ "$rc" -eq 2 ]] || { echo "expected verify_timeout reap rc=2, got $rc" >&2; exit 1; }
+  jq -e '.result == "verify_failed" and .verify_state == "timeout" and .verify_exit_code == "124"' \
+    "$state_home/lanes/verify-timeout/state.json" >/dev/null
+fi
+
+mkdir -p "$state_home/lanes/prepare-false"
+jq -n \
+  --arg cwd "$fixture" \
+  '{provider:"codex", status:"live", result:"", cwd:$cwd, origin_cwd:$cwd, no_recovery:"true", git_tracked:"true", prepare_command:"false", verify_command:"true", verify_name:"unit", verify_timeout:"5"}' \
+  > "$state_home/lanes/prepare-false/state.json"
+set +e
+WASPFLOW_HOME="$state_home" "$root/bin/waspflow" reap prepare-false --no-archive >/tmp/waspflow-prepare-false.txt 2>&1
+rc=$?
+set -e
+[[ "$rc" -eq 2 ]] || { echo "expected prepare_false reap rc=2, got $rc" >&2; exit 1; }
+jq -e '.result == "verify_failed" and .prepare_state == "failed" and .verify_state == "skipped"' \
+  "$state_home/lanes/prepare-false/state.json" >/dev/null
+jq -e '.state == "failed" and .exit_code == 1' "$state_home/lanes/prepare-false/prepare-result.json" >/dev/null
+jq -e '.state == "skipped" and .exit_code == null' "$state_home/lanes/prepare-false/verify-result.json" >/dev/null
+
+mkdir -p "$state_home/lanes/no-verify"
+jq -n \
+  --arg cwd "$fixture" \
+  '{provider:"codex", status:"live", result:"", cwd:$cwd, origin_cwd:$cwd, no_recovery:"true", git_tracked:"true"}' \
+  > "$state_home/lanes/no-verify/state.json"
+WASPFLOW_HOME="$state_home" "$root/bin/waspflow" reap no-verify --no-archive
+jq -e '.result == "succeeded" and (.verify_state == null)' "$state_home/lanes/no-verify/state.json" >/dev/null
+
 init_print="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" init --profile live-stack-mutex --print)"
 printf '%s\n' "$init_print" | jq -e '.mutexes[0].name == "live-stack"' >/dev/null
 
