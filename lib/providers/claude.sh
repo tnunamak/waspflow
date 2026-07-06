@@ -23,6 +23,7 @@ CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
 # its own health and is transparent to us, so we do not gate on it here.
 claude_preflight() {
   command -v claude >/dev/null 2>&1 || { err "claude not found on PATH"; return 1; }
+  billing_preflight_provider claude || return 1
   return 0
 }
 
@@ -192,6 +193,8 @@ claude_revise() {
     warn "claude revise: message may not have submitted for lane '$lane' (transcript did not grow)"
     return 0
   fi
+
+  billing_preflight_provider claude || return 1
 
   # Headless resume after the pane exited. Redirect stdin from /dev/null:
   # `claude --print` reads stdin even when the prompt is a positional arg, and

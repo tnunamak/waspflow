@@ -47,6 +47,9 @@ warn() { printf '%swaspflow:%s %s\n' "$(_wf_color 33)" "$(_wf_reset)" "$*" >&2; 
 err()  { printf '%swaspflow:%s %s\n' "$(_wf_color 31)" "$(_wf_reset)" "$*" >&2; }
 die()  { err "$*"; exit 1; }
 
+# shellcheck disable=SC1090
+source "$WASPFLOW_LIB/billing.sh"
+
 # ---- dependency checks ------------------------------------------------------
 require_cmd() {
   local missing=()

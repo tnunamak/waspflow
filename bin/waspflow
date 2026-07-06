@@ -103,6 +103,12 @@ Exec opts:
   --cwd <dir>        worker cwd (default: current dir)
   -o <file>          write final message to file (default: stdout)
 
+Billing safety:
+  Claude workers refuse to launch when ANTHROPIC_API_KEY is set because that
+  bills pay-as-you-go API rates instead of subscription/Agent-SDK credit.
+  Unset ANTHROPIC_API_KEY, or intentionally override with:
+    WASPFLOW_ALLOW_API_BILLING=1 waspflow spawn --provider claude ...
+
 State: $WASPFLOW_HOME (default ~/.local/state/waspflow)
 tmux:  $WASPFLOW_TMUX_SESSION (default waspflow)
 EOF
@@ -544,6 +550,7 @@ cmd_doctor() {
     if [[ "$code" == "200" ]]; then echo "  [ok]   codex model proxy $url"; else
       echo "  [warn] codex model proxy $url -> $code (start your Codex proxy, or unset WASPFLOW_CODEX_BACKEND_HEALTH_URL)"; fi
   fi
+  billing_report_auth
   [[ "$agent_ok" -eq 1 ]] || ok=0
   [[ "$ok" -eq 1 ]] || {
     echo "  -> missing prerequisites"

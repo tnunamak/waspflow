@@ -24,6 +24,7 @@ CODEX_SESSIONS_DIR="${CODEX_SESSIONS_DIR:-$HOME/.codex/sessions}"
 # Preflight: codex on PATH + the model backend reachable (else turns hang).
 codex_preflight() {
   command -v codex >/dev/null 2>&1 || { err "codex not found on PATH"; return 1; }
+  billing_preflight_provider codex || return 1
   local url="$WASPFLOW_CODEX_BACKEND_HEALTH_URL"
   if [[ -n "$url" ]]; then
     if ! command -v curl >/dev/null 2>&1; then

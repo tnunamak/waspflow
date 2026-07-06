@@ -177,6 +177,25 @@ Useful `spawn` options:
 - `--cwd <dir>` starts the worker in another directory.
 - `--arg <flag>` passes an extra flag to the underlying agent CLI.
 
+## Billing Safety
+
+`waspflow doctor` reports the active auth/billing path implied by the current
+environment. This is especially important for Claude fleets: if
+`ANTHROPIC_API_KEY` is set, headless Claude workers bill pay-as-you-go API
+rates instead of subscription/Agent-SDK credit.
+
+For that reason, `waspflow spawn --provider claude ...` refuses to launch while
+`ANTHROPIC_API_KEY` is set. Unset it to use subscription-backed Claude auth, or
+override intentionally for API billing:
+
+```bash
+WASPFLOW_ALLOW_API_BILLING=1 waspflow spawn --provider claude --lane api -- \
+  "Run the intended API-billed task"
+```
+
+Codex has a secondary analogous check: `OPENAI_API_KEY` is reported by
+`doctor`, and Codex spawns print a billing notice when it is set.
+
 ## What Waspflow Saves
 
 Every lane writes to `$WASPFLOW_HOME/lanes/<lane>/`:
@@ -208,6 +227,7 @@ If the pane has exited, `revise` resumes the saved session headlessly:
 |---|---|---|
 | `WASPFLOW_HOME` | `~/.local/state/waspflow` | Lane state and transcripts |
 | `WASPFLOW_TMUX_SESSION` | `waspflow` | tmux session that holds worker windows |
+| `WASPFLOW_ALLOW_API_BILLING` | empty | Set to `1` to intentionally allow Claude workers while `ANTHROPIC_API_KEY` is set |
 | `WASPFLOW_CODEX_BACKEND_HEALTH_URL` | empty | Optional health check URL for proxy-routed Codex setups |
 | `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Claude session logs |
 | `CODEX_SESSIONS_DIR` | `~/.codex/sessions` | Codex session logs |
