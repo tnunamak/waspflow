@@ -54,8 +54,20 @@ grep -q "Blocker file:" /tmp/waspflow-verify-open.txt
 mkdir -p "$state_home/lanes/old-success"
 jq -n --arg cwd "$fixture" '{provider:"codex", status:"reaped", result:"succeeded", cwd:$cwd, origin_cwd:$cwd}' \
   > "$state_home/lanes/old-success/state.json"
+mkdir -p "$state_home/lanes/old-abandoned"
+jq -n --arg cwd "$fixture" '{provider:"codex", status:"reaped", result:"failed", outcome:"abandoned", outcome_reason:"intentionally dropped", cwd:$cwd, origin_cwd:$cwd}' \
+  > "$state_home/lanes/old-abandoned/state.json"
+mkdir -p "$state_home/lanes/old-superseded"
+jq -n --arg cwd "$fixture" '{provider:"codex", status:"reaped", result:"failed", outcome:"superseded", outcome_by:"better-lane", cwd:$cwd, origin_cwd:$cwd}' \
+  > "$state_home/lanes/old-superseded/state.json"
 lane_check="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" check --no-fail)"
 grep -q "OK: no lanes for this project" <<<"$lane_check"
+mkdir -p "$state_home/lanes/old-open-failed"
+jq -n --arg cwd "$fixture" '{provider:"codex", status:"reaped", result:"failed", cwd:$cwd, origin_cwd:$cwd}' \
+  > "$state_home/lanes/old-open-failed/state.json"
+lane_check="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" check --no-fail)"
+grep -q "lane has failed deliverable: lane=old-open-failed" <<<"$lane_check"
+rm -rf "$state_home/lanes/old-open-failed"
 
 init_print="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" init --profile live-stack-mutex --print)"
 printf '%s\n' "$init_print" | jq -e '.mutexes[0].name == "live-stack"' >/dev/null
