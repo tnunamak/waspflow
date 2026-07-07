@@ -125,6 +125,28 @@ for L in a b; do waspflow reap "$L"; done
 `--isolate` puts each agent in its own git worktree (branch `waspflow/<lane>`) so
 they don't collide. `reap` keeps a dirty worktree unless you pass `--force`.
 
+**Billing safety before you fan out.** If `ANTHROPIC_API_KEY` is set, headless
+Claude workers bill pay-as-you-go **API** rates, not your subscription/Agent-SDK
+credit — and a fleet multiplies that (a stray key has run up $1,800+ in two days).
+waspflow hard-stops a Claude `spawn`/`exec`/`revise` when the key is set; run
+`waspflow doctor` to see the active auth path first. Unset the key to use your
+subscription, or opt in explicitly with `WASPFLOW_ALLOW_API_BILLING=1` if you
+really mean to bill the API. This is an accident guard, not a spend cap.
+
+## Cheap one-shot work (`exec`)
+
+For stateless, fire-and-return work (an audit, a summary, a one-shot transform)
+you only read once, skip the lane machinery entirely:
+
+```bash
+waspflow exec --provider codex -o out.md -- "Summarize what changed in the last 5 commits."
+waspflow exec --provider claude -- "Which files import lib/core.sh?"   # -> stdout
+```
+
+`exec` runs one headless turn, blocks, writes to `-o <file>` (or stdout), and
+leaves no lane, worktree, or reap to clean up. Use `spawn` when you need to steer
+or harvest; use `exec` when you just need the answer.
+
 ## Recovering after YOUR OWN compaction
 
 The lanes outlive your context. To pick back up:

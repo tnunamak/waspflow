@@ -155,7 +155,8 @@ config shape.
 
 | Command | What it does |
 |---|---|
-| `spawn --provider <claude\|codex> --lane <name> [opts] -- <task>` | Start a worker |
+| `spawn --provider <claude\|codex> --lane <name> [opts] -- <task>` | Start a durable worker lane |
+| `exec --provider <claude\|codex> [opts] [-o FILE] -- <task>` | Headless one-shot: run, return, leave no lane |
 | `demo --provider <claude\|codex> [--run]` | Show or run a safe first demo |
 | `wait <lane>` | Wait until a worker finishes its current turn |
 | `peek <lane>` | Show the tail of the worker pane or transcript |
@@ -176,6 +177,30 @@ Useful `spawn` options:
 - `--effort <low|medium|high|xhigh|max>` passes reasoning effort where supported.
 - `--cwd <dir>` starts the worker in another directory.
 - `--arg <flag>` passes an extra flag to the underlying agent CLI.
+
+## Exec: Headless One-Shot Work
+
+`spawn` creates a durable lane — a tmux window, session, optional worktree, and
+state you later `reap`. That is the right shape for implementation work you steer
+and harvest. For **stateless, fire-and-return** work (an analysis, an audit, a
+one-shot transform) that shape is overkill: it leaves a lane and a branch to
+reconcile for something you only read once.
+
+`exec` is the cheap path. It runs one headless turn, blocks until it finishes,
+writes the final message to a file (or stdout), and leaves nothing behind — no
+tmux window, no worktree, no lane record, no reap.
+
+```bash
+# Analysis to a file, blocking:
+waspflow exec --provider codex -o report.md -- "Summarize the auth flow in src/auth/."
+
+# One-shot answer to stdout:
+waspflow exec --provider claude -- "List the public functions in lib/core.sh."
+```
+
+Options mirror `spawn` where they apply: `--model`, `--effort`, `--cwd`, and
+`-o <file>` (omit `-o` to print to stdout). Because `exec` runs the same provider
+preflight as `spawn`, the billing guard below covers it too.
 
 ## Billing Safety
 
