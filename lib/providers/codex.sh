@@ -299,6 +299,10 @@ codex_revise() {
   cwd="$(lane_get "$lane" cwd)"
   model="$(lane_get "$lane" model)"
 
+  # Billing notice covers both the live-pane and headless-resume paths (parity
+  # with claude_revise). For codex this is a soft notice, not a hard stop.
+  billing_preflight_provider codex || return 1
+
   if tmux_window_exists "$lane"; then
     # Live in-pane steer. The Enter can race pane state, so VERIFY the turn
     # actually started by watching the rollout grow, re-sending Enter if not.

@@ -167,6 +167,11 @@ claude_revise() {
   model="$(lane_get "$lane" model)"
   cwd="$(lane_get "$lane" cwd)"   # claude --resume is cwd-scoped — MUST resume from here
 
+  # Billing guard BEFORE the live-vs-headless branch: revising an already-live
+  # pane bills API turns too, so the guard must cover that path — not just the
+  # headless resume below. (Fixes the "$1,800-trap" bypass on live-pane steering.)
+  billing_preflight_provider claude || return 1
+
   if tmux_window_exists "$lane"; then
     # Live in-pane steer. The Enter can race the composer (esp. through hook
     # output), so VERIFY the turn started by watching the JSONL grow, re-sending
@@ -193,8 +198,6 @@ claude_revise() {
     warn "claude revise: message may not have submitted for lane '$lane' (transcript did not grow)"
     return 0
   fi
-
-  billing_preflight_provider claude || return 1
 
   # Headless resume after the pane exited. Redirect stdin from /dev/null:
   # `claude --print` reads stdin even when the prompt is a positional arg, and
