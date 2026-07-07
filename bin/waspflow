@@ -91,6 +91,11 @@ Spawn opts:
   --cwd <dir>        worker cwd (default: current dir)
   --isolate          create an isolated git worktree
   --report <path>    require a deliverable report at reap
+  --verify <cmd>     run a project verification command at reap
+  --verify-name <s>  label for verification receipts (default: verify)
+  --verify-timeout <seconds>
+                    verification timeout in seconds (default: 1800)
+  --prepare <cmd>    run setup command before --verify at reap
   --arg <flag>       pass an extra arg to the provider CLI
 
 State: $WASPFLOW_HOME (default ~/.local/state/waspflow)
@@ -116,6 +121,7 @@ split_after_ddash() {
 
 cmd_spawn() {
   local provider="" lane="" model="" cwd="$PWD" isolate=0 effort="" report="" no_recovery=0
+  local verify_command="" verify_name="verify" verify_timeout=1800 prepare_command=""
   local -a extra=()
   split_after_ddash "$@"
   set -- "${FLAGS[@]:-}"
@@ -129,6 +135,10 @@ cmd_spawn() {
       --isolate|--worktree) isolate=1; shift ;;
       --report)   report="${2:-}"; shift 2 ;;     # opt-in deliverable contract
       --no-recovery) no_recovery=1; shift ;;
+      --verify) verify_command="${2:-}"; shift 2 ;;
+      --verify-name) verify_name="${2:-}"; shift 2 ;;
+      --verify-timeout) verify_timeout="${2:-}"; shift 2 ;;
+      --prepare) prepare_command="${2:-}"; shift 2 ;;
       --arg)      extra+=("${2:-}"); shift 2 ;;   # repeatable pass-through to the agent CLI
       "")         shift ;;
       *) die "spawn: unknown option '$1'" ;;
@@ -144,6 +154,13 @@ cmd_spawn() {
   cwd="$(cd "$cwd" && pwd)" || die "spawn: --cwd does not exist"
   if [[ -n "$effort" && ! "$effort" =~ ^(low|medium|high|xhigh|max)$ ]]; then
     die "spawn: --effort must be one of low|medium|high|xhigh|max (got: $effort)"
+  fi
+  if [[ -n "$verify_command" ]]; then
+    [[ -n "$verify_name" ]] || die "spawn: --verify-name cannot be empty"
+    [[ "$verify_timeout" =~ ^[0-9]+$ && "$verify_timeout" -gt 0 ]] \
+      || die "spawn: --verify-timeout must be a positive integer (got: $verify_timeout)"
+  elif [[ -n "$prepare_command" ]]; then
+    die "spawn: --prepare requires --verify"
   fi
 
   if lane_exists "$lane" && [[ "$(lane_get "$lane" status)" == "live" ]]; then
@@ -195,6 +212,10 @@ cmd_spawn() {
     transcript "$transcript" \
     report "$report_abs" \
     no_recovery "$([[ "$no_recovery" -eq 1 ]] && echo true || echo false)" \
+    verify_command "$verify_command" \
+    verify_name "$verify_name" \
+    verify_timeout "$verify_timeout" \
+    prepare_command "$prepare_command" \
     spawn_epoch "$(date +%s)" \
     prompt "$prompt"
 
@@ -205,6 +226,7 @@ cmd_spawn() {
 
   log "spawned $provider lane '$lane' (tmux: $WASPFLOW_TMUX_SESSION:$lane)"
   [[ -n "$report_abs" ]] && log "  deliverable contract: $report_abs (verified on idle; one recovery pass if missing)"
+  [[ -n "$verify_command" ]] && log "  verify contract: $verify_name -> $verify_command"
   log "  peek:   waspflow peek $lane"
   log "  wait:   waspflow wait $lane"
   log "  revise: waspflow revise $lane -- \"<message>\""
@@ -456,7 +478,7 @@ cmd_reap() {
 }
 
 # Reap a single lane. Args: lane force keep_wt no_archive. Returns 2 on an unmet
-# deliverable contract (failed|report_missing) so callers/CI can key on it.
+# deliverable/verification contract so callers/CI can key on it.
 _reap_one() {
   local lane="$1" force="$2" keep_wt="$3" no_archive="$4"
   local provider; provider="$(lane_get "$lane" provider)"
@@ -467,6 +489,7 @@ _reap_one() {
   # run one recovery pass. Recovery may resume the live pane OR the exited
   # session, and needs the worktree intact to read the diff + write the report.
   local result; result="$(artifacts_finalize "$lane" "$provider")"
+  result="$(artifacts_verify "$lane" "$result")"
 
   if tmux_window_exists "$lane"; then
     tmux kill-window -t "$(tmux_window_target "$lane")" 2>/dev/null || true
@@ -489,13 +512,15 @@ _reap_one() {
   lane_set "$lane" status "reaped"
   case "$result" in
     succeeded)       log "reap: lane '$lane' reaped — result=succeeded" ;;
+    verified)        log "reap: lane '$lane' reaped — result=verified" ;;
     recovered)       warn "reap: lane '$lane' reaped — result=recovered (report rebuilt by recovery pass)" ;;
+    verify_failed)   err  "reap: lane '$lane' reaped — result=verify_failed" ;;
     report_missing)  err  "reap: lane '$lane' reaped — result=report_missing (recovery disabled)" ;;
     failed)          err  "reap: lane '$lane' reaped — result=failed (required report never produced)" ;;
     *)               log "reap: lane '$lane' reaped" ;;
   esac
   log "reap: state retained ($(lane_dir "$lane")); rm it to purge"
-  case "$result" in failed|report_missing) return 2 ;; esac
+  case "$result" in failed|report_missing|verify_failed) return 2 ;; esac
   return 0
 }
 

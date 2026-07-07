@@ -67,6 +67,7 @@ _check_advice_for() {
     current\ branch\ upstream\ delta*|worktree\ branch=*upstream\ delta*|current\ branch\ has\ no\ upstream*) _check_advice branch ;;
     unreaped\ exited\ lane*) _check_advice unreaped ;;
     lane\ has\ failed\ deliverable*) _check_advice deliverable ;;
+    lane\ has\ failed\ verification*) _check_advice verify ;;
     mutex\ *\ is\ OPEN*) _check_advice mutex ;;
     found\ *) _check_advice blocker ;;
     command\ *\ failed*|*\ failed\ rc=*) _check_advice command ;;
@@ -247,7 +248,7 @@ project_check_lanes() {
     if [[ "$status" == "reaped" && ( "$outcome" == "abandoned" || "$outcome" == "superseded" ) ]]; then
       continue
     fi
-    if [[ "$status" == "reaped" && ( "$result" == "succeeded" || "$result" == "recovered" || -z "$result" ) ]]; then
+    if [[ "$status" == "reaped" && ( "$result" == "succeeded" || "$result" == "recovered" || "$result" == "verified" || -z "$result" ) ]]; then
       continue
     fi
     any=1
@@ -256,6 +257,8 @@ project_check_lanes() {
       _check_risk "unreaped exited lane: $label"
     elif [[ "$result" == "failed" || "$result" == "report_missing" ]]; then
       _check_risk "lane has failed deliverable: $label"
+    elif [[ "$result" == "verify_failed" ]]; then
+      _check_risk "lane has failed verification: $label"
     else
       _check_info "$label"
     fi
@@ -450,6 +453,7 @@ project_check_explain() {
       branch) printf '%s\n' '- Branch sync: pull with `git pull --ff-only`, push accepted commits, or set an upstream if this branch is intentionally local.' ;;
       unreaped) printf '%s\n' '- Unreaped exited lane: inspect with `waspflow peek <lane>` and `waspflow status <lane>`, then `waspflow reap <lane>`.' ;;
       deliverable) printf '%s\n' '- Failed/missing report: revise the lane or treat it as failed; do not convert it to success without the deliverable.' ;;
+      verify) printf '%s\n' '- Failed verification: inspect the lane verify receipts, then fix the work or explicitly accept the failed gate.' ;;
       mutex) printf '%s\n' '- Open mutex: read the mutex file and wait for the owner/operator window to close before touching that protected resource.' ;;
       blocker) printf '%s\n' '- Blocker file: open the listed blocker and resolve or explicitly accept the risk before launching more work.' ;;
       command) printf '%s\n' '- Project command failure: fix the command output or mark that command as warning-only in config if it is advisory.' ;;
