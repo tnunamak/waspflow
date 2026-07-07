@@ -23,6 +23,7 @@ CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
 # its own health and is transparent to us, so we do not gate on it here.
 claude_preflight() {
   command -v claude >/dev/null 2>&1 || { err "claude not found on PATH"; return 1; }
+  billing_preflight_provider claude || return 1
   return 0
 }
 
@@ -165,6 +166,11 @@ claude_revise() {
   [[ -n "$session_id" ]] || { err "no session_id recorded for lane '$lane'"; return 1; }
   model="$(lane_get "$lane" model)"
   cwd="$(lane_get "$lane" cwd)"   # claude --resume is cwd-scoped — MUST resume from here
+
+  # Billing guard BEFORE the live-vs-headless branch: revising an already-live
+  # pane bills API turns too, so the guard must cover that path — not just the
+  # headless resume below. (Fixes the "$1,800-trap" bypass on live-pane steering.)
+  billing_preflight_provider claude || return 1
 
   if tmux_window_exists "$lane"; then
     # Live in-pane steer. The Enter can race the composer (esp. through hook

@@ -24,6 +24,7 @@ CODEX_SESSIONS_DIR="${CODEX_SESSIONS_DIR:-$HOME/.codex/sessions}"
 # Preflight: codex on PATH + the model backend reachable (else turns hang).
 codex_preflight() {
   command -v codex >/dev/null 2>&1 || { err "codex not found on PATH"; return 1; }
+  billing_preflight_provider codex || return 1
   local url="$WASPFLOW_CODEX_BACKEND_HEALTH_URL"
   if [[ -n "$url" ]]; then
     if ! command -v curl >/dev/null 2>&1; then
@@ -297,6 +298,10 @@ codex_revise() {
   [[ -n "$sid" ]] || { err "no session_id for lane '$lane' (has it run a turn yet?)"; return 1; }
   cwd="$(lane_get "$lane" cwd)"
   model="$(lane_get "$lane" model)"
+
+  # Billing notice covers both the live-pane and headless-resume paths (parity
+  # with claude_revise). For codex this is a soft notice, not a hard stop.
+  billing_preflight_provider codex || return 1
 
   if tmux_window_exists "$lane"; then
     # Live in-pane steer. The Enter can race pane state, so VERIFY the turn

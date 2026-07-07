@@ -10,6 +10,7 @@
 #
 # Verbs:
 #   spawn   --provider <claude|codex> --lane <name> [opts] -- <task prompt>
+#   exec    --provider <claude|codex> [opts] [-o FILE] -- <task prompt>
 #   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
 #   demo    --provider <claude|codex> [--run]                 guided first lane
 #   list    [--status S,...]              show all lanes + status/outcome
@@ -45,6 +46,8 @@ export WASPFLOW_ROOT WASPFLOW_LIB
 # shellcheck disable=SC1090
 source "$WASPFLOW_LIB/core.sh"
 # shellcheck disable=SC1090
+source "$WASPFLOW_LIB/exec.sh"
+# shellcheck disable=SC1090
 source "$WASPFLOW_LIB/worktree.sh"
 # shellcheck disable=SC1090
 source "$WASPFLOW_LIB/artifacts.sh"
@@ -64,6 +67,7 @@ First successful run:
 
 Verbs:
   spawn   --provider <claude|codex> --lane <name> [opts] -- <task prompt>
+  exec    --provider <claude|codex> [--model M] [--effort L] [--cwd DIR] [-o FILE] -- <task prompt>
   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
   demo    --provider <claude|codex> [--run]                 guided first lane
   list    [--status S,...]              show all lanes (filter by fan-in outcome)
@@ -97,6 +101,18 @@ Spawn opts:
                     verification timeout in seconds (default: 1800)
   --prepare <cmd>    run setup command before --verify at reap
   --arg <flag>       pass an extra arg to the provider CLI
+
+Exec opts:
+  --model <id>       provider model override
+  --effort <level>   low|medium|high|xhigh|max
+  --cwd <dir>        worker cwd (default: current dir)
+  -o <file>          write final message to file (default: stdout)
+
+Billing safety:
+  Claude workers refuse to launch when ANTHROPIC_API_KEY is set because that
+  bills pay-as-you-go API rates instead of subscription/Agent-SDK credit.
+  Unset ANTHROPIC_API_KEY, or intentionally override with:
+    WASPFLOW_ALLOW_API_BILLING=1 waspflow spawn --provider claude ...
 
 State: $WASPFLOW_HOME (default ~/.local/state/waspflow)
 tmux:  $WASPFLOW_TMUX_SESSION (default waspflow)
@@ -231,6 +247,10 @@ cmd_spawn() {
   log "  wait:   waspflow wait $lane"
   log "  revise: waspflow revise $lane -- \"<message>\""
   log "  reap:   waspflow reap $lane"
+}
+
+cmd_exec() {
+  exec_run "$@"
 }
 
 cmd_demo() {
@@ -555,6 +575,7 @@ cmd_doctor() {
     if [[ "$code" == "200" ]]; then echo "  [ok]   codex model proxy $url"; else
       echo "  [warn] codex model proxy $url -> $code (start your Codex proxy, or unset WASPFLOW_CODEX_BACKEND_HEALTH_URL)"; fi
   fi
+  billing_report_auth
   [[ "$agent_ok" -eq 1 ]] || ok=0
   [[ "$ok" -eq 1 ]] || {
     echo "  -> missing prerequisites"
@@ -569,6 +590,7 @@ main() {
   local verb="${1:-}"; shift || true
   case "$verb" in
     spawn)  cmd_spawn "$@" ;;
+    exec)   cmd_exec "$@" ;;
     init)   cmd_init "$@" ;;
     demo)   cmd_demo "$@" ;;
     list|ls) cmd_list "$@" ;;

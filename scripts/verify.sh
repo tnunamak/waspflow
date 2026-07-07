@@ -147,6 +147,20 @@ printf '%s\n' "$init_print" | jq -e '.mutexes[0].name == "live-stack"' >/dev/nul
 demo_preview="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" demo --provider codex --lane preview-only)"
 grep -q "waspflow demo --provider codex --lane preview-only" <<<"$demo_preview"
 
+set +e
+missing_provider="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" exec -- "hello" 2>&1)"
+rc=$?
+set -e
+[[ "$rc" -ne 0 ]] || { echo "expected exec without --provider to fail" >&2; exit 1; }
+grep -q "exec: --provider is required" <<<"$missing_provider"
+
+set +e
+missing_prompt="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" exec --provider codex 2>&1)"
+rc=$?
+set -e
+[[ "$rc" -ne 0 ]] || { echo "expected exec without prompt to fail" >&2; exit 1; }
+grep -q "exec: a task prompt is required after '--'" <<<"$missing_prompt"
+
 sessions_dir="$(mktemp -d "$scratch/waspflow-codex-sessions-XXXXXX")"
 mkdir -p "$sessions_dir/2026/07/01"
 same_cwd="$fixture"

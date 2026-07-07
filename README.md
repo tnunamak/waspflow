@@ -155,7 +155,8 @@ config shape.
 
 | Command | What it does |
 |---|---|
-| `spawn --provider <claude\|codex> --lane <name> [opts] -- <task>` | Start a worker |
+| `spawn --provider <claude\|codex> --lane <name> [opts] -- <task>` | Start a durable worker lane |
+| `exec --provider <claude\|codex> [opts] [-o FILE] -- <task>` | Headless one-shot: run, return, leave no lane |
 | `demo --provider <claude\|codex> [--run]` | Show or run a safe first demo |
 | `wait <lane>` | Wait until a worker finishes its current turn |
 | `peek <lane>` | Show the tail of the worker pane or transcript |
@@ -176,6 +177,49 @@ Useful `spawn` options:
 - `--effort <low|medium|high|xhigh|max>` passes reasoning effort where supported.
 - `--cwd <dir>` starts the worker in another directory.
 - `--arg <flag>` passes an extra flag to the underlying agent CLI.
+
+## Exec: Headless One-Shot Work
+
+`spawn` creates a durable lane — a tmux window, session, optional worktree, and
+state you later `reap`. That is the right shape for implementation work you steer
+and harvest. For **stateless, fire-and-return** work (an analysis, an audit, a
+one-shot transform) that shape is overkill: it leaves a lane and a branch to
+reconcile for something you only read once.
+
+`exec` is the cheap path. It runs one headless turn, blocks until it finishes,
+writes the final message to a file (or stdout), and leaves nothing behind — no
+tmux window, no worktree, no lane record, no reap.
+
+```bash
+# Analysis to a file, blocking:
+waspflow exec --provider codex -o report.md -- "Summarize the auth flow in src/auth/."
+
+# One-shot answer to stdout:
+waspflow exec --provider claude -- "List the public functions in lib/core.sh."
+```
+
+Options mirror `spawn` where they apply: `--model`, `--effort`, `--cwd`, and
+`-o <file>` (omit `-o` to print to stdout). Because `exec` runs the same provider
+preflight as `spawn`, the billing guard below covers it too.
+
+## Billing Safety
+
+`waspflow doctor` reports the active auth/billing path implied by the current
+environment. This is especially important for Claude fleets: if
+`ANTHROPIC_API_KEY` is set, headless Claude workers bill pay-as-you-go API
+rates instead of subscription/Agent-SDK credit.
+
+For that reason, `waspflow spawn --provider claude ...` refuses to launch while
+`ANTHROPIC_API_KEY` is set. Unset it to use subscription-backed Claude auth, or
+override intentionally for API billing:
+
+```bash
+WASPFLOW_ALLOW_API_BILLING=1 waspflow spawn --provider claude --lane api -- \
+  "Run the intended API-billed task"
+```
+
+Codex has a secondary analogous check: `OPENAI_API_KEY` is reported by
+`doctor`, and Codex spawns print a billing notice when it is set.
 
 ## What Waspflow Saves
 
@@ -208,6 +252,7 @@ If the pane has exited, `revise` resumes the saved session headlessly:
 |---|---|---|
 | `WASPFLOW_HOME` | `~/.local/state/waspflow` | Lane state and transcripts |
 | `WASPFLOW_TMUX_SESSION` | `waspflow` | tmux session that holds worker windows |
+| `WASPFLOW_ALLOW_API_BILLING` | empty | Set to `1` to intentionally allow Claude workers while `ANTHROPIC_API_KEY` is set |
 | `WASPFLOW_CODEX_BACKEND_HEALTH_URL` | empty | Optional health check URL for proxy-routed Codex setups |
 | `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Claude session logs |
 | `CODEX_SESSIONS_DIR` | `~/.codex/sessions` | Codex session logs |
