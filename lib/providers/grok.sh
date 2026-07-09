@@ -139,16 +139,16 @@ grok_is_idle() {
   [[ "$last_turn" == "turn_ended" ]]
 }
 
-# turn_mark: monotonic session counter = events.jsonl line count. Advances on
-# every event (incl. the turn_started a live revise triggers), so a post-revise
-# increase means the new turn began. Used by `wait` to skip stale prior-turn idle.
+# turn_mark: count of COMPLETED turns (turn_ended events) in events.jsonl. Like
+# claude/codex, advances ONLY when a turn finishes — not on the turn_started a
+# revise triggers — so the wait barrier clears exactly when the revised turn ends.
 grok_turn_mark() {
   local lane="$1" session_id events
   session_id="$(grok_discover_session "$lane")"
   [[ -n "$session_id" ]] || { echo 0; return 0; }
   events="$(_grok_events_file "$session_id" || true)"
   [[ -n "$events" && -f "$events" ]] || { echo 0; return 0; }
-  wc -l <"$events" 2>/dev/null || echo 0
+  jq -rc 'select(.type=="turn_ended") | 1' "$events" 2>/dev/null | wc -l
 }
 
 # Revise: re-enter the session and run one turn. Two paths:

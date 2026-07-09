@@ -301,9 +301,9 @@ codex_is_idle() {
   [[ "$last" == "task_complete" ]]
 }
 
-# turn_mark: monotonic session counter = rollout JSONL line count. Advances on
-# every event (incl. the user message a live revise submits), so a post-revise
-# increase means the new turn began. Used by `wait` to skip stale prior-turn idle.
+# turn_mark: count of COMPLETED turns (task_complete events) in the rollout. Like
+# claude's, this advances ONLY when a turn finishes — not on the submitted user
+# message — so the wait barrier clears exactly when the revised turn completes.
 codex_turn_mark() {
   local lane="$1" sid rollout
   sid="$(codex_discover_session "$lane")"
@@ -313,7 +313,7 @@ codex_turn_mark() {
     rollout="$(find "$CODEX_SESSIONS_DIR" -type f -name "*${sid}.jsonl" 2>/dev/null | head -1)"
   fi
   [[ -n "$rollout" && -f "$rollout" ]] || { echo 0; return 0; }
-  wc -l <"$rollout" 2>/dev/null || echo 0
+  jq -rc 'select((.payload.type // .type) == "task_complete") | 1' "$rollout" 2>/dev/null | wc -l
 }
 
 # Revise. If the tmux window is live, steer in-pane via paste-buffer; otherwise
