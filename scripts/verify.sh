@@ -328,4 +328,87 @@ JSONL
   rm -rf "$cproj"
 )
 
+# codex_is_idle: last rollout event payload.type == task_complete => idle.
+# Codex is a first-class provider; its idle predicate gets behavioral coverage
+# too (parity with claude/grok), so `wait` on a Codex lane is proven, not assumed.
+(
+  export WASPFLOW_HOME="$state_home"
+  cxdir="$(mktemp -d "$scratch/waspflow-codex-idle-XXXXXX")"
+  export CODEX_SESSIONS_DIR="$cxdir"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/codex.sh"
+  csid="33333333-3333-3333-3333-333333333333"
+  mkdir -p "$cxdir/2026/07/09"
+  roll="$cxdir/2026/07/09/rollout-2026-07-09T00-00-01-$csid.jsonl"
+  same="$fixture"
+  # Mid-turn: a task_started with no task_complete yet -> NOT idle.
+  cat >"$roll" <<JSONL
+{"type":"session_meta","payload":{"id":"$csid","cwd":"$same"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"WASPFLOW_LANE_MARKER:cx-idle:zzz"}}
+{"type":"event_msg","payload":{"type":"task_started"}}
+JSONL
+  lane_set cx-idle provider codex status live cwd "$same" codex_marker "WASPFLOW_LANE_MARKER:cx-idle:zzz" rollout "$roll"
+  if codex_is_idle cx-idle; then echo "codex_is_idle: expected NOT idle before task_complete" >&2; exit 1; fi
+  # Turn completes -> idle.
+  printf '%s\n' '{"type":"event_msg","payload":{"type":"task_complete"}}' >>"$roll"
+  codex_is_idle cx-idle || { echo "codex_is_idle: expected idle after task_complete" >&2; exit 1; }
+  rm -rf "$cxdir"
+)
+
+# Fan-in ledger — `close` sets outcome + requires provenance; `captured` reports
+# CAPTURED/UNIQUE/PARTIAL by CONTENT. Both are trust-critical for fleet cleanup
+# yet had no behavioral coverage. Deterministic, no agent needed.
+(
+  export WASPFLOW_HOME="$state_home"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/fanin.sh"
+
+  # close: unset outcome reads as 'open'.
+  lane_set fi-close provider codex status reaped cwd "$fixture"
+  [[ "$(lane_outcome fi-close)" == "open" ]] || { echo "close: default outcome should be 'open'" >&2; exit 1; }
+  # harvested requires --into provenance.
+  if ( fanin_close fi-close harvested "" "" ) 2>/dev/null; then
+    echo "close: harvested without --into should fail" >&2; exit 1; fi
+  fanin_close fi-close harvested into "PR#42"
+  [[ "$(lane_get fi-close outcome)" == "harvested" && "$(lane_get fi-close outcome_into)" == "PR#42" ]] \
+    || { echo "close: harvested state not recorded" >&2; exit 1; }
+  fanin_close fi-close abandoned reason "dropped for a better approach"
+  [[ "$(lane_get fi-close outcome)" == "abandoned" && "$(lane_get fi-close outcome_reason)" == "dropped for a better approach" ]] \
+    || { echo "close: abandoned state not recorded" >&2; exit 1; }
+  # outcome filter matches.
+  fanin_outcome_matches fi-close "harvested,abandoned" || { echo "close: outcome filter should match abandoned" >&2; exit 1; }
+  if fanin_outcome_matches fi-close "harvested"; then echo "close: filter should NOT match harvested now" >&2; exit 1; fi
+
+  # captured: build a real git repo, a lane branch that adds a file+symbol, and
+  # three refs — one WITH the work (CAPTURED), one WITHOUT (UNIQUE).
+  crepo="$(mktemp -d "$scratch/waspflow-captured-XXXXXX")"
+  git -C "$crepo" init -q
+  git -C "$crepo" config user.email t@e.invalid; git -C "$crepo" config user.name T
+  printf 'base\n' > "$crepo/base.txt"; git -C "$crepo" add -A; git -C "$crepo" commit -q -m base
+  git -C "$crepo" branch -m main 2>/dev/null || true
+  fork="$(git -C "$crepo" rev-parse HEAD)"
+  # Lane branch adds a unique file + a unique symbol.
+  git -C "$crepo" checkout -q -b waspflow/fi-cap
+  printf 'export function laneUniqueSymbol() { return 1 }\n' > "$crepo/lane_added.ts"
+  git -C "$crepo" add -A; git -C "$crepo" commit -q -m lane
+  # ref WITHOUT the work = the fork point.
+  git -C "$crepo" checkout -q main
+  # ref WITH the work = a forward-port (cherry-pick, non-merge — ancestry would lie).
+  git -C "$crepo" checkout -q -b integrated main
+  printf 'export function laneUniqueSymbol() { return 1 }\n' > "$crepo/lane_added.ts"
+  git -C "$crepo" add -A; git -C "$crepo" commit -q -m 'forward-port lane work'
+  git -C "$crepo" checkout -q main
+  lane_set fi-cap provider codex status reaped cwd "$crepo" repo_root "$crepo" origin_cwd "$crepo"
+
+  verdict_cap="$(fanin_captured fi-cap integrated 2>/dev/null)"
+  [[ "$verdict_cap" == "CAPTURED" ]] || { echo "captured: expected CAPTURED vs integrated, got '$verdict_cap'" >&2; exit 1; }
+  verdict_uniq="$(fanin_captured fi-cap main 2>/dev/null)"
+  [[ "$verdict_uniq" == "UNIQUE" ]] || { echo "captured: expected UNIQUE vs fork point, got '$verdict_uniq'" >&2; exit 1; }
+  rm -rf "$crepo"
+)
+
 echo "waspflow verify: ok"
