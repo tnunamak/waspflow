@@ -69,6 +69,17 @@ new_uuid() {
   fi
 }
 
+# Refuse to hand a worker the filesystem root as its cwd. Real incident: grok
+# workers spawned with `--cwd /` crashed and dumped multi-GB cores. Root is never
+# a legitimate workspace; require an explicit opt-in to allow it. The caller must
+# pass an ALREADY-RESOLVED absolute path (post `cd && pwd`). Args: resolved_cwd
+guard_cwd() {
+  local cwd="$1"
+  if [[ "$cwd" == "/" && "${WASPFLOW_ALLOW_ROOT_CWD:-0}" != "1" ]]; then
+    die "refusing to run a worker with cwd '/' (known crash class: multi-GB core dumps). Set WASPFLOW_ALLOW_ROOT_CWD=1 to override."
+  fi
+}
+
 # Lane names become tmux window names and dir names; keep them tame.
 validate_lane_name() {
   local lane="$1"

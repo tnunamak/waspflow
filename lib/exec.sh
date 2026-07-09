@@ -44,6 +44,7 @@ exec_run() {
   is_known_provider "$provider" || die "exec: unknown provider '$provider'"
   [[ -n "$prompt" ]] || die "exec: a task prompt is required after '--'"
   cwd="$(cd "$cwd" && pwd)" || die "exec: --cwd does not exist"
+  guard_cwd "$cwd"   # never run a worker with cwd '/' silently (known crash class)
   if [[ -n "$effort" && ! "$effort" =~ ^(none|minimal|low|medium|high|xhigh|max)$ ]]; then
     die "exec: --effort must be one of none|minimal|low|medium|high|xhigh|max (got: $effort)"
   fi
@@ -72,10 +73,47 @@ exec_run() {
     return "$rc"
   fi
 
+  # A provider can exit 0 yet write a useless report (empty, whitespace-only, or
+  # a body that is just an error string). Returning success on that is a silent
+  # re-run — the exact waste the product sells against. Validate BEFORE success.
+  if ! _exec_output_is_useful "$output_path"; then
+    err "exec: $provider exited 0 but produced no usable output (empty/placeholder); treating as failure"
+    [[ "$should_cat" -eq 1 ]] && rm -f "$output_path"
+    return 1
+  fi
+
   if [[ "$should_cat" -eq 1 ]]; then
     cat "$output_path"
     rm -f "$output_path"
   fi
+}
+
+# Reject an output file that is too small to be real, blank once stripped, or is
+# only a known error placeholder. Conservative on purpose: the 2-byte floor and
+# whitespace check reject nothing legitimate (even a one-line "a\n" file list is
+# >2 bytes), and the denylist matches ONLY when the ENTIRE stripped body equals a
+# pure-error string — not merely contains it — so a real report that mentions
+# "Execution error" in passing still passes. Returns 0 if useful, 1 if not.
+_exec_output_is_useful() {
+  local path="$1" bytes stripped
+  [[ -f "$path" ]] || return 1
+  # Byte floor: < 2 bytes cannot be a meaningful answer.
+  bytes="$(wc -c <"$path" 2>/dev/null || echo 0)"
+  [[ "$bytes" -ge 2 ]] || return 1
+  # Strip leading/trailing whitespace (incl. blank lines); empty after strip = useless.
+  stripped="$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$path" | sed '/^$/d')"
+  [[ -n "$stripped" ]] || return 1
+  # Pure-error placeholders: reject only when the ENTIRE stripped body EXACTLY
+  # equals one of these (no globs — a real report that merely opens with "Error:"
+  # and continues must pass). Case-insensitive on the common single-word ones.
+  local low; low="$(printf '%s' "$stripped" | tr '[:upper:]' '[:lower:]')"
+  case "$low" in
+    "execution error" | "error" | "null" | "undefined" \
+    | "no response" | "no output" | "(no output)" | "n/a" )
+      return 1
+      ;;
+  esac
+  return 0
 }
 
 _exec_abs_output_path() {

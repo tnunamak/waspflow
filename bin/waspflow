@@ -187,6 +187,7 @@ cmd_spawn() {
   validate_lane_name "$lane"
   [[ -n "$prompt" ]] || die "spawn: a task prompt is required after '--'"
   cwd="$(cd "$cwd" && pwd)" || die "spawn: --cwd does not exist"
+  guard_cwd "$cwd"   # never hand a worker '/' silently (known grok --cwd / crash)
   if [[ -n "$effort" && ! "$effort" =~ ^(none|minimal|low|medium|high|xhigh|max)$ ]]; then
     die "spawn: --effort must be one of none|minimal|low|medium|high|xhigh|max (got: $effort)"
   fi
@@ -279,13 +280,9 @@ cmd_spawn() {
 
   "${provider}_spawn" "$lane" "$work_cwd" "$model" "$session_id" "$transcript" "$prompt" "${extra[@]}"
 
-  log "spawned $provider lane '$lane' (tmux: $WASPFLOW_TMUX_SESSION:$lane)"
+  log "spawned $provider lane '$lane' (tmux: $WASPFLOW_TMUX_SESSION:$lane) — next: wait/peek/revise/reap $lane"
   [[ -n "$report_abs" ]] && log "  deliverable contract: $report_abs (verified on idle; one recovery pass if missing)"
   [[ -n "$verify_command" ]] && log "  verify contract: $verify_name -> $verify_command"
-  log "  peek:   waspflow peek $lane"
-  log "  wait:   waspflow wait $lane"
-  log "  revise: waspflow revise $lane -- \"<message>\""
-  log "  reap:   waspflow reap $lane"
 }
 
 cmd_exec() {
@@ -451,7 +448,6 @@ cmd_wait() {
   require_cmd jq
 
   local deadline=$(( $(date +%s) + timeout ))
-  log "wait: lane '$lane' ($provider) timeout=${timeout}s"
   while :; do
     if "${provider}_is_idle" "$lane"; then
       # Capture the change so far (cheap, idempotent). Deliverable enforcement +
@@ -553,7 +549,6 @@ _reap_one() {
 
   if tmux_window_exists "$lane"; then
     tmux kill-window -t "$(tmux_window_target "$lane")" 2>/dev/null || true
-    log "reap: killed window for lane '$lane'"
   fi
 
   # Bundle-before-reap: archive the branch tip to a verified git bundle BEFORE
@@ -579,7 +574,6 @@ _reap_one() {
     failed)          err  "reap: lane '$lane' reaped — result=failed (required report never produced)" ;;
     *)               log "reap: lane '$lane' reaped" ;;
   esac
-  log "reap: state retained ($(lane_dir "$lane")); rm it to purge"
   case "$result" in failed|report_missing|verify_failed) return 2 ;; esac
   return 0
 }

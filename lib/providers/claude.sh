@@ -141,7 +141,65 @@ claude_session_resumable() {
   [[ -n "$jsonl" && -s "$jsonl" ]]
 }
 
-# IDLE predicate: last assistant event's stop_reason == end_turn.
+# How recently a subagent transcript must have been written to count as "still
+# active". A running subagent flushes events continuously; once it finishes (or
+# dies) its file goes cold. This bounds the wait so a killed/hung child can't
+# block reaping forever, while being generous enough to survive slow model turns.
+CLAUDE_SUBAGENT_ACTIVE_SECS="${CLAUDE_SUBAGENT_ACTIVE_SECS:-45}"
+
+# Are any of the parent session's Task/subagents still running?
+#
+# Signal (ground-truthed against real ~/.claude/projects files, 2026-07):
+#   Claude Code writes each subagent's transcript to a SEPARATE file at
+#     <projects>/<slug>/<session-id>/subagents/agent-*.jsonl
+#   Every such file carries "isSidechain":true and the SAME sessionId as the
+#   parent. The parent's own JSONL does NOT reliably inline subagent events, and
+#   in the modern schema the parent's Task tool_use/tool_result pairing is often
+#   pruned/compacted away — so the parent file alone cannot tell us a child is
+#   live. The child FILES are the observable signal.
+#
+# A subagent is treated as ACTIVE when its transcript was modified within
+# CLAUDE_SUBAGENT_ACTIVE_SECS AND its last event is not a clean terminal turn
+# (assistant/end_turn). The mtime gate ignores children that already finished
+# (cold files); the terminal-state gate ignores a child that finished cleanly
+# but whose file is coincidentally fresh.
+#
+# Reliability, stated honestly: this is a heuristic, biased toward the SAFE side
+# (waiting too long beats reaping an empty worktree). A subagent that stalls
+# without writing for >ACTIVE_SECS reads as done; conversely a child mid-turn
+# always reads as active. It cannot see subagents that never wrote a file yet
+# (sub-second race right after spawn) — the parent's end_turn gate below plus
+# wait's polling covers that in practice. Returns 0 if any child looks active.
+_claude_children_active() {
+  local session_id="$1" subdir sub last_mtime now age
+  # Parent transcript dir: <projects>/<slug>/<session-id>/subagents/
+  # Locate it via the parent jsonl's dir so we don't guess the slug.
+  local parent_jsonl parent_dir
+  parent_jsonl="$(find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
+  [[ -n "$parent_jsonl" ]] || return 1
+  parent_dir="$(dirname "$parent_jsonl")"
+  subdir="$parent_dir/${session_id}/subagents"
+  [[ -d "$subdir" ]] || return 1
+
+  now="$(date +%s)"
+  while IFS= read -r sub; do
+    [[ -n "$sub" && -f "$sub" ]] || continue
+    last_mtime="$(stat -c %Y "$sub" 2>/dev/null || echo 0)"
+    age=$(( now - last_mtime ))
+    # Cold file → that child is done (or dead); skip it.
+    [[ "$age" -le "$CLAUDE_SUBAGENT_ACTIVE_SECS" ]] || continue
+    # Fresh file: active unless its last assistant turn already ended cleanly.
+    local child_reason
+    child_reason="$(jq -rc 'select(.type=="assistant") | .message.stop_reason // empty' "$sub" 2>/dev/null | tail -1)"
+    [[ "$child_reason" == "end_turn" ]] || return 0
+  done < <(find "$subdir" -maxdepth 1 -type f -name 'agent-*.jsonl' 2>/dev/null)
+  return 1
+}
+
+# IDLE predicate: the parent's last assistant event ended its turn AND no child
+# subagent is still active. A Claude parent that spawned Task/subagents ends its
+# OWN turn (end_turn) while the children keep writing the deliverable; gating on
+# the parent alone reaps a partial/empty worktree. See _claude_children_active.
 # Args: lane
 claude_is_idle() {
   local lane="$1" session_id jsonl last_reason
@@ -151,7 +209,12 @@ claude_is_idle() {
             -printf '%T@\t%p\n' 2>/dev/null | sort -rn | head -1 | cut -f2-)"
   [[ -n "$jsonl" && -f "$jsonl" ]] || return 1
   last_reason="$(jq -rc 'select(.type=="assistant") | .message.stop_reason // empty' "$jsonl" 2>/dev/null | tail -1)"
-  [[ "$last_reason" == "end_turn" ]]
+  [[ "$last_reason" == "end_turn" ]] || return 1
+  # Parent turn ended — but hold IDLE while any spawned subagent is still writing.
+  if _claude_children_active "$session_id"; then
+    return 2   # distinct nonzero: "parent done, children still active" (not idle)
+  fi
+  return 0
 }
 
 # Revise: re-enter the session and run one turn. Two paths:
