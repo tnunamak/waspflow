@@ -33,7 +33,7 @@ codex exec \
   </dev/null
 ```
 
-`xhigh` and `max` clamp to Codex `model_reasoning_effort=high`, matching the
+`xhigh is passed through as model_reasoning_effort=xhigh (never clamped). max hard-fails.
 existing spawn adapter behavior. `--skip-git-repo-check` is needed because this
 verb is expected to work from scratch dirs, and Codex only accepts that flag on
 `exec`.

@@ -44,8 +44,8 @@ exec_run() {
   is_known_provider "$provider" || die "exec: unknown provider '$provider'"
   [[ -n "$prompt" ]] || die "exec: a task prompt is required after '--'"
   cwd="$(cd "$cwd" && pwd)" || die "exec: --cwd does not exist"
-  if [[ -n "$effort" && ! "$effort" =~ ^(low|medium|high|xhigh|max)$ ]]; then
-    die "exec: --effort must be one of low|medium|high|xhigh|max (got: $effort)"
+  if [[ -n "$effort" && ! "$effort" =~ ^(none|minimal|low|medium|high|xhigh|max)$ ]]; then
+    die "exec: --effort must be one of none|minimal|low|medium|high|xhigh|max (got: $effort)"
   fi
 
   load_provider "$provider"
@@ -93,11 +93,19 @@ _exec_codex() {
   local -a model_args=()
   [[ -n "$model" ]] && model_args=(-m "$model")
 
+  # Pass through exactly; never clamp xhigh→high. max is not a Codex value.
   local -a effort_args=()
   case "$effort" in
-    low)             effort_args=(-c model_reasoning_effort=low) ;;
-    medium)          effort_args=(-c model_reasoning_effort=medium) ;;
-    high|xhigh|max)  effort_args=(-c model_reasoning_effort=high) ;;
+    "") ;;
+    minimal|low|medium|high|xhigh)
+      effort_args=(-c "model_reasoning_effort=${effort}")
+      ;;
+    max)
+      die "exec/codex: effort 'max' is not supported by Codex (use xhigh). Never silently remapped."
+      ;;
+    *)
+      die "exec/codex: unsupported effort '$effort' (valid: minimal|low|medium|high|xhigh)"
+      ;;
   esac
 
   local log_file rc=0

@@ -83,11 +83,38 @@ waspflow wait parser
 waspflow reap parser
 ```
 
-## Choosing provider / model / lane
+## Choosing provider / model / lane (operating points)
+
+**Do not** invent a `cheap|default|max` ladder or silently auto-route models.
+
+Prefer **task-shaped operating points** that expand to explicit flags:
+
+```bash
+waspflow ops list --task implementation --constraint balanced
+waspflow ops explain implement.standard
+waspflow ops resolve review.audit --json
+waspflow spawn --op implement.standard --lane fix -- "Implement …"
+# explicit overrides always win:
+waspflow spawn --op implement.standard --provider codex --effort xhigh --lane fix -- "…"
+```
+
+Doctrine:
+
+1. Pick **task family** first (implement / review / recover / fanout / advisor / ui / docs).
+2. Pick **constraint** second (balanced / quota-tight / dollar-tight / …).
+3. Resolve to an explicit operating point; check the decision card (frontier, evidence, escalate path).
+4. Check **quota** (clawmeter) separately from **API dollars** (tokensmash) — never merge without an explicit exchange rate.
+5. Prefer non-dominated points with adequate evidence; escalate after failed verification, not by default.
+6. Do **not** use providers with **missing** quality evidence for high-risk work unless the user chooses exploration (`grok.explore-only`).
+7. Log/record catalog + policy versions when available; raw `--provider/--model/--effort` remains canonical.
+8. Effort is pass-through: never silently demote (Codex `xhigh` is real; do not clamp to `high`).
+
+Raw control still works:
 
 - `--provider claude`, `--provider codex`, or `--provider grok`.
 - `--model <id>` to override (e.g. a specific Claude, gpt, or Grok model). Omit
   to use the provider's default.
+- `--effort <none|minimal|low|medium|high|xhigh|max>` — validity is provider/surface-specific; unsupported values hard-fail.
 - `--lane <name>` is your handle for every later command — keep it short and
   unique (letters/digits/`.`/`_`/`-`).
 - `--arg <x>` (repeatable) passes an extra flag straight to the underlying agent
@@ -184,5 +211,5 @@ Grok `turn_ended`). Prefer `wait` over polling `peek`.
 
 ## Full command reference
 
-`spawn · init · demo · list · status · peek · wait · revise · attach · reap · check · doctor` — run
+`spawn · exec · ops · init · demo · list · status · peek · wait · revise · attach · reap · check · doctor` — run
 `waspflow help` or see the repo README.

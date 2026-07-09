@@ -7,12 +7,26 @@ mkdir -p "$scratch"
 
 bash -n "$root/bin/waspflow" "$root"/lib/*.sh "$root"/lib/providers/*.sh
 
+# Codex effort honesty: xhigh must pass through (never clamp xhigh|max → high)
+grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/providers/codex.sh"
+grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/exec.sh"
+! grep -E 'high\|xhigh\|max' "$root/lib/providers/codex.sh"
+! grep -E 'high\|xhigh\|max' "$root/lib/exec.sh"
+
 fixture="$(mktemp -d "$scratch/waspflow-verify-XXXXXX")"
 state_home="$(mktemp -d "$scratch/waspflow-state-XXXXXX")"
 cleanup() {
   rm -rf "$fixture" "$state_home"
 }
 trap cleanup EXIT
+
+# Operating-point resolver (bundled policy pack)
+ops_list="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" ops list --task implementation)"
+grep -q "implement.standard" <<<"$ops_list"
+ops_explain="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" ops explain implement.standard)"
+grep -q "provider: claude" <<<"$ops_explain"
+ops_json="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" ops resolve implement.standard --json)"
+jq -e '.expands_to.provider == "claude" and .expands_to.effort == "medium" and .op == "implement.standard"' <<<"$ops_json" >/dev/null
 
 cd "$fixture"
 git init -q

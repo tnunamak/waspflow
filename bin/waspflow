@@ -9,8 +9,9 @@
 # windows + lane state persist on disk).
 #
 # Verbs:
-#   spawn   --provider <claude|codex|grok> --lane <name> [opts] -- <task prompt>
+#   spawn   --provider <claude|codex|grok> | --op <id> --lane <name> [opts] -- <task>
 #   exec    --provider <claude|codex|grok> [opts] [-o FILE] -- <task prompt>
+#   ops     list|explain|resolve|path     operating-point resolver (not a picker)
 #   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
 #   demo    --provider <claude|codex|grok> [--run]            guided first lane
 #   list    [--status S,...]              show all lanes + status/outcome
@@ -48,6 +49,8 @@ source "$WASPFLOW_LIB/core.sh"
 # shellcheck disable=SC1090
 source "$WASPFLOW_LIB/exec.sh"
 # shellcheck disable=SC1090
+source "$WASPFLOW_LIB/ops.sh"
+# shellcheck disable=SC1090
 source "$WASPFLOW_LIB/worktree.sh"
 # shellcheck disable=SC1090
 source "$WASPFLOW_LIB/artifacts.sh"
@@ -66,8 +69,9 @@ First successful run:
   waspflow demo --provider codex --run
 
 Verbs:
-  spawn   --provider <claude|codex|grok> --lane <name> [opts] -- <task prompt>
+  spawn   --provider <claude|codex|grok> | --op <id> --lane <name> [opts] -- <task>
   exec    --provider <claude|codex|grok> [--model M] [--effort L] [--cwd DIR] [-o FILE] -- <task prompt>
+  ops     list|explain|resolve|path     operating-point resolver (decision cards)
   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
   demo    --provider <claude|codex|grok> [--run]            guided first lane
   list    [--status S,...]              show all lanes (filter by fan-in outcome)
@@ -82,6 +86,13 @@ Verbs:
   check   [--cwd DIR] [--config FILE] [--no-fail] [--explain] project integrity gate
   doctor                                check deps + backends
 
+Operating points (not cheap/default/max profiles):
+  waspflow ops list --task implementation
+  waspflow ops explain implement.standard
+  waspflow ops resolve review.audit --json
+  waspflow spawn --op implement.standard --lane fix -- "…"
+  # explicit flags always win over --op expansion
+
 Fan-in (docs/lane-closeout-and-fan-in.md):
   close   <lane> --status harvested  --into <pr#|ref>   # work landed here
   close   <lane> --status superseded --by   <lane|ref>  # a better version won
@@ -90,8 +101,9 @@ Fan-in (docs/lane-closeout-and-fan-in.md):
   reap    --status harvested,superseded,abandoned        # fan-in cleanup, one command
 
 Spawn opts:
+  --op <id>          expand a task-shaped operating point (see ops list)
   --model <id>       provider model override
-  --effort <level>   low|medium|high|xhigh|max
+  --effort <level>   none|minimal|low|medium|high|xhigh|max (pass-through; never silent demote)
   --cwd <dir>        worker cwd (default: current dir)
   --isolate          create an isolated git worktree
   --report <path>    require a deliverable report at reap
@@ -104,7 +116,7 @@ Spawn opts:
 
 Exec opts:
   --model <id>       provider model override
-  --effort <level>   low|medium|high|xhigh|max
+  --effort <level>   none|minimal|low|medium|high|xhigh|max
   --cwd <dir>        worker cwd (default: current dir)
   -o <file>          write final message to file (default: stdout)
 
@@ -138,12 +150,14 @@ split_after_ddash() {
 cmd_spawn() {
   local provider="" lane="" model="" cwd="$PWD" isolate=0 effort="" report="" no_recovery=0
   local verify_command="" verify_name="verify" verify_timeout=1800 prepare_command=""
+  local op_id="" OP_ID="" OP_MODE=""
   local -a extra=()
   split_after_ddash "$@"
   set -- "${FLAGS[@]:-}"
   while [[ $# -gt 0 ]]; do
     case "${1:-}" in
       --provider) provider="${2:-}"; shift 2 ;;
+      --op)       op_id="${2:-}"; shift 2 ;;
       --lane)     lane="${2:-}"; shift 2 ;;
       --model)    model="${2:-}"; shift 2 ;;
       --effort)   effort="${2:-}"; shift 2 ;;
@@ -162,14 +176,19 @@ cmd_spawn() {
   done
   local prompt="${REST[*]:-}"
 
-  [[ -n "$provider" ]] || die "spawn: --provider is required (claude|codex|grok)"
+  # Expand --op first (explicit --provider/--model/--effort win over expansion).
+  if [[ -n "$op_id" ]]; then
+    ops_apply_to_spawn "$op_id"
+  fi
+
+  [[ -n "$provider" ]] || die "spawn: --provider or --op is required (claude|codex|grok)"
   is_known_provider "$provider" || die "spawn: unknown provider '$provider'"
   [[ -n "$lane" ]] || die "spawn: --lane is required"
   validate_lane_name "$lane"
   [[ -n "$prompt" ]] || die "spawn: a task prompt is required after '--'"
   cwd="$(cd "$cwd" && pwd)" || die "spawn: --cwd does not exist"
-  if [[ -n "$effort" && ! "$effort" =~ ^(low|medium|high|xhigh|max)$ ]]; then
-    die "spawn: --effort must be one of low|medium|high|xhigh|max (got: $effort)"
+  if [[ -n "$effort" && ! "$effort" =~ ^(none|minimal|low|medium|high|xhigh|max)$ ]]; then
+    die "spawn: --effort must be one of none|minimal|low|medium|high|xhigh|max (got: $effort)"
   fi
   if [[ -n "$verify_command" ]]; then
     [[ -n "$verify_name" ]] || die "spawn: --verify-name cannot be empty"
@@ -224,6 +243,9 @@ cmd_spawn() {
     origin_cwd "$cwd" \
     model "$model" \
     effort "$effort" \
+    effort_requested "$effort" \
+    op "${OP_ID:-}" \
+    op_mode "${OP_MODE:-}" \
     session_id "$recorded_sid" \
     rollout "" \
     worktree "$wt_path" \
@@ -595,6 +617,7 @@ main() {
   case "$verb" in
     spawn)  cmd_spawn "$@" ;;
     exec)   cmd_exec "$@" ;;
+    ops)    cmd_ops "$@" ;;
     init)   cmd_init "$@" ;;
     demo)   cmd_demo "$@" ;;
     list|ls) cmd_list "$@" ;;

@@ -175,7 +175,8 @@ Useful `spawn` options:
 - `--isolate` creates a git worktree for the lane.
 - `--report <path>` requires a written deliverable before `reap` succeeds.
 - `--model <id>` selects a provider model.
-- `--effort <low|medium|high|xhigh|max>` passes reasoning effort where supported.
+- `--effort <none|minimal|low|medium|high|xhigh|max>` passes reasoning effort **exactly** where supported (never silent demotion; Codex accepts `xhigh`).
+- `--op <id>` expands a task-shaped operating point (`waspflow ops list`); explicit flags win over expansion.
 - `--cwd <dir>` starts the worker in another directory.
 - `--arg <flag>` passes an extra flag to the underlying agent CLI.
 

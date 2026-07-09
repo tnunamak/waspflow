@@ -1,0 +1,361 @@
+{
+  "id": "model-choice-policy",
+  "schema_version": 1,
+  "policy_version": "0.1.0",
+  "generated_at": "2026-07-09",
+  "catalog_ref": "data-model-catalog-v0.3.0",
+  "doctrine": [
+    "Task-shaped operating points, not cheap/default/max ladders",
+    "Enumerate and explain; no silent auto-routing",
+    "Quota and API dollars are non-fungible",
+    "Missing evidence stays missing — never invent Grok quality curves",
+    "explicit_flags_win over --op expansion"
+  ],
+  "operating_points": [
+    {
+      "id": "recover.report",
+      "task_family": "recover",
+      "constraint_family": "dollar-tight",
+      "expands_to": {
+        "provider": "claude",
+        "model": "claude-sonnet-5",
+        "effort": "low",
+        "mode": "standard"
+      },
+      "frontier_assumption": {
+        "cost_basis": "low",
+        "quota_basis": "low",
+        "expected_strength": "adequate_for_status_and_summaries",
+        "evidence_confidence": "medium",
+        "frontier_status": "likely_efficient"
+      },
+      "evidence_refs": [
+        "catalog://pricing/anthropic-api-2026-07",
+        "catalog://performance/anthropic-effort-quality-2026-07"
+      ],
+      "use_when": [
+        "Status reports, recovery notes, short summaries",
+        "Low reversibility cost if wrong"
+      ],
+      "avoid_when": [
+        "Audit-grade review",
+        "Large implementation with tests required"
+      ],
+      "escalate_to": ["implement.standard"],
+      "deescalate_to": [],
+      "known_gaps": [
+        "No local success-rate series for recover task family"
+      ],
+      "override_policy": "explicit_flags_win"
+    },
+    {
+      "id": "fanout.explore",
+      "task_family": "fanout",
+      "constraint_family": "latency-sensitive",
+      "expands_to": {
+        "provider": "claude",
+        "model": "claude-sonnet-5",
+        "effort": "medium",
+        "mode": "standard"
+      },
+      "frontier_assumption": {
+        "cost_basis": "medium",
+        "quota_basis": "medium",
+        "expected_strength": "good_breadth_for_parallel_scouts",
+        "evidence_confidence": "medium",
+        "frontier_status": "likely_efficient"
+      },
+      "evidence_refs": [
+        "catalog://performance/anthropic-effort-quality-2026-07"
+      ],
+      "use_when": [
+        "Parallel exploration lanes",
+        "Cheap probes before a heavy implement/review"
+      ],
+      "avoid_when": [
+        "Single high-stakes edit that needs max evidence"
+      ],
+      "escalate_to": ["implement.standard", "review.audit"],
+      "deescalate_to": ["recover.report"],
+      "known_gaps": [
+        "Cross-vendor fan-out cost comparison unmeasured"
+      ],
+      "override_policy": "explicit_flags_win"
+    },
+    {
+      "id": "docs.lookup",
+      "task_family": "docs",
+      "constraint_family": "dollar-tight",
+      "expands_to": {
+        "provider": "claude",
+        "model": "claude-sonnet-5",
+        "effort": "low",
+        "mode": "standard"
+      },
+      "frontier_assumption": {
+        "cost_basis": "low",
+        "quota_basis": "low",
+        "expected_strength": "adequate_for_doc_search_and_citation",
+        "evidence_confidence": "medium",
+        "frontier_status": "likely_efficient"
+      },
+      "evidence_refs": [
+        "catalog://pricing/anthropic-api-2026-07"
+      ],
+      "use_when": [
+        "Readme / docs / API reference lookup",
+        "Citation-style answers"
+      ],
+      "avoid_when": [
+        "Deep multi-file design synthesis (use advisor.deep)"
+      ],
+      "escalate_to": ["advisor.deep"],
+      "deescalate_to": [],
+      "known_gaps": [],
+      "override_policy": "explicit_flags_win"
+    },
+    {
+      "id": "implement.standard",
+      "task_family": "implementation",
+      "constraint_family": "balanced",
+      "expands_to": {
+        "provider": "claude",
+        "model": "claude-sonnet-5",
+        "effort": "medium",
+        "mode": "standard"
+      },
+      "frontier_assumption": {
+        "cost_basis": "medium",
+        "quota_basis": "medium",
+        "expected_strength": "default_coding_agent_work",
+        "evidence_confidence": "medium_high",
+        "frontier_status": "likely_efficient"
+      },
+      "evidence_refs": [
+        "catalog://performance/anthropic-effort-quality-2026-07",
+        "source://anthropic-sonnet-5-2026-06-30"
+      ],
+      "use_when": [
+        "Normal implementation with tests or review path",
+        "Moderate reversibility"
+      ],
+      "avoid_when": [
+        "Quota near floor (use implement.quota-tight)",
+        "Independent audit-grade review (use review.audit)"
+      ],
+      "escalate_to": ["review.audit", "implement.accuracy-first"],
+      "deescalate_to": ["implement.quota-tight", "recover.report"],
+      "known_gaps": [
+        "Local fixed-harness P(success) not yet measured"
+      ],
+      "override_policy": "explicit_flags_win"
+    },
+    {
+      "id": "implement.quota-tight",
+      "task_family": "implementation",
+      "constraint_family": "quota-tight",
+      "expands_to": {
+        "provider": "claude",
+        "model": "claude-sonnet-5",
+        "effort": "low",
+        "mode": "standard"
+      },
+      "frontier_assumption": {
+        "cost_basis": "low",
+        "quota_basis": "low",
+        "expected_strength": "thinner_ceiling_ok_for_small_patches",
+        "evidence_confidence": "medium",
+        "frontier_status": "likely_efficient_under_quota_pressure"
+      },
+      "evidence_refs": [
+        "catalog://performance/anthropic-effort-quality-2026-07"
+      ],
+      "use_when": [
+        "Subscription quota is scarce",
+        "Small scoped patches"
+      ],
+      "avoid_when": [
+        "Hard reasoning / large refactors"
+      ],
+      "escalate_to": ["implement.standard"],
+      "deescalate_to": ["recover.report"],
+      "known_gaps": [],
+      "override_policy": "explicit_flags_win"
+    },
+    {
+      "id": "implement.accuracy-first",
+      "task_family": "implementation",
+      "constraint_family": "accuracy-first",
+      "expands_to": {
+        "provider": "codex",
+        "model": "gpt-5.6-sol",
+        "effort": "xhigh",
+        "mode": "standard"
+      },
+      "frontier_assumption": {
+        "cost_basis": "high",
+        "quota_basis": "high",
+        "expected_strength": "high_ceiling_coding",
+        "evidence_confidence": "medium",
+        "frontier_status": "likely_efficient_when_failure_is_expensive"
+      },
+      "evidence_refs": [
+        "catalog://performance/openai-gpt-5-6-launch-2026-07",
+        "catalog://pricing/openai-api-2026-07",
+        "source://openai-gpt-5-6-2026-07-09"
+      ],
+      "use_when": [
+        "Hard implementation where rework is costly",
+        "After implement.standard verification fails"
+      ],
+      "avoid_when": [
+        "Quota-tight sessions",
+        "Trivial one-line fixes"
+      ],
+      "escalate_to": ["review.audit"],
+      "deescalate_to": ["implement.standard"],
+      "known_gaps": [
+        "Vendor harnesses not cross-vendor comparable; local eval pending"
+      ],
+      "override_policy": "explicit_flags_win"
+    },
+    {
+      "id": "review.audit",
+      "task_family": "review",
+      "constraint_family": "accuracy-first",
+      "expands_to": {
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "effort": "xhigh",
+        "mode": "standard"
+      },
+      "frontier_assumption": {
+        "cost_basis": "high",
+        "quota_basis": "high",
+        "expected_strength": "independent_audit_style_review",
+        "evidence_confidence": "medium",
+        "frontier_status": "likely_efficient_for_high_risk"
+      },
+      "evidence_refs": [
+        "catalog://performance/openai-quality-2026-07",
+        "catalog://pricing/codex-credits-2026-07"
+      ],
+      "use_when": [
+        "Independent review of another agent's work",
+        "Security / correctness sensitive changes"
+      ],
+      "avoid_when": [
+        "Cheap status checks (use recover.report)",
+        "Quota floor"
+      ],
+      "escalate_to": [],
+      "deescalate_to": ["implement.standard"],
+      "known_gaps": [
+        "Prefer different provider than implementer when possible — still operator choice"
+      ],
+      "override_policy": "explicit_flags_win"
+    },
+    {
+      "id": "advisor.deep",
+      "task_family": "advisor",
+      "constraint_family": "accuracy-first",
+      "expands_to": {
+        "provider": "claude",
+        "model": "claude-sonnet-5",
+        "effort": "high",
+        "mode": "standard"
+      },
+      "frontier_assumption": {
+        "cost_basis": "medium_high",
+        "quota_basis": "medium_high",
+        "expected_strength": "long_horizon_design_and_synthesis",
+        "evidence_confidence": "medium",
+        "frontier_status": "likely_efficient"
+      },
+      "evidence_refs": [
+        "catalog://performance/anthropic-effort-quality-2026-07"
+      ],
+      "use_when": [
+        "Design / architecture advice",
+        "Multi-document synthesis"
+      ],
+      "avoid_when": [
+        "Mechanical code edits (use implement.*)"
+      ],
+      "escalate_to": ["review.audit"],
+      "deescalate_to": ["docs.lookup"],
+      "known_gaps": [],
+      "override_policy": "explicit_flags_win"
+    },
+    {
+      "id": "ui.computer-use",
+      "task_family": "ui",
+      "constraint_family": "balanced",
+      "expands_to": {
+        "provider": "codex",
+        "model": "gpt-5.6-sol",
+        "effort": "high",
+        "mode": "standard"
+      },
+      "frontier_assumption": {
+        "cost_basis": "medium_high",
+        "quota_basis": "medium_high",
+        "expected_strength": "computer_use_and_frontend",
+        "evidence_confidence": "medium",
+        "frontier_status": "unknown_locally"
+      },
+      "evidence_refs": [
+        "catalog://performance/openai-gpt-5-6-launch-2026-07"
+      ],
+      "use_when": [
+        "UI / browser / OSWorld-style computer use",
+        "Frontend polish with visual judgment"
+      ],
+      "avoid_when": [
+        "Pure backend implementation without UI"
+      ],
+      "escalate_to": ["implement.accuracy-first"],
+      "deescalate_to": ["implement.standard"],
+      "known_gaps": [
+        "Local computer-use success rate unmeasured"
+      ],
+      "override_policy": "explicit_flags_win"
+    },
+    {
+      "id": "grok.explore-only",
+      "task_family": "implementation",
+      "constraint_family": "balanced",
+      "expands_to": {
+        "provider": "grok",
+        "model": "grok-4.5",
+        "effort": "high",
+        "mode": "standard"
+      },
+      "frontier_assumption": {
+        "cost_basis": "low_medium",
+        "quota_basis": "unknown",
+        "expected_strength": "unknown",
+        "evidence_confidence": "missing",
+        "frontier_status": "evidence_missing"
+      },
+      "evidence_refs": [
+        "catalog://pricing/xai-api-2026-07"
+      ],
+      "use_when": [
+        "Explicit exploration of Grok surface",
+        "User opts into measuring local success rate"
+      ],
+      "avoid_when": [
+        "High-risk tasks without local eval",
+        "Default implementation path"
+      ],
+      "escalate_to": ["implement.standard"],
+      "deescalate_to": ["recover.report"],
+      "known_gaps": [
+        "No repo-repair quality curve — deliberately not invented"
+      ],
+      "override_policy": "explicit_flags_win",
+      "notes": "Visible exploration point; not a recommended default."
+    }
+  ]
+}

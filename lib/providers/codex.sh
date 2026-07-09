@@ -101,15 +101,28 @@ codex_spawn() {
 
   local model_args=()
   [[ -n "$model" ]] && model_args=(-m "$model")
-  # Map waspflow effort → codex model_reasoning_effort (minimal|low|medium|high).
-  # Codex has no xhigh/max, so those clamp to high.
-  local effort_args=() effort
+  # Pass model_reasoning_effort through exactly. Codex supports
+  # minimal|low|medium|high|xhigh (OpenAI config reference). Never silently
+  # demote xhigh→high. 'max' is not a Codex value — hard fail (use xhigh).
+  local effort_args=() effort passed_effort
   effort="$(lane_get "$lane" effort)"
   case "$effort" in
-    low)             effort_args=(-c model_reasoning_effort=low) ;;
-    medium)          effort_args=(-c model_reasoning_effort=medium) ;;
-    high|xhigh|max)  effort_args=(-c model_reasoning_effort=high) ;;
+    "" ) ;;
+    minimal|low|medium|high|xhigh)
+      effort_args=(-c "model_reasoning_effort=${effort}")
+      passed_effort="$effort"
+      ;;
+    max)
+      die "codex: effort 'max' is not a Codex model_reasoning_effort value (use xhigh). Never silently remapped."
+      ;;
+    *)
+      die "codex: unsupported effort '$effort' (valid: minimal|low|medium|high|xhigh)"
+      ;;
   esac
+  # requested vs passed (org-side caps may still alter observed effort later)
+  local requested_effort="$effort"
+  [[ -n "$requested_effort" ]] && lane_set "$lane" effort_requested "$requested_effort"
+  [[ -n "${passed_effort:-}" ]] && lane_set "$lane" effort_passed "$passed_effort"
 
   # Wrap with tokensmash launch for study actuation when available.
   local ts_prefix=()
