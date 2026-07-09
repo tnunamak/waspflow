@@ -11,14 +11,14 @@ contaminate pricing or benchmark evidence.
 
 | | |
 |---|---|
-| **This version** | Tag **`data-model-choice-policy-v0.1.2`** |
+| **This version** | Tag **`data-model-choice-policy-v0.1.3`** |
 | **Latest** | [releases](https://github.com/tnunamak/minnows/releases?q=data-model-choice-policy&expanded=true) |
 | **Facts catalog** | [model-catalog](../model-catalog/) — pin is `catalog_ref` in the policy file |
 
 ```bash
 ./scripts/fetch-data-pack.sh model-choice-policy
 # or
-TAG=data-model-choice-policy-v0.1.2
+TAG=data-model-choice-policy-v0.1.3
 curl -fsSL -L \
   "https://github.com/tnunamak/minnows/releases/download/${TAG}/${TAG}.tar.gz" \
   | tar -xz
@@ -65,9 +65,9 @@ Waspflow resolves from (first hit):
 
 ## Changelog
 
-### v0.1.2 — 2026-07-09
+### v0.1.3 — 2026-07-09
 
-- Pin catalog to **`data-model-catalog-v0.5.0`** (was v0.3.0).
+- Pin catalog to **`data-model-catalog-v0.5.1`** (was v0.3.0).
 - Evidence refs for Sonnet ops cite digitized effort curves (`anthropic-sonnet5-digitized-2026-07`).
 - Validator now enforces: unique op ids, escalate graph, `expands_to` vs capabilities, catalog:// and source:// resolvability, pack.json pin agreement.
 
