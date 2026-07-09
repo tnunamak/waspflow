@@ -18,6 +18,12 @@ set -euo pipefail
 WASPFLOW_LIB="${WASPFLOW_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 WASPFLOW_ROOT="${WASPFLOW_ROOT:-$(cd "$WASPFLOW_LIB/.." && pwd)}"
 
+# Generated effort unions from minnows capabilities (optional; adapters hard-fail themselves).
+if [[ -f "$WASPFLOW_LIB/generated/effort-whitelists.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "$WASPFLOW_LIB/generated/effort-whitelists.sh"
+fi
+
 # ---- state home -------------------------------------------------------------
 # All lane state (one dir per lane) lives here. Survives across the orchestrating
 # session's own compaction/restart — that's the whole point.

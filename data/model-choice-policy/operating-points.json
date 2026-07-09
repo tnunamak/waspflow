@@ -1,9 +1,9 @@
 {
   "id": "model-choice-policy",
   "schema_version": 1,
-  "policy_version": "0.1.1",
+  "policy_version": "0.1.2",
   "generated_at": "2026-07-09",
-  "catalog_ref": "data-model-catalog-v0.4.2",
+  "catalog_ref": "data-model-catalog-v0.5.0",
   "doctrine": [
     "Task-shaped operating points, not cheap/default/max ladders",
     "Enumerate and explain; no silent auto-routing",

@@ -12,6 +12,8 @@ grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/providers/codex.sh"
 grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/exec.sh"
 # Grok effort honesty: unsupported values hard-fail (never silent-drop)
 grep -Eq "unsupported effort" "$root/lib/providers/grok.sh"
+# Generated capabilities-derived effort unions present
+test -f "$root/lib/generated/effort-whitelists.sh"
 # Lane provenance: --op spawn records policy_version + catalog_ref
 grep -Eq 'policy_version' "$root/bin/waspflow"
 grep -Eq 'catalog_ref' "$root/bin/waspflow"
