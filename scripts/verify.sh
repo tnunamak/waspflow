@@ -187,4 +187,36 @@ JSONL
   [[ "$(codex_discover_session marker-b)" == "22222222-2222-2222-2222-222222222222" ]]
 )
 
+# Grok idle/resumable: last turn_* event is turn_ended (MCP noise after is fine).
+grok_sessions_dir="$(mktemp -d)"
+grok_sid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+grok_sdir="$grok_sessions_dir/%2Ftmp%2Fproj/$grok_sid"
+mkdir -p "$grok_sdir"
+cat >"$grok_sdir/events.jsonl" <<'JSONL'
+{"type":"phase_changed","phase":"waiting_for_model"}
+{"type":"turn_started","turn_number":0}
+{"type":"phase_changed","phase":"streaming_text"}
+{"type":"turn_ended","outcome":"completed"}
+{"type":"mcp_server_failed"}
+JSONL
+(
+  export WASPFLOW_HOME="$state_home"
+  export GROK_SESSIONS_DIR="$grok_sessions_dir"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/grok.sh"
+  lane_set grok-idle provider grok status live session_id "$grok_sid" cwd /tmp/proj
+  grok_session_resumable grok-idle
+  grok_is_idle grok-idle
+  # A new turn after turn_ended means not idle.
+  printf '%s\n' '{"type":"turn_started","turn_number":1}' >>"$grok_sdir/events.jsonl"
+  if grok_is_idle grok-idle; then
+    echo "expected grok not idle after turn_started" >&2
+    exit 1
+  fi
+  # is_known_provider accepts grok
+  is_known_provider grok
+)
+
 echo "waspflow verify: ok"

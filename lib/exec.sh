@@ -40,7 +40,7 @@ exec_run() {
   done
   local prompt="${REST[*]:-}"
 
-  [[ -n "$provider" ]] || die "exec: --provider is required (claude|codex)"
+  [[ -n "$provider" ]] || die "exec: --provider is required (claude|codex|grok)"
   is_known_provider "$provider" || die "exec: unknown provider '$provider'"
   [[ -n "$prompt" ]] || die "exec: a task prompt is required after '--'"
   cwd="$(cd "$cwd" && pwd)" || die "exec: --cwd does not exist"
@@ -63,6 +63,7 @@ exec_run() {
   case "$provider" in
     codex)  _exec_codex "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
     claude) _exec_claude "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
+    grok)   _exec_grok "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
     *)      die "exec: unsupported provider '$provider'" ;;
   esac
 
@@ -138,4 +139,34 @@ _exec_claude() {
       "$prompt" \
       </dev/null
   ) >"$output_path"
+}
+
+_exec_grok() {
+  local cwd="$1" model="$2" effort="$3" prompt="$4" output_path="$5"
+  local -a model_args=()
+  [[ -n "$model" ]] && model_args=(-m "$model")
+  local -a effort_args=()
+  case "$effort" in
+    low|medium|high|xhigh|max) effort_args=(--effort "$effort") ;;
+  esac
+
+  local log_file rc=0
+  log_file="$(mktemp)"
+  (
+    cd "$cwd"
+    grok -p "$prompt" \
+      "${model_args[@]}" \
+      "${effort_args[@]}" \
+      --always-approve \
+      --cwd "$cwd" \
+      --output-format plain \
+      </dev/null
+  ) >"$output_path" 2>"$log_file" || rc=$?
+
+  if [[ "$rc" -ne 0 ]]; then
+    cat "$log_file" >&2
+    rm -f "$log_file"
+    return "$rc"
+  fi
+  rm -f "$log_file"
 }

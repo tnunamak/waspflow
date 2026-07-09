@@ -10,7 +10,7 @@ git clone <waspflow-repo-url> ~/code/waspflow
 ```
 
 You need `tmux`, `jq`, `git`, `curl`, `uuidgen`, and at least one agent CLI:
-`codex` or `claude`. If any are missing, use
+`codex`, `claude`, or `grok`. If any are missing, use
 [Prerequisites](prerequisites.md).
 
 ## 2. Check the machine
@@ -35,7 +35,7 @@ Run them:
 waspflow demo --provider codex --run
 ```
 
-Use `--provider claude` if Claude Code is your available agent CLI.
+Use `--provider claude` or `--provider grok` if that is your available agent CLI.
 
 The demo launches a worker, waits until it finishes one turn, shows the result,
 and reaps the lane. It does not edit your files.

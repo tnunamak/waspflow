@@ -1,19 +1,20 @@
 ---
 name: waspflow-orchestrate
 description: >-
-  Spawn, watch, steer, and reap Claude/Codex coding agents live in tmux from any
-  project directory. Use when you (an agent) need to delegate work to a worker
-  agent of either provider AND retain live control — observe it stream, inject a
-  revision mid-run or after teardown, wait for idle, and clean up — rather than a
-  one-shot fire-and-forget call. Survives your own compaction (lanes persist on disk).
+  Spawn, watch, steer, and reap Claude/Codex/Grok coding agents live in tmux from
+  any project directory. Use when you (an agent) need to delegate work to a
+  worker agent of any supported provider AND retain live control — observe it
+  stream, inject a revision mid-run or after teardown, wait for idle, and clean
+  up — rather than a one-shot fire-and-forget call. Survives your own compaction
+  (lanes persist on disk).
 ---
 
 # waspflow — live cross-provider agent orchestration
 
 You are an orchestrating agent. `waspflow` lets you run **worker** agents
-(Claude Code or OpenAI Codex) in tmux windows you can watch and steer, then reap.
-Lane state is on disk, so if you compact mid-task you recover everything with
-`waspflow list`.
+(Claude Code, OpenAI Codex, or Grok Build) in tmux windows you can watch and
+steer, then reap. Lane state is on disk, so if you compact mid-task you recover
+everything with `waspflow list`.
 
 ## When to use this
 
@@ -35,8 +36,8 @@ waspflow check --no-fail
 
 Green = ready. If `doctor` warns the **Codex model proxy** is down (only when
 `WASPFLOW_CODEX_BACKEND_HEALTH_URL` is set for a proxy-routed Codex), start that
-proxy before spawning Codex. Claude needs no backend gate. If `waspflow` isn't on
-PATH, run the repo's `install.sh`.
+proxy before spawning Codex. Claude and Grok need no backend gate. If `waspflow`
+isn't on PATH, run the repo's `install.sh`.
 
 `check` is the project/process gate. It inventories git worktrees, dirty state,
 waspflow lanes for this project, and any project-configured mutex/blocker/report
@@ -84,9 +85,9 @@ waspflow reap parser
 
 ## Choosing provider / model / lane
 
-- `--provider claude` or `--provider codex`.
-- `--model <id>` to override (e.g. a specific Claude or gpt model). Omit to use
-  the provider's default.
+- `--provider claude`, `--provider codex`, or `--provider grok`.
+- `--model <id>` to override (e.g. a specific Claude, gpt, or Grok model). Omit
+  to use the provider's default.
 - `--lane <name>` is your handle for every later command — keep it short and
   unique (letters/digits/`.`/`_`/`-`).
 - `--arg <x>` (repeatable) passes an extra flag straight to the underlying agent
@@ -117,9 +118,10 @@ answerable without you setting anything up.
 ```bash
 waspflow spawn --provider claude --lane a --isolate -- "Refactor module A"
 waspflow spawn --provider codex  --lane b --isolate -- "Refactor module B"
+waspflow spawn --provider grok   --lane c --isolate -- "Refactor module C"
 # poll each:
-for L in a b; do waspflow wait "$L" && waspflow peek "$L" --lines 40; done
-for L in a b; do waspflow reap "$L"; done
+for L in a b c; do waspflow wait "$L" && waspflow peek "$L" --lines 40; done
+for L in a b c; do waspflow reap "$L"; done
 ```
 
 `--isolate` puts each agent in its own git worktree (branch `waspflow/<lane>`) so
@@ -141,6 +143,7 @@ you only read once, skip the lane machinery entirely:
 ```bash
 waspflow exec --provider codex -o out.md -- "Summarize what changed in the last 5 commits."
 waspflow exec --provider claude -- "Which files import lib/core.sh?"   # -> stdout
+waspflow exec --provider grok -- "Which files import lib/core.sh?"     # -> stdout
 ```
 
 `exec` runs one headless turn, blocks, writes to `-o <file>` (or stdout), and
@@ -168,8 +171,8 @@ waspflow revise <lane> --out /tmp/reply.txt -- "Summarize what you changed."
 ## Idle is detected from the agent's own logs (trust `wait`)
 
 You don't need to read panes to know when an agent is done — `wait` reads the
-provider's session log (Claude `stop_reason: end_turn`; Codex `task_complete`).
-Prefer `wait` over polling `peek`.
+provider's session log (Claude `stop_reason: end_turn`; Codex `task_complete`;
+Grok `turn_ended`). Prefer `wait` over polling `peek`.
 
 ## Etiquette
 

@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 #
-# waspflow — turnkey live orchestration of Claude/Codex agents in tmux.
+# waspflow — turnkey live orchestration of Claude/Codex/Grok agents in tmux.
 #
-# An orchestrating session (itself Claude or Codex, in ANY project dir) uses
-# this to spawn an agent of either provider into a tmux window, watch it stream,
-# steer/revise it live or after teardown, wait for it to go idle, and reap it —
-# all surviving the orchestrator's own compaction (the windows + lane state
-# persist on disk).
+# An orchestrating session (itself Claude, Codex, or Grok, in ANY project dir)
+# uses this to spawn an agent of any supported provider into a tmux window,
+# watch it stream, steer/revise it live or after teardown, wait for it to go
+# idle, and reap it — all surviving the orchestrator's own compaction (the
+# windows + lane state persist on disk).
 #
 # Verbs:
-#   spawn   --provider <claude|codex> --lane <name> [opts] -- <task prompt>
-#   exec    --provider <claude|codex> [opts] [-o FILE] -- <task prompt>
+#   spawn   --provider <claude|codex|grok> --lane <name> [opts] -- <task prompt>
+#   exec    --provider <claude|codex|grok> [opts] [-o FILE] -- <task prompt>
 #   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
-#   demo    --provider <claude|codex> [--run]                 guided first lane
+#   demo    --provider <claude|codex|grok> [--run]            guided first lane
 #   list    [--status S,...]              show all lanes + status/outcome
 #   status  <lane>                        one lane's state (json)
 #   peek    <lane> [--lines N]            de-escaped tail of the live pane
@@ -58,7 +58,7 @@ source "$WASPFLOW_LIB/project.sh"
 
 usage() {
   cat <<EOF
-waspflow — turnkey live orchestration of Claude/Codex agents in tmux.
+waspflow — turnkey live orchestration of Claude/Codex/Grok agents in tmux.
 
 First successful run:
   waspflow doctor
@@ -66,10 +66,10 @@ First successful run:
   waspflow demo --provider codex --run
 
 Verbs:
-  spawn   --provider <claude|codex> --lane <name> [opts] -- <task prompt>
-  exec    --provider <claude|codex> [--model M] [--effort L] [--cwd DIR] [-o FILE] -- <task prompt>
+  spawn   --provider <claude|codex|grok> --lane <name> [opts] -- <task prompt>
+  exec    --provider <claude|codex|grok> [--model M] [--effort L] [--cwd DIR] [-o FILE] -- <task prompt>
   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
-  demo    --provider <claude|codex> [--run]                 guided first lane
+  demo    --provider <claude|codex|grok> [--run]            guided first lane
   list    [--status S,...]              show all lanes (filter by fan-in outcome)
   status  <lane>                        one lane's state (json)
   peek    <lane> [--lines N]            de-escaped tail of the live pane
@@ -162,7 +162,7 @@ cmd_spawn() {
   done
   local prompt="${REST[*]:-}"
 
-  [[ -n "$provider" ]] || die "spawn: --provider is required (claude|codex)"
+  [[ -n "$provider" ]] || die "spawn: --provider is required (claude|codex|grok)"
   is_known_provider "$provider" || die "spawn: unknown provider '$provider'"
   [[ -n "$lane" ]] || die "spawn: --lane is required"
   validate_lane_name "$lane"
@@ -197,7 +197,7 @@ cmd_spawn() {
   fi
 
   local session_id transcript
-  session_id="$(new_uuid)"           # claude uses this; codex mints its own
+  session_id="$(new_uuid)"           # claude/grok use this; codex mints its own
   mkdir -p "$(lane_dir "$lane")"
   transcript="$(lane_transcript "$lane")"
   : >"$transcript"
@@ -213,6 +213,9 @@ cmd_spawn() {
   fi
 
   # Record state BEFORE spawn so a crash mid-spawn is still recoverable.
+  # Claude and Grok accept a client-minted --session-id; Codex discovers its own.
+  local recorded_sid=""
+  case "$provider" in claude|grok) recorded_sid="$session_id" ;; esac
   lane_set "$lane" \
     provider "$provider" \
     status "live" \
@@ -221,7 +224,7 @@ cmd_spawn() {
     origin_cwd "$cwd" \
     model "$model" \
     effort "$effort" \
-    session_id "$([[ "$provider" == claude ]] && echo "$session_id" || echo "")" \
+    session_id "$recorded_sid" \
     rollout "" \
     worktree "$wt_path" \
     repo_root "$repo_root" \
@@ -263,7 +266,7 @@ cmd_demo() {
       --run) run=1; shift ;;
       -h|--help)
         cat <<'EOF'
-waspflow demo --provider <claude|codex> [--run] [--lane NAME] [--cwd DIR]
+waspflow demo --provider <claude|codex|grok> [--run] [--lane NAME] [--cwd DIR]
 
 Without --run, prints a safe first-run walkthrough.
 With --run, performs spawn -> wait -> peek -> reap using a tiny no-edit task.
@@ -277,7 +280,8 @@ EOF
   if [[ -z "$provider" ]]; then
     if command -v codex >/dev/null 2>&1; then provider="codex"
     elif command -v claude >/dev/null 2>&1; then provider="claude"
-    else die "demo: no provider found on PATH (install codex or claude, or pass --provider)"
+    elif command -v grok >/dev/null 2>&1; then provider="grok"
+    else die "demo: no provider found on PATH (install codex, claude, or grok, or pass --provider)"
     fi
   fi
   is_known_provider "$provider" || die "demo: unknown provider '$provider'"
@@ -555,10 +559,10 @@ cmd_doctor() {
   done
   command -v curl >/dev/null 2>&1 || ok=0
   command -v uuidgen >/dev/null 2>&1 || [[ -r /proc/sys/kernel/random/uuid ]] || ok=0
-  for c in claude codex curl uuidgen; do
+  for c in claude codex grok curl uuidgen; do
     if command -v "$c" >/dev/null 2>&1; then
       echo "  [ok]   $c"
-      [[ "$c" == "claude" || "$c" == "codex" ]] && agent_ok=1
+      [[ "$c" == "claude" || "$c" == "codex" || "$c" == "grok" ]] && agent_ok=1
     elif [[ "$c" == "curl" || "$c" == "uuidgen" ]]; then
       echo "  [MISS] $c (required on systems without an equivalent)"
     else

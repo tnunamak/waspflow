@@ -17,6 +17,12 @@ billing_report_auth() {
   else
     echo "  [ok]   codex auth: no OPENAI_API_KEY in environment; billing follows configured Codex CLI auth"
   fi
+
+  if [[ -n "${XAI_API_KEY:-}" ]]; then
+    echo "  [warn] grok auth: XAI_API_KEY is set -> headless Grok may use API pay-as-you-go billing instead of OAuth/subscription-backed CLI auth. Verify billing before fleet use."
+  else
+    echo "  [ok]   grok auth: no XAI_API_KEY in environment; billing follows configured Grok CLI auth (OAuth cache or login)"
+  fi
 }
 
 billing_preflight_provider() {
@@ -24,6 +30,7 @@ billing_preflight_provider() {
   case "$provider" in
     claude) billing_preflight_claude ;;
     codex) billing_preflight_codex ;;
+    grok) billing_preflight_grok ;;
     *) return 0 ;;
   esac
 }
@@ -48,5 +55,11 @@ billing_preflight_claude() {
 billing_preflight_codex() {
   [[ -n "${OPENAI_API_KEY:-}" ]] || return 0
   warn "codex billing notice: OPENAI_API_KEY is set; verify whether Codex will use API pay-as-you-go billing before fleet use."
+  return 0
+}
+
+billing_preflight_grok() {
+  [[ -n "${XAI_API_KEY:-}" ]] || return 0
+  warn "grok billing notice: XAI_API_KEY is set; verify whether Grok will use API pay-as-you-go billing before fleet use."
   return 0
 }

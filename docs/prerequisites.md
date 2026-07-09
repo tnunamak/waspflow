@@ -20,8 +20,8 @@ OS, but `waspflow doctor` tells you exactly what is missing.
 - `curl` — used by `doctor` and optional backend health checks.
   Project: https://curl.se/
 
-- `uuidgen` or `/proc/sys/kernel/random/uuid` — used to mint Claude session ids.
-  On most Linux/macOS systems this is already installed.
+- `uuidgen` or `/proc/sys/kernel/random/uuid` — used to mint Claude/Grok session
+  ids. On most Linux/macOS systems this is already installed.
 
 ## At least one agent CLI
 
@@ -31,6 +31,9 @@ OS, but `waspflow doctor` tells you exactly what is missing.
 
 - Claude Code.
   Quickstart: https://code.claude.com/docs/en/quickstart
+
+- Grok Build CLI (`grok`).
+  Installs to `~/.grok/bin/grok` by default; ensure that directory is on `PATH`.
 
 ## Verify
 
@@ -45,4 +48,4 @@ waspflow demo --provider codex
 waspflow demo --provider codex --run
 ```
 
-Swap `codex` for `claude` if Claude Code is the agent CLI you have installed.
+Swap `codex` for `claude` or `grok` if that is the agent CLI you have installed.

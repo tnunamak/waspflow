@@ -21,6 +21,10 @@ Full loop, with real worker output:
   is minted by waspflow and passed via `--session-id`, so the path is known.
 - **Codex**: `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`. Idle = the
   **last event** is `event_msg / payload.type == task_complete`.
+- **Grok**: `~/.grok/sessions/<url-encoded-cwd>/<session-id>/events.jsonl`. Idle
+  = the **last `turn_started`/`turn_ended` event** is `turn_ended` (MCP lifecycle
+  noise can land after the turn ends — ignore non-turn events). Session id is
+  minted by waspflow and passed via `--session-id`.
 
 ## Codex gotchas (handled in `lib/providers/codex.sh`)
 
@@ -68,6 +72,23 @@ Full loop, with real worker output:
    reply with full prior context.
 5. On some setups `claude` is itself wrapped to route through a local proxy. Such
    a wrapper owns its own health and is transparent to waspflow — no gate needed.
+
+## Grok gotchas (handled in `lib/providers/grok.sh`)
+
+1. **Unattended tool approval is `--always-approve`** (not Claude's
+   `--dangerously-skip-permissions`, not a bare `--yolo` in the top-level help).
+   Without it, interactive lanes block on permission prompts.
+2. **Prompt auto-runs as a positional arg** — same as Claude, no separate
+   composer submit at spawn (unlike Codex). Session id is client-minted via
+   `--session-id <uuid>` (must be a fresh UUID under the target session dir).
+3. **Idle is `turn_ended`, not the last line of `events.jsonl`.** MCP connect/
+   fail events can append after the turn finishes; only look at
+   `turn_started`/`turn_ended`.
+4. **Headless revise**: `grok -p "<msg>" --resume <session-id> --always-approve`.
+   Prefer running from the lane's cwd so project discovery and the session group
+   resolve. Retry with backoff if a just-killed session is briefly unfindable.
+5. **Billing**: soft notice (not hard stop) when `XAI_API_KEY` is set — OAuth
+   cache is the usual subscription path; the API key is pay-as-you-go.
 
 ## Durable-artifact + recovery findings (generalized from a prior single-provider harness)
 

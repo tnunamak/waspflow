@@ -6,12 +6,12 @@
 
 Give your main agent a live workflow for managing worker agents.
 
-Waspflow is an agent-operable control loop for Claude Code and Codex workers:
-spawn a worker, watch its live stream, steer it with another instruction,
-preserve the transcript and diff, and reap the lane deliberately. Humans can use
-the same CLI directly; the deeper point is that an orchestrating agent gets a
-small, durable tool surface instead of fire-and-forget subprocesses and loose
-notes.
+Waspflow is an agent-operable control loop for Claude Code, Codex, and Grok
+workers: spawn a worker, watch its live stream, steer it with another
+instruction, preserve the transcript and diff, and reap the lane deliberately.
+Humans can use the same CLI directly; the deeper point is that an orchestrating
+agent gets a small, durable tool surface instead of fire-and-forget subprocesses
+and loose notes.
 
 Use it when you want to:
 
@@ -32,11 +32,12 @@ waspflow demo --provider codex
 waspflow demo --provider codex --run
 ```
 
-Use `--provider claude` if Claude Code is the agent CLI you have installed.
+Use `--provider claude` or `--provider grok` if that is the agent CLI you have
+installed.
 
 You need `tmux`, `jq`, `git`, `curl`, `uuidgen`, and at least one agent CLI:
-`codex` or `claude`. If something is missing, `waspflow doctor` tells you what
-to install. See [docs/prerequisites.md](docs/prerequisites.md) for links.
+`codex`, `claude`, or `grok`. If something is missing, `waspflow doctor` tells
+you what to install. See [docs/prerequisites.md](docs/prerequisites.md) for links.
 
 ## The Loop
 
@@ -155,9 +156,9 @@ config shape.
 
 | Command | What it does |
 |---|---|
-| `spawn --provider <claude\|codex> --lane <name> [opts] -- <task>` | Start a durable worker lane |
-| `exec --provider <claude\|codex> [opts] [-o FILE] -- <task>` | Headless one-shot: run, return, leave no lane |
-| `demo --provider <claude\|codex> [--run]` | Show or run a safe first demo |
+| `spawn --provider <claude\|codex\|grok> --lane <name> [opts] -- <task>` | Start a durable worker lane |
+| `exec --provider <claude\|codex\|grok> [opts] [-o FILE] -- <task>` | Headless one-shot: run, return, leave no lane |
+| `demo --provider <claude\|codex\|grok> [--run]` | Show or run a safe first demo |
 | `wait <lane>` | Wait until a worker finishes its current turn |
 | `peek <lane>` | Show the tail of the worker pane or transcript |
 | `revise <lane> -- <message>` | Send another instruction to the same session |
@@ -196,6 +197,9 @@ waspflow exec --provider codex -o report.md -- "Summarize the auth flow in src/a
 
 # One-shot answer to stdout:
 waspflow exec --provider claude -- "List the public functions in lib/core.sh."
+
+# Same shape for Grok:
+waspflow exec --provider grok -- "List the public functions in lib/core.sh."
 ```
 
 Options mirror `spawn` where they apply: `--model`, `--effort`, `--cwd`, and
@@ -218,8 +222,9 @@ WASPFLOW_ALLOW_API_BILLING=1 waspflow spawn --provider claude --lane api -- \
   "Run the intended API-billed task"
 ```
 
-Codex has a secondary analogous check: `OPENAI_API_KEY` is reported by
-`doctor`, and Codex spawns print a billing notice when it is set.
+Codex and Grok have secondary analogous checks: `OPENAI_API_KEY` / `XAI_API_KEY`
+are reported by `doctor`, and spawns print a billing notice when the matching
+key is set.
 
 ## What Waspflow Saves
 
@@ -240,11 +245,13 @@ Waspflow does not scrape prompt glyphs. It reads each provider's session log:
 
 - Claude Code: idle when the last assistant event has `stop_reason: "end_turn"`.
 - Codex: idle when the latest rollout event is `task_complete`.
+- Grok: idle when the last `turn_*` event in `events.jsonl` is `turn_ended`.
 
 If the pane has exited, `revise` resumes the saved session headlessly:
 
 - Claude: `claude --resume <session-id> --print "<message>"`
 - Codex: `codex exec resume <session-id> "<message>" -o <file>`
+- Grok: `grok -p "<message>" --resume <session-id> --always-approve`
 
 ## Environment
 
@@ -256,6 +263,8 @@ If the pane has exited, `revise` resumes the saved session headlessly:
 | `WASPFLOW_CODEX_BACKEND_HEALTH_URL` | empty | Optional health check URL for proxy-routed Codex setups |
 | `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Claude session logs |
 | `CODEX_SESSIONS_DIR` | `~/.codex/sessions` | Codex session logs |
+| `GROK_HOME` | `~/.grok` | Grok config home (sessions under `$GROK_HOME/sessions`) |
+| `GROK_SESSIONS_DIR` | `$GROK_HOME/sessions` | Grok session directories |
 
 ## Architecture
 
@@ -263,7 +272,7 @@ Waspflow is shell around tmux plus provider adapters:
 
 - `bin/waspflow` routes CLI commands.
 - `lib/core.sh` owns lane state, tmux helpers, and provider dispatch.
-- `lib/providers/claude.sh` and `lib/providers/codex.sh` adapt each CLI.
+- `lib/providers/claude.sh`, `codex.sh`, and `grok.sh` adapt each CLI.
 - `lib/worktree.sh` handles git worktree isolation.
 - `lib/project.sh` implements `init` and `check`.
 - `skill/SKILL.md` teaches an orchestrating agent how to use the CLI.
