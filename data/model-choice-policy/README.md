@@ -11,14 +11,14 @@ contaminate pricing or benchmark evidence.
 
 | | |
 |---|---|
-| **This version** | Tag **`data-model-choice-policy-v0.1.0`** |
+| **This version** | Tag **`data-model-choice-policy-v0.1.1`** |
 | **Latest** | [releases](https://github.com/tnunamak/minnows/releases?q=data-model-choice-policy&expanded=true) |
-| **Facts catalog** | [model-catalog](../model-catalog/) (pin the `catalog_ref` in the policy file) |
+| **Facts catalog** | [model-catalog](../model-catalog/) — pin is `catalog_ref` in the policy file |
 
 ```bash
 ./scripts/fetch-data-pack.sh model-choice-policy
 # or
-TAG=data-model-choice-policy-v0.1.0
+TAG=data-model-choice-policy-v0.1.1
 curl -fsSL -L \
   "https://github.com/tnunamak/minnows/releases/download/${TAG}/${TAG}.tar.gz" \
   | tar -xz
@@ -48,9 +48,30 @@ Waspflow resolves from (first hit):
 2. `$DATA_PACKS_HOME/model-choice-policy/operating-points.json`
 3. Bundled `waspflow/data/model-choice-policy/operating-points.json`
 
+## Operating points (10)
+
+| Op | Provider / model / effort |
+|----|---------------------------|
+| `recover.report` | claude / sonnet-5 / low |
+| `fanout.explore` | claude / sonnet-5 / medium |
+| `docs.lookup` | claude / sonnet-5 / low |
+| `implement.standard` | claude / sonnet-5 / medium |
+| `implement.quota-tight` | claude / sonnet-5 / low |
+| `implement.accuracy-first` | codex / gpt-5.6-sol / xhigh |
+| `review.audit` | codex / gpt-5.5 / xhigh |
+| `advisor.deep` | claude / sonnet-5 / high |
+| `ui.computer-use` | codex / gpt-5.6-sol / high |
+| `grok.explore-only` | grok / grok-4.5 / high |
+
 ## Changelog
+
+### v0.1.1 — 2026-07-09
+
+- Pin catalog to **`data-model-catalog-v0.4.2`** (was v0.3.0).
+- Evidence refs for Sonnet ops cite digitized effort curves (`anthropic-sonnet5-digitized-2026-07`).
+- Validator now enforces: unique op ids, escalate graph, `expands_to` vs capabilities, catalog:// and source:// resolvability, pack.json pin agreement.
 
 ### v0.1.0 — 2026-07-09
 
-- Initial 8 operating points from expert recommendation.
+- Initial 10 operating points from expert recommendation (README previously said 8).
 - Pins `model-catalog@data-model-catalog-v0.3.0`.

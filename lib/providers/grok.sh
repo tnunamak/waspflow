@@ -55,10 +55,14 @@ grok_spawn() {
   [[ -n "$model" ]] && model_args=(-m "$model")
   local effort_args=() effort
   effort="$(lane_get "$lane" effort)"
-  # Pass waspflow effort levels straight through; Grok accepts the same set
-  # (plus none/minimal which waspflow doesn't expose).
+  # Pass effort through; unsupported non-empty values hard-fail (no silent drop).
   case "$effort" in
-    low|medium|high|xhigh|max) effort_args=(--effort "$effort") ;;
+    "" ) ;;
+    none|minimal|low|medium|high|xhigh|max) effort_args=(--effort "$effort") ;;
+    *)
+      err "grok: unsupported effort '$effort' (use none|minimal|low|medium|high|xhigh|max)"
+      return 1
+      ;;
   esac
 
   # Interactive grok: positional prompt auto-starts the first turn. --always-approve
@@ -183,7 +187,12 @@ grok_revise() {
   local effort_args=() effort
   effort="$(lane_get "$lane" effort)"
   case "$effort" in
-    low|medium|high|xhigh|max) effort_args=(--effort "$effort") ;;
+    "" ) ;;
+    none|minimal|low|medium|high|xhigh|max) effort_args=(--effort "$effort") ;;
+    *)
+      err "grok: unsupported effort '$effort' (use none|minimal|low|medium|high|xhigh|max)"
+      return 1
+      ;;
   esac
   local tmp; tmp="${out_file:-$(mktemp)}"
   local attempt rc=0

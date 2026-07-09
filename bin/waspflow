@@ -235,6 +235,17 @@ cmd_spawn() {
   # Claude and Grok accept a client-minted --session-id; Codex discovers its own.
   local recorded_sid=""
   case "$provider" in claude|grok) recorded_sid="$session_id" ;; esac
+  # When --op was used, record policy/catalog pins for lane→evidence traceability.
+  local policy_version="" catalog_ref="" policy_file=""
+  if [[ -n "${OP_ID:-}" ]]; then
+    ops_load 2>/dev/null || true
+    if [[ -n "${OPS_POLICY_JSON:-}" ]]; then
+      policy_version="$(jq -r '.policy_version // empty' <<<"$OPS_POLICY_JSON")"
+      catalog_ref="$(jq -r '.catalog_ref // empty' <<<"$OPS_POLICY_JSON")"
+    fi
+    policy_file="${OPS_POLICY_FILE:-}"
+  fi
+
   lane_set "$lane" \
     provider "$provider" \
     status "live" \
@@ -246,6 +257,9 @@ cmd_spawn() {
     effort_requested "$effort" \
     op "${OP_ID:-}" \
     op_mode "${OP_MODE:-}" \
+    policy_version "$policy_version" \
+    catalog_ref "$catalog_ref" \
+    policy_file "$policy_file" \
     session_id "$recorded_sid" \
     rollout "" \
     worktree "$wt_path" \

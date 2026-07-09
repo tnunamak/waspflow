@@ -10,6 +10,11 @@ bash -n "$root/bin/waspflow" "$root"/lib/*.sh "$root"/lib/providers/*.sh
 # Codex effort honesty: xhigh must pass through (never clamp xhigh|max → high)
 grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/providers/codex.sh"
 grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/exec.sh"
+# Grok effort honesty: unsupported values hard-fail (never silent-drop)
+grep -Eq "unsupported effort" "$root/lib/providers/grok.sh"
+# Lane provenance: --op spawn records policy_version + catalog_ref
+grep -Eq 'policy_version' "$root/bin/waspflow"
+grep -Eq 'catalog_ref' "$root/bin/waspflow"
 ! grep -E 'high\|xhigh\|max' "$root/lib/providers/codex.sh"
 ! grep -E 'high\|xhigh\|max' "$root/lib/exec.sh"
 

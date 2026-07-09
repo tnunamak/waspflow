@@ -1,14 +1,14 @@
 {
   "id": "model-choice-policy",
   "schema_version": 1,
-  "policy_version": "0.1.0",
+  "policy_version": "0.1.1",
   "generated_at": "2026-07-09",
-  "catalog_ref": "data-model-catalog-v0.3.0",
+  "catalog_ref": "data-model-catalog-v0.4.2",
   "doctrine": [
     "Task-shaped operating points, not cheap/default/max ladders",
     "Enumerate and explain; no silent auto-routing",
     "Quota and API dollars are non-fungible",
-    "Missing evidence stays missing — never invent Grok quality curves",
+    "Missing evidence stays missing \u2014 never invent Grok quality curves",
     "explicit_flags_win over --op expansion"
   ],
   "operating_points": [
@@ -41,7 +41,9 @@
         "Audit-grade review",
         "Large implementation with tests required"
       ],
-      "escalate_to": ["implement.standard"],
+      "escalate_to": [
+        "implement.standard"
+      ],
       "deescalate_to": [],
       "known_gaps": [
         "No local success-rate series for recover task family"
@@ -66,7 +68,8 @@
         "frontier_status": "likely_efficient"
       },
       "evidence_refs": [
-        "catalog://performance/anthropic-effort-quality-2026-07"
+        "catalog://performance/anthropic-effort-quality-2026-07",
+        "catalog://performance/anthropic-sonnet5-digitized-2026-07"
       ],
       "use_when": [
         "Parallel exploration lanes",
@@ -75,8 +78,13 @@
       "avoid_when": [
         "Single high-stakes edit that needs max evidence"
       ],
-      "escalate_to": ["implement.standard", "review.audit"],
-      "deescalate_to": ["recover.report"],
+      "escalate_to": [
+        "implement.standard",
+        "review.audit"
+      ],
+      "deescalate_to": [
+        "recover.report"
+      ],
       "known_gaps": [
         "Cross-vendor fan-out cost comparison unmeasured"
       ],
@@ -109,7 +117,9 @@
       "avoid_when": [
         "Deep multi-file design synthesis (use advisor.deep)"
       ],
-      "escalate_to": ["advisor.deep"],
+      "escalate_to": [
+        "advisor.deep"
+      ],
       "deescalate_to": [],
       "known_gaps": [],
       "override_policy": "explicit_flags_win"
@@ -133,7 +143,8 @@
       },
       "evidence_refs": [
         "catalog://performance/anthropic-effort-quality-2026-07",
-        "source://anthropic-sonnet-5-2026-06-30"
+        "source://anthropic-sonnet-5-2026-06-30",
+        "catalog://performance/anthropic-sonnet5-digitized-2026-07"
       ],
       "use_when": [
         "Normal implementation with tests or review path",
@@ -143,8 +154,14 @@
         "Quota near floor (use implement.quota-tight)",
         "Independent audit-grade review (use review.audit)"
       ],
-      "escalate_to": ["review.audit", "implement.accuracy-first"],
-      "deescalate_to": ["implement.quota-tight", "recover.report"],
+      "escalate_to": [
+        "review.audit",
+        "implement.accuracy-first"
+      ],
+      "deescalate_to": [
+        "implement.quota-tight",
+        "recover.report"
+      ],
       "known_gaps": [
         "Local fixed-harness P(success) not yet measured"
       ],
@@ -168,7 +185,8 @@
         "frontier_status": "likely_efficient_under_quota_pressure"
       },
       "evidence_refs": [
-        "catalog://performance/anthropic-effort-quality-2026-07"
+        "catalog://performance/anthropic-effort-quality-2026-07",
+        "catalog://performance/anthropic-sonnet5-digitized-2026-07"
       ],
       "use_when": [
         "Subscription quota is scarce",
@@ -177,8 +195,12 @@
       "avoid_when": [
         "Hard reasoning / large refactors"
       ],
-      "escalate_to": ["implement.standard"],
-      "deescalate_to": ["recover.report"],
+      "escalate_to": [
+        "implement.standard"
+      ],
+      "deescalate_to": [
+        "recover.report"
+      ],
       "known_gaps": [],
       "override_policy": "explicit_flags_win"
     },
@@ -212,8 +234,12 @@
         "Quota-tight sessions",
         "Trivial one-line fixes"
       ],
-      "escalate_to": ["review.audit"],
-      "deescalate_to": ["implement.standard"],
+      "escalate_to": [
+        "review.audit"
+      ],
+      "deescalate_to": [
+        "implement.standard"
+      ],
       "known_gaps": [
         "Vendor harnesses not cross-vendor comparable; local eval pending"
       ],
@@ -249,9 +275,11 @@
         "Quota floor"
       ],
       "escalate_to": [],
-      "deescalate_to": ["implement.standard"],
+      "deescalate_to": [
+        "implement.standard"
+      ],
       "known_gaps": [
-        "Prefer different provider than implementer when possible — still operator choice"
+        "Prefer different provider than implementer when possible \u2014 still operator choice"
       ],
       "override_policy": "explicit_flags_win"
     },
@@ -273,7 +301,8 @@
         "frontier_status": "likely_efficient"
       },
       "evidence_refs": [
-        "catalog://performance/anthropic-effort-quality-2026-07"
+        "catalog://performance/anthropic-effort-quality-2026-07",
+        "catalog://performance/anthropic-sonnet5-digitized-2026-07"
       ],
       "use_when": [
         "Design / architecture advice",
@@ -282,8 +311,12 @@
       "avoid_when": [
         "Mechanical code edits (use implement.*)"
       ],
-      "escalate_to": ["review.audit"],
-      "deescalate_to": ["docs.lookup"],
+      "escalate_to": [
+        "review.audit"
+      ],
+      "deescalate_to": [
+        "docs.lookup"
+      ],
       "known_gaps": [],
       "override_policy": "explicit_flags_win"
     },
@@ -314,8 +347,12 @@
       "avoid_when": [
         "Pure backend implementation without UI"
       ],
-      "escalate_to": ["implement.accuracy-first"],
-      "deescalate_to": ["implement.standard"],
+      "escalate_to": [
+        "implement.accuracy-first"
+      ],
+      "deescalate_to": [
+        "implement.standard"
+      ],
       "known_gaps": [
         "Local computer-use success rate unmeasured"
       ],
@@ -349,10 +386,14 @@
         "High-risk tasks without local eval",
         "Default implementation path"
       ],
-      "escalate_to": ["implement.standard"],
-      "deescalate_to": ["recover.report"],
+      "escalate_to": [
+        "implement.standard"
+      ],
+      "deescalate_to": [
+        "recover.report"
+      ],
       "known_gaps": [
-        "No repo-repair quality curve — deliberately not invented"
+        "No repo-repair quality curve \u2014 deliberately not invented"
       ],
       "override_policy": "explicit_flags_win",
       "notes": "Visible exploration point; not a recommended default."
