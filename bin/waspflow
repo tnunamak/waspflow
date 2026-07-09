@@ -447,15 +447,40 @@ cmd_wait() {
   load_provider "$provider"
   require_cmd jq
 
+  # Stale-idle barrier: a `revise` that just started a new turn sets pending_turn.
+  # The provider's idle predicate reads the LAST terminal event, which — in the
+  # window right after revise — is still the PRIOR turn's end_turn/task_complete.
+  # So wait must first observe the lane BUSY (proving the new turn is underway)
+  # before it will honor an idle reading; that observation clears pending_turn.
+  # Without this, `revise x; wait` returns instantly on the previous turn's idle
+  # and silently drops the steering instruction.
+  local pending; pending="$(lane_get "$lane" pending_turn)"
+
   local deadline=$(( $(date +%s) + timeout ))
   while :; do
     if "${provider}_is_idle" "$lane"; then
+      if [[ "$pending" == "1" ]]; then
+        # Idle, but a revise turn is still pending and we have NOT yet seen the
+        # lane go busy — this is the stale prior-turn idle. Keep waiting.
+        if [[ "$(date +%s)" -ge "$deadline" ]]; then
+          warn "wait: TIMEOUT after ${timeout}s (revised turn never started for lane '$lane')"
+          return 1
+        fi
+        sleep "$interval"
+        continue
+      fi
       # Capture the change so far (cheap, idempotent). Deliverable enforcement +
       # the honest result happen at reap (the explicit end-of-run), so an
       # intermediate idle between revise turns doesn't trigger premature recovery.
       artifacts_capture_after "$lane"
       log "wait: lane '$lane' is IDLE"
       return 0
+    fi
+    # Lane is BUSY. If a revise turn was pending, this is the new turn underway —
+    # clear the barrier so the NEXT idle (this turn's completion) is honored.
+    if [[ "$pending" == "1" ]]; then
+      lane_set "$lane" pending_turn ""
+      pending=""
     fi
     if [[ "$(date +%s)" -ge "$deadline" ]]; then
       warn "wait: TIMEOUT after ${timeout}s (lane '$lane' never went idle)"
@@ -484,6 +509,10 @@ cmd_revise() {
   load_provider "$provider"
   if tmux_window_exists "$lane"; then
     log "revise: steering live pane for lane '$lane'"
+    # Live steer starts a NEW turn asynchronously; mark it pending so a following
+    # `wait` doesn't return on the PRIOR turn's stale idle (see cmd_wait barrier).
+    # Headless resume (else branch) blocks until the reply, so it needs no marker.
+    lane_set "$lane" pending_turn "1"
   else
     log "revise: lane '$lane' window exited; resuming session headlessly"
   fi
