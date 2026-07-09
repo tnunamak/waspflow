@@ -217,6 +217,19 @@ claude_is_idle() {
   return 0
 }
 
+# turn_mark: a monotonic counter for the session — the session JSONL line count.
+# Advances on every event (incl. the user message a live revise pastes), so a
+# post-revise increase means the new turn has begun. Used by `wait` to avoid
+# honoring the prior turn's stale idle. Echoes 0 if the session isn't found yet.
+claude_turn_mark() {
+  local lane="$1" session_id jsonl
+  session_id="$(claude_discover_session "$lane")"
+  [[ -n "$session_id" ]] || { echo 0; return 0; }
+  jsonl="$(find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
+  [[ -n "$jsonl" && -f "$jsonl" ]] || { echo 0; return 0; }
+  wc -l <"$jsonl" 2>/dev/null || echo 0
+}
+
 # Revise: re-enter the session and run one turn. Two paths:
 #   - If the lane's tmux window is still live, steer in-pane via paste-buffer.
 #   - Otherwise resume headlessly:  claude --resume <session-id> --print "<msg>"

@@ -139,6 +139,18 @@ grok_is_idle() {
   [[ "$last_turn" == "turn_ended" ]]
 }
 
+# turn_mark: monotonic session counter = events.jsonl line count. Advances on
+# every event (incl. the turn_started a live revise triggers), so a post-revise
+# increase means the new turn began. Used by `wait` to skip stale prior-turn idle.
+grok_turn_mark() {
+  local lane="$1" session_id events
+  session_id="$(grok_discover_session "$lane")"
+  [[ -n "$session_id" ]] || { echo 0; return 0; }
+  events="$(_grok_events_file "$session_id" || true)"
+  [[ -n "$events" && -f "$events" ]] || { echo 0; return 0; }
+  wc -l <"$events" 2>/dev/null || echo 0
+}
+
 # Revise: re-enter the session and run one turn. Two paths:
 #   - Live tmux window: steer in-pane via paste-buffer.
 #   - Exited: headless  grok -p "<msg>" --resume <session-id> --always-approve

@@ -411,55 +411,69 @@ JSONL
   rm -rf "$crepo"
 )
 
-# wait/revise stale-idle barrier (2026-07-09, confirmed live): after a live-pane
-# revise, `wait` must NOT return on the prior turn's idle. pending_turn is the
-# barrier. Deterministic test via a fake provider whose idle predicate is always
-# "idle" — with pending_turn set, wait must block until the lane is seen busy.
+# wait/revise stale-idle barrier (2026-07-09, root-caused on a live run). After a
+# live revise, wait must NOT honor the PRIOR turn's idle. The barrier keys on the
+# provider turn_mark (session-log line count): wait honors idle only once turn_mark
+# has advanced past revise_barrier_mark. This drives the REAL cmd_wait against a
+# fake provider whose turn_mark + idle we control via sentinel files — the actual
+# shipped gate logic, no live agent, no quota.
 (
   export WASPFLOW_HOME="$state_home"
-  fakelib="$(mktemp -d "$scratch/waspflow-fakeprov-XXXXXX")"
-  # A fake provider adapter: idle predicate returns idle iff a sentinel file says so.
-  cat >"$fakelib/faker.sh" <<'PROV'
+  # Register a fake provider adapter in a private lib dir so load_provider finds it.
+  fakelib="$(mktemp -d "$scratch/waspflow-fakelib-XXXXXX")"
+  mkdir -p "$fakelib/providers"
+  cp "$root"/lib/*.sh "$fakelib/"                       # core + siblings
+  cp -r "$root/lib/generated" "$fakelib/" 2>/dev/null || true
+  ctl="$(mktemp -d "$scratch/waspflow-fakectl-XXXXXX")"  # sentinels: mark + idle
+  printf '0\n' > "$ctl/mark"
+  cat >"$fakelib/providers/faker.sh" <<PROV
 faker_spawn() { :; }
-faker_revise() { :; }
 faker_preflight() { :; }
 faker_discover_session() { echo "x"; }
 faker_session_resumable() { return 0; }
-# Idle unless the "busy" sentinel exists.
-faker_is_idle() { [[ ! -f "$FAKER_BUSY" ]]; }
+faker_revise() { :; }
+# turn_mark and idle are read from control files this test writes.
+faker_turn_mark() { cat "$ctl/mark" 2>/dev/null || echo 0; }
+faker_is_idle() { [[ -f "$ctl/idle" ]]; }
 PROV
-  # Point core at our fake provider dir by symlinking into the real providers dir
-  # is intrusive; instead source core + our adapter and drive cmd_wait's loop
-  # logic through the same pending_turn contract at the state layer.
-  # shellcheck disable=SC1090
-  source "$root/lib/core.sh"
-  # shellcheck disable=SC1090
-  source "$fakelib/faker.sh"
 
-  lane_set barlane provider faker status live cwd "$fixture" pending_turn "1"
-  export FAKER_BUSY="$fakelib/busy"
+  # Source core from the fake lib so lane_set is available here AND lane state is
+  # written to the same $state_home the wait subprocess reads.
+  export WASPFLOW_LIB="$fakelib"
+  # shellcheck disable=SC1090
+  source "$fakelib/core.sh"
 
-  # Simulate the wait barrier by hand (mirrors cmd_wait): with pending_turn=1 and
-  # the lane idle, wait must NOT honor idle. Once the lane goes busy, the barrier
-  # clears; the next idle is then honored.
-  pending="$(lane_get barlane pending_turn)"
-  [[ "$pending" == "1" ]] || { echo "barrier: pending_turn should be 1" >&2; exit 1; }
-  # Lane is idle now (no busy sentinel) but pending -> must be treated as NOT done.
-  if faker_is_idle barlane && [[ "$pending" != "1" ]]; then
-    echo "barrier: should not honor idle while pending" >&2; exit 1
-  fi
-  # Lane goes busy -> barrier clears.
-  : > "$FAKER_BUSY"
-  if faker_is_idle barlane; then echo "barrier: lane should read busy" >&2; exit 1; fi
-  lane_set barlane pending_turn ""      # (cmd_wait clears on first busy observation)
-  # Turn completes -> idle, pending cleared -> honored.
-  rm -f "$FAKER_BUSY"
-  faker_is_idle barlane || { echo "barrier: lane should read idle after busy" >&2; exit 1; }
-  [[ "$(lane_get barlane pending_turn)" == "" ]] || { echo "barrier: pending_turn should be cleared" >&2; exit 1; }
-  rm -rf "$fakelib"
+  run_wait() { WASPFLOW_LIB="$fakelib" WASPFLOW_HOME="$state_home" \
+    "$root/bin/waspflow" wait barlane --timeout "$1" --interval 1; }
+
+  # --- Case S1: revise sets barrier=mark; turn NOT started yet (mark unchanged) +
+  #     lane already idle (prior turn). wait must NOT return early -> it TIMES OUT.
+  lane_set barlane provider faker status live cwd "$fixture" revise_barrier_mark "0"
+  : > "$ctl/idle"                 # prior-turn idle is present (the stale trap)
+  printf '0\n' > "$ctl/mark"      # turn_mark has NOT advanced
+  set +e; run_wait 2 >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 1 ]] || { echo "barrier S1: wait should NOT honor stale idle (want timeout rc1, got $rc)" >&2; exit 1; }
+
+  # --- Case S2: the revised turn ran to completion BEFORE wait — mark advanced and
+  #     lane is idle. wait must return FAST (rc0), no false timeout, barrier cleared.
+  lane_set barlane revise_barrier_mark "0"
+  printf '5\n' > "$ctl/mark"      # turn_mark advanced past the barrier
+  : > "$ctl/idle"                 # and the turn is done (idle)
+  set +e; t0=$(date +%s); run_wait 30 >/dev/null 2>&1; rc=$?; t1=$(date +%s); set -e
+  [[ "$rc" -eq 0 ]] || { echo "barrier S2: wait should honor idle after mark advanced (want rc0, got $rc)" >&2; exit 1; }
+  [[ $((t1 - t0)) -lt 10 ]] || { echo "barrier S2: wait false-timed-out ($((t1-t0))s) — stale-flag bug" >&2; exit 1; }
+  [[ "$(lane_get barlane revise_barrier_mark)" == "" ]] || { echo "barrier S2: barrier_mark should be cleared" >&2; exit 1; }
+
+  # --- Case: no barrier set (normal wait) -> idle honored immediately.
+  lane_set barlane revise_barrier_mark ""
+  : > "$ctl/idle"
+  set +e; run_wait 5 >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 0 ]] || { echo "barrier: plain wait should honor idle (rc0), got $rc" >&2; exit 1; }
+
+  rm -rf "$fakelib" "$ctl"
 )
-# Static guard: cmd_wait honors the pending_turn barrier, cmd_revise sets it on
-# the live path. Pin the wiring so a refactor can't silently drop the fix.
-grep -q 'pending_turn' "$root/bin/waspflow" || { echo "wait/revise: pending_turn barrier missing from bin/waspflow" >&2; exit 1; }
+# Static pins: the barrier wiring must stay present through refactors.
+grep -q 'revise_barrier_mark' "$root/bin/waspflow" || { echo "wait/revise: revise_barrier_mark barrier missing" >&2; exit 1; }
+grep -q 'turn_mark' "$root/lib/core.sh" || { echo "core: turn_mark not in provider contract" >&2; exit 1; }
 
 echo "waspflow verify: ok"
