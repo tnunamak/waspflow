@@ -2,16 +2,16 @@
   "$schema": "../schemas/pack-v1.schema.json",
   "name": "model-choice-policy",
   "schema_version": 1,
-  "tag": "data-model-choice-policy-v0.1.3",
+  "tag": "data-model-choice-policy-v0.1.4",
   "generated_at": "2026-07-09",
-  "description": "Task-shaped operating points. Pins catalog v0.5.1. Local-eval evidence for top-3 ops.",
+  "description": "Task-shaped operating points. Pins catalog v0.5.2. Local-eval v0.1.0 rows reclassified as harness smoke; evidence_confidence medium for top-3 ops.",
   "files": [
     "README.md",
     "SCHEMA.md",
     "operating-points.json"
   ],
   "related": {
-    "catalog": "data-model-catalog-v0.5.1",
-    "doctrine": "Operating Point Resolver — task-shaped ops, not cheap/default/max, not silent auto-routing"
+    "catalog": "data-model-catalog-v0.5.2",
+    "doctrine": "Operating Point Resolver \u2014 task-shaped ops, not cheap/default/max, not silent auto-routing"
   }
 }

@@ -193,6 +193,15 @@ cmd_spawn() {
   if [[ -n "$effort" && ! "$effort" =~ ^(none|minimal|low|medium|high|xhigh|max)$ ]]; then
     die "spawn: --effort must be one of none|minimal|low|medium|high|xhigh|max (got: $effort)"
   fi
+
+  # If capabilities-derived whitelist is loaded, enforce per provider (after op expansion).
+  if [[ -n "$effort" && -n "${provider:-}" ]]; then
+    local _wl_var="WASPFLOW_EFFORTS_${provider^^}"
+    local _wl="${!_wl_var:-}"
+    if [[ -n "$_wl" && ! "$effort" =~ ^($_wl)$ ]]; then
+      die "spawn: effort '$effort' not in capabilities whitelist for $provider (valid: ${_wl//|/, })"
+    fi
+  fi
   if [[ -n "$verify_command" ]]; then
     [[ -n "$verify_name" ]] || die "spawn: --verify-name cannot be empty"
     [[ "$verify_timeout" =~ ^[0-9]+$ && "$verify_timeout" -gt 0 ]] \
@@ -263,6 +272,8 @@ cmd_spawn() {
     policy_version "$policy_version" \
     catalog_ref "$catalog_ref" \
     policy_file "$policy_file" \
+    op_expands_to "${OP_EXPANDS_TO:-}" \
+    explicit_overrides "${EXPLICIT_OVERRIDES:-[]}" \
     session_id "$recorded_sid" \
     rollout "" \
     worktree "$wt_path" \

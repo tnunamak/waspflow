@@ -1,9 +1,9 @@
 {
   "id": "model-choice-policy",
   "schema_version": 1,
-  "policy_version": "0.1.3",
+  "policy_version": "0.1.4",
   "generated_at": "2026-07-09",
-  "catalog_ref": "data-model-catalog-v0.5.1",
+  "catalog_ref": "data-model-catalog-v0.5.2",
   "doctrine": [
     "Task-shaped operating points, not cheap/default/max ladders",
     "Enumerate and explain; no silent auto-routing",
@@ -64,8 +64,9 @@
         "cost_basis": "medium",
         "quota_basis": "medium",
         "expected_strength": "good_breadth_for_parallel_scouts",
-        "evidence_confidence": "high",
-        "frontier_status": "likely_efficient"
+        "evidence_confidence": "medium",
+        "frontier_status": "likely_efficient",
+        "basis": "expert_prior_plus_harness_smoke"
       },
       "evidence_refs": [
         "catalog://performance/anthropic-effort-quality-2026-07",
@@ -87,6 +88,7 @@
         "recover.report"
       ],
       "known_gaps": [
+        "Local harness smoke only (answer-contaminated single seed) \u2014 not grade-A quality evidence (Sol+Fable P0.2)",
         "Cross-vendor fan-out cost comparison unmeasured"
       ],
       "override_policy": "explicit_flags_win"
@@ -139,8 +141,9 @@
         "cost_basis": "medium",
         "quota_basis": "medium",
         "expected_strength": "default_coding_agent_work",
-        "evidence_confidence": "high",
-        "frontier_status": "likely_efficient"
+        "evidence_confidence": "medium",
+        "frontier_status": "likely_efficient",
+        "basis": "expert_prior_plus_harness_smoke"
       },
       "evidence_refs": [
         "catalog://performance/anthropic-effort-quality-2026-07",
@@ -165,6 +168,7 @@
         "recover.report"
       ],
       "known_gaps": [
+        "Local harness smoke only (answer-contaminated single seed) \u2014 not grade-A quality evidence (Sol+Fable P0.2)",
         "Single local-eval cell; expand multi-seed later"
       ],
       "override_policy": "explicit_flags_win"
@@ -261,8 +265,9 @@
         "cost_basis": "high",
         "quota_basis": "high",
         "expected_strength": "independent_audit_style_review",
-        "evidence_confidence": "high",
-        "frontier_status": "likely_efficient_for_high_risk"
+        "evidence_confidence": "medium",
+        "frontier_status": "likely_efficient_for_high_risk",
+        "basis": "expert_prior_plus_harness_smoke"
       },
       "evidence_refs": [
         "catalog://performance/openai-quality-2026-07",
@@ -282,6 +287,7 @@
         "implement.standard"
       ],
       "known_gaps": [
+        "Local harness smoke only (answer-contaminated single seed) \u2014 not grade-A quality evidence (Sol+Fable P0.2)",
         "Prefer different provider than implementer when possible \u2014 still operator choice"
       ],
       "override_policy": "explicit_flags_win"

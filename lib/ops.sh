@@ -222,6 +222,15 @@ ops_apply_to_spawn() {
   [[ -z "${effort:-}" ]] && effort="$exp_effort"
   OP_MODE="${exp_mode:-standard}"
   OP_ID="$op_id"
+  # Durable receipts for lane state (explicit_flags_win auditability)
+  OP_EXPANDS_TO="$(jq -c '.expands_to' <<<"$row")"
+  if [[ ${#overrides[@]} -gt 0 ]]; then
+    EXPLICIT_OVERRIDES="$(printf '%s
+' "${overrides[@]}" | jq -R . | jq -s -c .)"
+  else
+    EXPLICIT_OVERRIDES='[]'
+  fi
+  export OP_EXPANDS_TO EXPLICIT_OVERRIDES
 
   ops_load
   log "op $op_id expands to:"
