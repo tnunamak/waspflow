@@ -238,4 +238,92 @@ JSONL
   is_known_provider grok
 )
 
+# ---------------------------------------------------------------------------
+# Reliability hardening (2026-07-09): behavioral coverage for the three
+# silent-waste fixes. Each closes a re-run class, so each gets a real test.
+# ---------------------------------------------------------------------------
+
+# BUG 3 — guard_cwd: refuse worker cwd '/' unless explicitly overridden.
+(
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # cwd '/' must be refused (die -> nonzero) with the default env.
+  if ( guard_cwd "/" ) 2>/dev/null; then
+    echo "guard_cwd: expected refusal for '/'" >&2; exit 1
+  fi
+  # ...unless the explicit opt-in is set.
+  ( WASPFLOW_ALLOW_ROOT_CWD=1 guard_cwd "/" ) || {
+    echo "guard_cwd: override WASPFLOW_ALLOW_ROOT_CWD=1 should permit '/'" >&2; exit 1; }
+  # A real project dir must always pass.
+  ( guard_cwd "$fixture" ) || { echo "guard_cwd: rejected a real dir" >&2; exit 1; }
+)
+
+# BUG 2 — _exec_output_is_useful: reject empty/whitespace/pure-error output;
+# accept real short answers (must not false-reject a legit file list).
+(
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/exec.sh"
+  d="$(mktemp -d "$scratch/waspflow-exec-XXXXXX")"
+  printf ''                    > "$d/empty"
+  printf '   \n\n\t\n'         > "$d/blank"
+  printf 'Execution error\n'   > "$d/err"
+  printf 'N/A\n'               > "$d/na"
+  printf 'foo.txt\nbar.txt\n'  > "$d/list"     # real short answer — MUST pass
+  printf 'a\n'                 > "$d/tiny"      # 2 bytes — MUST pass
+  printf 'Execution error: the parser threw on line 5, here is the fix\n' > "$d/mention"  # MUST pass
+  for bad in empty blank err na; do
+    if _exec_output_is_useful "$d/$bad"; then echo "exec-useful: '$bad' wrongly accepted" >&2; exit 1; fi
+  done
+  for good in list tiny mention; do
+    _exec_output_is_useful "$d/$good" || { echo "exec-useful: '$good' wrongly rejected" >&2; exit 1; }
+  done
+  rm -rf "$d"
+)
+
+# BUG 1 — claude_is_idle gates on active subagents. Fixture matches the real
+# on-disk schema: parent <sid>.jsonl + <sid>/subagents/agent-*.jsonl.
+(
+  export WASPFLOW_HOME="$state_home"
+  cproj="$(mktemp -d "$scratch/waspflow-claude-proj-XXXXXX")"
+  export CLAUDE_PROJECTS_DIR="$cproj"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/claude.sh"
+  sid="cccccccc-dddd-eeee-ffff-000000000000"
+  slug="$cproj/-home-proj"
+  mkdir -p "$slug/$sid/subagents"
+  # Parent ended its turn cleanly.
+  printf '%s\n' '{"type":"assistant","message":{"stop_reason":"end_turn"}}' > "$slug/$sid.jsonl"
+  lane_set claude-idle provider claude status live session_id "$sid" cwd /home/proj
+
+  # Case A: no subagents at all -> parent end_turn == idle (rc 0).
+  claude_is_idle claude-idle || { echo "claude_is_idle: expected idle with no children" >&2; exit 1; }
+
+  # Case B: a FRESH child mid-turn (last event not end_turn) -> NOT idle (rc 2).
+  child="$slug/$sid/subagents/agent-11111111.jsonl"
+  printf '%s\n' '{"isSidechain":true,"type":"assistant","message":{"stop_reason":"tool_use"}}' > "$child"
+  # (freshly written -> mtime is now; within CLAUDE_SUBAGENT_ACTIVE_SECS)
+  set +e; claude_is_idle claude-idle; rc=$?; set -e
+  [[ "$rc" -eq 2 ]] || { echo "claude_is_idle: expected rc=2 (children active), got $rc" >&2; exit 1; }
+
+  # Case C: that child finishes cleanly (end_turn) -> idle again (rc 0).
+  printf '%s\n' '{"isSidechain":true,"type":"assistant","message":{"stop_reason":"end_turn"}}' > "$child"
+  claude_is_idle claude-idle || { echo "claude_is_idle: expected idle after child end_turn" >&2; exit 1; }
+
+  # Case D: a mid-turn child that has gone COLD (mtime old) -> treated as done -> idle.
+  printf '%s\n' '{"isSidechain":true,"type":"assistant","message":{"stop_reason":"tool_use"}}' > "$child"
+  touch -d '1 hour ago' "$child" 2>/dev/null || touch -t 202001010000 "$child"
+  claude_is_idle claude-idle || { echo "claude_is_idle: cold mid-turn child should not block idle" >&2; exit 1; }
+
+  # Case E: parent itself NOT done (no end_turn) -> not idle (rc 1) regardless of children.
+  printf '%s\n' '{"type":"assistant","message":{"stop_reason":"tool_use"}}' > "$slug/$sid.jsonl"
+  set +e; claude_is_idle claude-idle; rc=$?; set -e
+  [[ "$rc" -eq 1 ]] || { echo "claude_is_idle: expected rc=1 (parent not done), got $rc" >&2; exit 1; }
+
+  rm -rf "$cproj"
+)
+
 echo "waspflow verify: ok"
