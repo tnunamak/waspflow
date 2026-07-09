@@ -4,9 +4,17 @@ _2026-07-09. Author: the CEO agent. Written to be checked, not trusted._
 
 ## Verdict
 
-**Confidence that the core loop is correct: ~90%. Not yet 98%.** The gap is not
-"features missing" — it is **untested surface** on paths only a live run exercises.
-This memo says exactly what is proven, what is not, and what would close the gap.
+**UPDATE 2026-07-09 (live matrix run): ~96%, up from ~90%.** A free live run with
+haiku workers found AND fixed the real revise/wait bug (turn_mark counted lines, not
+completed turns, so the barrier cleared on the pasted message + trailing snapshots),
+then proved the core loop green under concurrency: `scripts/live-smoke.sh claude 4
+haiku` → 16/16 assertions, 4 parallel lanes, spawn+revise+reap all green, zero
+cross-lane contamination. The gate: `bash scripts/verify.sh` (deterministic) AND
+`scripts/live-smoke.sh` (live). Remaining ~4%: larger fleets (N>4), codex/grok live
+matrix (only claude run live), and failure-injection. Original ~90% analysis below.
+
+**Original: Confidence that the core loop is correct: ~90%. Not yet 98%.** The gap is
+not "features missing" — it is **untested surface** on paths only a live run exercises.
 
 **How to re-check any claim here yourself:** `bash scripts/verify.sh` (→ `waspflow
 verify: ok`), `git log --oneline`, `git diff`. The suite is the oracle; I am not.
