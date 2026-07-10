@@ -294,3 +294,12 @@ and demo preview output without calling a model.
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+## Releases (CI)
+
+Pushes to `main` with conventional commits (`feat:`, `fix:`, `BREAKING CHANGE`) trigger
+[semantic-release](https://github.com/semantic-release/semantic-release): GitHub Releases + notes.
+
+- Workflow: `.github/workflows/release.yml` (after `scripts/verify.sh`)
+- Local install still tracks your clone: `git pull && ./install.sh` (also wired in `dotfiles/setup.sh`).
+
