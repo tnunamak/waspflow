@@ -163,6 +163,9 @@ config shape.
 | `peek <lane>` | Show the tail of the worker pane or transcript |
 | `revise <lane> -- <message>` | Send another instruction to the same session |
 | `reap <lane>` | Close the pane, verify outputs, and finalize state |
+| `close <lane> --status <harvested\|superseded\|abandoned>` | Record a lane's fan-in outcome (with provenance) |
+| `captured <lane> --in <ref>` | Is the lane's work already present in `<ref>`? (by content, not ancestry) |
+| `ops list\|explain\|resolve <id>` | Resolve a task-shaped operating point to explicit flags |
 | `list` | List lanes |
 | `status <lane>` | Show one lane's JSON state |
 | `attach <lane>` | Attach your terminal to the worker pane |

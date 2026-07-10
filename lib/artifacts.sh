@@ -77,7 +77,17 @@ artifacts_report_present() {
 artifacts_finalize() {
   local lane="$1" provider="$2" existing report
   existing="$(lane_get "$lane" result)"
-  case "$existing" in succeeded|recovered|failed|report_missing|verified|verify_failed) echo "$existing"; return 0 ;; esac
+  case "$existing" in
+    succeeded|recovered|failed|report_missing|verified|verify_failed) echo "$existing"; return 0 ;;
+    "") ;;   # not finalized yet — proceed to compute the result below
+    *)
+      # A NON-EMPTY but UNRECOGNIZED result means the state was tampered with or
+      # written by an incompatible version. Do NOT launder it into "succeeded"
+      # (that would fabricate a success). Surface it honestly.
+      lane_set "$lane" result "corrupt_result" prior_result "$existing"
+      echo "corrupt_result"; return 0
+      ;;
+  esac
 
   artifacts_capture_after "$lane"
 

@@ -653,4 +653,46 @@ grep -q 'valid_models' "$root/lib/core.sh" || { echo "core: valid_models not in 
 )
 grep -q 'flock' "$root/lib/core.sh" || { echo "core: lane_set concurrency lock missing" >&2; exit 1; }
 
+# Excellence-audit seam fixes (2026-07-10): clean input validation + honest state
+# handling on the read/control verbs — no raw tool errors, no silent laundering.
+(
+  set +e   # these tests intentionally run commands expected to FAIL and check rc/output
+  export WASPFLOW_HOME="$state_home"
+  export WASPFLOW_TMUX_SESSION="waspflow-verify-seam-$$"
+  BF="$root/bin/waspflow"
+  mkdir -p "$state_home/lanes/sgood"
+  printf 'l1\n' > "$state_home/lanes/sgood/transcript.log"
+  jq -n --arg c "$fixture" --arg t "$state_home/lanes/sgood/transcript.log"     '{provider:"codex",status:"live",cwd:$c,transcript:$t}' > "$state_home/lanes/sgood/state.json"
+
+  # Seam 4B: non-numeric --timeout is a clean error, NOT a bash crash.
+  o="$(WASPFLOW_HOME="$state_home" "$BF" wait sgood --timeout nope 2>&1)"; rc=$?
+  [[ "$rc" -ne 0 ]] && grep -q 'timeout must be a positive integer' <<<"$o"     || { echo "seam: wait --timeout nope not cleanly rejected" >&2; exit 1; }
+  grep -qi 'unbound variable' <<<"$o" && { echo "seam: wait leaked a bash crash" >&2; exit 1; }
+
+  # Seam 4A: non-numeric --lines is a clean error, NOT a raw tail error.
+  o="$(WASPFLOW_HOME="$state_home" "$BF" peek sgood --lines nope 2>&1)"
+  grep -q 'lines must be a positive integer' <<<"$o" || { echo "seam: peek --lines nope not cleanly rejected" >&2; exit 1; }
+  grep -qi 'tail:' <<<"$o" && { echo "seam: peek leaked a tail error" >&2; exit 1; }
+
+  # Seam 4C: unknown flag on list is rejected (not silently ignored).
+  WASPFLOW_HOME="$state_home" "$BF" list --wat >/dev/null 2>&1 && { echo "seam: list --wat silently accepted" >&2; exit 1; }
+
+  # Seam 5: peek --help does not leak grep usage.
+  o="$(WASPFLOW_HOME="$state_home" "$BF" peek sgood --help 2>&1)"
+  grep -qi 'Usage: grep' <<<"$o" && { echo "seam: peek --help leaked grep usage" >&2; exit 1; }
+
+  # Seam 3: list surfaces a corrupt lane as CORRUPT and exits nonzero (no laundering).
+  mkdir -p "$state_home/lanes/scorrupt"; printf '{"provider":' > "$state_home/lanes/scorrupt/state.json"
+  o="$(WASPFLOW_HOME="$state_home" "$BF" list 2>/dev/null)"; rc=$?
+  grep -q 'CORRUPT' <<<"$o" || { echo "seam: corrupt lane not marked CORRUPT in list" >&2; exit 1; }
+  [[ "$rc" -eq 2 ]] || { echo "seam: list should exit 2 with a corrupt lane, got $rc" >&2; exit 1; }
+  rm -rf "$state_home/lanes/scorrupt"
+
+  # Seam 2: reap does NOT launder an unknown result value into success.
+  mkdir -p "$state_home/lanes/smystery"
+  jq -n --arg c "$fixture" '{provider:"codex",status:"live",cwd:$c,result:"mystery",no_recovery:"true",git_tracked:"false"}'     > "$state_home/lanes/smystery/state.json"
+  WASPFLOW_HOME="$state_home" "$BF" reap smystery --no-archive --force >/dev/null 2>&1
+  [[ "$(jq -r .result "$state_home/lanes/smystery/state.json")" == "corrupt_result" ]]     || { echo "seam: reap laundered an unknown result instead of flagging it" >&2; exit 1; }
+)
+
 echo "waspflow verify: ok"

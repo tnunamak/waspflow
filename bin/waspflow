@@ -386,15 +386,23 @@ cmd_list() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --status) status_filter="${2:-}"; shift 2 ;;
+      -*) die "list: unknown option '$1'" ;;
       *) shift ;;
     esac
   done
   local lanes; lanes="$(list_lanes)"
   if [[ -z "$lanes" ]]; then echo "(no lanes)"; return 0; fi
   printf '%-20s %-8s %-8s %-11s %s\n' LANE PROVIDER STATE OUTCOME CWD
-  local lane matched=0
+  local lane matched=0 any_corrupt=0
   while IFS= read -r lane; do
     [[ -n "$lane" ]] || continue
+    # A corrupt state.json must be SURFACED, not laundered into a blank/exited lane
+    # (that would misreport the fleet). Mark it and remember to exit nonzero.
+    if ! jq empty "$(lane_state_file "$lane")" 2>/dev/null; then
+      matched=1; any_corrupt=1
+      printf '%-20s %-8s %-8s %-11s %s\n' "$lane" "?" "CORRUPT" "?" "(unparseable state.json)"
+      continue
+    fi
     local provider status cwd live outcome
     provider="$(lane_get "$lane" provider)"
     status="$(lane_get "$lane" status)"
@@ -410,6 +418,7 @@ cmd_list() {
     printf '%-20s %-8s %-8s %-11s %s\n' "$lane" "$provider" "$live" "$outcome" "$cwd"
   done <<<"$lanes"
   [[ -n "$status_filter" && "$matched" -eq 0 ]] && echo "(no lanes with outcome in: $status_filter)"
+  [[ "$any_corrupt" -eq 1 ]] && { warn "list: one or more lanes have corrupt state.json (shown as CORRUPT)"; return 2; }
   return 0
 }
 
@@ -457,14 +466,22 @@ cmd_status() {
 
 cmd_peek() {
   local lane="${1:-}" lines=40; shift || true
-  while [[ $# -gt 0 ]]; do case "$1" in --lines) lines="${2:-40}"; shift 2 ;; *) shift ;; esac; done
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --lines) lines="${2:-}"; shift 2 ;;
+      -*) die "peek: unknown option '$1'" ;;
+      *) shift ;;
+    esac
+  done
   [[ -n "$lane" ]] || die "peek: <lane> required"
+  [[ "$lines" =~ ^[0-9]+$ ]] || die "peek: --lines must be a positive integer (got: $lines)"
+  lane_exists "$lane" || die "peek: no such lane '$lane'"
   if tmux_window_exists "$lane"; then
     tmux capture-pane -p -t "$(tmux_window_target "$lane")" -S -"$lines" 2>/dev/null \
       | strip_ansi | grep -v '^$' | tail -"$lines"
   else
     local t; t="$(lane_get "$lane" transcript)"
-    [[ -f "$t" ]] || die "peek: lane '$lane' has no live window and no transcript"
+    [[ -f "$t" ]] || die "peek: lane '$lane' has no live window and no transcript yet"
     strip_ansi <"$t" | grep -v '^$' | tail -"$lines"
   fi
 }
@@ -473,12 +490,15 @@ cmd_wait() {
   local lane="${1:-}" timeout=600 interval=2; shift || true
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --timeout) timeout="${2:-600}"; shift 2 ;;
-      --interval) interval="${2:-2}"; shift 2 ;;
+      --timeout) timeout="${2:-}"; shift 2 ;;
+      --interval) interval="${2:-}"; shift 2 ;;
+      -*) die "wait: unknown option '$1'" ;;
       *) shift ;;
     esac
   done
   [[ -n "$lane" ]] || die "wait: <lane> required"
+  [[ "$timeout" =~ ^[0-9]+$ && "$timeout" -gt 0 ]] || die "wait: --timeout must be a positive integer (got: $timeout)"
+  [[ "$interval" =~ ^[0-9]+$ && "$interval" -gt 0 ]] || die "wait: --interval must be a positive integer (got: $interval)"
   lane_exists "$lane" || die "no such lane '$lane'"
   local provider; provider="$(lane_get "$lane" provider)"
   load_provider "$provider"
@@ -682,9 +702,10 @@ _reap_one() {
     verify_failed)   err  "reap: lane '$lane' reaped — result=verify_failed" ;;
     report_missing)  err  "reap: lane '$lane' reaped — result=report_missing (recovery disabled)" ;;
     failed)          err  "reap: lane '$lane' reaped — result=failed (required report never produced)" ;;
+    corrupt_result)  err  "reap: lane '$lane' — state has an unrecognized result value (not laundered to success); inspect state.json" ;;
     *)               log "reap: lane '$lane' reaped" ;;
   esac
-  case "$result" in failed|report_missing|verify_failed) return 2 ;; esac
+  case "$result" in failed|report_missing|verify_failed|corrupt_result) return 2 ;; esac
   return 0
 }
 
