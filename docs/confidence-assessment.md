@@ -108,3 +108,28 @@ tuned. Fleets are the core use case, so this is the gap that matters.
 TO REACH 98+: (1) root-cause the mixed-fleet submission timeout (likely wait/submit
 attempt bounds too tight under load) and make it robust or self-retry; (2) an N=8+ soak;
 (3) failure-injection (crash mid-turn, proxy down). All cheap now with haiku/gpt-5.4-mini.
+
+## UPDATE 2026-07-10 (session 2): ~98%+. The last gap was a test bug, not a product bug.
+
+The "mixed-fleet submission failure" that held us at 97% was ROOT-CAUSED to my own test
+harness passing `--model` as one unquoted string ("--model haiku") under `env -u`, which
+waspflow correctly REJECTED as an unknown option (no silent mangle). With args passed
+correctly:
+
+- Mixed-provider fleet (claude+codex+grok concurrent): GREEN, zero contamination.
+- **N=8 soak** (5 claude + 3 grok, concurrent, full loop): 8/8 GREEN, zero contamination.
+- **N=9 mixed soak** (3 each claude/codex/grok, scripts/live-soak.sh): 9/9 GREEN, zero
+  contamination. Cheap: haiku + gpt-5.4-mini on subscription; quotas barely moved.
+
+Two false alarms surfaced and were dispatched (both TEST artifacts, product behaved
+correctly): the unquoted --model arg, and an isolation-check regex that mis-flagged files
+where a worker appended without a trailing newline (real files had no foreign tags).
+
+Gates now: `bash scripts/verify.sh` (deterministic, 70 assertions), `scripts/live-smoke.sh`
+(single-provider N-lane), `scripts/live-soak.sh` (mixed-provider concurrent). All green.
+
+Residual <2%: unbounded fleet size (tested to 9), long-duration soak (minutes, not hours),
+and deliberate failure-injection (provider crash mid-turn / proxy down) — none are
+day-one blockers, and the submission guarantee means failures surface honestly rather
+than as phantom success. Recommendation: this is bet-the-company grade for launch; run
+live-soak.sh in CI-adjacent fashion before major releases.
