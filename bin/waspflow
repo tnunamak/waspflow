@@ -502,6 +502,18 @@ cmd_wait() {
   local barrier_cleared=0
   [[ -n "$barrier_mark" ]] || barrier_cleared=1
 
+  # Mid-run interactive-prompt (stall) detection. A worker can BLOCK mid-turn on a
+  # prompt that expects a human keystroke (quota/model-downgrade offer, security
+  # wait, y/n). It never reaches idle, so plain `wait` would stall blind until
+  # timeout. We watch the lane transcript for activity: if it stops growing for
+  # WASPFLOW_STALL_SECONDS *and* the pane looks blocked, return a distinct
+  # 'blocked' state (rc 4) with the pane text — so the orchestrator answers via
+  # `revise` in seconds instead of losing the whole timeout. We never auto-answer.
+  local stall_secs="${WASPFLOW_STALL_SECONDS:-45}"
+  local transcript; transcript="$(lane_transcript "$lane")"
+  local last_size; last_size="$(wc -c <"$transcript" 2>/dev/null || echo 0)"
+  local last_change; last_change="$(date +%s)"
+
   local deadline=$(( $(date +%s) + timeout ))
   while :; do
     if [[ "$barrier_cleared" -eq 0 ]]; then
@@ -520,7 +532,29 @@ cmd_wait() {
       log "wait: lane '$lane' is IDLE"
       return 0
     fi
-    if [[ "$(date +%s)" -ge "$deadline" ]]; then
+    # --- stall / blocked-on-prompt check ---
+    local now cur_size; now="$(date +%s)"
+    cur_size="$(wc -c <"$transcript" 2>/dev/null || echo 0)"
+    if [[ "$cur_size" != "$last_size" ]]; then
+      last_size="$cur_size"; last_change="$now"      # activity → reset the stall clock
+    elif [[ $(( now - last_change )) -ge "$stall_secs" ]]; then
+      # No pane output for stall_secs. If the pane looks blocked on a prompt,
+      # surface it now rather than waiting out the full timeout.
+      local pane reason
+      pane="$(tmux capture-pane -p -t "$(tmux_window_target "$lane")" -S -40 2>/dev/null | strip_ansi)"
+      if reason="$(wf_pane_looks_blocked "$pane")"; then
+        lane_set "$lane" wait_state "blocked" blocked_reason "$reason"
+        warn "wait: lane '$lane' appears BLOCKED on an interactive prompt ($reason) — not auto-answered"
+        warn "  the worker is waiting for human input. Inspect and answer:"
+        warn "    waspflow peek $lane            # read the exact prompt"
+        warn "    waspflow revise $lane -- \"1\"   # or 'yes' / 'no' — YOUR call (never auto-answered)"
+        return 4
+      fi
+      # Stalled but not obviously a prompt — reset the clock and keep waiting; the
+      # deadline still bounds us. (Avoids crying wolf on a slow-but-working turn.)
+      last_change="$now"
+    fi
+    if [[ "$now" -ge "$deadline" ]]; then
       warn "wait: TIMEOUT after ${timeout}s (lane '$lane' never went idle)"
       return 1
     fi

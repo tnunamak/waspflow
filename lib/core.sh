@@ -176,6 +176,34 @@ tmux_paste_text() {
 # Strip ANSI escapes from captured pane text for human/log consumption.
 strip_ansi() { sed -E 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b[()][AB0]//g'; }
 
+# Does a captured pane look like it is BLOCKED on an interactive prompt that
+# expects a human keystroke? These appear MID-RUN and can't be predicted per
+# provider — quota/model-downgrade offers ("switch to a lesser model"),
+# security-check waits ("additional verification, keep waiting?"), y/n
+# confirmations, numbered menus. We DETECT and SURFACE them (so `wait` returns a
+# distinct blocked state instead of stalling blind), but deliberately DO NOT
+# auto-answer: guessing could downgrade the model or approve something unwanted.
+# The caller answers via `revise`. Matches a question/choice STRUCTURE, not the
+# bare composer `❯`, so an actively-working pane isn't flagged (and `wait` only
+# calls this once it has ALSO confirmed the session log stopped growing).
+# Echoes a short reason if blocked; empty (rc 1) if not. Args: pane_text
+wf_pane_looks_blocked() {
+  local pane="$1"
+  # A numbered choice menu with a selection cursor (trust gate, downgrade offers).
+  if grep -qiE '(^|\n)[[:space:]]*(❯|>|\*)?[[:space:]]*[12]\.[[:space:]]*(yes|no|continue|proceed|keep|switch|use)' <<<"$pane"; then
+    echo "numbered choice prompt"; return 0
+  fi
+  # Explicit y/n or Enter-to-confirm gates.
+  if grep -qiE '\[y/n\]|\(y/n\)|\(y/N\)|\[Y/n\]|press enter|enter to confirm|enter to continue' <<<"$pane"; then
+    echo "confirm/keystroke prompt"; return 0
+  fi
+  # Known interactive question phrasings a human is expected to answer.
+  if grep -qiE 'switch to a (lesser|smaller|different) model|approaching your (usage )?limit|additional (security|verification)|keep waiting\?|do you want to (continue|proceed|keep)|would you like to (continue|switch)' <<<"$pane"; then
+    echo "interactive question awaiting input"; return 0
+  fi
+  return 1
+}
+
 # ---- provider adapter dispatch ---------------------------------------------
 # Each provider is a file lib/providers/<provider>.sh defining shell functions
 # named  <provider>_spawn  <provider>_is_idle  <provider>_revise

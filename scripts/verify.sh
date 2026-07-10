@@ -532,4 +532,37 @@ PROV
 grep -q 'lane name too long' "$root/lib/core.sh" || { echo "core: lane-name length guard missing" >&2; exit 1; }
 grep -q 'corrupted state.json' "$root/bin/waspflow" || { echo "status: corrupt-json guard missing" >&2; exit 1; }
 
+# Mid-run interactive-prompt (stall) detection (2026-07-10): wait must SURFACE a
+# worker blocked on a human-input prompt (rc 4 + wait_state=blocked), never
+# auto-answer, and never false-flag a working pane.
+(
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # positive: real prompt shapes (model-downgrade, security-wait, y/n, trust, Enter)
+  for t in \
+    "You are approaching your usage limit.
+❯ 1. Switch to a lesser model
+  2. Keep current" \
+    "Additional security verification required. Do you want to keep waiting? [y/n]" \
+    "This will modify files. Continue? (y/N)" \
+    "Press Enter to confirm"; do
+    wf_pane_looks_blocked "$t" >/dev/null || { echo "stall: prompt not detected: $t" >&2; exit 1; }
+  done
+  # negative: working panes must NOT be flagged (no crying wolf)
+  for t in \
+    "● Reading file
+✽ Processing… (4s)
+❯ " \
+    "● Done. Appended TOKEN.
+✻ Worked for 6s
+❯ " \
+    "I will analyze the code now.
+❯ "; do
+    if wf_pane_looks_blocked "$t" >/dev/null; then echo "stall: working pane wrongly flagged: $t" >&2; exit 1; fi
+  done
+)
+# Pin: wait has stall/blocked detection wired (rc 4, surfaced, never auto-answered).
+grep -q 'wf_pane_looks_blocked' "$root/bin/waspflow" || { echo "wait: stall detection not wired" >&2; exit 1; }
+grep -q 'WASPFLOW_STALL_SECONDS' "$root/bin/waspflow" || { echo "wait: stall window not configurable" >&2; exit 1; }
+
 echo "waspflow verify: ok"
