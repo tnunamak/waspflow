@@ -447,7 +447,10 @@ cmd_captured() {
 cmd_status() {
   local lane="${1:-}"; [[ -n "$lane" ]] || die "status: <lane> required"
   lane_exists "$lane" || die "no such lane '$lane'"
-  jq . "$(lane_state_file "$lane")"
+  # Pretty-print the state, but on malformed JSON emit a clear waspflow error
+  # instead of leaking a raw `jq: parse error` to the operator (red-team finding).
+  local sf; sf="$(lane_state_file "$lane")"
+  jq . "$sf" 2>/dev/null || die "lane '$lane' has corrupted state.json ($sf) — cannot parse"
 }
 
 cmd_peek() {

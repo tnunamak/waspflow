@@ -90,6 +90,11 @@ guard_cwd() {
 validate_lane_name() {
   local lane="$1"
   [[ -n "$lane" ]] || die "lane name is required"
+  # Length cap: a lane name becomes a directory component. Over ~255 bytes the
+  # later mkdir fails with a raw "File name too long" from the OS; catch it here
+  # with a clear waspflow error instead. (Red-team finding, 2026-07-10.)
+  [[ "${#lane}" -le 100 ]] \
+    || die "lane name too long (${#lane} chars; max 100) — keep lane names short and unique"
   [[ "$lane" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
     || die "invalid lane name '$lane' (use letters, digits, . _ -)"
 }

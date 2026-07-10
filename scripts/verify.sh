@@ -527,4 +527,9 @@ PROV
   rm -rf "$deadlib" "$dead_home" "$dead_work"
 )
 
+# Red-team hardening pins (2026-07-10): clear errors for oversized lane names and
+# corrupted state.json, instead of raw OS/jq errors leaking to the operator.
+grep -q 'lane name too long' "$root/lib/core.sh" || { echo "core: lane-name length guard missing" >&2; exit 1; }
+grep -q 'corrupted state.json' "$root/bin/waspflow" || { echo "status: corrupt-json guard missing" >&2; exit 1; }
+
 echo "waspflow verify: ok"
