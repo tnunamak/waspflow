@@ -150,3 +150,28 @@ seconds, not at timeout. Per owner's explicit choice: DETECT + SURFACE, never au
 (guessing could downgrade the model or approve something unwanted); the orchestrator
 answers via `revise`. Detector verified: catches model-downgrade/security-wait/y-n/trust/
 Enter prompts, 0 false positives on working panes; live sim returns rc 4 in ~5s.
+
+## UPDATE 2026-07-10 (session 5): excellence pass — the seams are closed
+
+Owner: "figure out what excellence is shippable... Apple ships excellence all the way
+through, not a mix of excellent and good." Did a full excellence pass:
+
+1. **Fixed the last documented seam — lane_set concurrency.** Per-lane flock serializes
+   the read-modify-write: 40 concurrent same-lane writes now keep all 40 fields (was ~7).
+   Different lanes don't contend; falls back gracefully without flock; suite green.
+
+2. **Systematic command-surface audit (Codex gpt-5.6-terra, isolated worktree)** found 5
+   seams on the read/control verbs; each independently verified, then fixed:
+   - reap no longer launders an unknown `result` into `succeeded` (→ corrupt_result, nonzero)
+   - list no longer launders a corrupt lane into a blank row (→ CORRUPT, exit 2)
+   - clean input validation: `wait --timeout nope` (was a Bash crash), `peek --lines nope`
+     (was a raw tail: error), `list --wat` (was silently ignored) — all now clean errors
+   - peek --help no longer leaks grep usage; README verb table completed (ops/close/captured)
+
+Every fix has a regression test. The reactive "fix what's reported" posture is now backed
+by a systematic audit that found real seams I'd missed — and they're closed.
+
+HONEST residual: (a) stall-detection prompt WORDING still unverified against a real
+provider prompt (mechanism proven, wording is a hint by design); (b) a full per-verb
+`--help` framework was deliberately NOT built (a feature, not a seam — the leak it caused
+is fixed). Neither is a bet-the-company blocker.
