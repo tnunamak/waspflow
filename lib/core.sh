@@ -86,6 +86,24 @@ guard_cwd() {
   fi
 }
 
+# Fail a bad --model FAST, with the valid set, instead of 30s into the run (or —
+# worse — silently running the wrong model). Reads the provider CLI's own live,
+# auth-scoped model cache via <provider>_valid_models. FAIL OPEN: if the provider
+# can't enumerate models (no cache), skip — the CLI is the real backstop, so a
+# missing courtesy cache never blocks work. (Addresses the --model footgun:
+# stale/unsupported slugs like gpt-5.3-codex under a ChatGPT-account auth.)
+# Args: provider model verb
+validate_model() {
+  local provider="$1" model="$2" verb="${3:-spawn}"
+  [[ -n "$model" ]] || return 0
+  local valid; valid="$("${provider}_valid_models" 2>/dev/null || true)"
+  [[ -n "$valid" ]] || return 0                       # fail open: nothing to check against
+  grep -qxF "$model" <<<"$valid" && return 0
+  err "$verb: model '$model' is not available for $provider on the current auth."
+  err "  valid models: $(tr '\n' ' ' <<<"$valid" | tr -s ' ' | sed 's/ /, /g; s/, $//')"
+  die "  fix --model (or omit it to use the provider default)"
+}
+
 # Lane names become tmux window names and dir names; keep them tame.
 validate_lane_name() {
   local lane="$1"
@@ -216,7 +234,7 @@ load_provider() {
   # shellcheck disable=SC1090
   source "$f"
   local fn
-  for fn in spawn is_idle revise preflight discover_session session_resumable turn_mark; do
+  for fn in spawn is_idle revise preflight discover_session session_resumable turn_mark valid_models; do
     declare -F "${provider}_${fn}" >/dev/null \
       || die "provider '$provider' adapter is missing function ${provider}_${fn}"
   done

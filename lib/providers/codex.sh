@@ -20,6 +20,22 @@
 #     configurable health URL ($WASPFLOW_CODEX_BACKEND_HEALTH_URL) when set.
 
 CODEX_SESSIONS_DIR="${CODEX_SESSIONS_DIR:-$HOME/.codex/sessions}"
+# The Codex CLI maintains a LIVE, auth-scoped model list here (slug + effort levels,
+# refreshed with an etag). We read it to fail a bad --model fast at spawn instead of
+# 30s into a run — but never as a hard gate (see codex_valid_models).
+CODEX_MODELS_CACHE="${CODEX_MODELS_CACHE:-$HOME/.codex/models_cache.json}"
+
+# Valid model slugs for the CURRENT Codex auth, one per line, from the CLI's own
+# live cache. Echoes NOTHING (rc 1) when the cache is absent/unreadable — callers
+# must treat "unknown" as "skip validation" (fail OPEN): the CLI itself is the real
+# backstop, so a missing courtesy cache must never block a spawn.
+codex_valid_models() {
+  [[ -r "$CODEX_MODELS_CACHE" ]] || return 1
+  local out
+  out="$(jq -r '.models[].slug // empty' "$CODEX_MODELS_CACHE" 2>/dev/null)"
+  [[ -n "$out" ]] || return 1
+  printf '%s\n' "$out"
+}
 
 # Preflight: codex on PATH + the model backend reachable (else turns hang).
 codex_preflight() {

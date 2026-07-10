@@ -19,6 +19,18 @@
 # Prefer explicit sessions dir; else $GROK_HOME/sessions; else ~/.grok/sessions.
 GROK_HOME="${GROK_HOME:-$HOME/.grok}"
 GROK_SESSIONS_DIR="${GROK_SESSIONS_DIR:-$GROK_HOME/sessions}"
+# The Grok CLI keeps a live, auth-scoped model cache here (like Codex's).
+GROK_MODELS_CACHE="${GROK_MODELS_CACHE:-$GROK_HOME/models_cache.json}"
+
+# Valid model ids for the current Grok auth, one per line, from the CLI's own live
+# cache. Echoes nothing (rc 1) when absent — callers fail OPEN (see codex_valid_models).
+grok_valid_models() {
+  [[ -r "$GROK_MODELS_CACHE" ]] || return 1
+  local out
+  out="$(jq -r '.models[].info.id // .models[].id // empty' "$GROK_MODELS_CACHE" 2>/dev/null)"
+  [[ -n "$out" ]] || return 1
+  printf '%s\n' "$out"
+}
 
 # Preflight: grok on PATH. Grok reaches its model via OAuth cache or XAI_API_KEY;
 # no mandatory local-proxy gate.

@@ -50,6 +50,7 @@ exec_run() {
   fi
 
   load_provider "$provider"
+  validate_model "$provider" "$model" exec
   "${provider}_preflight" || die "exec aborted: $provider preflight failed"
 
   local output_path should_cat=0

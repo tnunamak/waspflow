@@ -17,6 +17,12 @@
 
 CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
 
+# Claude's model set is small and stable (opus/sonnet/haiku aliases + dated ids)
+# and there's no auth-scoped cache to read, so we don't second-guess --model here:
+# echo nothing (rc 1) → spawn skips validation (fail OPEN). The claude CLI rejects a
+# genuinely bad model itself. Defined for provider-contract parity.
+claude_valid_models() { return 1; }
+
 # Preflight: claude on PATH. Claude reaches its model directly by default, so
 # there's no mandatory local-proxy gate like Codex's. NOTE: on some setups
 # `claude` is itself wrapped to route through a local proxy; such a wrapper owns

@@ -444,6 +444,7 @@ faker_revise() { :; }
 # turn_mark and idle are read from control files this test writes.
 faker_turn_mark() { cat "$ctl/mark" 2>/dev/null || echo 0; }
 faker_is_idle() { [[ -f "$ctl/idle" ]]; }
+faker_valid_models() { return 1; }
 PROV
 
   # Source core from the fake lib so lane_set is available here AND lane state is
@@ -509,6 +510,7 @@ deadp_session_resumable() { return 0; }
 deadp_is_idle() { return 1; }
 deadp_revise() { :; }
 deadp_turn_mark() { echo 0; }
+deadp_valid_models() { return 1; }
 deadp_spawn() { return 1; }   # simulate: window up, task never confirmed submitted
 PROV
   sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok)/WASPFLOW_PROVIDERS=(claude codex grok deadp)/' "$deadlib/core.sh"
@@ -573,5 +575,35 @@ grep -q 'corrupted state.json' "$root/bin/waspflow" || { echo "status: corrupt-j
 # Pins: the trigger is stall (not wording); config knob present.
 grep -q 'STALLED' "$root/bin/waspflow" || { echo "wait: stall surfacing missing" >&2; exit 1; }
 grep -q 'WASPFLOW_STALL_SECONDS' "$root/bin/waspflow" || { echo "wait: stall window not configurable" >&2; exit 1; }
+
+# --model validation (2026-07-10): fail a bad model FAST with the valid list (from
+# the provider CLI's own live, auth-scoped cache), but FAIL OPEN when no cache — the
+# CLI is the real backstop. Addresses the --model footgun (stale/unsupported slugs).
+(
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  vmlib="$(mktemp -d "$scratch/waspflow-vm-XXXXXX")"
+  # fake provider that enumerates a fixed model set
+  cat >"$vmlib/faker.sh" <<'PROV'
+faker_valid_models() { printf '%s\n' good-1 good-2 good-3; }
+PROV
+  # shellcheck disable=SC1090
+  source "$vmlib/faker.sh"
+  # bad model -> die (nonzero), lists valid set
+  out="$( (validate_model faker bad-model spawn) 2>&1 )" && { echo "vm: bad model should fail" >&2; exit 1; }
+  grep -q 'not available' <<<"$out" || { echo "vm: missing 'not available' msg" >&2; exit 1; }
+  grep -q 'good-1, good-2, good-3' <<<"$out" || { echo "vm: valid list not shown cleanly" >&2; exit 1; }
+  # valid model -> ok
+  ( validate_model faker good-2 spawn ) || { echo "vm: valid model wrongly rejected" >&2; exit 1; }
+  # empty model (default) -> ok
+  ( validate_model faker "" spawn ) || { echo "vm: empty model should be allowed" >&2; exit 1; }
+  # provider that can't enumerate -> FAIL OPEN (any model allowed)
+  faker2_valid_models() { return 1; }
+  ( validate_model faker2 anything-goes spawn ) || { echo "vm: must fail open when no cache" >&2; exit 1; }
+  rm -rf "$vmlib"
+)
+# Pins: real caches are read; contract includes valid_models; fail-open comment present.
+grep -q 'models_cache.json' "$root/lib/providers/codex.sh" || { echo "codex: model cache source missing" >&2; exit 1; }
+grep -q 'valid_models' "$root/lib/core.sh" || { echo "core: valid_models not in provider contract" >&2; exit 1; }
 
 echo "waspflow verify: ok"

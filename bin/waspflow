@@ -216,6 +216,8 @@ cmd_spawn() {
 
   require_cmd tmux jq
   load_provider "$provider"
+
+  validate_model "$provider" "$model" spawn
   "${provider}_preflight" || die "spawn aborted: $provider preflight failed"
 
   # Worktree isolation (opt-in, only inside a git repo).
