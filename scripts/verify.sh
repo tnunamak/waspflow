@@ -571,6 +571,26 @@ grep -q 'corrupted state.json' "$root/bin/waspflow" || { echo "status: corrupt-j
     || { echo "stall hint: should recognize a model-downgrade menu" >&2; exit 1; }
   if wf_pane_looks_blocked "$(printf '● Done. Worked for 6s\n❯ ')" >/dev/null; then
     echo "stall hint: a working pane should not be hinted as a prompt" >&2; exit 1; fi
+
+  # GROUND TRUTH: prompts captured LIVE from codex (2026-07-10), verbatim — not
+  # imagined. The hint must match the ACTUAL provider text, or it's useless. These
+  # anchor the hint patterns to reality so a refactor can't drift away from it.
+  real_trust="$(printf '%s\n' \
+    '  Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection.' \
+    '❯ 1. Yes, continue' \
+    '  2. No, quit' \
+    '  Press enter to continue')"
+  wf_pane_looks_blocked "$real_trust" >/dev/null \
+    || { echo "stall hint: MISSED the real codex trust prompt (captured 2026-07-10)" >&2; exit 1; }
+  real_approval="$(printf '%s\n' \
+    '  Would you like to run the following command?' \
+    '  $ touch APPROVE_ME.txt && ls -l APPROVE_ME.txt' \
+    '❯ 1. Yes, proceed (y)' \
+    '  2. Yes, and dont ask again (p)' \
+    '  3. No, and tell Codex what to do differently (esc)' \
+    '  Press enter to confirm or esc to cancel')"
+  wf_pane_looks_blocked "$real_approval" >/dev/null \
+    || { echo "stall hint: MISSED the real codex approval prompt (captured 2026-07-10)" >&2; exit 1; }
 )
 # Pins: the trigger is stall (not wording); config knob present.
 grep -q 'STALLED' "$root/bin/waspflow" || { echo "wait: stall surfacing missing" >&2; exit 1; }
