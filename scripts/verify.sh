@@ -22,7 +22,16 @@ grep -Eq 'catalog_ref' "$root/bin/waspflow"
 
 fixture="$(mktemp -d "$scratch/waspflow-verify-XXXXXX")"
 state_home="$(mktemp -d "$scratch/waspflow-state-XXXXXX")"
+
+# HERMETIC ISOLATION. The suite must be deterministic regardless of the machine's
+# live state. It already isolates WASPFLOW_HOME; it MUST also isolate the tmux
+# session, or reap's `tmux_window_exists <lane>` collides with the operator's real
+# `waspflow` session (dozens of live windows) and the suite goes flaky. Use a
+# unique session name per run and export it so every `bin/waspflow` child inherits
+# it. (Per the repo's own rule: tests never touch the production tmux server.)
+export WASPFLOW_TMUX_SESSION="waspflow-verify-$$"
 cleanup() {
+  tmux kill-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || true
   rm -rf "$fixture" "$state_home"
 }
 trap cleanup EXIT
@@ -475,5 +484,14 @@ PROV
 # Static pins: the barrier wiring must stay present through refactors.
 grep -q 'revise_barrier_mark' "$root/bin/waspflow" || { echo "wait/revise: revise_barrier_mark barrier missing" >&2; exit 1; }
 grep -q 'turn_mark' "$root/lib/core.sh" || { echo "core: turn_mark not in provider contract" >&2; exit 1; }
+
+# Pin: verify/prepare run in a NON-login shell (bash -c). A login shell (-lc) sources
+# the user's interactive profile, which was nondeterministic under load and flakily
+# failed passing verify commands. Guard against regressing to -lc.
+grep -q 'bash -c "\$command"' "$root/lib/artifacts.sh" || { echo "artifacts: verify must use bash -c (non-login), not -lc" >&2; exit 1; }
+! grep -q 'bash -lc "\$command"' "$root/lib/artifacts.sh" || { echo "artifacts: verify regressed to login shell (-lc)" >&2; exit 1; }
+# Pin: cmd_spawn ends with an explicit success so a contract-less spawn does not
+# exit nonzero (which trained callers to ignore spawn's exit code, hiding real fails).
+grep -q 'spawn_submitted' "$root/bin/waspflow" || { echo "spawn: submission-confirmation (spawn_submitted) missing" >&2; exit 1; }
 
 echo "waspflow verify: ok"

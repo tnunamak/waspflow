@@ -291,11 +291,30 @@ cmd_spawn() {
   # Durable artifacts: prompt + git-status-before, automatically (no flag).
   artifacts_capture_before "$lane" "$work_cwd" "$prompt"
 
-  "${provider}_spawn" "$lane" "$work_cwd" "$model" "$session_id" "$transcript" "$prompt" "${extra[@]}"
+  # Spawn + confirm the task actually submitted. A provider adapter returns nonzero
+  # when it could not confirm submission (dead-on-arrival: window up, task never
+  # injected — e.g. a modal stole focus). Record the lane either way so it stays
+  # inspectable, but tell the caller LOUDLY and exit nonzero: a silent "spawned"
+  # on a lane that never ran is the failure that makes an orchestrator report
+  # phantom work in flight.
+  local spawn_rc=0
+  "${provider}_spawn" "$lane" "$work_cwd" "$model" "$session_id" "$transcript" "$prompt" "${extra[@]}" || spawn_rc=$?
+
+  if [[ "$spawn_rc" -ne 0 ]]; then
+    lane_set "$lane" spawn_submitted "false"
+    err "spawn: lane '$lane' launched but the task was NOT confirmed submitted"
+    err "  the worker may be stuck at a startup prompt (trust gate / MCP auth / other modal)."
+    err "  inspect:  waspflow peek $lane        (see what is blocking)"
+    err "  recover:  waspflow revise $lane -- \"<the task>\"   (re-inject once unblocked)"
+    err "  the lane is recorded, so nothing is lost — but do NOT assume it is working."
+    return 3
+  fi
+  lane_set "$lane" spawn_submitted "true"
 
   log "spawned $provider lane '$lane' (tmux: $WASPFLOW_TMUX_SESSION:$lane) — next: wait/peek/revise/reap $lane"
   [[ -n "$report_abs" ]] && log "  deliverable contract: $report_abs (verified on idle; one recovery pass if missing)"
   [[ -n "$verify_command" ]] && log "  verify contract: $verify_name -> $verify_command"
+  return 0
 }
 
 cmd_exec() {

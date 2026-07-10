@@ -221,14 +221,20 @@ _artifacts_run_command() {
 
   printf '%s\n' "$command" >"$command_file"
   start="$(date +%s)"
+  # Run in a NON-login shell (bash -c, not -lc). A login shell sources the user's
+  # interactive profile (~/.bash_profile etc.), whose side effects are nondeterministic
+  # under load — observed: an ssh/gpg-agent hook that prints errors and, in parallel,
+  # made even `bash -lc true` exit nonzero ~50% of the time, flakily stamping a
+  # passing verify as verify_failed. The verify command must depend only on its own
+  # environment, not on interactive login setup. (Real bug + the suite-flake source.)
   set +e
   if command -v timeout >/dev/null 2>&1; then
     timeout_available=1
-    (cd "$cwd" && timeout "$timeout_seconds" bash -lc "$command") >"$stdout" 2>"$stderr"
+    (cd "$cwd" && timeout "$timeout_seconds" bash -c "$command") >"$stdout" 2>"$stderr"
     rc=$?
   else
     warn "verify: coreutils 'timeout' not found; running '$name' without a timeout"
-    (cd "$cwd" && bash -lc "$command") >"$stdout" 2>"$stderr"
+    (cd "$cwd" && bash -c "$command") >"$stdout" 2>"$stderr"
     rc=$?
   fi
   set -e

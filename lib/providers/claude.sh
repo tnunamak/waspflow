@@ -79,10 +79,10 @@ claude_spawn() {
   # which still blocks startup in an unfamiliar dir. The task prompt was passed as
   # a positional arg, so it auto-runs once trust is cleared — no separate submit.
   _claude_clear_trust_prompt "$target"
-  # Verify the session actually started (JSONL appears) — the trust prompt may
-  # arrive a beat late; re-answer once if needed.
+  # Confirm the task actually submitted (prompt lands as a user event). Propagate
+  # the result so cmd_spawn can warn loudly on a dead-on-arrival lane instead of
+  # reporting a false success.
   _claude_verify_started "$lane" "$target"
-  return 0
 }
 
 # Pane snapshot, de-escaped.
@@ -112,22 +112,41 @@ _claude_clear_trust_prompt() {
   return 0
 }
 
-# Ensure the session JSONL appears (the turn started). If not within the window,
-# re-answer a possibly-late trust prompt once. Best-effort; wait/idle is the real
-# gate the caller uses next.
+# Confirm the task ACTUALLY SUBMITTED — not just that a window exists. A silent
+# dead-on-arrival lane (fresh banner, task never injected because a modal stole
+# focus) is the worst failure: the orchestrator thinks work is in flight when it
+# isn't. So this returns SUCCESS only once the prompt appears as a `user` message
+# in the session JSONL, and it actively clears the modals that block submission:
+#   - the folder-trust gate ("Is this a project you trust?")
+#   - the MCP-auth banner is passive (doesn't block), but if a blocking /mcp or
+#     other prompt appears we send Enter/Escape to dismiss and let the task run.
+# Returns 0 if submission confirmed, 1 if not (caller surfaces this loudly).
 _claude_verify_started() {
-  local lane="$1" target="$2" sid jsonl i
+  local lane="$1" target="$2" sid jsonl i pane
   sid="$(claude_discover_session "$lane")"
-  [[ -n "$sid" ]] || return 0
-  for i in $(seq 1 15); do
+  [[ -n "$sid" ]] || return 1
+  local prompt; prompt="$(lane_get "$lane" prompt)"
+  # Attempts are env-tunable so tests can exercise the failure path fast; default
+  # 30 (~30s) gives a real spawn ample time to submit past startup modals.
+  local attempts="${WASPFLOW_SUBMIT_ATTEMPTS:-30}"
+  for i in $(seq 1 "$attempts"); do
     jsonl="$(find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -type f -name "${sid}.jsonl" 2>/dev/null | head -1)"
-    [[ -n "$jsonl" ]] && return 0
-    if grep -qiE "trust this folder|Is this a project you" <<<"$(_claude_pane "$target")"; then
+    # Submission confirmed: a user event carries the task. Use a distinctive slice
+    # of the prompt so we match the real submission, not an echo of the composer.
+    if [[ -n "$jsonl" && -s "$jsonl" ]]; then
+      if jq -rc 'select(.type=="user") | (.message.content // .message // "" | tostring)' "$jsonl" 2>/dev/null \
+           | grep -qF "${prompt:0:40}"; then
+        return 0
+      fi
+    fi
+    pane="$(_claude_pane "$target")"
+    # Re-clear the trust gate if it (re)appeared.
+    if grep -qiE "trust this folder|Is this a project you" <<<"$pane"; then
       tmux send-keys -t "$target" "1"; sleep 1; tmux send-keys -t "$target" Enter
     fi
     sleep 1
   done
-  return 0
+  return 1
 }
 
 # Is the session resumable yet? After a window is killed, the JSONL may not be
