@@ -137,12 +137,30 @@ lane_get() {
 
 # Write/merge fields into a lane's state.json. Args: lane k1 v1 k2 v2 ...
 # Always stamps updated_at (epoch). Creates the dir + file if absent.
+#
+# CONCURRENCY: the read-modify-write (read state.json, merge fields via jq, write
+# back) is serialized per-lane with flock, so two concurrent lane_set calls to the
+# SAME lane can't lose each other's fields (last-writer-wins-with-lost-updates was a
+# real fleet seam). The lock is per-lane, so different lanes never contend. Falls
+# back to the un-locked path if flock is unavailable (rare) — the atomic mv still
+# prevents a torn/corrupt file, only concurrent-same-lane updates could be lost.
 lane_set() {
   local lane="$1"; shift
-  local dir sf tmp
-  dir="$(lane_dir "$lane")"
+  local dir; dir="$(lane_dir "$lane")"
   mkdir -p "$dir"
-  sf="$dir/state.json"
+  if command -v flock >/dev/null 2>&1; then
+    local lockf="$dir/.state.lock"
+    ( flock 9; _lane_set_locked "$dir" "$@" ) 9>"$lockf"
+  else
+    _lane_set_locked "$dir" "$@"
+  fi
+}
+
+# The critical section: read → merge → atomic write. MUST run under the lane lock
+# (or single-threaded). Args: dir k1 v1 k2 v2 ...
+_lane_set_locked() {
+  local dir="$1"; shift
+  local sf="$dir/state.json" tmp
   [[ -f "$sf" ]] || echo '{}' >"$sf"
   # Build a jq assignment object from the k/v pairs.
   local jq_args=() jq_set='.'
@@ -154,8 +172,13 @@ lane_set() {
     i=$((i+1))
   done
   jq_set="$jq_set | .updated_at = (now | floor | tostring)"
-  tmp="$(mktemp)"
-  jq "${jq_args[@]}" "$jq_set" "$sf" >"$tmp" && mv "$tmp" "$sf"
+  tmp="$(mktemp "$dir/.state.XXXXXX")"   # same dir → mv is atomic (same filesystem)
+  if jq "${jq_args[@]}" "$jq_set" "$sf" >"$tmp" 2>/dev/null; then
+    mv "$tmp" "$sf"
+  else
+    rm -f "$tmp"   # never leave a partial temp or clobber good state on jq failure
+    return 1
+  fi
 }
 
 list_lanes() {

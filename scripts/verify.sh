@@ -635,4 +635,22 @@ grep -q 'valid_models' "$root/lib/core.sh" || { echo "core: valid_models not in 
   rm -rf "$br"
 )
 
+# lane_set concurrency (2026-07-10): the per-lane flock must prevent lost updates
+# when many writes hit the SAME lane at once (was last-writer-wins, ~7/40 survived).
+(
+  export WASPFLOW_HOME="$state_home"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  mkdir -p "$state_home/lanes/conc"; echo '{}' > "$state_home/lanes/conc/state.json"
+  for i in $(seq 1 30); do ( lane_set conc "k$i" "v$i" ) & done
+  wait
+  jq empty "$state_home/lanes/conc/state.json" 2>/dev/null || { echo "conc: state.json corrupted" >&2; exit 1; }
+  n="$(jq '[keys[]|select(startswith("k"))]|length' "$state_home/lanes/conc/state.json")"
+  [[ "$n" -eq 30 ]] || { echo "conc: lost updates ($n/30 fields survived)" >&2; exit 1; }
+  # lock/temp files must not surface as lanes
+  list_lanes | grep -q '\.state' && { echo "conc: lock/temp file leaked into list_lanes" >&2; exit 1; }
+  true
+)
+grep -q 'flock' "$root/lib/core.sh" || { echo "core: lane_set concurrency lock missing" >&2; exit 1; }
+
 echo "waspflow verify: ok"
