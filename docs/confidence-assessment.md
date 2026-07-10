@@ -133,3 +133,20 @@ and deliberate failure-injection (provider crash mid-turn / proxy down) — none
 day-one blockers, and the submission guarantee means failures surface honestly rather
 than as phantom success. Recommendation: this is bet-the-company grade for launch; run
 live-soak.sh in CI-adjacent fashion before major releases.
+
+## UPDATE 2026-07-10 (session 4): mid-run interactive-prompt handling
+
+Owner asked: what happens when a provider throws a mid-run prompt expecting human
+input (quota/model-downgrade offer, "additional security check — keep waiting?", y/n)?
+Answer BEFORE this session: waspflow only handled the STARTUP folder-trust gate. A
+mid-run prompt blocked the worker; `wait` (which reads the session log for turn-end)
+never saw idle and stalled BLIND until timeout. Honest (no phantom success) but wasteful
+and undiagnosed — the exact class that stranded an earlier fleet.
+
+FIXED (commit 64c1db8): `wait` now watches the lane transcript for activity; if it stops
+growing for WASPFLOW_STALL_SECONDS (default 45) AND the pane matches an interactive-prompt
+shape, it returns a distinct rc 4 (wait_state=blocked) with an actionable message — in
+seconds, not at timeout. Per owner's explicit choice: DETECT + SURFACE, never auto-answer
+(guessing could downgrade the model or approve something unwanted); the orchestrator
+answers via `revise`. Detector verified: catches model-downgrade/security-wait/y-n/trust/
+Enter prompts, 0 false positives on working panes; live sim returns rc 4 in ~5s.
