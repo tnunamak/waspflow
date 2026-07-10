@@ -233,7 +233,10 @@ $prompt"
     warn "codex spawn: submit attempt $attempt did not start a turn for lane '$lane'; retrying Enter"
   done
   warn "codex spawn: prompt may not have submitted for lane '$lane' (no rollout for $cwd). Inspect: waspflow attach $lane"
-  return 0
+  # Real failure signal: no rollout appeared after 5 Enter attempts, so the task
+  # was NOT confirmed submitted (dead-on-arrival). Return nonzero so cmd_spawn
+  # surfaces it loudly + exits 3, instead of a phantom "spawned" (parity with claude).
+  return 1
 }
 
 # Extract Codex's session id from a rollout path.

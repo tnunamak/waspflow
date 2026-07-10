@@ -494,4 +494,37 @@ grep -q 'bash -c "\$command"' "$root/lib/artifacts.sh" || { echo "artifacts: ver
 # exit nonzero (which trained callers to ignore spawn's exit code, hiding real fails).
 grep -q 'spawn_submitted' "$root/bin/waspflow" || { echo "spawn: submission-confirmation (spawn_submitted) missing" >&2; exit 1; }
 
+# Dead-on-arrival spawn: when a provider adapter cannot confirm the task submitted
+# (returns nonzero), cmd_spawn must exit 3, record spawn_submitted=false, and warn
+# loudly — never a phantom "spawned". Drive the REAL cmd_spawn with a fake provider
+# whose spawn returns 1. (The incident: an orchestrator reported work in flight that
+# never ran, because spawn couldn't tell submitted from dead-on-arrival.)
+(
+  deadlib="$(mktemp -d "$scratch/waspflow-deadlib-XXXXXX")"; mkdir -p "$deadlib/providers"
+  cp "$root"/lib/*.sh "$deadlib/"; cp -r "$root/lib/generated" "$deadlib/" 2>/dev/null || true
+  cat >"$deadlib/providers/deadp.sh" <<'PROV'
+deadp_preflight() { :; }
+deadp_discover_session() { echo x; }
+deadp_session_resumable() { return 0; }
+deadp_is_idle() { return 1; }
+deadp_revise() { :; }
+deadp_turn_mark() { echo 0; }
+deadp_spawn() { return 1; }   # simulate: window up, task never confirmed submitted
+PROV
+  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok)/WASPFLOW_PROVIDERS=(claude codex grok deadp)/' "$deadlib/core.sh"
+  dead_home="$(mktemp -d "$scratch/waspflow-deadhome-XXXXXX")"
+  dead_work="$(mktemp -d "$scratch/waspflow-deadwork-XXXXXX")"
+  ( cd "$dead_work" && git init -q )
+  set +e
+  out="$(cd "$dead_work" && WASPFLOW_LIB="$deadlib" WASPFLOW_HOME="$dead_home" WASPFLOW_TMUX_SESSION="wf-dead-$$" \
+        "$root/bin/waspflow" spawn --provider deadp --lane dead -- "do a thing" 2>&1)"
+  rc=$?
+  set -e
+  [[ "$rc" -eq 3 ]] || { echo "dead-on-arrival: cmd_spawn should exit 3, got $rc" >&2; exit 1; }
+  grep -q "NOT confirmed submitted" <<<"$out" || { echo "dead-on-arrival: missing loud warning" >&2; exit 1; }
+  [[ "$(jq -r '.spawn_submitted // empty' "$dead_home/lanes/dead/state.json" 2>/dev/null)" == "false" ]] \
+    || { echo "dead-on-arrival: spawn_submitted should be false" >&2; exit 1; }
+  rm -rf "$deadlib" "$dead_home" "$dead_work"
+)
+
 echo "waspflow verify: ok"
