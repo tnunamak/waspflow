@@ -131,13 +131,16 @@ waspflow revise <lane> --out /tmp/reply.txt -- "Summarize what you changed."
 
 `wait` reads the provider's session log for turn-end (Claude `end_turn`; Codex
 `task_complete`; Grok `turn_ended`) — no need to poll `peek` to know an agent is
-done. Exit codes: `0` idle (done), `1` timeout, `4` **blocked** — the worker stalled
-on a mid-run interactive prompt that expects human input (e.g. "switch to a lesser
-model?", "additional security check — keep waiting?", a y/n). waspflow **surfaces**
-this fast but never auto-answers (guessing could downgrade your model or approve
-something unwanted). On rc 4: `waspflow peek <lane>` to read the exact prompt, then
-`waspflow revise <lane> -- "1"` (or `yes`/`no` — your call) to answer it, then
-`wait` again. Tune the stall window with `WASPFLOW_STALL_SECONDS` (default 45).
+done. Exit codes: `0` idle (done), `1` timeout, `4` **stalled** — the worker produced
+no output for `WASPFLOW_STALL_SECONDS` (default 45) while its turn hadn't ended.
+That usually means it's waiting on a mid-run interactive prompt (a quota/model-
+downgrade offer, a security check, a y/n) but can also be a hang or a very slow tool.
+waspflow **surfaces** the stall fast (in seconds, not at timeout) but never auto-
+answers — it hands the decision to you. On rc 4: `waspflow peek <lane>` to see exactly
+what it's waiting on, then `waspflow revise <lane> -- "<answer>"` (e.g. `1`/`yes`/`no`)
+to answer, then `wait` again — or raise `WASPFLOW_STALL_SECONDS` if the turn is just
+slow. The trigger is the stall itself, not any specific prompt wording (robust to new
+or reworded prompts).
 
 Reap lanes you finish (state is retained after reap, so reaping is safe); one
 live lane per name (reap before reusing one); `attach <lane>` drops you into the

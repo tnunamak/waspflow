@@ -532,37 +532,46 @@ PROV
 grep -q 'lane name too long' "$root/lib/core.sh" || { echo "core: lane-name length guard missing" >&2; exit 1; }
 grep -q 'corrupted state.json' "$root/bin/waspflow" || { echo "status: corrupt-json guard missing" >&2; exit 1; }
 
-# Mid-run interactive-prompt (stall) detection (2026-07-10): wait must SURFACE a
-# worker blocked on a human-input prompt (rc 4 + wait_state=blocked), never
-# auto-answer, and never false-flag a working pane.
+# Stall detection (2026-07-10). `wait` must SURFACE a worker that made no progress
+# for WASPFLOW_STALL_SECONDS while its turn hasn't ended (rc 4, wait_state=stalled)
+# — whatever the cause (interactive prompt, hang, slow tool). The TRIGGER is the
+# stall itself, NOT prompt wording: matching prompt text is brittle (breaks when a
+# provider rephrases). Prompt matching is only an optional HINT in the message.
+(
+  export WASPFLOW_HOME="$state_home"
+  # END-TO-END, wording-INDEPENDENT: a pane with GENERIC stalled text (no prompt
+  # phrases) must still trigger rc 4. This is the whole point of the reframe.
+  tmux new-session -d -s "$WASPFLOW_TMUX_SESSION" -n _h 2>/dev/null || true
+  tmux new-window -d -t "$WASPFLOW_TMUX_SESSION" -n stalled \
+    "bash -c 'printf \"some generic output with no prompt words at all\n\"; exec cat'" 2>/dev/null
+  mkdir -p "$state_home/lanes/stalled"
+  echo '{"provider":"claude","status":"live","session_id":"no-such","cwd":"/tmp"}' > "$state_home/lanes/stalled/state.json"
+  : > "$state_home/lanes/stalled/transcript.log"
+  set +e
+  t0="$(date +%s)"
+  WASPFLOW_HOME="$state_home" WASPFLOW_STALL_SECONDS=3 \
+    "$root/bin/waspflow" wait stalled --timeout 30 --interval 1 >/tmp/wf-stall.txt 2>&1
+  rc=$?; t1="$(date +%s)"
+  set -e
+  [[ "$rc" -eq 4 ]] || { echo "stall: generic stalled pane should return rc 4, got $rc" >&2; exit 1; }
+  [[ $((t1 - t0)) -lt 20 ]] || { echo "stall: should fire near stall_secs (3s), not wait out timeout ($((t1-t0))s)" >&2; exit 1; }
+  [[ "$(jq -r '.wait_state // empty' "$state_home/lanes/stalled/state.json")" == "stalled" ]] \
+    || { echo "stall: wait_state should be 'stalled'" >&2; exit 1; }
+  grep -q 'STALLED' /tmp/wf-stall.txt || { echo "stall: message should say STALLED" >&2; exit 1; }
+  grep -qi 'never auto-answer\|YOUR call' /tmp/wf-stall.txt || { echo "stall: must state it never auto-answers" >&2; exit 1; }
+  tmux kill-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || true
+)
+# The prompt-shape HINT still works (nice-to-have, not the gate).
 (
   # shellcheck disable=SC1090
   source "$root/lib/core.sh"
-  # positive: real prompt shapes (model-downgrade, security-wait, y/n, trust, Enter)
-  for t in \
-    "You are approaching your usage limit.
-❯ 1. Switch to a lesser model
-  2. Keep current" \
-    "Additional security verification required. Do you want to keep waiting? [y/n]" \
-    "This will modify files. Continue? (y/N)" \
-    "Press Enter to confirm"; do
-    wf_pane_looks_blocked "$t" >/dev/null || { echo "stall: prompt not detected: $t" >&2; exit 1; }
-  done
-  # negative: working panes must NOT be flagged (no crying wolf)
-  for t in \
-    "● Reading file
-✽ Processing… (4s)
-❯ " \
-    "● Done. Appended TOKEN.
-✻ Worked for 6s
-❯ " \
-    "I will analyze the code now.
-❯ "; do
-    if wf_pane_looks_blocked "$t" >/dev/null; then echo "stall: working pane wrongly flagged: $t" >&2; exit 1; fi
-  done
+  wf_pane_looks_blocked "$(printf 'approaching your usage limit\n❯ 1. Switch to a lesser model\n  2. Keep current')" >/dev/null \
+    || { echo "stall hint: should recognize a model-downgrade menu" >&2; exit 1; }
+  if wf_pane_looks_blocked "$(printf '● Done. Worked for 6s\n❯ ')" >/dev/null; then
+    echo "stall hint: a working pane should not be hinted as a prompt" >&2; exit 1; fi
 )
-# Pin: wait has stall/blocked detection wired (rc 4, surfaced, never auto-answered).
-grep -q 'wf_pane_looks_blocked' "$root/bin/waspflow" || { echo "wait: stall detection not wired" >&2; exit 1; }
+# Pins: the trigger is stall (not wording); config knob present.
+grep -q 'STALLED' "$root/bin/waspflow" || { echo "wait: stall surfacing missing" >&2; exit 1; }
 grep -q 'WASPFLOW_STALL_SECONDS' "$root/bin/waspflow" || { echo "wait: stall window not configurable" >&2; exit 1; }
 
 echo "waspflow verify: ok"
