@@ -88,3 +88,23 @@ Do **not** bet the company yet. Green-light one more session: the **live provide
 matrix** (item 1), quota permitting, plus a small soak test. When those pass and stay
 green across repeated runs, I will come back with a number at or above 98% — and it
 will rest on the suite, not on my confidence.
+
+## UPDATE 2026-07-10: ~97%, and the one thing between us and 98
+
+All three providers now live-verified end-to-end on their real (cheap/subscription)
+auth paths: claude (full loop + N=4 concurrent + dead-on-arrival), codex (full loop +
+submission-confirm, works under 2-way concurrent load, subscription via
+`env -u OPENAI_API_KEY` + gpt-5.4-mini), grok (full loop). Deterministic suite: 70
+assertions, green + stable under load. The submission guarantee catches dead-on-arrival
+on all three (exit 3, not a phantom "spawned").
+
+THE REMAINING RISK (why 97, not 98+): a 3-way mixed-provider fleet run simultaneously
+showed 2 of 3 lanes reporting spawn=NO under heavy concurrent startup load. It is NOT
+corruption — isolation stayed clean and the same spawns work when re-run or under lighter
+load, and the detection correctly flagged submitted=false rather than lying. But it means
+sustained heavy fleets can hit spurious submission-timeouts I have not yet root-caused or
+tuned. Fleets are the core use case, so this is the gap that matters.
+
+TO REACH 98+: (1) root-cause the mixed-fleet submission timeout (likely wait/submit
+attempt bounds too tight under load) and make it robust or self-retry; (2) an N=8+ soak;
+(3) failure-injection (crash mid-turn, proxy down). All cheap now with haiku/gpt-5.4-mini.
