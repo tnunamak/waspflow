@@ -606,4 +606,33 @@ PROV
 grep -q 'models_cache.json' "$root/lib/providers/codex.sh" || { echo "codex: model cache source missing" >&2; exit 1; }
 grep -q 'valid_models' "$root/lib/core.sh" || { echo "core: valid_models not in provider contract" >&2; exit 1; }
 
+# Thin bundle-before-reap (2026-07-10): archive only the lane's OWN commits
+# (fork-point..tip), not full branch history — the dominant cost of batch reap on a
+# big fleet. Must stay recoverable, and fall back to full when there's no fork point.
+(
+  export WASPFLOW_HOME="$state_home"
+  export WASPFLOW_ARCHIVE_DIR="$state_home/archive"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/fanin.sh"
+  br="$(mktemp -d "$scratch/waspflow-thin-XXXXXX")"
+  ( cd "$br" && git init -q && git config user.email t@e.invalid && git config user.name T
+    for i in 1 2 3 4 5 6 7 8; do echo "base$i" >> base.txt; git add -A; git commit -q -m "b$i"; done
+    git branch -m main 2>/dev/null || true
+    git checkout -q -b waspflow/thinlane; echo work > w.txt; git add -A; git commit -q -m work
+    git checkout -q main )
+  mkdir -p "$state_home/lanes/thinlane"
+  jq -n --arg c "$br" '{provider:"codex", repo_root:$c}' > "$state_home/lanes/thinlane/state.json"
+  fanin_bundle_lane thinlane >/dev/null 2>&1 || { echo "thin: bundle failed" >&2; exit 1; }
+  bun="$(jq -r '.archive_bundle' "$state_home/lanes/thinlane/state.json")"
+  [[ -n "$bun" && -f "$bun" ]] || { echo "thin: no bundle recorded" >&2; exit 1; }
+  git -C "$br" bundle verify "$bun" >/dev/null 2>&1 || { echo "thin: bundle not recoverable" >&2; exit 1; }
+  [[ -n "$(jq -r '.archive_base // empty' "$state_home/lanes/thinlane/state.json")" ]]     || { echo "thin: archive_base not recorded (not a thin bundle)" >&2; exit 1; }
+  # a full-history bundle of the same branch must be LARGER (proves we shipped the thin one)
+  git -C "$br" bundle create "$br/full.bundle" waspflow/thinlane >/dev/null 2>&1
+  [[ "$(stat -c%s "$bun")" -lt "$(stat -c%s "$br/full.bundle")" ]]     || { echo "thin: thin bundle not smaller than full — thinning didn't happen" >&2; exit 1; }
+  rm -rf "$br"
+)
+
 echo "waspflow verify: ok"

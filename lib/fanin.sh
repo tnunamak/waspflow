@@ -216,12 +216,37 @@ fanin_bundle_lane() {
   stamp="$(date +%Y%m%d-%H%M%S)"
   bundle="$WASPFLOW_ARCHIVE_DIR/${lane}-${stamp}.bundle"
 
-  if git -C "$repo_root" bundle create "$bundle" "$branch" >/dev/null 2>&1 \
-     && git -C "$repo_root" bundle verify "$bundle" >/dev/null 2>&1; then
-    lane_set "$lane" archive_bundle "$bundle"
-    log "reap: archived branch '$branch' -> $bundle (verified)"
-    return 0
+  # Prefer a THIN bundle: only the lane's OWN commits (fork-point..tip), not the
+  # branch's entire reachable history. On a large repo the full-history bundle is
+  # clone-sized PER LANE — the dominant cost of batch reap on a big fleet (a 20-lane
+  # reap took >2min in the field). The lane's fork base already lives in the origin
+  # repo, so a thin bundle restores there fine and preserves exactly the work that's
+  # unique to the lane. Fall back to a full bundle if we can't resolve a fork point
+  # (e.g. an orphan/unrelated branch), so archival is never silently lost.
+  # Record base_ref so a restorer knows what the thin bundle is relative to.
+  local base=""
+  base="$(git -C "$repo_root" merge-base HEAD "$branch" 2>/dev/null || true)"
+  [[ -n "$base" ]] || base="$(git -C "$repo_root" merge-base main "$branch" 2>/dev/null || true)"
+
+  local made=0
+  if [[ -n "$base" && "$base" != "$(git -C "$repo_root" rev-parse "$branch" 2>/dev/null)" ]]; then
+    if git -C "$repo_root" bundle create "$bundle" "${base}..${branch}" >/dev/null 2>&1 \
+       && git -C "$repo_root" bundle verify "$bundle" >/dev/null 2>&1; then
+      lane_set "$lane" archive_bundle "$bundle" archive_base "$base"
+      log "reap: archived branch '$branch' (thin, base ${base:0:9}) -> $bundle (verified)"
+      made=1
+    fi
   fi
+  if [[ "$made" -eq 0 ]]; then
+    # Full-history fallback (no fork point, or thin create/verify failed).
+    if git -C "$repo_root" bundle create "$bundle" "$branch" >/dev/null 2>&1 \
+       && git -C "$repo_root" bundle verify "$bundle" >/dev/null 2>&1; then
+      lane_set "$lane" archive_bundle "$bundle"
+      log "reap: archived branch '$branch' -> $bundle (verified)"
+      made=1
+    fi
+  fi
+  [[ "$made" -eq 1 ]] && return 0
   warn "reap: failed to bundle branch '$branch' (continuing without archive)"
   return 1
 }
