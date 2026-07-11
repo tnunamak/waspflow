@@ -179,9 +179,16 @@ Useful `spawn` options:
 - `--report <path>` requires a written deliverable before `reap` succeeds.
 - `--model <id>` selects a provider model.
 - `--effort <none|minimal|low|medium|high|xhigh|max>` passes reasoning effort **exactly** where supported (never silent demotion; Codex accepts `xhigh`).
+- `--mcp <auto|none|inherit>` controls worker MCP exposure. `auto` is the default and is MCP-minimal where the provider supports it; use `inherit` only when the task needs the current provider configuration.
 - `--op <id>` expands a task-shaped operating point (`waspflow ops list`); explicit flags win over expansion.
 - `--cwd <dir>` starts the worker in another directory.
 - `--arg <flag>` passes an extra flag to the underlying agent CLI.
+
+MCP policy by provider: Claude and Codex resolve `auto` to `none`; Grok
+currently resolves `auto` to `inherit` with a warning because its CLI has no
+verified empty-MCP launch boundary. Explicit Grok `--mcp none` fails before
+launch. Under Claude/Codex isolation, pass-through MCP config (and Codex config
+profiles) is rejected; choose `inherit` explicitly when a task needs it.
 
 ## Exec: Headless One-Shot Work
 
@@ -206,7 +213,7 @@ waspflow exec --provider claude -- "List the public functions in lib/core.sh."
 waspflow exec --provider grok -- "List the public functions in lib/core.sh."
 ```
 
-Options mirror `spawn` where they apply: `--model`, `--effort`, `--cwd`, and
+Options mirror `spawn` where they apply: `--model`, `--effort`, `--mcp`, `--cwd`, and
 `-o <file>` (omit `-o` to print to stdout). Because `exec` runs the same provider
 preflight as `spawn`, the billing guard below covers it too.
 
@@ -305,4 +312,3 @@ Pushes to `main` with conventional commits (`feat:`, `fix:`, `BREAKING CHANGE`) 
 
 - Workflow: `.github/workflows/release.yml` (after `scripts/verify.sh`)
 - Local install still tracks your clone: `git pull && ./install.sh` (also wired in `dotfiles/setup.sh`).
-

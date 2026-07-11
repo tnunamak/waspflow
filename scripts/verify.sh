@@ -445,6 +445,7 @@ faker_revise() { :; }
 faker_turn_mark() { cat "$ctl/mark" 2>/dev/null || echo 0; }
 faker_is_idle() { [[ -f "$ctl/idle" ]]; }
 faker_valid_models() { return 1; }
+faker_mcp_policy() { printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}'; }
 PROV
 
   # Source core from the fake lib so lane_set is available here AND lane state is
@@ -511,6 +512,7 @@ deadp_is_idle() { return 1; }
 deadp_revise() { :; }
 deadp_turn_mark() { echo 0; }
 deadp_valid_models() { return 1; }
+deadp_mcp_policy() { printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}'; }
 deadp_spawn() { return 1; }   # simulate: window up, task never confirmed submitted
 PROV
   sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok)/WASPFLOW_PROVIDERS=(claude codex grok deadp)/' "$deadlib/core.sh"
@@ -625,6 +627,207 @@ PROV
 # Pins: real caches are read; contract includes valid_models; fail-open comment present.
 grep -q 'models_cache.json' "$root/lib/providers/codex.sh" || { echo "codex: model cache source missing" >&2; exit 1; }
 grep -q 'valid_models' "$root/lib/core.sh" || { echo "core: valid_models not in provider contract" >&2; exit 1; }
+
+# MCP lifecycle (2026-07-11): model validation queries Codex live first and
+# falls back to its cache only when discovery is unavailable. MCP minimization
+# also queries the live configured server set — there is no waspflow-curated list.
+(
+  mcpbin="$(mktemp -d "$scratch/waspflow-mcp-bin-XXXXXX")"
+  mcpwork="$(mktemp -d "$scratch/waspflow-mcp-work-XXXXXX")"
+  mcpcache="$mcpwork/models_cache.json"
+  cat >"$mcpbin/codex" <<'CODEX'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "debug models")
+    [[ "${CODEX_DEBUG_FAIL:-0}" == 1 ]] && exit 1
+    printf '%s\n' '{"models":[{"slug":"gpt-5.6-sol"}]}'
+    ;;
+  "mcp list")
+    [[ "${3:-}" == "--json" ]] || exit 9
+    [[ -z "${CODEX_EXPECT_CWD:-}" || "$PWD" == "$CODEX_EXPECT_CWD" ]] || exit 8
+    [[ "${CODEX_MCP_BAD_SCHEMA:-0}" == 1 ]] && { printf '%s\n' '{"unexpected":[]}'; exit 0; }
+    printf '%s\n' '[{"name":"alpha"},{"name":"beta-server"}]'
+    ;;
+  *) exit 9 ;;
+esac
+CODEX
+  chmod +x "$mcpbin/codex"
+  printf '%s\n' '{"models":[{"slug":"stale-cache-model"}]}' >"$mcpcache"
+  export PATH="$mcpbin:$PATH" CODEX_MODELS_CACHE="$mcpcache"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/codex.sh"
+  live="$(codex_valid_models)"
+  [[ "$live" == "gpt-5.6-sol" ]] || { echo "codex models: did not prefer live discovery" >&2; exit 1; }
+  ! grep -q 'stale-cache-model' <<<"$live" || { echo "codex models: stale cache won over live discovery" >&2; exit 1; }
+  fallback="$(CODEX_DEBUG_FAIL=1 codex_valid_models)"
+  [[ "$fallback" == "stale-cache-model" ]] || { echo "codex models: cache did not fail open after live discovery failure" >&2; exit 1; }
+  policy="$(CODEX_EXPECT_CWD="$mcpwork" codex_mcp_policy auto "$mcpwork")"
+  jq -e '.resolved == "none" and (.argv | index("mcp_servers.alpha.enabled=false")) and (.argv | index("mcp_servers.beta-server.enabled=false"))' \
+    >/dev/null <<<"$policy" || { echo "codex MCP: live server overrides missing" >&2; exit 1; }
+  ! grep -q 'stale-cache-model' <<<"$policy" || { echo "codex MCP: stale list leaked into overrides" >&2; exit 1; }
+  ! rg -q 'alpha|beta-server|stale-cache-model' "$root/lib/providers/codex.sh" \
+    || { echo "codex MCP: provider contains a curated server list" >&2; exit 1; }
+  CODEX_MCP_BAD_SCHEMA=1 codex_mcp_policy auto >/dev/null 2>&1 \
+    && { echo "codex MCP: unknown discovery schema must fail closed" >&2; exit 1; }
+  codex_mcp_validate_extra auto -c 'mcp_servers.added.command="npx"' \
+    && { echo "codex MCP: raw config must not bypass isolation" >&2; exit 1; }
+  codex_mcp_validate_extra auto --profile alternate \
+    && { echo "codex MCP: profiles must not bypass discovery" >&2; exit 1; }
+  codex_mcp_validate_extra inherit -c 'mcp_servers.added.command="npx"' \
+    || { echo "codex MCP: inherit should preserve raw config" >&2; exit 1; }
+  ( mcp_policy_load_json '["ok","line\nbreak"]' '{}' test ) >/dev/null 2>&1 \
+    && { echo "MCP state: newline must not change argv boundaries" >&2; exit 1; }
+  rm -rf "$mcpbin" "$mcpwork"
+)
+
+# Provider argv construction: the resolved policy reaches the actual headless
+# commands, including Claude's supported strict empty config + environment gate.
+(
+  argvbin="$(mktemp -d "$scratch/waspflow-mcp-argv-XXXXXX")"
+  argvfile="$argvbin/argv" envfile="$argvbin/env" out="$argvbin/out"
+  cat >"$argvbin/codex" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$ARGV_FILE"
+for ((i=1; i<=$#; i++)); do
+  [[ "${!i}" == -o ]] && { j=$((i+1)); printf 'answer\n' >"${!j}"; }
+done
+exit 0
+FAKE
+  cat >"$argvbin/claude" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$ARGV_FILE"
+printf '%s\n' "${ENABLE_CLAUDEAI_MCP_SERVERS:-}" >"$ENV_FILE"
+printf 'answer\n'
+FAKE
+  chmod +x "$argvbin/codex" "$argvbin/claude"
+  export PATH="$argvbin:$PATH" ARGV_FILE="$argvfile" ENV_FILE="$envfile"
+  # shellcheck disable=SC1090
+  source "$root/lib/exec.sh"
+  MCP_ARGV=(-c 'mcp_servers.alpha.enabled=false') MCP_ENV=()
+  _exec_codex "$fixture" "" "" "prompt" "$out"
+  grep -qx -- '-c' "$argvfile" && grep -qx 'mcp_servers.alpha.enabled=false' "$argvfile" \
+    || { echo "codex argv: MCP override was not appended" >&2; exit 1; }
+  MCP_ARGV=(--strict-mcp-config --mcp-config '{"mcpServers":{}}') MCP_ENV=(ENABLE_CLAUDEAI_MCP_SERVERS=false)
+  _exec_claude "$fixture" "" "" "prompt" "$out"
+  grep -qx -- '--strict-mcp-config' "$argvfile" && grep -qx -- '--mcp-config' "$argvfile" \
+    && grep -qx '{"mcpServers":{}}' "$argvfile" && grep -qx false "$envfile" \
+    || { echo "claude argv: strict MCP policy was not applied" >&2; exit 1; }
+  rm -rf "$argvbin"
+)
+
+# Grok must not pretend it can provide a strict empty MCP boundary.
+(
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/grok.sh"
+  grok_mcp_policy auto | jq -e '.resolved == "inherit" and (.warning | length > 0)' >/dev/null \
+    || { echo "grok MCP: auto warning/state missing" >&2; exit 1; }
+  grok_mcp_policy none >/dev/null 2>&1 && { echo "grok MCP: none must fail closed" >&2; exit 1; }
+  : # keep the expected failing probe from becoming this subshell's status
+)
+
+# Exited-lane revise/recovery launches a fresh provider process. The original
+# receipt must cross that boundary too, and resolved MCP flags must remain last
+# so caller pass-through config cannot undo the isolation policy.
+(
+  resumebin="$(mktemp -d "$scratch/waspflow-mcp-resume-bin-XXXXXX")"
+  resumehome="$(mktemp -d "$scratch/waspflow-mcp-resume-home-XXXXXX")"
+  argvfile="$resumebin/argv" envfile="$resumebin/env"
+  cat >"$resumebin/codex" <<'FAKE'
+#!/usr/bin/env bash
+if [[ "${1:-} ${2:-} ${3:-}" == "mcp list --json" ]]; then
+  printf '%s\n' '[{"name":"alpha"},{"name":"added-after-spawn"}]'
+  exit 0
+fi
+printf '%s\n' "$@" >"$ARGV_FILE"
+for ((i=1; i<=$#; i++)); do
+  [[ "${!i}" == -o ]] && { j=$((i+1)); printf 'answer\n' >"${!j}"; }
+done
+exit 0
+FAKE
+  cat >"$resumebin/claude" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$ARGV_FILE"
+printf '%s\n' "${ENABLE_CLAUDEAI_MCP_SERVERS:-}" >"$ENV_FILE"
+printf 'answer\n'
+FAKE
+  chmod +x "$resumebin/codex" "$resumebin/claude"
+  export PATH="$resumebin:$PATH" ARGV_FILE="$argvfile" ENV_FILE="$envfile"
+  export WASPFLOW_HOME="$resumehome"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  tmux_window_exists() { return 1; }
+  billing_preflight_provider() { return 0; }
+
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/codex.sh"
+  codex_discover_session() { printf 'codex-session\n'; }
+  lane_set codex-resume cwd "$fixture" model "" session_id codex-session mcp_requested auto \
+    mcp_argv '["-c","mcp_servers.alpha.enabled=false"]' mcp_env '{}'
+  codex_revise codex-resume prompt "$resumebin/codex-out"
+  grep -qx 'mcp_servers.alpha.enabled=false' "$argvfile" \
+    && grep -qx 'mcp_servers.added-after-spawn.enabled=false' "$argvfile" \
+    || { echo "codex resume: live MCP receipt was not refreshed/reapplied" >&2; exit 1; }
+
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/claude.sh"
+  claude_mcp_validate_extra auto --mcp-config custom.json \
+    && { echo "claude MCP: caller config must not bypass isolation" >&2; exit 1; }
+  claude_mcp_validate_extra inherit --mcp-config custom.json \
+    || { echo "claude MCP: inherit should preserve caller config" >&2; exit 1; }
+  claude_discover_session() { printf 'claude-session\n'; }
+  lane_set claude-resume cwd "$fixture" model "" session_id claude-session \
+    mcp_argv '["--strict-mcp-config","--mcp-config","{\"mcpServers\":{}}"]' \
+    mcp_env '{"ENABLE_CLAUDEAI_MCP_SERVERS":"false"}'
+  claude_revise claude-resume prompt "$resumebin/claude-out"
+  grep -qx -- '--strict-mcp-config' "$argvfile" && grep -qx false "$envfile" \
+    || { echo "claude resume: MCP receipt was not reapplied" >&2; exit 1; }
+  rm -rf "$resumebin" "$resumehome"
+)
+
+# Public parsing + lane receipts: default auto reaches the adapter and records
+# both the requested policy and the provider-resolved result.
+(
+  mcplib="$(mktemp -d "$scratch/waspflow-mcp-lib-XXXXXX")"; mkdir -p "$mcplib/providers"
+  cp "$root"/lib/*.sh "$mcplib/"; cp -r "$root/lib/generated" "$mcplib/" 2>/dev/null || true
+  cat >"$mcplib/providers/mcpp.sh" <<'PROV'
+mcpp_preflight() { :; }
+mcpp_discover_session() { echo x; }
+mcpp_session_resumable() { return 0; }
+mcpp_is_idle() { return 1; }
+mcpp_revise() { :; }
+mcpp_turn_mark() { echo 0; }
+mcpp_valid_models() { return 1; }
+mcpp_mcp_policy() { case "$1" in auto) printf '%s\n' '{"resolved":"none","warning":"test warning","argv":[],"env":{}}' ;; *) return 1 ;; esac; }
+mcpp_spawn() { return 0; }
+PROV
+  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok)/WASPFLOW_PROVIDERS=(claude codex grok mcpp)/' "$mcplib/core.sh"
+  mcphome="$(mktemp -d "$scratch/waspflow-mcp-home-XXXXXX")"
+  mcpdir="$(mktemp -d "$scratch/waspflow-mcp-cwd-XXXXXX")"; (cd "$mcpdir" && git init -q)
+  WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-state -- "test policy" >/dev/null 2>&1
+  jq -e '.mcp_requested == "auto" and .mcp_resolved == "none" and .mcp_warning == "test warning"' \
+    "$mcphome/lanes/mcp-state/state.json" >/dev/null \
+    || { echo "MCP state: requested/resolved receipt missing" >&2; exit 1; }
+  set +e
+  parse_out="$(WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" "$root/bin/waspflow" exec --provider mcpp --mcp invalid -- "x" 2>&1)"; parse_rc=$?
+  set -e
+  [[ "$parse_rc" -ne 0 ]] && grep -q -- '--mcp must be auto, none, or inherit' <<<"$parse_out" \
+    || { echo "MCP parsing: invalid public policy was not rejected" >&2; exit 1; }
+  set +e
+  missing_out="$(WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" "$root/bin/waspflow" spawn --provider mcpp --lane missing-mcp --mcp 2>&1)"; missing_rc=$?
+  set -e
+  [[ "$missing_rc" -ne 0 ]] && grep -q -- 'spawn: --mcp requires' <<<"$missing_out" \
+    || { echo "MCP parsing: spawn missing value lacks a diagnostic" >&2; exit 1; }
+  rm -rf "$mcplib" "$mcphome" "$mcpdir"
+)
+
+# Active guidance and live-soak must stay on the current GPT-5.6 operating point;
+# deliberately exclude historical incident/confidence records from this check.
+! rg -n 'gpt-5\.5|gpt-5\.4-mini' \
+  "$root/data/model-choice-policy" "$root/scripts/live-soak.sh" "$root/docs/operating-points.md" "$root/README.md" "$root/skill/SKILL.md" \
+  || { echo "active model guidance still references an old Codex model" >&2; exit 1; }
 
 # Thin bundle-before-reap (2026-07-10): archive only the lane's OWN commits
 # (fork-point..tip), not full branch history — the dominant cost of batch reap on a

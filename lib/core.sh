@@ -87,11 +87,9 @@ guard_cwd() {
 }
 
 # Fail a bad --model FAST, with the valid set, instead of 30s into the run (or —
-# worse — silently running the wrong model). Reads the provider CLI's own live,
-# auth-scoped model cache via <provider>_valid_models. FAIL OPEN: if the provider
-# can't enumerate models (no cache), skip — the CLI is the real backstop, so a
-# missing courtesy cache never blocks work. (Addresses the --model footgun:
-# stale/unsupported slugs like gpt-5.3-codex under a ChatGPT-account auth.)
+# worse — silently running the wrong model). Providers own model discovery; a
+# live provider query is preferred and a local cache is only its fail-open
+# fallback. If neither can enumerate, the CLI remains the real backstop.
 # Args: provider model verb
 validate_model() {
   local provider="$1" model="$2" verb="${3:-spawn}"
@@ -102,6 +100,66 @@ validate_model() {
   err "$verb: model '$model' is not available for $provider on the current auth."
   err "  valid models: $(tr '\n' ' ' <<<"$valid" | tr -s ' ' | sed 's/ /, /g; s/, $//')"
   die "  fix --model (or omit it to use the provider default)"
+}
+
+# Resolve the public MCP policy through the provider adapter. The adapter returns
+# a compact command description, keeping provider flags, environment knobs, and
+# discovery out of cmd_spawn/exec. Globals are deliberately grouped here because
+# bash has no structured return values:
+#   MCP_RESOLVED, MCP_WARNING, MCP_ARGV_JSON, MCP_ENV_JSON
+# Args: provider requested(auto|none|inherit) effective_cwd
+resolve_mcp_policy() {
+  local provider="$1" requested="$2" effective_cwd="${3:-$PWD}" raw
+  case "$requested" in auto|none|inherit) ;; *) err "--mcp must be auto, none, or inherit (got: $requested)"; return 1 ;; esac
+  raw="$("${provider}_mcp_policy" "$requested" "$effective_cwd")" || return 1
+  jq -e '.resolved | strings' >/dev/null <<<"$raw" \
+    && jq -e '.warning | strings' >/dev/null <<<"$raw" \
+    && jq -e '(.argv | arrays) and (.env | objects)' >/dev/null <<<"$raw" || {
+      err "$provider: invalid MCP policy response"
+      return 1
+    }
+  MCP_RESOLVED="$(jq -r '.resolved' <<<"$raw")"
+  MCP_WARNING="$(jq -r '.warning' <<<"$raw")"
+  MCP_ARGV_JSON="$(jq -c '.argv' <<<"$raw")"
+  MCP_ENV_JSON="$(jq -c '.env' <<<"$raw")"
+}
+
+# Raw provider flags are intentionally powerful. Under an isolation policy,
+# let the provider reject flag families that can introduce MCP configuration
+# after discovery. `inherit` remains the explicit escape hatch.
+validate_mcp_extra() {
+  local provider="$1" requested="$2"; shift 2
+  if declare -F "${provider}_mcp_validate_extra" >/dev/null; then
+    "${provider}_mcp_validate_extra" "$requested" "$@" \
+      || die "$provider: pass-through flags conflict with --mcp $requested (use --mcp inherit only when the task needs custom MCP configuration)"
+  fi
+}
+
+# Decode the persisted, provider-resolved command description for an adapter.
+# Older lanes have no policy fields and intentionally preserve their old behavior.
+mcp_policy_load_lane() {
+  local lane="$1" argv_json env_json
+  argv_json="$(lane_get "$lane" mcp_argv)"
+  env_json="$(lane_get "$lane" mcp_env)"
+  mcp_policy_load_json "$argv_json" "$env_json" "lane '$lane'"
+}
+
+# Decode a resolved policy for a direct provider command (exec) or lane command.
+# Args: argv_json env_json error_subject
+mcp_policy_load_json() {
+  local argv_json="$1" env_json="$2" subject="$3"
+  [[ -n "$argv_json" ]] || argv_json='[]'
+  [[ -n "$env_json" ]] || env_json='{}'
+  jq -e 'type == "array" and all(.[]; type == "string" and (test("[\\r\\n]") | not))' \
+    >/dev/null <<<"$argv_json" || die "$subject has invalid MCP argv state"
+  jq -e 'type == "object" and all(to_entries[];
+      (.key | test("^[A-Za-z_][A-Za-z0-9_]*$")) and
+      (.value | type == "string" and (test("[\\r\\n]") | not)))' \
+    >/dev/null <<<"$env_json" || die "$subject has invalid MCP env state"
+  MCP_ARGV=()
+  MCP_ENV=()
+  mapfile -t MCP_ARGV < <(jq -r '.[]' <<<"$argv_json")
+  mapfile -t MCP_ENV < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<<"$env_json")
 }
 
 # Lane names become tmux window names and dir names; keep them tame.
@@ -248,7 +306,7 @@ wf_pane_looks_blocked() {
 # ---- provider adapter dispatch ---------------------------------------------
 # Each provider is a file lib/providers/<provider>.sh defining shell functions
 # named  <provider>_spawn  <provider>_is_idle  <provider>_revise
-#        <provider>_preflight  <provider>_discover_session
+#        <provider>_preflight  <provider>_discover_session <provider>_mcp_policy
 # core.sh sources the right one and calls through these names.
 load_provider() {
   local provider="$1"
@@ -257,7 +315,7 @@ load_provider() {
   # shellcheck disable=SC1090
   source "$f"
   local fn
-  for fn in spawn is_idle revise preflight discover_session session_resumable turn_mark valid_models; do
+  for fn in spawn is_idle revise preflight discover_session session_resumable turn_mark valid_models mcp_policy; do
     declare -F "${provider}_${fn}" >/dev/null \
       || die "provider '$provider' adapter is missing function ${provider}_${fn}"
   done

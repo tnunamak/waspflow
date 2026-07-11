@@ -23,6 +23,28 @@ CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
 # genuinely bad model itself. Defined for provider-contract parity.
 claude_valid_models() { return 1; }
 
+# Claude supports a strict empty MCP configuration. Keep this detail in the
+# adapter: generic orchestration only handles the resolved command description.
+claude_mcp_policy() {
+  case "$1" in
+    inherit) printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}' ;;
+    auto|none) printf '%s\n' '{"resolved":"none","warning":"","argv":["--strict-mcp-config","--mcp-config","{\\"mcpServers\\":{}}"],"env":{"ENABLE_CLAUDEAI_MCP_SERVERS":"false"}}' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Claude combines repeated --mcp-config values. Do not let a caller append a
+# server-bearing config while waspflow is claiming auto/none isolation.
+claude_mcp_validate_extra() {
+  local requested="$1"; shift
+  [[ "$requested" == "inherit" ]] && return 0
+  local arg
+  for arg in "$@"; do
+    case "$arg" in --mcp-config|--mcp-config=*) return 1 ;; esac
+  done
+  return 0
+}
+
 # Preflight: claude on PATH. Claude reaches its model directly by default, so
 # there's no mandatory local-proxy gate like Codex's. NOTE: on some setups
 # `claude` is itself wrapped to route through a local proxy; such a wrapper owns
@@ -51,6 +73,7 @@ claude_spawn() {
 
   local model_args=()
   [[ -n "$model" ]] && model_args=(--model "$model")
+  mcp_policy_load_lane "$lane"
   local effort_args=() effort
   effort="$(lane_get "$lane" effort)"
   [[ -n "$effort" ]] && effort_args=(--effort "$effort")
@@ -61,13 +84,14 @@ claude_spawn() {
   # transcript). --dangerously-skip-permissions because the lane is unattended.
   #
   # We assemble an argv array and quote it for the tmux shell.
-  local argv=(claude
+  local argv=(env "${MCP_ENV[@]}" claude
     "${model_args[@]}"
     "${effort_args[@]}"
     --session-id "$session_id"
     --name "$lane"
     --dangerously-skip-permissions
     "${extra[@]}"
+    "${MCP_ARGV[@]}"
     "$prompt")
 
   local quoted=""
@@ -314,13 +338,14 @@ claude_revise() {
   # resume succeeding. Args already validated above.
   local model_args=()
   [[ -n "$model" ]] && model_args=(--model "$model")
+  mcp_policy_load_lane "$lane"
   local tmp; tmp="${out_file:-$(mktemp)}"
   local attempt rc
   for attempt in 1 2 3 4 5; do
     rc=0
     # Resume from the lane's cwd: claude --resume is scoped to the project dir.
-    ( cd "${cwd:-$PWD}" && claude --resume "$session_id" --print "${model_args[@]}" \
-        --dangerously-skip-permissions "$message" </dev/null ) >"$tmp" 2>&1 || rc=$?
+    ( cd "${cwd:-$PWD}" && env "${MCP_ENV[@]}" claude --resume "$session_id" --print "${model_args[@]}" \
+        --dangerously-skip-permissions "${MCP_ARGV[@]}" "$message" </dev/null ) >"$tmp" 2>&1 || rc=$?
     if grep -q "No conversation found" "$tmp" 2>/dev/null; then
       sleep $(( attempt * 2 ))
       continue

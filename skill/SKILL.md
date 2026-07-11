@@ -50,7 +50,9 @@ prompt, result).
 Raw flags are canonical: `--provider claude|codex|grok`, `--model <id>` (omit for
 default), `--effort <none|minimal|low|medium|high|xhigh|max>` (provider-specific;
 unsupported hard-fails; never silently demoted — Codex `xhigh` is real),
-`--arg <flag>` (repeatable) to pass a flag straight to the underlying CLI.
+`--mcp auto|none|inherit` (default `auto`, MCP-minimal where supported), and
+`--arg <flag>` (repeatable) to pass a flag straight to the underlying CLI. Use
+`--mcp inherit` only when the task specifically needs configured MCP servers.
 
 For task-shaped selection, `--op <id>` expands to explicit flags + a decision card
 (explicit flags win over the expansion). Do NOT invent a `cheap|default|max`

@@ -2,9 +2,9 @@
   "$schema": "../schemas/pack-v1.schema.json",
   "name": "model-choice-policy",
   "schema_version": 1,
-  "tag": "data-model-choice-policy-v0.1.4",
-  "generated_at": "2026-07-09",
-  "description": "Task-shaped operating points. Pins catalog v0.5.2. Local-eval v0.1.0 rows reclassified as harness smoke; evidence_confidence medium for top-3 ops.",
+  "tag": "data-model-choice-policy-v0.1.5",
+  "generated_at": "2026-07-11",
+  "description": "Task-shaped operating points. Pins catalog v0.5.2; refreshes review.audit to GPT-5.6 Sol; evidence_confidence remains medium for top-3 ops.",
   "files": [
     "README.md",
     "SCHEMA.md",

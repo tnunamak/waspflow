@@ -32,6 +32,20 @@ grok_valid_models() {
   printf '%s\n' "$out"
 }
 
+# Grok has no supported strict/empty MCP launch contract. `auto` is honest
+# inheritance with a durable warning; explicit `none` fails before launch.
+grok_mcp_policy() {
+  case "$1" in
+    inherit) printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}' ;;
+    auto) printf '%s\n' '{"resolved":"inherit","warning":"Grok MCP auto resolves to inherit: this Grok CLI has no supported MCP-minimal mode.","argv":[],"env":{}}' ;;
+    none)
+      err "grok: --mcp none is unsupported; refusing to launch with an unverified MCP boundary"
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # Preflight: grok on PATH. Grok reaches its model via OAuth cache or XAI_API_KEY;
 # no mandatory local-proxy gate.
 grok_preflight() {
@@ -65,6 +79,7 @@ grok_spawn() {
 
   local model_args=()
   [[ -n "$model" ]] && model_args=(-m "$model")
+  mcp_policy_load_lane "$lane"
   local effort_args=() effort
   effort="$(lane_get "$lane" effort)"
   # Pass effort through; unsupported non-empty values hard-fail (no silent drop).

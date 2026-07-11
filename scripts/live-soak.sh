@@ -6,7 +6,7 @@
 # case is many workers at once, and this proves submission, steering, cleanup,
 # and isolation all hold under real concurrent load.
 #
-# Cheap by design: claude→haiku, codex→gpt-5.4-mini on the SUBSCRIPTION
+# Cheap by design: claude→haiku, codex→gpt-5.6-luna on the SUBSCRIPTION
 # (env -u OPENAI_API_KEY, since a stray OPENAI_API_KEY would bill the API).
 #
 # Usage: WASPFLOW_HOME=... scripts/live-soak.sh [n_per_provider]   (default 3 => 9 lanes)
@@ -23,7 +23,7 @@ resfile="$(mktemp "$scratch/soak-res-XXXXXX")"
 
 # providers[i] paired with model[i]; empty model = provider default.
 PROVIDERS=(claude codex grok)
-MODELS=(haiku gpt-5.4-mini "")
+MODELS=(haiku gpt-5.6-luna "")
 
 one() {
   local lane="$1" prov="$2" model="$3" tag="$4"

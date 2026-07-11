@@ -72,7 +72,7 @@ First successful run:
 
 Verbs:
   spawn   --provider <claude|codex|grok> | --op <id> --lane <name> [opts] -- <task>
-  exec    --provider <claude|codex|grok> [--model M] [--effort L] [--cwd DIR] [-o FILE] -- <task prompt>
+  exec    --provider <claude|codex|grok> [--model M] [--effort L] [--mcp P] [--cwd DIR] [-o FILE] -- <task prompt>
   ops     list|explain|resolve|path     operating-point resolver (decision cards)
   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
   demo    --provider <claude|codex|grok> [--run]            guided first lane
@@ -106,6 +106,7 @@ Spawn opts:
   --op <id>          expand a task-shaped operating point (see ops list)
   --model <id>       provider model override
   --effort <level>   none|minimal|low|medium|high|xhigh|max (pass-through; never silent demote)
+  --mcp <policy>     auto|none|inherit (default: auto; MCP-minimal where supported)
   --cwd <dir>        worker cwd (default: current dir)
   --isolate          create an isolated git worktree
   --report <path>    require a deliverable report at reap
@@ -119,6 +120,7 @@ Spawn opts:
 Exec opts:
   --model <id>       provider model override
   --effort <level>   none|minimal|low|medium|high|xhigh|max
+  --mcp <policy>     auto|none|inherit (default: auto; MCP-minimal where supported)
   --cwd <dir>        worker cwd (default: current dir)
   -o <file>          write final message to file (default: stdout)
 
@@ -150,7 +152,7 @@ split_after_ddash() {
 # ============================================================================
 
 cmd_spawn() {
-  local provider="" lane="" model="" cwd="$PWD" isolate=0 effort="" report="" no_recovery=0
+  local provider="" lane="" model="" cwd="$PWD" isolate=0 effort="" mcp="auto" report="" no_recovery=0
   local verify_command="" verify_name="verify" verify_timeout=1800 prepare_command=""
   local op_id="" OP_ID="" OP_MODE=""
   local -a extra=()
@@ -163,6 +165,10 @@ cmd_spawn() {
       --lane)     lane="${2:-}"; shift 2 ;;
       --model)    model="${2:-}"; shift 2 ;;
       --effort)   effort="${2:-}"; shift 2 ;;
+      --mcp)
+        [[ $# -ge 2 && -n "${2:-}" ]] || die "spawn: --mcp requires auto, none, or inherit"
+        mcp="$2"; shift 2
+        ;;
       --cwd)      cwd="${2:-}"; shift 2 ;;
       --isolate|--worktree) isolate=1; shift ;;
       --report)   report="${2:-}"; shift 2 ;;     # opt-in deliverable contract
@@ -218,6 +224,7 @@ cmd_spawn() {
   load_provider "$provider"
 
   validate_model "$provider" "$model" spawn
+  validate_mcp_extra "$provider" "$mcp" "${extra[@]}"
   "${provider}_preflight" || die "spawn aborted: $provider preflight failed"
 
   # Worktree isolation (opt-in, only inside a git repo).
@@ -228,6 +235,16 @@ cmd_spawn() {
     work_cwd="$wt_path"
     log "isolated worktree: $wt_path"
   fi
+
+  # Discover from the worker's effective cwd. Provider MCP configuration can be
+  # project-scoped, and the isolated worktree is the process boundary that must
+  # be measured. If discovery fails after worktree creation, remove that empty
+  # worktree instead of leaking setup debris.
+  if ! resolve_mcp_policy "$provider" "$mcp" "$work_cwd"; then
+    [[ -n "$wt_path" ]] && worktree_remove "$lane" "$wt_path" "$repo_root" 1 >/dev/null 2>&1 || true
+    die "$provider: cannot resolve MCP policy '$mcp'"
+  fi
+  [[ -n "$MCP_WARNING" ]] && warn "$MCP_WARNING"
 
   local session_id transcript
   session_id="$(new_uuid)"           # claude/grok use this; codex mints its own
@@ -268,6 +285,11 @@ cmd_spawn() {
     origin_cwd "$cwd" \
     model "$model" \
     effort "$effort" \
+    mcp_requested "$mcp" \
+    mcp_resolved "$MCP_RESOLVED" \
+    mcp_warning "$MCP_WARNING" \
+    mcp_argv "$MCP_ARGV_JSON" \
+    mcp_env "$MCP_ENV_JSON" \
     effort_requested "$effort" \
     op "${OP_ID:-}" \
     op_mode "${OP_MODE:-}" \

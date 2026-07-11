@@ -11,14 +11,14 @@ contaminate pricing or benchmark evidence.
 
 | | |
 |---|---|
-| **This version** | Tag **`data-model-choice-policy-v0.1.4`** |
+| **This version** | Tag **`data-model-choice-policy-v0.1.5`** |
 | **Latest** | [releases](https://github.com/tnunamak/minnows/releases?q=data-model-choice-policy&expanded=true) |
 | **Facts catalog** | [model-catalog](../model-catalog/) — pin is `catalog_ref` in the policy file |
 
 ```bash
 ./scripts/fetch-data-pack.sh model-choice-policy
 # or
-TAG=data-model-choice-policy-v0.1.4
+TAG=data-model-choice-policy-v0.1.5
 curl -fsSL -L \
   "https://github.com/tnunamak/minnows/releases/download/${TAG}/${TAG}.tar.gz" \
   | tar -xz
@@ -58,12 +58,16 @@ Waspflow resolves from (first hit):
 | `implement.standard` | claude / sonnet-5 / medium |
 | `implement.quota-tight` | claude / sonnet-5 / low |
 | `implement.accuracy-first` | codex / gpt-5.6-sol / xhigh |
-| `review.audit` | codex / gpt-5.5 / xhigh |
+| `review.audit` | codex / gpt-5.6-sol / xhigh |
 | `advisor.deep` | claude / sonnet-5 / high |
 | `ui.computer-use` | codex / gpt-5.6-sol / high |
 | `grok.explore-only` | grok / grok-4.5 / high |
 
 ## Changelog
+
+### v0.1.5 — 2026-07-11
+
+- Refresh `review.audit` to Codex **gpt-5.6-sol** / xhigh.
 
 ### v0.1.4 — 2026-07-09
 

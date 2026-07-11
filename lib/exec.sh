@@ -9,7 +9,7 @@
 set -euo pipefail
 
 exec_run() {
-  local provider="" model="" effort="" cwd="$PWD" out_file=""
+  local provider="" model="" effort="" mcp="auto" cwd="$PWD" out_file=""
   split_after_ddash "$@"
   set -- "${FLAGS[@]:-}"
   while [[ $# -gt 0 ]]; do
@@ -25,6 +25,10 @@ exec_run() {
       --effort)
         [[ $# -ge 2 && -n "${2:-}" ]] || die "exec: --effort requires a value"
         effort="$2"; shift 2
+        ;;
+      --mcp)
+        [[ $# -ge 2 && -n "${2:-}" ]] || die "exec: --mcp requires auto, none, or inherit"
+        mcp="$2"; shift 2
         ;;
       --cwd)
         [[ $# -ge 2 && -n "${2:-}" ]] || die "exec: --cwd requires a value"
@@ -51,7 +55,11 @@ exec_run() {
 
   load_provider "$provider"
   validate_model "$provider" "$model" exec
+  resolve_mcp_policy "$provider" "$mcp" "$cwd" \
+    || die "$provider: cannot resolve MCP policy '$mcp'"
   "${provider}_preflight" || die "exec aborted: $provider preflight failed"
+  mcp_policy_load_json "$MCP_ARGV_JSON" "$MCP_ENV_JSON" "exec $provider"
+  [[ -n "$MCP_WARNING" ]] && warn "$MCP_WARNING"
 
   local output_path should_cat=0
   if [[ -n "$out_file" ]]; then
@@ -154,6 +162,7 @@ _exec_codex() {
     codex exec \
       "${model_args[@]}" \
       "${effort_args[@]}" \
+      "${MCP_ARGV[@]}" \
       -c sandbox_mode=workspace-write \
       -c approval_policy=never \
       --skip-git-repo-check \
@@ -179,9 +188,10 @@ _exec_claude() {
 
   (
     cd "$cwd"
-    claude --print \
+    env "${MCP_ENV[@]}" claude --print \
       "${model_args[@]}" \
       "${effort_args[@]}" \
+      "${MCP_ARGV[@]}" \
       --dangerously-skip-permissions \
       "$prompt" \
       </dev/null

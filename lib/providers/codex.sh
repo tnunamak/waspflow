@@ -20,21 +20,104 @@
 #     configurable health URL ($WASPFLOW_CODEX_BACKEND_HEALTH_URL) when set.
 
 CODEX_SESSIONS_DIR="${CODEX_SESSIONS_DIR:-$HOME/.codex/sessions}"
-# The Codex CLI maintains a LIVE, auth-scoped model list here (slug + effort levels,
-# refreshed with an etag). We read it to fail a bad --model fast at spawn instead of
-# 30s into a run — but never as a hard gate (see codex_valid_models).
+# The local cache is only a fallback. `codex debug models` is the
+# provider-owned, auth-scoped source of truth at launch time.
 CODEX_MODELS_CACHE="${CODEX_MODELS_CACHE:-$HOME/.codex/models_cache.json}"
 
-# Valid model slugs for the CURRENT Codex auth, one per line, from the CLI's own
-# live cache. Echoes NOTHING (rc 1) when the cache is absent/unreadable — callers
-# must treat "unknown" as "skip validation" (fail OPEN): the CLI itself is the real
-# backstop, so a missing courtesy cache must never block a spawn.
+# Valid model slugs for the CURRENT Codex auth. Prefer the live provider command;
+# its local cache is a fail-open fallback only. Never curate slugs here: Codex's
+# auth-scoped availability changes independently of waspflow releases.
 codex_valid_models() {
+  local source out
+  if command -v codex >/dev/null 2>&1; then
+    source="$(codex debug models 2>/dev/null || true)"
+    out="$(jq -r '.models[].slug // empty' <<<"$source" 2>/dev/null || true)"
+    [[ -n "$out" ]] && { printf '%s\n' "$out"; return 0; }
+  fi
   [[ -r "$CODEX_MODELS_CACHE" ]] || return 1
-  local out
   out="$(jq -r '.models[].slug // empty' "$CODEX_MODELS_CACHE" 2>/dev/null)"
   [[ -n "$out" ]] || return 1
   printf '%s\n' "$out"
+}
+
+# Provider-owned MCP policy. `auto` means MCP-minimal for Codex today: disable
+# every server the current Codex profile reports, discovered live at launch. This
+# is deliberately not a waspflow list, so renamed/new servers cannot escape it.
+# Args: requested policy; stdout: {resolved,warning,argv,env}
+codex_mcp_policy() {
+  local requested="$1" effective_cwd="${2:-$PWD}" raw names_json args_json='[]' name config
+  case "$requested" in
+    inherit)
+      printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}'
+      return 0
+      ;;
+    auto|none) ;;
+    *) return 1 ;;
+  esac
+  raw="$(cd "$effective_cwd" && codex mcp list --json 2>/dev/null)" || {
+    err "codex: live MCP discovery failed; refusing '$requested' because configured servers may remain enabled"
+    return 1
+  }
+  # Capture the installed CLI's real schema exactly: a top-level array of
+  # server records with string names. Do not imagine compatibility shapes;
+  # accepting an unknown shape as an empty list would silently inherit MCPs.
+  names_json="$(jq -ce '
+    if type != "array" then error("expected a top-level array") else
+      [ .[] | if type == "object" and (.name | type) == "string" and (.name | length) > 0
+               then .name else error("server record is missing a string name") end ]
+    end
+  ' <<<"$raw" 2>/dev/null)" || {
+    err "codex: live MCP discovery returned an unsupported JSON schema"
+    return 1
+  }
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    # Codex's -c dotted-path parser accepts MCP slugs (including hyphens) but
+    # interprets quoted path segments as a different, invalid config shape.
+    # Reject anything outside that provider slug grammar rather than injecting
+    # an untrusted path or silently leaving a server enabled.
+    [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]] || {
+      err "codex: MCP server name cannot be represented safely in a config override: $name"
+      return 1
+    }
+    config="mcp_servers.${name}.enabled=false"
+    args_json="$(jq -c --arg config "$config" '. + ["-c", $config]' <<<"$args_json")"
+  done < <(jq -r '.[]' <<<"$names_json" | sort -u)
+  jq -cn --argjson argv "$args_json" '{resolved:"none",warning:"",argv:$argv,env:{}}'
+}
+
+# Profiles and raw config can introduce servers that were absent from the live
+# discovery snapshot. Under auto/none, refuse that unbounded combination rather
+# than claiming an isolation boundary we cannot prove.
+codex_mcp_validate_extra() {
+  local requested="$1"; shift
+  [[ "$requested" == "inherit" ]] && return 0
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      -c|--config|--config=*|-p|--profile|--profile=*) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+# Load the policy for a newly launched Codex process. Auto/none must be
+# re-discovered from the effective cwd every time because user/project config
+# can change between spawn and a later headless resume.
+codex_load_process_mcp_policy() {
+  local lane="$1" cwd="$2" context="$3" requested
+  requested="$(lane_get "$lane" mcp_requested)"
+  if [[ "$requested" == "auto" || "$requested" == "none" ]]; then
+    resolve_mcp_policy codex "$requested" "${cwd:-$PWD}" || {
+      err "codex $context: MCP discovery failed; refusing to launch lane '$lane'"
+      return 1
+    }
+    lane_set "$lane" mcp_resolved "$MCP_RESOLVED" mcp_warning "$MCP_WARNING" \
+      mcp_argv "$MCP_ARGV_JSON" mcp_env "$MCP_ENV_JSON"
+    mcp_policy_load_json "$MCP_ARGV_JSON" "$MCP_ENV_JSON" "lane '$lane'"
+  else
+    mcp_policy_load_lane "$lane"
+  fi
 }
 
 # Preflight: codex on PATH + the model backend reachable (else turns hang).
@@ -117,6 +200,7 @@ codex_spawn() {
 
   local model_args=()
   [[ -n "$model" ]] && model_args=(-m "$model")
+  codex_load_process_mcp_policy "$lane" "$cwd" spawn || return 1
   # Pass model_reasoning_effort through exactly. Codex supports
   # minimal|low|medium|high|xhigh (OpenAI config reference). Never silently
   # demote xhigh→high. 'max' is not a Codex value — hard fail (use xhigh).
@@ -145,7 +229,9 @@ codex_spawn() {
   command -v tokensmash >/dev/null 2>&1 && ts_prefix=(tokensmash launch codex --)
 
   # Bare interactive codex (NO --skip-git-repo-check — that's exec-only).
-  local argv=("${ts_prefix[@]}" codex "${model_args[@]}" "${effort_args[@]}" "${extra[@]}")
+  # Resolved policy comes last so pass-through --arg values cannot turn a
+  # disabled server back on after the isolation boundary was established.
+  local argv=("${ts_prefix[@]}" codex "${model_args[@]}" "${effort_args[@]}" "${extra[@]}" "${MCP_ARGV[@]}")
   local quoted=""
   local a
   for a in "${argv[@]}"; do quoted+=" $(printf '%q' "$a")"; done
@@ -383,9 +469,10 @@ codex_revise() {
   # global config.
   local model_args=()
   [[ -n "$model" ]] && model_args=(-m "$model")
+  codex_load_process_mcp_policy "$lane" "$cwd" revise || return 1
   local tmp; tmp="${out_file:-$(mktemp)}"
   ( cd "${cwd:-$PWD}" && codex exec resume "$sid" "$message" "${model_args[@]}" \
-      -c sandbox_mode=workspace-write -c approval_policy=never -o "$tmp" ) \
+      -c sandbox_mode=workspace-write -c approval_policy=never "${MCP_ARGV[@]}" -o "$tmp" ) \
     >/dev/null 2>&1
   if [[ -z "$out_file" ]]; then cat "$tmp"; rm -f "$tmp"; fi
   return 0
