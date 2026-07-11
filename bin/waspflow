@@ -14,10 +14,12 @@
 #   ops     list|explain|resolve|path     operating-point resolver (not a picker)
 #   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
 #   demo    --provider <claude|codex|grok> [--run]            guided first lane
-#   list    [--status S,...]              show all lanes + status/outcome
+#   list    [--status S,...] [--lifecycle-state S,...] [--project DIR] [--limit N] [--json]
 #   status  <lane>                        one lane's state (json)
 #   peek    <lane> [--lines N]            de-escaped tail of the live pane
-#   wait    <lane> [--timeout S] [--interval S]   block until idle
+#   wait    <lane> [--timeout S] [--interval S] [--reap]   block until idle, optionally reap
+#   park    <lane> [--reason TEXT] [--adopt-legacy]  stop a verified-idle owned window
+#   gc      [--lane-age S] [--project DIR] [--adopt-legacy] [--apply]  dry-run park candidates
 #   revise  <lane> [--out FILE] -- <message>      steer live, or resume if exited
 #   attach  <lane>                        attach your terminal to the pane
 #   close   <lane> --status <...> [--into|--by|--reason ...]  set fan-in outcome
@@ -76,10 +78,14 @@ Verbs:
   ops     list|explain|resolve|path     operating-point resolver (decision cards)
   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
   demo    --provider <claude|codex|grok> [--run]            guided first lane
-  list    [--status S,...]              show all lanes (filter by fan-in outcome)
+  list    [--status S,...] [--lifecycle-state S,...] [--project DIR] [--limit N] [--json]
+                                          show the durable global lane index
   status  <lane>                        one lane's state (json)
   peek    <lane> [--lines N]            de-escaped tail of the live pane
-  wait    <lane> [--timeout S] [--interval S]   block until idle
+  wait    <lane> [--timeout S] [--interval S] [--reap]   block until idle; --reap cleans up only after idle
+  park    <lane> [--reason TEXT] [--adopt-legacy]  park an owned, terminal-idle resumable lane
+  gc      [--lane-age S] [--project DIR] [--adopt-legacy] [--apply]
+                                      dry-run eligible terminal-idle lanes; --apply parks, never reaps
   revise  <lane> [--out FILE] -- <message>      steer live, or resume if exited
   attach  <lane>                        attach your terminal to the pane
   close   <lane> --status <harvested|superseded|abandoned|open> [prov]  fan-in outcome
@@ -216,11 +222,32 @@ cmd_spawn() {
     die "spawn: --prepare requires --verify"
   fi
 
-  if lane_exists "$lane" && [[ "$(lane_get "$lane" status)" == "live" ]]; then
-    die "lane '$lane' is already live (reap it first or pick another name)"
-  fi
-
   require_cmd tmux jq
+  # Start the dedicated server before opening the lane-operation lock. A tmux
+  # server launched while that fd is open would inherit it and hold the flock
+  # for the lifetime of the server, deadlocking every later command for the lane.
+  tmux_ensure_session
+  # Serialize claim/check/create/capture for this lane name. Without this, two
+  # concurrent spawns can both pass the existence check and create duplicates.
+  command -v flock >/dev/null 2>&1 || die "spawn: flock is required for an atomic lane claim"
+  mkdir -p "$WASPFLOW_LOCKS_DIR"
+  local spawn_lock_fd
+  exec {spawn_lock_fd}>"$WASPFLOW_LOCKS_DIR/$lane.lock"
+  flock -x "$spawn_lock_fd"
+  # A lane record is durable evidence. Reusing a name is allowed only after the
+  # old record was explicitly reaped; parked, exited, malformed, and otherwise
+  # unreaped records must never be silently overwritten by a new spawn.
+  if lane_exists "$lane"; then
+    jq empty "$(lane_state_file "$lane")" 2>/dev/null \
+      || die "spawn: lane '$lane' has corrupted state.json; refusing to overwrite it"
+    [[ "$(lane_get "$lane" status)" == "reaped" ]] \
+      || die "spawn: lane '$lane' already exists and is unreaped (reap it first or pick another name)"
+  fi
+  # Avoid creating an indistinguishable second tmux window when a record was
+  # deleted manually but its old window remains.
+  tmux_named_lane_window_exists "$lane" \
+    && die "spawn: tmux window '$WASPFLOW_TMUX_SESSION:$lane' already exists; inspect or remove it first"
+
   load_provider "$provider"
 
   validate_model "$provider" "$model" spawn
@@ -324,6 +351,18 @@ cmd_spawn() {
   local spawn_rc=0
   "${provider}_spawn" "$lane" "$work_cwd" "$model" "$session_id" "$transcript" "$prompt" "${extra[@]}" || spawn_rc=$?
 
+  # Adapters create the window before they confirm prompt submission. Capture
+  # ownership whenever that window exists—even on rc=3—so a failed startup and
+  # its MCP children remain auditable/cleanable rather than becoming an unowned
+  # leak. If the just-created window cannot be identified, stop it by name now.
+  local window_owned=0
+  tmux_owned_lane_window_exists "$lane" && window_owned=1
+  if tmux_named_lane_window_exists "$lane" && [[ "$window_owned" -ne 1 ]]; then
+    tmux kill-window -t "$WASPFLOW_TMUX_SESSION:$lane" 2>/dev/null || true
+    lane_set "$lane" status "spawn_failed" spawn_submitted "false"
+    die "spawn: provider created a window without an ownership receipt; stopped the unowned window"
+  fi
+
   if [[ "$spawn_rc" -ne 0 ]]; then
     lane_set "$lane" spawn_submitted "false"
     err "spawn: lane '$lane' launched but the task was NOT confirmed submitted"
@@ -334,6 +373,10 @@ cmd_spawn() {
     return 3
   fi
   lane_set "$lane" spawn_submitted "true"
+  if [[ "$window_owned" -ne 1 ]]; then
+    lane_set "$lane" status "spawn_failed" spawn_submitted "false"
+    die "spawn: provider reported success but created no owned tmux window"
+  fi
 
   log "spawned $provider lane '$lane' (tmux: $WASPFLOW_TMUX_SESSION:$lane) — next: wait/peek/revise/reap $lane"
   [[ -n "$report_abs" ]] && log "  deliverable contract: $report_abs (verified on idle; one recovery pass if missing)"
@@ -404,28 +447,55 @@ EOF
 }
 
 cmd_list() {
-  local status_filter=""
+  local status_filter="" lifecycle_filter="" project="" limit="" json=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --status) status_filter="${2:-}"; shift 2 ;;
+      --status) [[ $# -ge 2 ]] || die "list: --status requires a value"; status_filter="$2"; shift 2 ;;
+      --lifecycle-state) [[ $# -ge 2 ]] || die "list: --lifecycle-state requires a value"; lifecycle_filter="$2"; shift 2 ;;
+      --project) [[ $# -ge 2 ]] || die "list: --project requires a directory"; project="$2"; shift 2 ;;
+      --limit) [[ $# -ge 2 ]] || die "list: --limit requires a value"; limit="$2"; shift 2 ;;
+      --json) json=1; shift ;;
       -*) die "list: unknown option '$1'" ;;
       *) shift ;;
     esac
   done
+  [[ -z "$limit" || "$limit" =~ ^[0-9]+$ && "$limit" -gt 0 ]] \
+    || die "list: --limit must be a positive integer (got: $limit)"
+  if [[ -n "$lifecycle_filter" ]]; then
+    local requested_state
+    local -a requested_states=()
+    IFS=',' read -r -a requested_states <<<"$lifecycle_filter"
+    for requested_state in "${requested_states[@]}"; do
+      case "$requested_state" in live|exited|parked|reaped) ;; *) die "list: --lifecycle-state must contain only live, exited, parked, or reaped" ;; esac
+    done
+  fi
+  if [[ -n "$project" ]]; then
+    project="$(cd "$project" && pwd)" || die "list: --project does not exist: $project"
+  fi
   local lanes; lanes="$(list_lanes)"
-  if [[ -z "$lanes" ]]; then echo "(no lanes)"; return 0; fi
-  printf '%-20s %-8s %-8s %-11s %s\n' LANE PROVIDER STATE OUTCOME CWD
-  local lane matched=0 any_corrupt=0
+  if [[ -z "$lanes" ]]; then
+    [[ "$json" -eq 1 ]] && echo '[]' || echo "(no lanes)"
+    return 0
+  fi
+  [[ "$json" -eq 1 ]] || printf '%-20s %-8s %-8s %-11s %s\n' LANE PROVIDER STATE OUTCOME CWD
+  local tmux_snapshot; tmux_snapshot="$(tmux_fleet_snapshot)"
+  local lane matched=0 any_corrupt=0 emitted=0
+  local -a json_rows=()
   while IFS= read -r lane; do
     [[ -n "$lane" ]] || continue
     # A corrupt state.json must be SURFACED, not laundered into a blank/exited lane
-    # (that would misreport the fleet). Mark it and remember to exit nonzero.
+    # (that would misreport the fleet). A corrupt record has unknown scope, so
+    # it remains visible even under project/state filters rather than disappearing.
     if ! jq empty "$(lane_state_file "$lane")" 2>/dev/null; then
       matched=1; any_corrupt=1
-      printf '%-20s %-8s %-8s %-11s %s\n' "$lane" "?" "CORRUPT" "?" "(unparseable state.json)"
+      if [[ "$json" -eq 1 ]]; then
+        json_rows+=("$(jq -cn --arg lane "$lane" '{lane:$lane,lifecycle_state:"corrupt",corrupt:true,error:"unparseable state.json",scope:"unknown"}')")
+      else
+        printf '%-20s %-8s %-8s %-11s %s\n' "$lane" "?" "CORRUPT" "?" "(unparseable state.json)"
+      fi
       continue
     fi
-    local provider status cwd live outcome
+    local provider status cwd live lifecycle outcome
     provider="$(lane_get "$lane" provider)"
     status="$(lane_get "$lane" status)"
     cwd="$(lane_get "$lane" cwd)"
@@ -434,12 +504,38 @@ cmd_list() {
     if [[ -n "$status_filter" ]]; then
       fanin_outcome_matches "$lane" "$status_filter" || continue
     fi
-    matched=1
-    if tmux_window_exists "$lane"; then live="live"; else live="exited"; fi
+    if tmux_snapshot_has_lane "$lane" "$tmux_snapshot"; then live="live"; else live="exited"; fi
     [[ "$status" == "reaped" ]] && live="reaped"
-    printf '%-20s %-8s %-8s %-11s %s\n' "$lane" "$provider" "$live" "$outcome" "$cwd"
+    [[ "$status" == "parked" ]] && live="parked"
+    lifecycle="$live"
+    [[ -z "$lifecycle_filter" || ",$lifecycle_filter," == *",$lifecycle,"* ]] || continue
+    [[ -z "$project" ]] || lane_matches_project "$lane" "$project" || continue
+    [[ -z "$limit" || "$emitted" -lt "$limit" ]] || continue
+    matched=1
+    if [[ "$json" -eq 1 ]]; then
+      # Fleet JSON is an index, not `status`: expose operational metadata only.
+      # In particular, do not copy prompts, commands, or provider argv/env from
+      # the full lane record into bulk audit output.
+      json_rows+=("$(jq -c --arg lane "$lane" --arg lifecycle "$lifecycle" --arg outcome "$outcome" '
+        {lane:$lane,provider:(.provider // ""),lifecycle_state:$lifecycle,
+         record_status:(.status // ""),outcome:$outcome,result:(.result // ""),
+         cwd:(.cwd // ""),origin_cwd:(.origin_cwd // ""),repo_root:(.repo_root // ""),
+         model:(.model // ""),effort:(.effort // ""),spawn_epoch:(.spawn_epoch // ""),
+         updated_at:(.updated_at // ""),parked_at:(.parked_at // ""),
+         spawn_submitted:(.spawn_submitted // ""),mcp_requested:(.mcp_requested // ""),
+         mcp_resolved:(.mcp_resolved // ""),mcp_warning:(.mcp_warning // ""),
+         tmux_session:(.tmux_session // ""),tmux_window:(.tmux_window // ""),
+         tmux_pane_pid:(.tmux_pane_pid // "")}' "$(lane_state_file "$lane")")")
+    else
+      printf '%-20s %-8s %-8s %-11s %s\n' "$lane" "$provider" "$live" "$outcome" "$cwd"
+    fi
+    emitted=$((emitted + 1))
   done <<<"$lanes"
-  [[ -n "$status_filter" && "$matched" -eq 0 ]] && echo "(no lanes with outcome in: $status_filter)"
+  if [[ "$json" -eq 1 ]]; then
+    if [[ "${#json_rows[@]}" -eq 0 ]]; then echo '[]'; else printf '%s\n' "${json_rows[@]}" | jq -cs .; fi
+  elif [[ -n "$status_filter" && "$matched" -eq 0 ]]; then
+    echo "(no lanes with outcome in: $status_filter)"
+  fi
   [[ "$any_corrupt" -eq 1 ]] && { warn "list: one or more lanes have corrupt state.json (shown as CORRUPT)"; return 2; }
   return 0
 }
@@ -509,11 +605,12 @@ cmd_peek() {
 }
 
 cmd_wait() {
-  local lane="${1:-}" timeout=600 interval=2; shift || true
+  local lane="${1:-}" timeout=600 interval=2 reap_after_idle=0; shift || true
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --timeout) timeout="${2:-}"; shift 2 ;;
       --interval) interval="${2:-}"; shift 2 ;;
+      --reap) reap_after_idle=1; shift ;;
       -*) die "wait: unknown option '$1'" ;;
       *) shift ;;
     esac
@@ -574,6 +671,19 @@ cmd_wait() {
       # intermediate idle between revise turns doesn't trigger premature recovery.
       artifacts_capture_after "$lane"
       log "wait: lane '$lane' is IDLE"
+      # Preserve wait's timeout/stall semantics: cleanup is reached only through
+      # the verified-idle path above. Its final result/rc belongs to reap, so a
+      # blocking harness receives the same result it would get from a separate
+      # `wait && reap` sequence.
+      if [[ "$reap_after_idle" -eq 1 ]]; then
+        local reap_rc=0
+        _wait_reap_after_idle "$lane" || reap_rc=$?
+        # A revise may have won the operation lock after the outer idle read.
+        # Re-enter the wait loop until the new turn reaches a fresh terminal
+        # event; never convert stale idle into destructive cleanup.
+        [[ "$reap_rc" -eq 5 ]] && continue
+        return "$reap_rc"
+      fi
       return 0
     fi
     # --- stall check ---
@@ -610,6 +720,160 @@ cmd_wait() {
   done
 }
 
+# Set PARK_REFUSAL and return nonzero unless a lane can be parked without
+# guessing about terminal state or tmux ownership. This is deliberately shared
+# by `park` and fleet `gc`, so their safety predicate cannot drift.
+lane_is_parkable() {
+  local lane="$1" adopt_legacy="${2:-0}" provider barrier mark need_adopt=0
+  PARK_REFUSAL=""
+  PARK_NEEDS_ADOPT=0
+  if ! jq empty "$(lane_state_file "$lane")" 2>/dev/null; then
+    PARK_REFUSAL="corrupt state.json"; return 1
+  fi
+  if [[ "$(lane_get "$lane" status)" != "live" ]]; then
+    PARK_REFUSAL="lifecycle state is '$(lane_get "$lane" status)' (need live)"; return 1
+  fi
+  if ! tmux_owned_lane_window_exists "$lane"; then
+    if [[ "$adopt_legacy" -eq 1 ]] && tmux_named_lane_window_exists "$lane"; then
+      need_adopt=1
+    else
+      PARK_REFUSAL="no verified owned tmux window (legacy lanes require explicit --adopt-legacy)"; return 1
+    fi
+  fi
+  provider="$(lane_get "$lane" provider)"
+  if [[ -z "$provider" || ! -f "$WASPFLOW_LIB/providers/$provider.sh" ]]; then
+    PARK_REFUSAL="missing provider adapter"; return 1
+  fi
+  load_provider "$provider"
+  if ! "${provider}_session_resumable" "$lane"; then
+    PARK_REFUSAL="provider session is not resumable"; return 1
+  fi
+  # A live revise records this barrier while the provider log still ends with
+  # the prior turn. Treat it as active until the terminal mark advances.
+  barrier="$(lane_get "$lane" revise_barrier_mark)"
+  if [[ -n "$barrier" ]]; then
+    mark="$("${provider}_turn_mark" "$lane" 2>/dev/null || echo '')"
+    if [[ ! "$barrier" =~ ^[0-9]+$ || ! "$mark" =~ ^[0-9]+$ || "$mark" -le "$barrier" ]]; then
+      PARK_REFUSAL="a revise turn is still pending"; return 1
+    fi
+  fi
+  if ! "${provider}_is_idle" "$lane"; then
+    PARK_REFUSAL="provider terminal oracle is not idle"; return 1
+  fi
+  PARK_NEEDS_ADOPT="$need_adopt"
+  return 0
+}
+
+_park_one() {
+  local lane="$1"
+  lane_operation_run "$lane" _park_one_locked "$@"
+}
+
+_park_one_locked() {
+  local lane="$1" reason="$2" adopt_legacy="${3:-0}"
+  lane_is_parkable "$lane" "$adopt_legacy" || { err "park: lane '$lane' refused: $PARK_REFUSAL"; return 1; }
+  if [[ "$PARK_NEEDS_ADOPT" -eq 1 ]]; then
+    tmux_capture_lane_ownership "$lane" \
+      || { err "park: lane '$lane' legacy ownership could not be adopted"; return 1; }
+    tmux_owned_lane_window_exists "$lane" \
+      || { err "park: lane '$lane' adopted ownership did not verify"; return 1; }
+  fi
+  tmux_kill_owned_lane_window "$lane" \
+    || { err "park: lane '$lane' ownership changed before its window could be stopped"; return 1; }
+  lane_set "$lane" status "parked" parked_at "$(date +%s)" park_reason "$reason"
+  log "park: lane '$lane' parked — transcript, state, session, worktree, and artifacts preserved"
+}
+
+cmd_park() {
+  local lane="" reason="operator requested" adopt_legacy=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --reason) [[ $# -ge 2 ]] || die "park: --reason requires text"; reason="$2"; shift 2 ;;
+      --adopt-legacy) adopt_legacy=1; shift ;;
+      -*) die "park: unknown option '$1'" ;;
+      *) [[ -z "$lane" ]] && { lane="$1"; shift; } || die "park: unexpected arg '$1'" ;;
+    esac
+  done
+  [[ -n "$lane" ]] || die "park: <lane> required"
+  [[ -n "$reason" ]] || die "park: --reason cannot be empty"
+  lane_exists "$lane" || die "park: no such lane '$lane'"
+  _park_one "$lane" "$reason" "$adopt_legacy"
+}
+
+cmd_gc() {
+  local lane_age="${WASPFLOW_GC_LANE_AGE_SECONDS:-86400}" project="" apply=0 adopt_legacy=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --lane-age) [[ $# -ge 2 ]] || die "gc: --lane-age requires seconds"; lane_age="$2"; shift 2 ;;
+      --project) [[ $# -ge 2 ]] || die "gc: --project requires a directory"; project="$2"; shift 2 ;;
+      --apply) apply=1; shift ;;
+      --adopt-legacy) adopt_legacy=1; shift ;;
+      -*) die "gc: unknown option '$1'" ;;
+      *) die "gc: unexpected arg '$1'" ;;
+    esac
+  done
+  [[ "$lane_age" =~ ^[0-9]+$ && "$lane_age" -gt 0 ]] \
+    || die "gc: --lane-age must be a positive integer seconds value (got: $lane_age)"
+  if [[ -n "$project" ]]; then
+    project="$(cd "$project" && pwd)" || die "gc: --project does not exist: $project"
+  fi
+
+  local mode="dry-run"; [[ "$apply" -eq 1 ]] && mode="apply"
+  printf 'gc: mode=%s lane_age_seconds=%s%s\n' "$mode" "$lane_age" "${project:+ project=$project}"
+  [[ "$apply" -eq 1 ]] || echo "gc: dry run only; pass --apply to park selected lanes (gc never reaps or touches worktrees/artifacts)"
+  printf '%-20s %s\n' LANE LANE_AGE_SECONDS
+
+  local now lane spawned age selected=0 parked=0 failed=0
+  now="$(date +%s)"
+  while IFS= read -r lane; do
+    [[ -n "$lane" ]] || continue
+    if ! jq empty "$(lane_state_file "$lane")" 2>/dev/null; then
+      warn "gc: skipping corrupt lane '$lane'"; continue
+    fi
+    [[ -z "$project" ]] || lane_matches_project "$lane" "$project" || continue
+    spawned="$(lane_get "$lane" spawn_epoch)"
+    [[ "$spawned" =~ ^[0-9]+$ && "$spawned" -le "$now" ]] || continue
+    age=$((now - spawned))
+    [[ "$age" -ge "$lane_age" ]] || continue
+    lane_is_parkable "$lane" "$adopt_legacy" || continue
+    printf '%-20s %s\n' "$lane" "$age"
+    selected=$((selected + 1))
+    if [[ "$apply" -eq 1 ]]; then
+      if _park_one "$lane" "gc: lane age ${age}s reached threshold ${lane_age}s" "$adopt_legacy"; then
+        parked=$((parked + 1))
+      else
+        failed=$((failed + 1))
+      fi
+    fi
+  done < <(list_lanes)
+  [[ "$selected" -gt 0 ]] || echo "(no safely parkable terminal-idle lanes older than the lane age threshold)"
+  if [[ "$apply" -eq 1 ]]; then
+    log "gc: parked $parked of $selected selected lanes"
+    [[ "$failed" -eq 0 ]] || { err "gc: $failed selected lane(s) could not be parked"; return 2; }
+  fi
+  return 0
+}
+
+_wait_reap_after_idle() {
+  local lane="$1"
+  lane_operation_run "$lane" _wait_reap_after_idle_locked "$lane"
+}
+
+_wait_reap_after_idle_locked() {
+  local lane="$1" provider barrier mark
+  provider="$(lane_get "$lane" provider)"
+  load_provider "$provider"
+  barrier="$(lane_get "$lane" revise_barrier_mark)"
+  if [[ -n "$barrier" ]]; then
+    mark="$("${provider}_turn_mark" "$lane" 2>/dev/null || echo '')"
+    [[ "$barrier" =~ ^[0-9]+$ && "$mark" =~ ^[0-9]+$ && "$mark" -gt "$barrier" ]] \
+      || return 5
+    lane_set "$lane" revise_barrier_mark ""
+  fi
+  "${provider}_is_idle" "$lane" || return 5
+  _reap_one_locked "$lane" 0 0 0
+}
+
 cmd_revise() {
   split_after_ddash "$@"
   local lane="" out=""
@@ -625,6 +889,11 @@ cmd_revise() {
   [[ -n "$lane" ]] || die "revise: <lane> required"
   [[ -n "$message" ]] || die "revise: a message is required after '--'"
   lane_exists "$lane" || die "no such lane '$lane'"
+  lane_operation_run "$lane" _revise_one "$lane" "$message" "$out"
+}
+
+_revise_one() {
+  local lane="$1" message="$2" out="$3"
   local provider; provider="$(lane_get "$lane" provider)"
   load_provider "$provider"
   if tmux_window_exists "$lane"; then
@@ -688,6 +957,11 @@ cmd_reap() {
 # Reap a single lane. Args: lane force keep_wt no_archive. Returns 2 on an unmet
 # deliverable/verification contract so callers/CI can key on it.
 _reap_one() {
+  local lane="$1"
+  lane_operation_run "$lane" _reap_one_locked "$@"
+}
+
+_reap_one_locked() {
   local lane="$1" force="$2" keep_wt="$3" no_archive="$4"
   local provider; provider="$(lane_get "$lane" provider)"
   load_provider "$provider"
@@ -737,7 +1011,7 @@ cmd_doctor() {
   echo "  tmux session  = $WASPFLOW_TMUX_SESSION"
   local ok=1
   local agent_ok=0
-  for c in tmux jq git; do
+  for c in tmux jq git flock; do
     if command -v "$c" >/dev/null 2>&1; then echo "  [ok]   $c"; else echo "  [MISS] $c (required)"; ok=0; fi
   done
   command -v curl >/dev/null 2>&1 || ok=0
@@ -785,6 +1059,8 @@ main() {
     status) cmd_status "$@" ;;
     peek)   cmd_peek "$@" ;;
     wait)   cmd_wait "$@" ;;
+    park)   cmd_park "$@" ;;
+    gc)     cmd_gc "$@" ;;
     revise) cmd_revise "$@" ;;
     attach) cmd_attach "$@" ;;
     close)  cmd_close "$@" ;;

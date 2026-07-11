@@ -14,6 +14,8 @@ grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/exec.sh"
 grep -Eq "unsupported effort" "$root/lib/providers/grok.sh"
 # Generated capabilities-derived effort unions present
 test -f "$root/lib/generated/effort-whitelists.sh"
+grep -q 'tmux jq git flock' "$root/bin/waspflow"
+grep -q '`flock`' "$root/docs/prerequisites.md"
 # Lane provenance: --op spawn records policy_version + catalog_ref
 grep -Eq 'policy_version' "$root/bin/waspflow"
 grep -Eq 'catalog_ref' "$root/bin/waspflow"
@@ -24,15 +26,30 @@ fixture="$(mktemp -d "$scratch/waspflow-verify-XXXXXX")"
 state_home="$(mktemp -d "$scratch/waspflow-state-XXXXXX")"
 
 # HERMETIC ISOLATION. The suite must be deterministic regardless of the machine's
-# live state. It already isolates WASPFLOW_HOME; it MUST also isolate the tmux
-# session, or reap's `tmux_window_exists <lane>` collides with the operator's real
-# `waspflow` session (dozens of live windows) and the suite goes flaky. Use a
-# unique session name per run and export it so every `bin/waspflow` child inherits
-# it. (Per the repo's own rule: tests never touch the production tmux server.)
+# live state. It isolates WASPFLOW_HOME *and* uses a unique tmux socket via a
+# tiny PATH wrapper: session names alone still share the operator's tmux server.
+# Every direct tmux probe and every bin/waspflow child inherits this wrapper, so
+# test cleanup can never kill a production tmux session.
+real_tmux="$(command -v tmux)"
+tmux_wrapper="$(mktemp -d "$scratch/waspflow-tmux-wrapper-XXXXXX")"
+tmux_socket_dir="$(mktemp -d "$HOME/.tmp/wf-tmux-XXXXXX")"
+export WASPFLOW_TMUX_SOCKET="wf-$$"
+export TMUX_TMPDIR="$tmux_socket_dir"
+cat >"$tmux_wrapper/tmux" <<EOF
+#!/usr/bin/env bash
+unset TMUX TMUX_PANE
+exec "$real_tmux" -L "\${WASPFLOW_TMUX_SOCKET:?}" "\$@"
+EOF
+chmod +x "$tmux_wrapper/tmux"
+export PATH="$tmux_wrapper:$PATH"
 export WASPFLOW_TMUX_SESSION="waspflow-verify-$$"
 cleanup() {
   tmux kill-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || true
-  rm -rf "$fixture" "$state_home"
+  # This is a test-only, uniquely named isolated socket. If a later assertion
+  # aborts before its per-session cleanup, stop that isolated server so no fake
+  # worker or inherited lock fd survives the suite.
+  tmux kill-server 2>/dev/null || true
+  rm -rf "$fixture" "$state_home" "$tmux_wrapper" "$tmux_socket_dir"
 }
 trap cleanup EXIT
 
@@ -213,8 +230,11 @@ JSONL
   source "$root/lib/providers/codex.sh"
   lane_set marker-a provider codex status live cwd "$same_cwd" codex_marker "WASPFLOW_LANE_MARKER:lane-a:aaa"
   lane_set marker-b provider codex status live cwd "$same_cwd" codex_marker "WASPFLOW_LANE_MARKER:lane-b:bbb"
+  marker_before="$(cksum "$(lane_state_file marker-a)")"
   [[ "$(codex_discover_session marker-a)" == "11111111-1111-1111-1111-111111111111" ]]
   [[ "$(codex_discover_session marker-b)" == "22222222-2222-2222-2222-222222222222" ]]
+  [[ "$(cksum "$(lane_state_file marker-a)")" == "$marker_before" ]] \
+    || { echo "codex discovery: read-only oracle mutated lane state" >&2; exit 1; }
 )
 
 # Grok idle/resumable: last turn_* event is turn_ended (MCP noise after is fine).
@@ -513,7 +533,10 @@ deadp_revise() { :; }
 deadp_turn_mark() { echo 0; }
 deadp_valid_models() { return 1; }
 deadp_mcp_policy() { printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}'; }
-deadp_spawn() { return 1; }   # simulate: window up, task never confirmed submitted
+deadp_spawn() {
+  tmux_create_owned_lane_window "$1" "$2" "exec sleep 60" >/dev/null || return 1
+  return 1
+}   # window up, task never confirmed submitted
 PROV
   sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok)/WASPFLOW_PROVIDERS=(claude codex grok deadp)/' "$deadlib/core.sh"
   dead_home="$(mktemp -d "$scratch/waspflow-deadhome-XXXXXX")"
@@ -528,6 +551,10 @@ PROV
   grep -q "NOT confirmed submitted" <<<"$out" || { echo "dead-on-arrival: missing loud warning" >&2; exit 1; }
   [[ "$(jq -r '.spawn_submitted // empty' "$dead_home/lanes/dead/state.json" 2>/dev/null)" == "false" ]] \
     || { echo "dead-on-arrival: spawn_submitted should be false" >&2; exit 1; }
+  jq -e '(.tmux_window | startswith("@")) and (.tmux_pane_pid | tonumber > 0)' \
+    "$dead_home/lanes/dead/state.json" >/dev/null \
+    || { echo "dead-on-arrival: retained worker lacks ownership receipt" >&2; exit 1; }
+  tmux kill-session -t "wf-dead-$$" 2>/dev/null || true
   rm -rf "$deadlib" "$dead_home" "$dead_work"
 )
 
@@ -545,7 +572,8 @@ grep -q 'corrupted state.json' "$root/bin/waspflow" || { echo "status: corrupt-j
   export WASPFLOW_HOME="$state_home"
   # END-TO-END, wording-INDEPENDENT: a pane with GENERIC stalled text (no prompt
   # phrases) must still trigger rc 4. This is the whole point of the reframe.
-  tmux new-session -d -s "$WASPFLOW_TMUX_SESSION" -n _h 2>/dev/null || true
+  tmux has-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null \
+    || tmux new-session -d -s "$WASPFLOW_TMUX_SESSION" -n _h
   tmux new-window -d -t "$WASPFLOW_TMUX_SESSION" -n stalled \
     "bash -c 'printf \"some generic output with no prompt words at all\n\"; exec cat'" 2>/dev/null
   mkdir -p "$state_home/lanes/stalled"
@@ -673,8 +701,12 @@ CODEX
     && { echo "codex MCP: unknown discovery schema must fail closed" >&2; exit 1; }
   codex_mcp_validate_extra auto -c 'mcp_servers.added.command="npx"' \
     && { echo "codex MCP: raw config must not bypass isolation" >&2; exit 1; }
+  codex_mcp_validate_extra auto '-cmcp_servers.added.command="npx"' \
+    && { echo "codex MCP: attached short config must not bypass isolation" >&2; exit 1; }
   codex_mcp_validate_extra auto --profile alternate \
     && { echo "codex MCP: profiles must not bypass discovery" >&2; exit 1; }
+  codex_mcp_validate_extra auto -palternate \
+    && { echo "codex MCP: attached short profile must not bypass discovery" >&2; exit 1; }
   codex_mcp_validate_extra inherit -c 'mcp_servers.added.command="npx"' \
     || { echo "codex MCP: inherit should preserve raw config" >&2; exit 1; }
   ( mcp_policy_load_json '["ok","line\nbreak"]' '{}' test ) >/dev/null 2>&1 \
@@ -798,18 +830,57 @@ mcpp_session_resumable() { return 0; }
 mcpp_is_idle() { return 1; }
 mcpp_revise() { :; }
 mcpp_turn_mark() { echo 0; }
-mcpp_valid_models() { return 1; }
+mcpp_valid_models() { printf 'allowed-model\n'; }
 mcpp_mcp_policy() { case "$1" in auto) printf '%s\n' '{"resolved":"none","warning":"test warning","argv":[],"env":{}}' ;; *) return 1 ;; esac; }
-mcpp_spawn() { return 0; }
+mcpp_spawn() {
+  local lane="$1" cwd="$2"
+  tmux_create_owned_lane_window "$lane" "$cwd" "exec sleep 60" >/dev/null
+}
 PROV
   sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok)/WASPFLOW_PROVIDERS=(claude codex grok mcpp)/' "$mcplib/core.sh"
   mcphome="$(mktemp -d "$scratch/waspflow-mcp-home-XXXXXX")"
   mcpdir="$(mktemp -d "$scratch/waspflow-mcp-cwd-XXXXXX")"; (cd "$mcpdir" && git init -q)
+  set +e
+  WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane invalid-model --model denied -- "reject early" >/dev/null 2>&1
+  invalid_model_rc=$?
+  set -e
+  [[ "$invalid_model_rc" -ne 0 && ! -d "$mcphome/lanes/invalid-model" ]] \
+    || { echo "spawn: invalid model polluted the durable lane index" >&2; exit 1; }
   WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
     "$root/bin/waspflow" spawn --provider mcpp --lane mcp-state -- "test policy" >/dev/null 2>&1
   jq -e '.mcp_requested == "auto" and .mcp_resolved == "none" and .mcp_warning == "test warning"' \
     "$mcphome/lanes/mcp-state/state.json" >/dev/null \
     || { echo "MCP state: requested/resolved receipt missing" >&2; exit 1; }
+  jq -e '(.tmux_session != "") and (.tmux_window | startswith("@")) and (.tmux_pane_pid | tonumber > 0)' \
+    "$mcphome/lanes/mcp-state/state.json" >/dev/null \
+    || { echo "spawn: tmux ownership receipt missing" >&2; exit 1; }
+  WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-state -- "must not overwrite" >/dev/null 2>&1 \
+    && { echo "spawn: overwrote an unreaped lane" >&2; exit 1; }
+
+  # A stale reaped receipt must not hide a same-name live window, and exact
+  # window ownership must prevent tmux duplicate-name ambiguity.
+  tmux new-window -d -t "wf-mcp-$$" -n duplicate-name "exec sleep 60"
+  mkdir -p "$mcphome/lanes/duplicate-name"
+  printf '%s\n' '{"status":"reaped","tmux_window":"@999999"}' >"$mcphome/lanes/duplicate-name/state.json"
+  WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane duplicate-name -- "must refuse duplicate" >/dev/null 2>&1 \
+    && { echo "spawn: stale receipt hid a duplicate tmux name" >&2; exit 1; }
+  [[ "$(tmux list-windows -t "wf-mcp-$$" -F '#{window_name}' | grep -cxF duplicate-name)" -eq 1 ]] \
+    || { echo "spawn: duplicate-name refusal changed the existing window set" >&2; exit 1; }
+
+  set +e
+  WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane concurrent-claim -- "first" >/dev/null 2>&1 & p1=$!
+  WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane concurrent-claim -- "second" >/dev/null 2>&1 & p2=$!
+  wait "$p1"; r1=$?; wait "$p2"; r2=$?
+  set -e
+  [[ $(( (r1 == 0) + (r2 == 0) )) -eq 1 ]] \
+    || { echo "spawn: concurrent same-lane claim did not admit exactly one winner ($r1,$r2)" >&2; exit 1; }
+  [[ "$(tmux list-windows -t "wf-mcp-$$" -F '#{window_name}' | grep -cxF concurrent-claim)" -eq 1 ]] \
+    || { echo "spawn: concurrent claim created duplicate windows" >&2; exit 1; }
   set +e
   parse_out="$(WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" "$root/bin/waspflow" exec --provider mcpp --mcp invalid -- "x" 2>&1)"; parse_rc=$?
   set -e
@@ -820,6 +891,7 @@ PROV
   set -e
   [[ "$missing_rc" -ne 0 ]] && grep -q -- 'spawn: --mcp requires' <<<"$missing_out" \
     || { echo "MCP parsing: spawn missing value lacks a diagnostic" >&2; exit 1; }
+  tmux kill-session -t "wf-mcp-$$" 2>/dev/null || true
   rm -rf "$mcplib" "$mcphome" "$mcpdir"
 )
 
@@ -916,6 +988,204 @@ grep -q 'flock' "$root/lib/core.sh" || { echo "core: lane_set concurrency lock m
   jq -n --arg c "$fixture" '{provider:"codex",status:"live",cwd:$c,result:"mystery",no_recovery:"true",git_tracked:"false"}'     > "$state_home/lanes/smystery/state.json"
   WASPFLOW_HOME="$state_home" "$BF" reap smystery --no-archive --force >/dev/null 2>&1
   [[ "$(jq -r .result "$state_home/lanes/smystery/state.json")" == "corrupt_result" ]]     || { echo "seam: reap laundered an unknown result instead of flagging it" >&2; exit 1; }
+)
+
+# Bounded lifecycle controls: use a fake provider terminal oracle plus a real,
+# uniquely named tmux session. This proves wait --reap, owned-window parking,
+# fleet GC dry-run/apply, and index filters without touching provider accounts or
+# the operator's tmux server.
+(
+  lifelib="$(mktemp -d "$scratch/waspflow-life-lib-XXXXXX")"; mkdir -p "$lifelib/providers"
+  cp "$root"/lib/*.sh "$lifelib/"; cp -r "$root/lib/generated" "$lifelib/" 2>/dev/null || true
+  cat >"$lifelib/providers/life.sh" <<'PROV'
+life_preflight() { :; }
+life_discover_session() { lane_get "$1" session_id; }
+life_session_resumable() { [[ "$(lane_get "$1" resumable)" == yes ]]; }
+life_is_idle() {
+  local idle checks
+  idle="$(lane_get "$1" terminal_idle)"
+  if [[ "$idle" == flip ]]; then
+    checks="$(lane_get "$1" idle_checks)"; checks="${checks:-0}"
+    lane_set "$1" idle_checks "$((checks + 1))"
+    [[ "$checks" -eq 0 ]]
+    return
+  fi
+  [[ "$idle" == yes ]]
+}
+life_revise() {
+  local lane="$1"
+  lane_set "$lane" revise_started yes
+  if [[ "$(lane_get "$lane" async_revise)" == yes ]]; then
+    local sf tmp command
+    sf="$(lane_state_file "$lane")"
+    lane_set "$lane" terminal_idle no
+    command="sleep 1; tmp=\$(mktemp $(printf '%q' "$(lane_dir "$lane")/.async.XXXXXX")); jq '.terminal_idle=\"yes\" | .turn_mark=\"2\"' $(printf '%q' "$sf") >\"\$tmp\"; mv \"\$tmp\" $(printf '%q' "$sf")"
+    tmux new-window -d -t "$WASPFLOW_TMUX_SESSION" -n "_async-$lane" "bash -c $(printf '%q' "$command")"
+    return 0
+  fi
+  sleep 1
+  lane_set "$lane" turn_mark 2
+}
+life_turn_mark() { lane_get "$1" turn_mark; }
+life_valid_models() { return 1; }
+life_mcp_policy() { printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}'; }
+life_spawn() { return 1; }
+PROV
+  lifehome="$(mktemp -d "$scratch/waspflow-life-home-XXXXXX")"
+  lifeother="$(mktemp -d "$scratch/waspflow-life-project-XXXXXX")"
+  lifesession="waspflow-life-$$"
+  export WASPFLOW_LIB="$lifelib" WASPFLOW_HOME="$lifehome" WASPFLOW_TMUX_SESSION="$lifesession"
+  tmux new-session -d -s "$lifesession" -n _home
+
+  make_life_lane() {
+    local lane="$1" idle="$2" resumable="$3" cwd="$4" spawned="$5" target session window pid transcript
+    transcript="$lifehome/lanes/$lane/transcript.log"
+    mkdir -p "$(dirname "$transcript")"; printf 'durable transcript for %s\n' "$lane" >"$transcript"
+    tmux new-window -d -t "$lifesession" -n "$lane" -c "$cwd" "exec sleep 120"
+    target="$lifesession:$lane"
+    IFS='|' read -r session window pid < <(tmux display-message -p -t "$target" '#{session_name}|#{window_id}|#{pane_pid}')
+    jq -n --arg cwd "$cwd" --arg t "$transcript" --arg session "$session" --arg window "$window" --arg pid "$pid" \
+      --arg idle "$idle" --arg resumable "$resumable" --arg spawned "$spawned" \
+      '{provider:"life",status:"live",cwd:$cwd,origin_cwd:$cwd,transcript:$t,session_id:"life-session",terminal_idle:$idle,resumable:$resumable,turn_mark:"1",spawn_epoch:$spawned,tmux_session:$session,tmux_window:$window,tmux_pane_pid:$pid}' \
+      >"$lifehome/lanes/$lane/state.json"
+  }
+
+  now="$(date +%s)"
+  make_life_lane wait-reap yes yes "$fixture" "$now"
+  "$root/bin/waspflow" wait wait-reap --timeout 3 --interval 1 --reap >/dev/null
+  [[ "$(jq -r .status "$lifehome/lanes/wait-reap/state.json")" == reaped ]] \
+    || { echo "wait --reap: did not return final reaped state" >&2; exit 1; }
+  tmux list-windows -a -F '#{window_id}' | grep -qxF "$(jq -r .tmux_window "$lifehome/lanes/wait-reap/state.json")" \
+    && { echo "wait --reap: owned window survived cleanup" >&2; exit 1; }
+
+  make_life_lane wait-reap-fail yes yes "$fixture" "$now"
+  jq '. + {verify_command:"false",verify_name:"verify",verify_timeout:"5"}' \
+    "$lifehome/lanes/wait-reap-fail/state.json" >"$lifehome/lanes/wait-reap-fail/state.next"
+  mv "$lifehome/lanes/wait-reap-fail/state.next" "$lifehome/lanes/wait-reap-fail/state.json"
+  set +e; "$root/bin/waspflow" wait wait-reap-fail --timeout 3 --interval 1 --reap >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 2 && "$(jq -r .result "$lifehome/lanes/wait-reap-fail/state.json")" == verify_failed ]] \
+    || { echo "wait --reap: did not return final reap failure rc/result" >&2; exit 1; }
+
+  make_life_lane wait-reap-race yes yes "$fixture" "$now"
+  jq '. + {async_revise:"yes"}' "$lifehome/lanes/wait-reap-race/state.json" \
+    >"$lifehome/lanes/wait-reap-race/state.next"
+  mv "$lifehome/lanes/wait-reap-race/state.next" "$lifehome/lanes/wait-reap-race/state.json"
+  mkdir -p "$lifehome/locks"
+  exec 8>"$lifehome/locks/wait-reap-race.lock"; flock -x 8
+  "$root/bin/waspflow" revise wait-reap-race -- "async turn" >/dev/null 2>&1 & race_revise_pid=$!
+  sleep 0.1
+  race_start_ns="$(date +%s%N)"
+  "$root/bin/waspflow" wait wait-reap-race --timeout 5 --interval 1 --reap >/dev/null 2>&1 & race_wait_pid=$!
+  sleep 0.2
+  flock -u 8; exec 8>&-
+  wait "$race_revise_pid"; wait "$race_wait_pid"
+  race_elapsed_ms=$(( ( $(date +%s%N) - race_start_ns ) / 1000000 ))
+  [[ "$(jq -r .status "$lifehome/lanes/wait-reap-race/state.json")" == reaped && "$race_elapsed_ms" -ge 700 ]] \
+    || { echo "wait --reap: stale idle raced a concurrent revise (${race_elapsed_ms}ms)" >&2; exit 1; }
+
+  make_life_lane wait-active no yes "$fixture" "$now"
+  set +e; "$root/bin/waspflow" wait wait-active --timeout 1 --interval 1 --reap >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 1 ]] || { echo "wait --reap: timeout rc changed (got $rc)" >&2; exit 1; }
+  [[ "$(jq -r .status "$lifehome/lanes/wait-active/state.json")" == live ]] \
+    || { echo "wait --reap: active lane was cleaned up" >&2; exit 1; }
+  tmux display-message -p -t "$(jq -r .tmux_window "$lifehome/lanes/wait-active/state.json")" >/dev/null \
+    || { echo "wait --reap: active window was killed" >&2; exit 1; }
+
+  make_life_lane park-good yes yes "$fixture" "$((now - 1000))"
+  printf 'artifact must survive\n' >"$lifehome/lanes/park-good/kept-artifact.txt"
+  "$root/bin/waspflow" park park-good --reason "operator paused" >/dev/null
+  jq -e '.status == "parked" and (.parked_at | tonumber > 0) and .park_reason == "operator paused"' \
+    "$lifehome/lanes/park-good/state.json" >/dev/null \
+    || { echo "park: did not record lifecycle receipt" >&2; exit 1; }
+  test -f "$lifehome/lanes/park-good/transcript.log" && test -f "$lifehome/lanes/park-good/kept-artifact.txt" \
+    || { echo "park: removed durable lane artifacts" >&2; exit 1; }
+  tmux list-windows -a -F '#{window_id}' | grep -qxF "$(jq -r .tmux_window "$lifehome/lanes/park-good/state.json")" \
+    && { echo "park: owned window was not stopped" >&2; exit 1; }
+  "$root/bin/waspflow" revise park-good -- "resume remains available" >/dev/null \
+    || { echo "park: parked lane was no longer resumable" >&2; exit 1; }
+
+  make_life_lane park-active no yes "$fixture" "$((now - 1000))"
+  "$root/bin/waspflow" park park-active >/dev/null 2>&1 \
+    && { echo "park: accepted an active provider lane" >&2; exit 1; }
+  tmux display-message -p -t "$(jq -r .tmux_window "$lifehome/lanes/park-active/state.json")" >/dev/null \
+    || { echo "park: killed active provider lane" >&2; exit 1; }
+
+  make_life_lane park-race yes yes "$fixture" "$((now - 1000))"
+  "$root/bin/waspflow" revise park-race -- "start another turn" >/dev/null 2>&1 & revise_pid=$!
+  for _ in $(seq 1 50); do
+    [[ "$(jq -r '.revise_started // ""' "$lifehome/lanes/park-race/state.json")" == yes ]] && break
+    sleep 0.02
+  done
+  start_ns="$(date +%s%N)"
+  "$root/bin/waspflow" park park-race >/dev/null
+  elapsed_ms=$(( ( $(date +%s%N) - start_ns ) / 1000000 ))
+  wait "$revise_pid"
+  [[ "$elapsed_ms" -ge 500 ]] \
+    || { echo "park/revise: lifecycle operation lock did not close the idle-proof race (${elapsed_ms}ms)" >&2; exit 1; }
+
+  make_life_lane park-legacy yes yes "$fixture" "$((now - 1000))"
+  jq 'del(.tmux_session,.tmux_window,.tmux_pane_pid)' \
+    "$lifehome/lanes/park-legacy/state.json" >"$lifehome/lanes/park-legacy/state.next"
+  mv "$lifehome/lanes/park-legacy/state.next" "$lifehome/lanes/park-legacy/state.json"
+  "$root/bin/waspflow" park park-legacy >/dev/null 2>&1 \
+    && { echo "park: silently adopted a legacy lane" >&2; exit 1; }
+  "$root/bin/waspflow" park park-legacy --adopt-legacy >/dev/null \
+    || { echo "park: explicit safe legacy adoption failed" >&2; exit 1; }
+  [[ "$(jq -r .status "$lifehome/lanes/park-legacy/state.json")" == parked ]] \
+    || { echo "park: legacy lane was not parked after adoption" >&2; exit 1; }
+
+  make_life_lane gc-good yes yes "$fixture" "$((now - 1000))"
+  make_life_lane gc-other yes yes "$lifeother" "$((now - 1000))"
+  make_life_lane gc-legacy yes yes "$fixture" "$((now - 1000))"
+  jq 'del(.tmux_session,.tmux_window,.tmux_pane_pid)' \
+    "$lifehome/lanes/gc-legacy/state.json" >"$lifehome/lanes/gc-legacy/state.next"
+  mv "$lifehome/lanes/gc-legacy/state.next" "$lifehome/lanes/gc-legacy/state.json"
+  gc_adopt_dry="$("$root/bin/waspflow" gc --lane-age 10 --project "$fixture" --adopt-legacy)"
+  grep -q 'gc-legacy' <<<"$gc_adopt_dry" \
+    || { echo "gc: explicit legacy dry run missed eligible lane" >&2; exit 1; }
+  [[ "$(jq -r '.tmux_window // ""' "$lifehome/lanes/gc-legacy/state.json")" == "" ]] \
+    || { echo "gc dry run: legacy adoption mutated state" >&2; exit 1; }
+  gc_dry="$("$root/bin/waspflow" gc --lane-age 10 --project "$fixture")"
+  grep -q 'gc-good' <<<"$gc_dry" || { echo "gc: missed scoped eligible lane" >&2; exit 1; }
+  ! grep -q 'gc-other' <<<"$gc_dry" || { echo "gc: ignored project scope" >&2; exit 1; }
+  ! grep -q 'gc-legacy' <<<"$gc_dry" || { echo "gc: silently adopted legacy lane" >&2; exit 1; }
+  [[ "$(jq -r .status "$lifehome/lanes/gc-good/state.json")" == live ]] \
+    || { echo "gc dry run: mutated lifecycle state" >&2; exit 1; }
+  "$root/bin/waspflow" gc --lane-age 10 --project "$fixture" --apply >/dev/null
+  [[ "$(jq -r .status "$lifehome/lanes/gc-good/state.json")" == parked ]] \
+    || { echo "gc apply: did not park selected lane" >&2; exit 1; }
+  [[ "$(jq -r .status "$lifehome/lanes/gc-other/state.json")" == live ]] \
+    || { echo "gc apply: touched out-of-scope lane" >&2; exit 1; }
+  "$root/bin/waspflow" gc --lane-age 10 --project "$fixture" --adopt-legacy --apply >/dev/null
+  [[ "$(jq -r .status "$lifehome/lanes/gc-legacy/state.json")" == parked ]] \
+    || { echo "gc apply: explicit legacy adoption did not park lane" >&2; exit 1; }
+
+  make_life_lane gc-race flip yes "$fixture" "$((now - 1000))"
+  set +e
+  "$root/bin/waspflow" gc --lane-age 10 --project "$fixture" --apply >/dev/null 2>&1; rc=$?
+  set -e
+  [[ "$rc" -eq 2 && "$(jq -r .status "$lifehome/lanes/gc-race/state.json")" == live ]] \
+    || { echo "gc apply: partial failure was masked (rc=$rc)" >&2; exit 1; }
+
+  jq '. + {prompt:"DO_NOT_LEAK_BULK_PROMPT",mcp_argv:"DO_NOT_LEAK_ARGV"}' \
+    "$lifehome/lanes/gc-good/state.json" >"$lifehome/lanes/gc-good/state.next"
+  mv "$lifehome/lanes/gc-good/state.next" "$lifehome/lanes/gc-good/state.json"
+  listed="$("$root/bin/waspflow" list --json --project "$fixture" --lifecycle-state parked --limit 1)"
+  jq -e 'length == 1 and .[0].lifecycle_state == "parked" and .[0].tmux_session != ""' <<<"$listed" >/dev/null \
+    || { echo "list json: lifecycle/project/limit filter failed" >&2; exit 1; }
+  ! grep -q 'DO_NOT_LEAK' <<<"$listed" \
+    || { echo "list json: bulk index leaked prompt/provider argv" >&2; exit 1; }
+  "$root/bin/waspflow" list --lifecycle-state impossible >/dev/null 2>&1 \
+    && { echo "list json: invalid lifecycle state was accepted" >&2; exit 1; }
+  "$root/bin/waspflow" gc --lane-age not-a-number >/dev/null 2>&1 \
+    && { echo "gc: invalid lane age was accepted" >&2; exit 1; }
+  mkdir -p "$lifehome/lanes/life-corrupt"; printf '{"provider":' >"$lifehome/lanes/life-corrupt/state.json"
+  set +e; corrupt_list="$("$root/bin/waspflow" list --json --project "$fixture" 2>/dev/null)"; rc=$?; set -e
+  [[ "$rc" -eq 2 ]] && jq -e 'any(.[]; .corrupt == true and .lane == "life-corrupt")' <<<"$corrupt_list" >/dev/null \
+    || { echo "list json: corrupt record was hidden" >&2; exit 1; }
+
+  tmux kill-session -t "$lifesession" 2>/dev/null || true
+  rm -rf "$lifelib" "$lifehome" "$lifeother"
 )
 
 echo "waspflow verify: ok"

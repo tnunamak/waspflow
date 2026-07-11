@@ -29,6 +29,7 @@ fi
 # session's own compaction/restart — that's the whole point.
 WASPFLOW_HOME="${WASPFLOW_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/waspflow}"
 WASPFLOW_LANES_DIR="$WASPFLOW_HOME/lanes"
+WASPFLOW_LOCKS_DIR="$WASPFLOW_HOME/locks"
 
 # ---- machine-specific knobs (env-overridable) -------------------------------
 # If Codex is configured to route its model calls through a local proxy, set this
@@ -214,6 +215,22 @@ lane_set() {
   fi
 }
 
+# Serialize lifecycle transitions that must re-check provider/tmux state and
+# then act on it atomically with respect to other waspflow commands. State-file
+# writes have their own short lock; this longer operation lock covers
+# revise/park/reap so a revise cannot start between park's idle proof and kill.
+lane_operation_run() {
+  local lane="$1"; shift
+  command -v flock >/dev/null 2>&1 || {
+    err "lane '$lane': flock is required for safe lifecycle transitions"
+    return 1
+  }
+  local lockf
+  mkdir -p "$WASPFLOW_LOCKS_DIR"
+  lockf="$WASPFLOW_LOCKS_DIR/$lane.lock"
+  ( flock -x 9; "$@" ) 9>"$lockf"
+}
+
 # The critical section: read → merge → atomic write. MUST run under the lane lock
 # (or single-threaded). Args: dir k1 v1 k2 v2 ...
 _lane_set_locked() {
@@ -244,6 +261,18 @@ list_lanes() {
   find "$WASPFLOW_LANES_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort
 }
 
+# The lane directory is the durable, global lane index.  Paths in a record are
+# intentionally compared as paths rather than by a transient shell cwd, so a
+# caller can scope a fleet query to a project after restarting its harness.
+lane_matches_project() {
+  local lane="$1" project="$2" candidate
+  for candidate in "$(lane_get "$lane" repo_root)" "$(lane_get "$lane" cwd)" "$(lane_get "$lane" origin_cwd)"; do
+    [[ -n "$candidate" ]] || continue
+    case "$candidate" in "$project"|"$project"/*) return 0 ;; esac
+  done
+  return 1
+}
+
 # ---- tmux helpers -----------------------------------------------------------
 # All windows live in a dedicated session so we never disturb the user's tmux.
 tmux_ensure_session() {
@@ -252,11 +281,103 @@ tmux_ensure_session() {
   tmux new-session -d -s "$WASPFLOW_TMUX_SESSION" -n _waspflow_home 2>/dev/null || true
 }
 
-tmux_window_target() { echo "$WASPFLOW_TMUX_SESSION:$1"; }
+tmux_window_target() {
+  local recorded
+  recorded="$(lane_get "$1" tmux_window)"
+  [[ -n "$recorded" ]] && printf '%s\n' "$recorded" \
+    || printf '%s:%s\n' "$WASPFLOW_TMUX_SESSION" "$1"
+}
 
-tmux_window_exists() {
+# Record the exact tmux objects created for a successful spawn. Window ids are
+# server-unique; the pane PID adds a cheap identity check before lifecycle code
+# kills anything. They contain no prompts, session tokens, or provider secrets.
+tmux_capture_lane_ownership() {
+  local lane="$1" target="${2:-$(tmux_window_target "$1")}" session window pane_pid
+  IFS='|' read -r session window pane_pid < <(
+    tmux display-message -p -t "$target" '#{session_name}|#{window_id}|#{pane_pid}' 2>/dev/null
+  ) || return 1
+  [[ -n "$session" && -n "$window" && "$pane_pid" =~ ^[0-9]+$ ]] || return 1
+  lane_set "$lane" tmux_session "$session" tmux_window "$window" tmux_pane_pid "$pane_pid"
+}
+
+# Create and claim a lane window as one provider-facing operation. `-P` returns
+# the exact new window id, avoiding tmux's ambiguous name lookup when duplicate
+# names exist. If ownership capture fails, kill that exact id before returning.
+# Args: lane cwd shell_command. Echoes the exact window id.
+tmux_create_owned_lane_window() {
+  local lane="$1" cwd="$2" shell_command="$3" window
+  tmux_ensure_session
+  window="$(tmux new-window -d -P -F '#{window_id}' -t "$WASPFLOW_TMUX_SESSION" \
+    -n "$lane" -c "$cwd" "$shell_command")" || return 1
+  [[ "$window" == @* ]] || return 1
+  if ! tmux_capture_lane_ownership "$lane" "$window"; then
+    tmux kill-window -t "$window" 2>/dev/null || true
+    return 1
+  fi
+  printf '%s\n' "$window"
+}
+
+# Echo a recorded window id only when it still names the same pane in the same
+# tmux session. This is the ownership boundary used by park: a stale/reused
+# window id must be refused, never killed.
+tmux_owned_lane_window_target() {
+  local lane="$1" session window pane_pid got_session got_window got_pid
+  session="$(lane_get "$lane" tmux_session)"
+  window="$(lane_get "$lane" tmux_window)"
+  pane_pid="$(lane_get "$lane" tmux_pane_pid)"
+  [[ -n "$session" && -n "$window" && "$pane_pid" =~ ^[0-9]+$ ]] || return 1
+  IFS='|' read -r got_session got_window got_pid < <(
+    tmux display-message -p -t "$window" '#{session_name}|#{window_id}|#{pane_pid}' 2>/dev/null
+  ) || return 1
+  [[ "$got_session" == "$session" && "$got_window" == "$window" && "$got_pid" == "$pane_pid" ]] || return 1
+  printf '%s\n' "$window"
+}
+
+tmux_owned_lane_window_exists() {
+  tmux_owned_lane_window_target "$1" >/dev/null
+}
+
+tmux_kill_owned_lane_window() {
+  local target
+  target="$(tmux_owned_lane_window_target "$1")" || return 1
+  tmux kill-window -t "$target"
+}
+
+# Name lookup exists only for explicit legacy adoption. Safety-critical cleanup
+# otherwise uses recorded window-id + pane-pid ownership.
+tmux_named_lane_window_exists() {
   tmux list-windows -t "$WASPFLOW_TMUX_SESSION" -F '#{window_name}' 2>/dev/null \
     | grep -qxF "$1"
+}
+
+# One-shot fleet inventory for bulk list/audit. Format is internal and chosen
+# from validated lane-name/window-id/PID alphabets so it can be parsed without
+# tmux's non-interpreted escape sequences.
+tmux_fleet_snapshot() {
+  tmux list-windows -t "$WASPFLOW_TMUX_SESSION" \
+    -F '#{window_id}|#{window_name}|#{pane_pid}' 2>/dev/null || true
+}
+
+tmux_snapshot_has_lane() {
+  local lane="$1" snapshot="$2" window pane_pid
+  window="$(lane_get "$lane" tmux_window)"
+  pane_pid="$(lane_get "$lane" tmux_pane_pid)"
+  if [[ -n "$window" && "$pane_pid" =~ ^[0-9]+$ ]]; then
+    awk -F '|' -v w="$window" -v p="$pane_pid" '$1 == w && $3 == p { found=1 } END { exit !found }' <<<"$snapshot"
+  else
+    awk -F '|' -v n="$lane" '$2 == n { found=1 } END { exit !found }' <<<"$snapshot"
+  fi
+}
+
+tmux_window_exists() {
+  # New lanes use recorded ownership. Keep the name fallback for pre-ownership
+  # records so existing callers retain their historical behavior; safety-critical
+  # park deliberately uses tmux_owned_lane_window_exists instead.
+  if [[ -n "$(lane_get "$1" tmux_window)" ]]; then
+    tmux_owned_lane_window_exists "$1" && return 0
+    return 1
+  fi
+  tmux_named_lane_window_exists "$1"
 }
 
 # Paste literal text into a tmux pane without key-name parsing. Use this for

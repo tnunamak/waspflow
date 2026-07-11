@@ -144,11 +144,26 @@ to answer, then `wait` again — or raise `WASPFLOW_STALL_SECONDS` if the turn i
 slow. The trigger is the stall itself, not any specific prompt wording (robust to new
 or reworded prompts).
 
+For a native background worker whose calling harness needs a completion signal,
+run `waspflow wait <lane> --reap`: it blocks until the provider oracle verifies
+idle, then returns the final reap result. The process exit is the notification;
+waspflow does not run a daemon or promise callbacks.
+
+`waspflow park <lane>` is the non-destructive alternative for an owned,
+terminal-idle resumable lane: it stops only the recorded tmux window and keeps
+the transcript, state, session, worktree, and artifacts. `waspflow gc` is a
+dry-run-by-default fleet selector for safely parkable lanes older than a
+configured **lane age** (time since spawn, not idle duration); `--apply` parks,
+never reaps. Age alone cannot establish that work is captured or safe to
+destroy, so automatic age-based reaping is intentionally unsafe and absent.
+For lanes created before ownership receipts, inspect first and explicitly use
+`--adopt-legacy`; adoption still requires resumable + terminal-idle proof.
+
 Reap lanes you finish (state is retained after reap, so reaping is safe); one
-live lane per name (reap before reusing one); `attach <lane>` drops you into the
+unreaped lane per name (reap before reusing one); `attach <lane>` drops you into the
 pane (Ctrl-b d to detach) — for humans, rarely needed by an agent.
 
 ## Full command reference
 
-`spawn · exec · ops · init · demo · list · status · peek · wait · revise · attach ·
+`spawn · exec · ops · init · demo · list · status · peek · wait · park · gc · revise · attach ·
 reap · check · doctor` — run `waspflow help` or see the README.

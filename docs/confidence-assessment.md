@@ -158,7 +158,8 @@ through, not a mix of excellent and good." Did a full excellence pass:
 
 1. **Fixed the last documented seam — lane_set concurrency.** Per-lane flock serializes
    the read-modify-write: 40 concurrent same-lane writes now keep all 40 fields (was ~7).
-   Different lanes don't contend; falls back gracefully without flock; suite green.
+   Different lanes don't contend; state-file writes fall back without flock.
+   (Lifecycle transitions added later require `flock` and `doctor` now checks it.)
 
 2. **Systematic command-surface audit (Codex gpt-5.6-terra, isolated worktree)** found 5
    seams on the read/control verbs; each independently verified, then fixed:

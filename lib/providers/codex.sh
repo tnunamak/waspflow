@@ -95,7 +95,7 @@ codex_mcp_validate_extra() {
   local arg
   for arg in "$@"; do
     case "$arg" in
-      -c|--config|--config=*|-p|--profile|--profile=*) return 1 ;;
+      -c|-c*|--config|--config=*|-p|-p*|--profile|--profile=*) return 1 ;;
     esac
   done
   return 0
@@ -160,7 +160,6 @@ codex_discover_session() {
     if [[ -n "$marker_match" ]]; then
       marker_sid="$(_codex_rollout_session_id "$marker_match")"
       if [[ -n "$marker_sid" ]]; then
-        lane_set "$lane" session_id "$marker_sid" rollout "$marker_match"
         echo "$marker_sid"
         return 0
       fi
@@ -175,7 +174,6 @@ codex_discover_session() {
   [[ -n "$match" ]] || { echo ""; return 0; }
   sid="$(_codex_rollout_session_id "$match")"
   if [[ -n "$sid" ]]; then
-    lane_set "$lane" session_id "$sid" rollout "$match"
     echo "$sid"
   else
     echo ""
@@ -236,9 +234,9 @@ codex_spawn() {
   local a
   for a in "${argv[@]}"; do quoted+=" $(printf '%q' "$a")"; done
 
-  tmux_ensure_session
-  tmux new-window -d -t "$WASPFLOW_TMUX_SESSION" -n "$lane" -c "$cwd" "bash -lc $(printf '%q' "${quoted# }")"
-  local target; target="$(tmux_window_target "$lane")"
+  local target
+  target="$(tmux_create_owned_lane_window "$lane" "$cwd" "bash -lc $(printf '%q' "${quoted# }")")" \
+    || return 1
   tmux pipe-pane -t "$target" -o "cat >> $(printf '%q' "$transcript")" 2>/dev/null || true
 
   # Drive the TUI deterministically. The startup is racy (trust prompt, hook

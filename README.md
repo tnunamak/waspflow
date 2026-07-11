@@ -49,8 +49,9 @@ working directory, git diff, optional report, and final result.
 waspflow spawn --provider codex --lane fixbug -- \
   "Find and fix the off-by-one in src/pager.ts"
 
-# Wait until the worker finishes its current turn.
-waspflow wait fixbug
+# Wait until the worker finishes its current turn, then perform normal reap.
+# The calling harness receives the final reap result directly.
+waspflow wait fixbug --reap
 
 # Read the tail of its pane.
 waspflow peek fixbug
@@ -159,10 +160,12 @@ config shape.
 | `spawn --provider <claude\|codex\|grok> --lane <name> [opts] -- <task>` | Start a durable worker lane |
 | `exec --provider <claude\|codex\|grok> [opts] [-o FILE] -- <task>` | Headless one-shot: run, return, leave no lane |
 | `demo --provider <claude\|codex\|grok> [--run]` | Show or run a safe first demo |
-| `wait <lane>` | Wait until a worker finishes its current turn |
+| `wait <lane> [--reap]` | Wait until a worker finishes; `--reap` then returns the final reap result |
 | `peek <lane>` | Show the tail of the worker pane or transcript |
 | `revise <lane> -- <message>` | Send another instruction to the same session |
 | `reap <lane>` | Close the pane, verify outputs, and finalize state |
+| `park <lane>` | Close only a verified-idle owned tmux window; preserve the resumable lane |
+| `gc [--lane-age S] [--apply]` | Dry-run fleet selection for safely parkable old lanes; `--apply` parks them |
 | `close <lane> --status <harvested\|superseded\|abandoned>` | Record a lane's fan-in outcome (with provenance) |
 | `captured <lane> --in <ref>` | Is the lane's work already present in `<ref>`? (by content, not ancestry) |
 | `ops list\|explain\|resolve <id>` | Resolve a task-shaped operating point to explicit flags |
@@ -263,6 +266,41 @@ If the pane has exited, `revise` resumes the saved session headlessly:
 - Claude: `claude --resume <session-id> --print "<message>"`
 - Codex: `codex exec resume <session-id> "<message>" -o <file>`
 - Grok: `grok -p "<message>" --resume <session-id> --always-approve`
+
+## Blocking Completion Notification
+
+For a native, backgrounded worker, use `waspflow wait <lane> --reap`. The
+calling harness blocks on that process and receives the normal final reap result
+only after the provider terminal oracle has confirmed the lane is idle. There is
+no waspflow daemon, callback endpoint, or claimed asynchronous notification
+delivery: process completion is the notification mechanism.
+
+## Parking and Conservative Fleet GC
+
+`park <lane>` stops only the tmux window recorded as belonging to a currently
+live lane. It refuses active, corrupt, reaped, unresumable, or unowned lanes;
+the transcript, lane state, provider session, worktree, and artifacts remain in
+place, and `revise` can resume the provider session later.
+
+Lanes created before ownership receipts were introduced remain safe-by-default:
+parking refuses them. After checking the dry-run candidate, use
+`park <lane> --adopt-legacy` or `gc ... --adopt-legacy --apply` to explicitly
+bind the existing named window to its lane record before cleanup. Adoption still
+requires a resumable provider session and a terminal-idle oracle result.
+
+`gc` is dry-run by default. It selects live, owned lanes whose provider terminal
+oracle is idle and whose **lane age** (time since spawn), not idle duration,
+meets `--lane-age` (or `WASPFLOW_GC_LANE_AGE_SECONDS`, default 86400). Pass
+`--apply` to park the selected windows, optionally bounded by `--project DIR`.
+It never auto-reaps and never removes worktrees or artifacts. Age alone cannot
+prove that a lane's changes were inspected, captured, or safe to destroy, so
+age-based cleanup parks rather than reaps.
+
+`list --json` exposes the durable global lane index to callers. It supports
+`--project DIR`, `--lifecycle-state live,exited,parked,reaped`, and `--limit N`
+while continuing to show corrupt records rather than silently dropping them.
+The bulk JSON is a metadata projection and deliberately excludes prompts,
+commands, and resolved provider argv/env; use `status <lane>` for one full record.
 
 ## Environment
 

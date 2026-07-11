@@ -98,9 +98,9 @@ claude_spawn() {
   local a
   for a in "${argv[@]}"; do quoted+=" $(printf '%q' "$a")"; done
 
-  tmux_ensure_session
-  tmux new-window -d -t "$WASPFLOW_TMUX_SESSION" -n "$lane" -c "$cwd" "bash -lc${quoted:+ }$(printf '%q' "${quoted# }")"
-  local target; target="$(tmux_window_target "$lane")"
+  local target
+  target="$(tmux_create_owned_lane_window "$lane" "$cwd" "bash -lc${quoted:+ }$(printf '%q' "${quoted# }")")" \
+    || return 1
   # Capture a live transcript via pipe-pane (parity with codex).
   tmux pipe-pane -t "$target" -o "cat >> $(printf '%q' "$transcript")" 2>/dev/null || true
 

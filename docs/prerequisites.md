@@ -17,6 +17,10 @@ OS, but `waspflow doctor` tells you exactly what is missing.
 - `git` — used for project detection, worktree isolation, and diff capture.
   Downloads: https://git-scm.com/downloads
 
+- `flock` — required to serialize spawn/revise/park/reap transitions so a
+  newly-started turn cannot race cleanup. It ships with util-linux on Linux;
+  on macOS install a compatible `flock` command before using waspflow.
+
 - `curl` — used by `doctor` and optional backend health checks.
   Project: https://curl.se/
 
