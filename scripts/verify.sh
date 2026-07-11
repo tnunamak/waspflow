@@ -237,6 +237,97 @@ JSONL
     || { echo "codex discovery: read-only oracle mutated lane state" >&2; exit 1; }
 )
 
+# ---------------------------------------------------------------------------
+# Codex session-isolation hardening (2026-07-11). Real incident: concurrent
+# same-cwd Codex lanes were mis-attached to one unrelated ~5-week-old rollout,
+# mixing prompts/turn histories across lanes; a dead/connection-refused lane
+# then read as "idle" and got recovery-"resolved" against someone else's
+# session. Root cause: codex_discover_session's cwd-only "legacy" fallback
+# (used whenever codex_marker is unset/lost) matched ANY rollout for the cwd —
+# ambiguous the moment more than one Codex session has ever run there. Fixed
+# by failing CLOSED: no marker -> no session, ever, regardless of cwd history.
+# ---------------------------------------------------------------------------
+
+# BUG: no codex_marker recorded (crash/partial-state/pre-marker-era lane) must
+# NOT fall back to a cwd-only match — even when a real, completed, unrelated
+# rollout exists for that exact cwd. Two different lanes sharing a cwd must
+# BOTH come back empty, never both silently converge on the same stale session.
+(
+  stale_dir="$(mktemp -d "$scratch/waspflow-codex-stale-XXXXXX")"
+  stale_home="$(mktemp -d "$scratch/waspflow-codex-stale-home-XXXXXX")"
+  stale_sessions="$(mktemp -d "$scratch/waspflow-codex-stale-sessions-XXXXXX")"
+  mkdir -p "$stale_sessions/2026/06/08"
+  stale_cwd="$stale_dir/repo"; mkdir -p "$stale_cwd"
+  cat >"$stale_sessions/2026/06/08/rollout-2026-06-08T10-00-00-old00000-0000-0000-0000-000000000000.jsonl" <<JSONL
+{"type":"session_meta","payload":{"id":"old00000-0000-0000-0000-000000000000","cwd":"$stale_cwd"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"an unrelated task from five weeks ago"}}
+{"type":"event_msg","payload":{"type":"task_complete"}}
+JSONL
+  (
+    export WASPFLOW_HOME="$stale_home"
+    export CODEX_SESSIONS_DIR="$stale_sessions"
+    # shellcheck disable=SC1090
+    source "$root/lib/core.sh"
+    # shellcheck disable=SC1090
+    source "$root/lib/providers/codex.sh"
+    # Two DIFFERENT lanes, same cwd, NEITHER has a codex_marker recorded.
+    lane_set new-x provider codex status live cwd "$stale_cwd"
+    lane_set new-y provider codex status live cwd "$stale_cwd"
+    sid_x="$(codex_discover_session new-x)"
+    sid_y="$(codex_discover_session new-y)"
+    [[ -z "$sid_x" ]] || { echo "session-isolation: lane new-x got a stale session_id '$sid_x' via cwd-only fallback" >&2; exit 1; }
+    [[ -z "$sid_y" ]] || { echo "session-isolation: lane new-y got a stale session_id '$sid_y' via cwd-only fallback" >&2; exit 1; }
+    # And a live-looking idle check must not read that stale rollout as this
+    # lane's own idle turn (the "dead lane silently reads as idle" symptom).
+    if codex_is_idle new-x; then
+      echo "session-isolation: codex_is_idle falsely reported idle via stale cwd match" >&2; exit 1
+    fi
+  )
+  rm -rf "$stale_dir" "$stale_home" "$stale_sessions"
+)
+
+# BUG: connection-refused / crashed-before-first-turn Codex lane (marker IS
+# recorded — codex_spawn always sets one first — but no rollout ever contains
+# it because the process died before flushing) must read as NOT idle, not as
+# a false-idle via ambiguous fallback, even with an unrelated completed rollout
+# sitting in the very same cwd.
+(
+  cr_dir="$(mktemp -d "$scratch/waspflow-codex-connrefused-XXXXXX")"
+  cr_home="$(mktemp -d "$scratch/waspflow-codex-connrefused-home-XXXXXX")"
+  cr_sessions="$(mktemp -d "$scratch/waspflow-codex-connrefused-sessions-XXXXXX")"
+  mkdir -p "$cr_sessions/2026/06/08"
+  cr_cwd="$cr_dir/repo"; mkdir -p "$cr_cwd"
+  cat >"$cr_sessions/2026/06/08/rollout-2026-06-08T10-00-00-old11111-0000-0000-0000-000000000000.jsonl" <<JSONL
+{"type":"session_meta","payload":{"id":"old11111-0000-0000-0000-000000000000","cwd":"$cr_cwd"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"an unrelated completed task"}}
+{"type":"event_msg","payload":{"type":"task_complete"}}
+JSONL
+  (
+    export WASPFLOW_HOME="$cr_home"
+    export CODEX_SESSIONS_DIR="$cr_sessions"
+    # shellcheck disable=SC1090
+    source "$root/lib/core.sh"
+    # shellcheck disable=SC1090
+    source "$root/lib/providers/codex.sh"
+    lane_set health-contract-redteam provider codex status live cwd "$cr_cwd" \
+      codex_marker "WASPFLOW_LANE_MARKER:health-contract-redteam:neverlanded"
+    sid="$(codex_discover_session health-contract-redteam)"
+    [[ -z "$sid" ]] || { echo "session-isolation: connection-refused lane got session_id '$sid' from an unrelated rollout" >&2; exit 1; }
+    if codex_is_idle health-contract-redteam; then
+      echo "session-isolation: connection-refused lane falsely read as idle" >&2; exit 1
+    fi
+    if codex_session_resumable health-contract-redteam; then
+      echo "session-isolation: connection-refused lane falsely read as resumable (would let recovery resume a STRANGER's session)" >&2; exit 1
+    fi
+  )
+  rm -rf "$cr_dir" "$cr_home" "$cr_sessions"
+)
+
+# Pin: the ambiguous cwd-only fallback must not exist in the shipped adapter.
+! grep -q '_codex_find_rollout_for_cwd' "$root/lib/providers/codex.sh" \
+  || { echo "codex: ambiguous cwd-only rollout fallback regressed back in" >&2; exit 1; }
+grep -q 'FAILS' "$root/lib/providers/codex.sh" || { echo "codex: fail-closed discovery comment missing" >&2; exit 1; }
+
 # Grok idle/resumable: last turn_* event is turn_ended (MCP noise after is fine).
 grok_sessions_dir="$(mktemp -d)"
 grok_sid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -438,6 +529,69 @@ JSONL
   verdict_uniq="$(fanin_captured fi-cap main 2>/dev/null)"
   [[ "$verdict_uniq" == "UNIQUE" ]] || { echo "captured: expected UNIQUE vs fork point, got '$verdict_uniq'" >&2; exit 1; }
   rm -rf "$crepo"
+)
+
+# close(abandoned/superseded) + reap must NOT run report recovery or launder
+# to "succeeded" (2026-07-11). Real incident: an operator explicitly closed a
+# lane as abandoned, then reap still resumed the worker for a recovery pass
+# and — with no --report contract at all — reported result=succeeded outright.
+# `outcome` (fan-in ledger) must gate `result` (deliverable honesty) for these
+# two terminal, human-declared-done outcomes; `harvested`/`open` must be
+# unaffected (a harvested lane's work landed — it should still read succeeded).
+(
+  fi_home="$(mktemp -d "$scratch/waspflow-fi-reap-home-XXXXXX")"
+  fi_repo="$(mktemp -d "$scratch/waspflow-fi-reap-repo-XXXXXX")"
+  git -C "$fi_repo" init -q
+  git -C "$fi_repo" config user.email t@e.invalid; git -C "$fi_repo" config user.name T
+  git -C "$fi_repo" commit -q --allow-empty -m init
+
+  # Case 1: abandoned, WITH an unmet --report contract. Must NOT attempt
+  # recovery (no resume of the worker) and must NOT report succeeded/recovered.
+  mkdir -p "$fi_home/lanes/fi-abandoned-report"
+  jq -n --arg cwd "$fi_repo" '{provider:"codex", status:"live", result:"", cwd:$cwd, origin_cwd:$cwd, git_tracked:"true", report:"/nonexistent/report.md"}' \
+    > "$fi_home/lanes/fi-abandoned-report/state.json"
+  WASPFLOW_HOME="$fi_home" "$root/bin/waspflow" close fi-abandoned-report --status abandoned --reason "dead end" >/dev/null
+  out="$(WASPFLOW_HOME="$fi_home" "$root/bin/waspflow" reap fi-abandoned-report --no-archive 2>&1)"
+  grep -qi 'recovery pass' <<<"$out" && { echo "fi-reap: abandoned lane should NOT run a recovery pass" >&2; exit 1; }
+  jq -e '.result == "abandoned"' "$fi_home/lanes/fi-abandoned-report/state.json" >/dev/null \
+    || { echo "fi-reap: abandoned lane with unmet report should stamp result=abandoned, not succeeded/failed" >&2; exit 1; }
+
+  # Case 2: abandoned, NO report contract at all — the common case. Must NOT
+  # be laundered into "succeeded" just because there was nothing to check.
+  mkdir -p "$fi_home/lanes/fi-abandoned-plain"
+  jq -n --arg cwd "$fi_repo" '{provider:"codex", status:"live", result:"", cwd:$cwd, origin_cwd:$cwd, git_tracked:"true"}' \
+    > "$fi_home/lanes/fi-abandoned-plain/state.json"
+  WASPFLOW_HOME="$fi_home" "$root/bin/waspflow" close fi-abandoned-plain --status abandoned --reason "superseded by a better lane" >/dev/null
+  WASPFLOW_HOME="$fi_home" "$root/bin/waspflow" reap fi-abandoned-plain --no-archive >/dev/null
+  jq -e '.result == "abandoned"' "$fi_home/lanes/fi-abandoned-plain/state.json" >/dev/null \
+    || { echo "fi-reap: abandoned lane with no report contract was laundered into a non-abandoned result" >&2; exit 1; }
+
+  # Case 3: superseded — same gate applies.
+  mkdir -p "$fi_home/lanes/fi-superseded"
+  jq -n --arg cwd "$fi_repo" '{provider:"codex", status:"live", result:"", cwd:$cwd, origin_cwd:$cwd, git_tracked:"true"}' \
+    > "$fi_home/lanes/fi-superseded/state.json"
+  WASPFLOW_HOME="$fi_home" "$root/bin/waspflow" close fi-superseded --status superseded --by "better-lane" >/dev/null
+  WASPFLOW_HOME="$fi_home" "$root/bin/waspflow" reap fi-superseded --no-archive >/dev/null
+  jq -e '.result == "abandoned"' "$fi_home/lanes/fi-superseded/state.json" >/dev/null \
+    || { echo "fi-reap: superseded lane should also skip recovery/success laundering" >&2; exit 1; }
+
+  # Control: harvested/open lanes must be UNAFFECTED — still finalize normally.
+  mkdir -p "$fi_home/lanes/fi-harvested"
+  jq -n --arg cwd "$fi_repo" '{provider:"codex", status:"live", result:"", cwd:$cwd, origin_cwd:$cwd, git_tracked:"true"}' \
+    > "$fi_home/lanes/fi-harvested/state.json"
+  WASPFLOW_HOME="$fi_home" "$root/bin/waspflow" close fi-harvested --status harvested --into "PR#99" >/dev/null
+  WASPFLOW_HOME="$fi_home" "$root/bin/waspflow" reap fi-harvested --no-archive >/dev/null
+  jq -e '.result == "succeeded"' "$fi_home/lanes/fi-harvested/state.json" >/dev/null \
+    || { echo "fi-reap: harvested lane should still finalize as succeeded (control case regressed)" >&2; exit 1; }
+
+  mkdir -p "$fi_home/lanes/fi-open"
+  jq -n --arg cwd "$fi_repo" '{provider:"codex", status:"live", result:"", cwd:$cwd, origin_cwd:$cwd, git_tracked:"true"}' \
+    > "$fi_home/lanes/fi-open/state.json"
+  WASPFLOW_HOME="$fi_home" "$root/bin/waspflow" reap fi-open --no-archive >/dev/null
+  jq -e '.result == "succeeded"' "$fi_home/lanes/fi-open/state.json" >/dev/null \
+    || { echo "fi-reap: open (default) outcome lane should still finalize as succeeded (control case regressed)" >&2; exit 1; }
+
+  rm -rf "$fi_home" "$fi_repo"
 )
 
 # wait/revise stale-idle barrier (2026-07-09, root-caused on a live run). After a

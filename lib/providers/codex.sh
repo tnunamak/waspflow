@@ -141,10 +141,26 @@ codex_preflight() {
   return 0
 }
 
-# Discover the session UUID + rollout file for a lane. Prefer the recorded value;
-# otherwise locate marker-bearing Codex lanes by their lane marker. Cwd-only
-# lookup is retained only for older lane state without markers; it is ambiguous
-# when multiple Codex lanes share a repo.
+# Discover the session UUID for a lane. Prefer the recorded value; otherwise
+# locate the lane's rollout by its unique spawn-time marker. A READ-ONLY
+# ORACLE: never mutates lane state (no lane_set here) — callers that want the
+# resolved rollout path cached (e.g. after a successful spawn) record it
+# themselves; discovery itself must be safe to call from any read path (wait,
+# park's safety predicate, gc's dry-run scan) without a side effect.
+#
+# FAILS CLOSED when no marker is recorded: a cwd-only match is AMBIGUOUS
+# whenever more than one Codex lane (past or present) has ever run in that
+# directory, and silently attaching to the wrong rollout is worse than
+# reporting "not found" — it mixes a stale/unrelated session's history into
+# this lane (wrong turns read as this lane's, a `revise`/recovery/park
+# resuming a COMPLETELY DIFFERENT conversation). codex_spawn always records a
+# marker before submitting, so an empty marker on a live codex lane is itself
+# anomalous (a bug or manually-crafted state) — never a normal case to paper
+# over with a guess. Real-world incident (2026-07-11): several concurrent
+# same-cwd lanes were each mis-attached to one unrelated ~5-week-old rollout via
+# a cwd-only fallback this replaced, mixing prompts and turn histories across
+# lanes and later causing a connection-refused/dead lane to read as "idle" and
+# get "recovered" against someone else's session.
 codex_discover_session() {
   local lane="$1" recorded lane_cwd marker
   recorded="$(lane_get "$lane" session_id)"
@@ -153,31 +169,16 @@ codex_discover_session() {
   lane_cwd="$(lane_get "$lane" cwd)"
   [[ -n "$lane_cwd" ]] || { echo ""; return 0; }
   marker="$(lane_get "$lane" codex_marker)"
+  [[ -n "$marker" ]] || { echo ""; return 0; }
 
-  if [[ -n "$marker" ]]; then
-    local marker_match marker_sid
-    marker_match="$(_codex_find_rollout_for_marker "$lane_cwd" "$marker" || true)"
-    if [[ -n "$marker_match" ]]; then
-      marker_sid="$(_codex_rollout_session_id "$marker_match")"
-      if [[ -n "$marker_sid" ]]; then
-        echo "$marker_sid"
-        return 0
-      fi
-    fi
-    echo ""
-    return 0
+  local marker_match marker_sid
+  marker_match="$(_codex_find_rollout_for_marker "$lane_cwd" "$marker" || true)"
+  if [[ -n "$marker_match" ]]; then
+    marker_sid="$(_codex_rollout_session_id "$marker_match")"
+    [[ -n "$marker_sid" ]] && { echo "$marker_sid"; return 0; }
   fi
-
-  # Legacy fallback for lanes spawned before codex_marker existed.
-  local match sid
-  match="$(_codex_find_rollout_for_cwd "$lane_cwd" || true)"
-  [[ -n "$match" ]] || { echo ""; return 0; }
-  sid="$(_codex_rollout_session_id "$match")"
-  if [[ -n "$sid" ]]; then
-    echo "$sid"
-  else
-    echo ""
-  fi
+  echo ""
+  return 0
 }
 
 # Spawn an interactive codex into the lane's tmux window (real PTY).
@@ -297,13 +298,16 @@ _codex_wait_composer_ready() {
 # failure is the Enter racing hook output). Up to a few attempts.
 _codex_submit_prompt() {
   local lane="$1" cwd="$2" target="$3" prompt="$4" marker="${5:-}" attempt
-  local full_prompt="$prompt"
-  if [[ -n "$marker" ]]; then
-    full_prompt="$marker
+  # A marker is REQUIRED to confirm submission safely: codex_spawn always sets
+  # one before calling here. Without it, the only way to find "our" rollout is
+  # cwd alone, which is AMBIGUOUS — any other lane (or a stale rollout from
+  # weeks ago) in the same directory would match just as well, mis-attaching
+  # this lane to someone else's session. Fail closed instead of guessing.
+  [[ -n "$marker" ]] || { err "codex spawn: internal error — no marker for lane '$lane' (refusing an ambiguous cwd-only submission check)"; return 1; }
+  local full_prompt="$marker
 Ignore the line above; it is for waspflow session correlation.
 
 $prompt"
-  fi
   # Clear any starter text ("Implement {feature}") and paste literally. Plain
   # send-keys is brittle for long prompts: it can mangle spaces and queue text
   # as a follow-up instead of submitting the intended first turn.
@@ -317,11 +321,7 @@ $prompt"
     local j
     for j in $(seq 1 6); do
       local rollout=""
-      if [[ -n "$marker" ]]; then
-        rollout="$(_codex_find_rollout_for_marker "$cwd" "$marker" || true)"
-      else
-        rollout="$(_codex_find_rollout_for_cwd "$cwd" || true)"
-      fi
+      rollout="$(_codex_find_rollout_for_marker "$cwd" "$marker" || true)"
       if [[ -n "$rollout" ]]; then
         local sid
         sid="$(_codex_rollout_session_id "$rollout")"
@@ -348,12 +348,21 @@ _codex_rollout_session_id() {
 }
 
 # Echo the rollout file path whose cwd and lane marker match. This is the
-# authoritative selector for new Codex lanes; cwd alone is ambiguous when several
-# lanes run in the same repo.
+# ONLY selector for Codex lanes; cwd alone is ambiguous whenever more than one
+# lane (past or present) has run in the same repo, so callers must never fall
+# back to a cwd-only match (see codex_discover_session).
+#
+# Sort newest-first by FILENAME, lexically (plain `sort -r`), not `sort -rn`:
+# these filenames (rollout-YYYY-MM-DDTHH-MM-SS-<uuid>.jsonl) are not numeric, so
+# `-n` parses no leading digits from any of them, treats every line as the
+# value 0, and produces an order with no reliable relationship to session time.
+# Lexical order on this zero-padded ISO-8601-like prefix sorts correctly.
+# Newest-first only matters for early-exit performance here — correctness comes
+# from the marker match (a fresh UUID per spawn), not from ordering.
 _codex_find_rollout_for_marker() {
   local cwd="$1" marker="$2" f fcwd
   [[ -n "$marker" ]] || return 1
-  local listing; listing="$(find "$CODEX_SESSIONS_DIR" -type f -name 'rollout-*.jsonl' -printf '%f\t%p\n' 2>/dev/null | sort -rn | cut -f2-)"
+  local listing; listing="$(find "$CODEX_SESSIONS_DIR" -type f -name 'rollout-*.jsonl' -printf '%f\t%p\n' 2>/dev/null | sort -r | cut -f2-)"
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
     fcwd="$(head -1 "$f" 2>/dev/null | jq -rc 'select(.type=="session_meta") | .payload.cwd // empty' 2>/dev/null)"
@@ -361,21 +370,6 @@ _codex_find_rollout_for_marker() {
     grep -Fq "$marker" "$f" 2>/dev/null || continue
     echo "$f"
     return 0
-  done <<<"$listing"
-  return 1
-}
-
-# Echo the rollout file path whose session_meta.cwd == $1, newest-first by
-# filename (session start time). Non-zero if none. Reads only line 1 per file.
-_codex_find_rollout_for_cwd() {
-  local cwd="$1" f fcwd
-  # Materialize the candidate list first so an early `return` doesn't SIGPIPE the
-  # find|sort|cut producer (which prints harmless "broken pipe" to stderr).
-  local listing; listing="$(find "$CODEX_SESSIONS_DIR" -type f -name 'rollout-*.jsonl' -printf '%f\t%p\n' 2>/dev/null | sort -rn | cut -f2-)"
-  while IFS= read -r f; do
-    [[ -n "$f" ]] || continue
-    fcwd="$(head -1 "$f" 2>/dev/null | jq -rc 'select(.type=="session_meta") | .payload.cwd // empty' 2>/dev/null)"
-    if [[ "$fcwd" == "$cwd" ]]; then echo "$f"; return 0; fi
   done <<<"$listing"
   return 1
 }
@@ -439,8 +433,17 @@ codex_revise() {
     # actually started by watching the rollout grow, re-sending Enter if not.
     local target rollout before after attempt j
     target="$(tmux_window_target "$lane")"
+    # codex_discover_session is a read-only oracle (no lane_set side effect), so
+    # `rollout` may not be cached in lane state. Resolve it the same safe way
+    # codex_is_idle/codex_turn_mark do: the cached path if present, else a
+    # find scoped by the unique session UUID — NEVER an ambiguous cwd-only
+    # search (same hazard class as the discovery path itself).
     rollout="$(lane_get "$lane" rollout)"
-    [[ -n "$rollout" && -f "$rollout" ]] || rollout="$(_codex_find_rollout_for_cwd "$cwd" || true)"
+    if [[ -z "$rollout" || ! -f "$rollout" ]]; then
+      rollout="$(find "$CODEX_SESSIONS_DIR" -type f -name "*${sid}.jsonl" 2>/dev/null | head -1)"
+    fi
+    [[ -n "$rollout" && -f "$rollout" ]] \
+      || { err "codex revise: lane '$lane' has a session_id but no resolved rollout file (inconsistent state)"; return 1; }
     before="$(wc -l <"$rollout" 2>/dev/null || echo 0)"
     tmux send-keys -t "$target" C-u
     sleep 0.3

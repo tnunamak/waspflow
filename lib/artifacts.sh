@@ -78,7 +78,7 @@ artifacts_finalize() {
   local lane="$1" provider="$2" existing report
   existing="$(lane_get "$lane" result)"
   case "$existing" in
-    succeeded|recovered|failed|report_missing|verified|verify_failed) echo "$existing"; return 0 ;;
+    succeeded|recovered|failed|report_missing|verified|verify_failed|abandoned) echo "$existing"; return 0 ;;
     "") ;;   # not finalized yet — proceed to compute the result below
     *)
       # A NON-EMPTY but UNRECOGNIZED result means the state was tampered with or
@@ -86,6 +86,25 @@ artifacts_finalize() {
       # (that would fabricate a success). Surface it honestly.
       lane_set "$lane" result "corrupt_result" prior_result "$existing"
       echo "corrupt_result"; return 0
+      ;;
+  esac
+
+  # A lane the operator already closed out via `close --status abandoned` (or
+  # superseded) is DONE, by explicit human/orchestrator decision — its actual
+  # deliverable state is irrelevant and must not be judged. Without this gate,
+  # reap ran the report-recovery pass (a live/headless RESUME of the worker,
+  # asking it to keep working) against a lane the caller declared a dead end,
+  # and — if no report contract existed at all — stamped "succeeded" outright.
+  # Both are false-success/false-progress reports on a lane that was explicitly
+  # abandoned. `outcome` (fan-in ledger) is intentionally separate from `result`
+  # (deliverable honesty); this is the one place they must interact, since an
+  # abandoned lane's deliverable contract is moot by definition.
+  local outcome; outcome="$(lane_outcome "$lane")"
+  case "$outcome" in
+    abandoned|superseded)
+      artifacts_capture_after "$lane"
+      lane_set "$lane" result "abandoned"
+      echo "abandoned"; return 0
       ;;
   esac
 

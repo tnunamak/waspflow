@@ -998,6 +998,7 @@ _reap_one_locked() {
     verify_failed)   err  "reap: lane '$lane' reaped — result=verify_failed" ;;
     report_missing)  err  "reap: lane '$lane' reaped — result=report_missing (recovery disabled)" ;;
     failed)          err  "reap: lane '$lane' reaped — result=failed (required report never produced)" ;;
+    abandoned)       warn "reap: lane '$lane' reaped — result=abandoned (closed out via 'close --status $(lane_outcome "$lane")'; deliverable not judged, no recovery run)" ;;
     corrupt_result)  err  "reap: lane '$lane' — state has an unrecognized result value (not laundered to success); inspect state.json" ;;
     *)               log "reap: lane '$lane' reaped" ;;
   esac
