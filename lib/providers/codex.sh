@@ -223,9 +223,17 @@ codex_spawn() {
   [[ -n "$requested_effort" ]] && lane_set "$lane" effort_requested "$requested_effort"
   [[ -n "${passed_effort:-}" ]] && lane_set "$lane" effort_passed "$passed_effort"
 
-  # Wrap with tokensmash launch for study actuation when available.
+  # Wrap with tokensmash launch for study actuation ONLY when the crossover
+  # study is live. While the study mode is off, wrapping is a pure no-op that
+  # still spawns a ~0.4s tokensmash process per spawn, so we skip it. Re-enable
+  # by setting the tokensmash study back to live (no change needed here).
   local ts_prefix=()
-  command -v tokensmash >/dev/null 2>&1 && ts_prefix=(tokensmash launch codex --)
+  local ts_study_config="${TOKENSMASH_STUDY_CONFIG:-$HOME/.local/state/tokensmash/study/config.json}"
+  if command -v tokensmash >/dev/null 2>&1 \
+     && [[ -f "$ts_study_config" ]] \
+     && grep -q '"mode"[[:space:]]*:[[:space:]]*"live"' "$ts_study_config" 2>/dev/null; then
+    ts_prefix=(tokensmash launch codex --)
+  fi
 
   # Bare interactive codex (NO --skip-git-repo-check — that's exec-only).
   # Resolved policy comes last so pass-through --arg values cannot turn a
