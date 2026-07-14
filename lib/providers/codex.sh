@@ -574,8 +574,9 @@ codex_revise() {
     fi
   fi
   local tmp; tmp="${out_file:-$(mktemp)}"
-  ( cd "${cwd:-$PWD}" && codex exec "${recovery_dir_args[@]}" resume "$sid" "$message" "${model_args[@]}" \
-      -c sandbox_mode=workspace-write -c approval_policy=never "${MCP_ARGV[@]}" -o "$tmp" ) \
+  tmux_run_owned_lane_command "$lane" "${cwd:-$PWD}" headless-revise -- \
+    codex exec "${recovery_dir_args[@]}" resume "$sid" "$message" "${model_args[@]}" \
+    -c sandbox_mode=workspace-write -c approval_policy=never "${MCP_ARGV[@]}" -o "$tmp" \
     >/dev/null 2>&1
   if [[ -z "$out_file" ]]; then cat "$tmp"; rm -f "$tmp"; fi
   return 0

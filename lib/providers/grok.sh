@@ -237,9 +237,10 @@ grok_revise() {
   local attempt rc=0
   for attempt in 1 2 3 4 5; do
     rc=0
-    ( cd "${cwd:-$PWD}" && grok -p "$message" --resume "$session_id" \
-        --always-approve "${model_args[@]}" "${effort_args[@]}" \
-        --cwd "${cwd:-$PWD}" </dev/null ) >"$tmp" 2>&1 || rc=$?
+    tmux_run_owned_lane_command "$lane" "${cwd:-$PWD}" headless-revise -- \
+      grok -p "$message" --resume "$session_id" \
+      --always-approve "${model_args[@]}" "${effort_args[@]}" \
+      --cwd "${cwd:-$PWD}" </dev/null >"$tmp" 2>&1 || rc=$?
     # Retry when the session file is not visible yet right after a kill.
     if grep -qiE "session not found|couldn't (find|load|start) session|No conversation" "$tmp" 2>/dev/null; then
       sleep $(( attempt * 2 ))

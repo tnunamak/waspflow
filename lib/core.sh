@@ -300,15 +300,259 @@ tmux_capture_lane_ownership() {
   lane_set "$lane" tmux_session "$session" tmux_window "$window" tmux_pane_pid "$pane_pid"
 }
 
+# ---- descendant-process ownership (cgroup scopes) -------------------------
+# tmux identifies a pane, not every descendant of the command it started. A
+# process can setsid/double-fork, outlive that pane, and still be owned by the
+# lane. A transient user scope is the ownership boundary for those descendants:
+# a child retains its cgroup even after reparenting.
+#
+# A lane can run more than one command over its life (initial pane, headless
+# revise, report recovery). Each successful command gets a distinct receipt.
+# Receipts are append-only because an older scope can still hold a daemon when a
+# later headless resume starts. The InvocationID makes a reused unit name safe:
+# cleanup may signal a unit only when it is still the invocation we created.
+tmux_cgroup_scope_available() {
+  command -v systemd-run >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1 \
+    && systemctl --user show-environment >/dev/null 2>&1
+}
+
+_lane_cgroup_receipt_append_locked() {
+  local dir="$1" unit="$2" invocation="$3" sf="$dir/state.json" tmp
+  [[ -f "$sf" ]] || echo '{}' >"$sf"
+  tmp="$(mktemp "$dir/.state.XXXXXX")"
+  if jq --arg unit "$unit" --arg invocation "$invocation" '
+      .cgroup_scope_receipts = (
+        (.cgroup_scope_receipts // [])
+        | if type == "array" then . else [] end
+        | if any(.[]; .unit == $unit and .invocation_id == $invocation) then .
+          else . + [{unit:$unit, invocation_id:$invocation}]
+          end
+      )
+      | .cgroup_supervision = "systemd-scope"
+      | .updated_at = (now | floor | tostring)
+    ' "$sf" >"$tmp" 2>/dev/null; then
+    mv "$tmp" "$sf"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+# Record an actual scope only after code running INSIDE that scope has read its
+# InvocationID. This makes the receipt proof of ownership rather than a planned
+# unit name. The per-lane lock preserves earlier receipts while a headless turn
+# is being started.
+tmux_append_lane_scope_receipt() {
+  local lane="$1" unit="$2" invocation="$3" dir
+  [[ "$unit" =~ ^waspflow-[A-Za-z0-9._-]+\.scope$ && "$invocation" =~ ^[A-Fa-f0-9-]+$ ]] || return 1
+  dir="$(lane_dir "$lane")"
+  mkdir -p "$dir"
+  if command -v flock >/dev/null 2>&1; then
+    ( flock 9; _lane_cgroup_receipt_append_locked "$dir" "$unit" "$invocation" ) 9>"$dir/.state.lock"
+  else
+    _lane_cgroup_receipt_append_locked "$dir" "$unit" "$invocation"
+  fi
+}
+
+_lane_cgroup_fallback_append_locked() {
+  local dir="$1" execution="$2" reason="$3" sf="$dir/state.json" tmp
+  [[ -f "$sf" ]] || echo '{}' >"$sf"
+  tmp="$(mktemp "$dir/.state.XXXXXX")"
+  if jq --arg execution "$execution" --arg reason "$reason" '
+      .cgroup_fallbacks = (
+        (.cgroup_fallbacks // [])
+        | if type == "array" then . else [] end
+        | . + [{execution:$execution, reason:$reason, at:(now | floor | tostring)}]
+      )
+      | .cgroup_supervision = "degraded-tmux-only"
+      | .updated_at = (now | floor | tostring)
+    ' "$sf" >"$tmp" 2>/dev/null; then
+    mv "$tmp" "$sf"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+# A fallback is an explicit, durable fact: the command ran with the historical
+# tmux-only ownership model because a scope was unavailable or failed to launch.
+tmux_record_lane_cgroup_fallback() {
+  local lane="$1" execution="$2" reason="$3" dir
+  dir="$(lane_dir "$lane")"
+  mkdir -p "$dir"
+  if command -v flock >/dev/null 2>&1; then
+    ( flock 9; _lane_cgroup_fallback_append_locked "$dir" "$execution" "$reason" ) 9>"$dir/.state.lock"
+  else
+    _lane_cgroup_fallback_append_locked "$dir" "$execution" "$reason"
+  fi
+}
+
+tmux_lane_scope_start_marker() {
+  local lane="$1" unit="$2"
+  printf '%s/.scope-started-%s\n' "$(lane_dir "$lane")" "$unit"
+}
+
+# Runs inside the newly-created scope. The marker distinguishes "the scope
+# started but receipt persistence failed" from "systemd-run could not create a
+# scope"; only the latter may execute the original command outside a scope.
+tmux_enter_lane_scope() {
+  local lane="$1" unit="$2" marker invocation
+  shift 2
+  # revise/reap hold the lane operation lock on fd 9. A detached child must
+  # never inherit it or it can keep the lane permanently locked after its CLI
+  # parent returns.
+  { exec 9>&-; } 2>/dev/null || true
+  marker="$(tmux_lane_scope_start_marker "$lane" "$unit")"
+  : >"$marker"
+  invocation="$(systemctl --user show "$unit" -p InvocationID --value 2>/dev/null)" || return 125
+  [[ -n "$invocation" ]] || return 125
+  tmux_append_lane_scope_receipt "$lane" "$unit" "$invocation" || return 125
+  exec "$@"
+}
+
+tmux_enter_lane_scope_and_capture() {
+  local lane="$1" unit="$2" run_dir="$3" marker invocation rc
+  shift 3
+  { exec 9>&-; } 2>/dev/null || true
+  marker="$(tmux_lane_scope_start_marker "$lane" "$unit")"
+  : >"$marker"
+  invocation="$(systemctl --user show "$unit" -p InvocationID --value 2>/dev/null)" || return 125
+  [[ -n "$invocation" ]] || return 125
+  tmux_append_lane_scope_receipt "$lane" "$unit" "$invocation" || return 125
+  # A headless CLI may daemonize. Do not make its caller wait for the detached
+  # child (the scope rightly stays alive for reap); wait only for the CLI's own
+  # result and replay its output to the caller after the completion receipt.
+  set +e
+  "$@" >"$run_dir/stdout" 2>"$run_dir/stderr"
+  rc=$?
+  printf '%s\n' "$rc" >"$run_dir/status"
+  return "$rc"
+}
+
+# Run one lane-owned argv command. The scope wrapper writes its receipt before
+# exec. If systemd accepted the scope but receipt recording failed, do NOT run a
+# second unsupervised copy: return the failure instead. If scope creation itself
+# fails after preflight, run the original command and record the degraded truth.
+# Args: lane cwd execution -- command [args...]
+tmux_run_owned_lane_command() {
+  local lane="$1" cwd="$2" execution="$3" unit marker rc=0 run_dir=""
+  shift 3
+  [[ "${1:-}" == "--" ]] || return 2
+  shift
+  [[ $# -gt 0 ]] || return 2
+
+  if ! tmux_cgroup_scope_available; then
+    tmux_record_lane_cgroup_fallback "$lane" "$execution" "scope-unavailable" || return 1
+    ( cd "$cwd" && "$@" )
+    return $?
+  fi
+
+  unit="waspflow-${lane}-$(new_uuid).scope"
+  marker="$(tmux_lane_scope_start_marker "$lane" "$unit")"
+  rm -f "$marker"
+
+  if [[ "$execution" == pane ]]; then
+    ( cd "$cwd" && systemd-run --user --scope --unit="$unit" --collect --quiet -- \
+        env "WASPFLOW_HOME=$WASPFLOW_HOME" "WASPFLOW_LIB=$WASPFLOW_LIB" \
+        "WASPFLOW_TMUX_SESSION=$WASPFLOW_TMUX_SESSION" "PATH=$PATH" \
+        bash -c 'source "$1"; tmux_enter_lane_scope "$2" "$3" "${@:4}"' -- \
+        "$WASPFLOW_LIB/core.sh" "$lane" "$unit" "$@" ) || rc=$?
+  else
+    run_dir="$(mktemp -d "$(lane_dir "$lane")/.scope-run.XXXXXX")"
+    ( cd "$cwd" && systemd-run --user --scope --no-block --unit="$unit" --collect --quiet -- \
+        env "WASPFLOW_HOME=$WASPFLOW_HOME" "WASPFLOW_LIB=$WASPFLOW_LIB" \
+        "WASPFLOW_TMUX_SESSION=$WASPFLOW_TMUX_SESSION" "PATH=$PATH" \
+        bash -c 'source "$1"; tmux_enter_lane_scope_and_capture "$2" "$3" "$4" "${@:5}"' -- \
+        "$WASPFLOW_LIB/core.sh" "$lane" "$unit" "$run_dir" "$@" ) || rc=$?
+    # A successful no-block submission is not proof the unit started. Wait for
+    # the in-scope marker, then for the primary CLI's completion receipt.
+    local tries=0
+    while [[ ! -f "$marker" && "$tries" -lt 50 ]]; do sleep 0.1; tries=$((tries + 1)); done
+    if [[ -f "$marker" ]]; then
+      while [[ ! -f "$run_dir/status" ]]; do sleep 0.1; done
+      rc="$(<"$run_dir/status")"
+      cat "$run_dir/stdout" "$run_dir/stderr"
+      rm -rf "$run_dir" "$marker"
+      return "$rc"
+    fi
+    rm -rf "$run_dir"
+  fi
+
+  if [[ -f "$marker" ]]; then
+    rm -f "$marker"
+    return "$rc"
+  fi
+
+  # A no-block request that systemd accepted but never started is ambiguous: do
+  # not duplicate a command that may be about to run outside our observation.
+  # A definite launch failure (nonzero systemd-run, no start marker) is the P2
+  # fallback case below.
+  if [[ "$execution" != pane && "$rc" -eq 0 ]]; then
+    lane_set "$lane" cgroup_supervision "scope-start-unconfirmed" || true
+    return 1
+  fi
+
+  tmux_record_lane_cgroup_fallback "$lane" "$execution" "scope-launch-failed" || return 1
+  ( cd "$cwd" && "$@" )
+}
+
+# A pane command is arbitrary shell syntax assembled by a provider adapter.
+# Keep parsing at this boundary, then use the argv-based launcher above for the
+# actual scope and fallback lifecycle.
+tmux_run_owned_lane_shell_command() {
+  local lane="$1" cwd="$2" execution="$3" shell_command="$4"
+  tmux_run_owned_lane_command "$lane" "$cwd" "$execution" -- bash -c "$shell_command"
+}
+
+# Emit each receipt as unit<RS>InvocationID. Legacy scalar fields are read for
+# compatibility with the rejected v1 experiment, but all new writes use the
+# append-only array above.
+tmux_lane_scope_receipts() {
+  local lane="$1" sf
+  sf="$(lane_state_file "$lane")"
+  [[ -f "$sf" ]] || return 0
+  jq -r '
+    ((.cgroup_scope_receipts // []) | if type == "array" then . else [] end)
+    + (if (.cgroup_scope // "") != "" and (.cgroup_scope_invocation_id // "") != ""
+       then [{unit:.cgroup_scope, invocation_id:.cgroup_scope_invocation_id}] else [] end)
+    | unique_by(.unit, .invocation_id)[]
+    | select(.unit | type == "string")
+    | select(.invocation_id | type == "string")
+    | .unit + "\u001e" + .invocation_id
+  ' "$sf" 2>/dev/null || true
+}
+
+# Reap every receipt independently. A stale/reused unit is harmless because its
+# current InvocationID must equal the recorded value before it is signalled.
+tmux_kill_owned_lane_scopes() {
+  local lane="$1" unit invocation actual
+  command -v systemctl >/dev/null 2>&1 || return 0
+  while IFS=$'\x1e' read -r unit invocation; do
+    [[ -n "$unit" && -n "$invocation" ]] || continue
+    actual="$(systemctl --user show "$unit" -p InvocationID --value 2>/dev/null)" || continue
+    [[ "$actual" == "$invocation" ]] || continue
+    systemctl --user kill --kill-whom=all --signal=SIGKILL "$unit" >/dev/null 2>&1 || true
+    # The kill is the lifecycle action. Do not let a manager bookkeeping delay
+    # (or a pathological descendant) block lane reaping after the signal was
+    # issued; the verifier polls the cgroup independently.
+    systemctl --user stop --no-block "$unit" >/dev/null 2>&1 || true
+  done < <(tmux_lane_scope_receipts "$lane")
+}
+
 # Create and claim a lane window as one provider-facing operation. `-P` returns
 # the exact new window id, avoiding tmux's ambiguous name lookup when duplicate
 # names exist. If ownership capture fails, kill that exact id before returning.
 # Args: lane cwd shell_command. Echoes the exact window id.
 tmux_create_owned_lane_window() {
-  local lane="$1" cwd="$2" shell_command="$3" window
+  local lane="$1" cwd="$2" shell_command="$3" window launcher
+  # tmux panes inherit the tmux SERVER's environment, not necessarily the
+  # caller's current WASPFLOW_HOME. Export the lane runtime coordinates into the
+  # pane explicitly before it sources core, or its scope receipt would be
+  # written to the operator's default state directory.
+  launcher="export WASPFLOW_HOME=$(printf '%q' "$WASPFLOW_HOME") WASPFLOW_LIB=$(printf '%q' "$WASPFLOW_LIB") WASPFLOW_TMUX_SESSION=$(printf '%q' "$WASPFLOW_TMUX_SESSION") PATH=$(printf '%q' "$PATH"); source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_run_owned_lane_shell_command $(printf '%q' "$lane") $(printf '%q' "$cwd") pane $(printf '%q' "$shell_command")"
   tmux_ensure_session
   window="$(tmux new-window -d -P -F '#{window_id}' -t "$WASPFLOW_TMUX_SESSION" \
-    -n "$lane" -c "$cwd" "$shell_command")" || return 1
+    -n "$lane" -c "$cwd" "bash -c $(printf '%q' "$launcher")")" || return 1
   [[ "$window" == @* ]] || return 1
   if ! tmux_capture_lane_ownership "$lane" "$window"; then
     tmux kill-window -t "$window" 2>/dev/null || true

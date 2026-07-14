@@ -348,8 +348,9 @@ claude_revise() {
   for attempt in 1 2 3 4 5; do
     rc=0
     # Resume from the lane's cwd: claude --resume is scoped to the project dir.
-    ( cd "${cwd:-$PWD}" && env "${MCP_ENV[@]}" claude --resume "$session_id" --print "${model_args[@]}" \
-        --dangerously-skip-permissions "${MCP_ARGV[@]}" -- "$message" </dev/null ) >"$tmp" 2>&1 || rc=$?
+    tmux_run_owned_lane_command "$lane" "${cwd:-$PWD}" headless-revise -- \
+      env "${MCP_ENV[@]}" claude --resume "$session_id" --print "${model_args[@]}" \
+      --dangerously-skip-permissions "${MCP_ARGV[@]}" -- "$message" </dev/null >"$tmp" 2>&1 || rc=$?
     if grep -q "No conversation found" "$tmp" 2>/dev/null; then
       sleep $(( attempt * 2 ))
       continue

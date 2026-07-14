@@ -1557,4 +1557,163 @@ PROV
   rm -rf "$lifelib" "$lifehome" "$lifeother"
 )
 
+# Descendant ownership is deliberately exercised with the same adapter seam the
+# real providers use. The test socket is private (configured at the top of this
+# verifier), and every user scope has a unique waspflow-test unit name; neither
+# production tmux nor an unrelated scope is ever selected for cleanup.
+if command -v systemd-run >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1 \
+    && systemctl --user show-environment >/dev/null 2>&1; then
+(
+  scopelib="$(mktemp -d "$scratch/waspflow-scope-lib-XXXXXX")"; mkdir -p "$scopelib/providers"
+  cp "$root"/lib/*.sh "$scopelib/"; cp -r "$root/lib/generated" "$scopelib/" 2>/dev/null || true
+  cat >"$scopelib/providers/scopep.sh" <<'PROV'
+scopep_preflight() { :; }
+scopep_discover_session() { echo scopep-session; }
+scopep_session_resumable() { return 0; }
+scopep_is_idle() { return 0; }
+scopep_turn_mark() { echo 0; }
+scopep_valid_models() { return 1; }
+scopep_mcp_policy() { printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}'; }
+scopep_spawn() {
+  local lane="$1" cwd="$2" _model="$3" _sid="$4" _transcript="$5" prompt="$6"
+  tmux_create_owned_lane_window "$lane" "$cwd" "exec bash -c $(printf '%q' "$prompt")" >/dev/null
+}
+# The provider's real headless seam uses the shared argv launcher. A normal
+# revise daemonizes exactly like a detached CLI child. Recovery additionally
+# writes its requested output/report so the real artifact flow can continue.
+scopep_revise() {
+  local lane="$1" message="$2" out_file="${3:-}" _recovery_parent="${4:-}" cwd report pid_file
+  cwd="$(lane_get "$lane" cwd)"
+  if [[ -z "$out_file" ]]; then
+    tmux_run_owned_lane_command "$lane" "$cwd" headless-revise -- bash -c "$message"
+    return
+  fi
+  report="$(lane_get "$lane" report)"
+  pid_file="$(lane_dir "$lane")/recovery-daemon.pid"
+  tmux_run_owned_lane_command "$lane" "$cwd" headless-recovery -- \
+    bash -c 'setsid bash -c "sleep 300 & echo \$! > \"$1\"; disown" -- "$2" & disown; printf "%256s\\n" "" | tr " " x > "$3"; cp "$3" "$4"' \
+    -- "$pid_file" "$pid_file" "$out_file" "$report"
+}
+PROV
+  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok)/WASPFLOW_PROVIDERS=(claude codex grok scopep)/' "$scopelib/core.sh"
+  scopehome="$(mktemp -d "$scratch/waspflow-scope-home-XXXXXX")"
+  scopework="$(mktemp -d "$scratch/waspflow-scope-work-XXXXXX")"; ( cd "$scopework" && git init -q )
+  scopesession="waspflow-scope-$$"
+  export WASPFLOW_LIB="$scopelib" WASPFLOW_HOME="$scopehome" WASPFLOW_TMUX_SESSION="$scopesession"
+
+  scope_receipts() { jq -r '.cgroup_scope_receipts // [] | .[] | .unit + "\u001e" + .invocation_id' "$scopehome/lanes/$1/state.json"; }
+  scope_pids() {
+    local lane="$1" unit invocation actual cg
+    while IFS=$'\x1e' read -r unit invocation; do
+      actual="$(systemctl --user show "$unit" -p InvocationID --value 2>/dev/null || true)"
+      [[ "$actual" == "$invocation" ]] || continue
+      cg="$(systemctl --user show "$unit" -p ControlGroup --value 2>/dev/null)"
+      [[ -n "$cg" ]] && cat "/sys/fs/cgroup${cg}/cgroup.procs" 2>/dev/null || true
+    done < <(scope_receipts "$lane")
+  }
+  wait_for_receipts() {
+    local lane="$1" expected="$2"
+    for _ in $(seq 1 60); do
+      [[ "$(jq '.cgroup_scope_receipts // [] | length' "$scopehome/lanes/$lane/state.json")" -ge "$expected" ]] && return 0
+      sleep 0.1
+    done
+    return 1
+  }
+  spawn_scope_lane() { ( cd "$scopework" && "$root/bin/waspflow" spawn --provider scopep --lane "$1" "${@:3}" -- "$2" >/dev/null ); }
+
+  # Normal completion gets a real scope receipt before its short command exits.
+  spawn_scope_lane normal-done 'true'
+  wait_for_receipts normal-done 1 || { echo "scope: normal pane receipt missing" >&2; exit 1; }
+  "$root/bin/waspflow" reap normal-done --no-archive >/dev/null
+  [[ "$(jq -r .status "$scopehome/lanes/normal-done/state.json")" == reaped ]] \
+    || { echo "scope: normal completion did not reap" >&2; exit 1; }
+
+  # Initial pane + daemonized headless resume create two receipts. Reap must
+  # kill both scopes even after the tmux pane vanished.
+  spawn_scope_lane multi-scope 'sleep 300'
+  wait_for_receipts multi-scope 1 || { echo "scope: initial receipt missing" >&2; exit 1; }
+  tmux kill-window -t "$scopesession:multi-scope" 2>/dev/null || true
+  "$root/bin/waspflow" revise multi-scope -- 'setsid bash -c "sleep 300 & disown" & disown' >/dev/null
+  wait_for_receipts multi-scope 2 || { echo "scope: headless resume did not append a receipt" >&2; exit 1; }
+  headless_pids="$(scope_pids multi-scope)"
+  [[ -n "$headless_pids" ]] || { echo "scope: daemonized headless resume produced no cgroup member" >&2; exit 1; }
+
+  # A forged receipt for a live bystander must not authorize killing it. This
+  # also proves InvocationID comparison protects unit-name reuse.
+  bystander="waspflow-bystander-$$.scope"
+  systemd-run --user --scope --unit="$bystander" --collect --quiet -- bash -c 'sleep 300' & bystander_runner=$!
+  for _ in $(seq 1 60); do
+    bystander_invocation="$(systemctl --user show "$bystander" -p InvocationID --value 2>/dev/null || true)"
+    [[ -n "$bystander_invocation" ]] && break
+    sleep 0.1
+  done
+  [[ -n "${bystander_invocation:-}" ]] || { echo "scope: bystander scope did not start" >&2; exit 1; }
+  jq --arg unit "$bystander" '.cgroup_scope_receipts += [{unit:$unit,invocation_id:"forged-reuse"}]' \
+    "$scopehome/lanes/multi-scope/state.json" >"$scopehome/lanes/multi-scope/state.next"
+  mv "$scopehome/lanes/multi-scope/state.next" "$scopehome/lanes/multi-scope/state.json"
+  "$root/bin/waspflow" reap multi-scope --no-archive >/dev/null
+  for _ in $(seq 1 60); do [[ -z "$(scope_pids multi-scope)" ]] && break; sleep 0.1; done
+  [[ -z "$(scope_pids multi-scope)" ]] || { echo "scope: reap left an owned cgroup member" >&2; exit 1; }
+  systemctl --user show "$bystander" -p InvocationID --value 2>/dev/null | grep -qx "$bystander_invocation" \
+    || { echo "scope: reap touched the bystander/reused unit" >&2; exit 1; }
+  "$root/bin/waspflow" reap multi-scope --no-archive >/dev/null
+  [[ "$(jq -r .status "$scopehome/lanes/multi-scope/state.json")" == reaped ]] \
+    || { echo "scope: repeat reap was not idempotent" >&2; exit 1; }
+  systemctl --user kill --kill-whom=all --signal=SIGKILL "$bystander" >/dev/null 2>&1 || true
+  systemctl --user stop "$bystander" >/dev/null 2>&1 || true
+  wait "$bystander_runner" 2>/dev/null || true
+
+  # The real artifact path kills the pane, invokes provider_revise headlessly,
+  # then reaps its freshly-created recovery scope and daemon.
+  spawn_scope_lane recovery 'sleep 300' --report recovery.md
+  wait_for_receipts recovery 1 || { echo "scope: recovery initial receipt missing" >&2; exit 1; }
+  "$root/bin/waspflow" reap recovery --no-archive >/dev/null
+  recovery_pid="$(cat "$scopehome/lanes/recovery/recovery-daemon.pid")"
+  ! kill -0 "$recovery_pid" 2>/dev/null || { echo "scope: recovery daemon survived reap" >&2; exit 1; }
+  [[ "$(jq '.cgroup_scope_receipts | length' "$scopehome/lanes/recovery/state.json")" -ge 2 ]] \
+    || { echo "scope: recovery did not append a second receipt" >&2; exit 1; }
+  [[ -s "$scopework/recovery.md" ]] \
+    || { echo "scope: recovery adapter did not write its requested report" >&2; exit 1; }
+  [[ "$(jq -r .result "$scopehome/lanes/recovery/state.json")" == recovered ]] \
+    || { echo "scope: artifact recovery did not preserve its success contract" >&2; exit 1; }
+
+  # A preflight-positive but launch-failing systemd-run must execute the original
+  # pane command, retain tmux ownership, and record a degraded—not phantom—lane.
+  failbin="$(mktemp -d "$scratch/waspflow-scope-failbin-XXXXXX")"
+  cat >"$failbin/systemd-run" <<'FAIL'
+#!/usr/bin/env bash
+exit 73
+FAIL
+  chmod +x "$failbin/systemd-run"
+  old_path="$PATH"; export PATH="$failbin:$PATH"
+  spawn_scope_lane scope-fallback 'printf fallback > fallback-ran'
+  for _ in $(seq 1 40); do [[ -f "$scopework/fallback-ran" ]] && break; sleep 0.1; done
+  [[ -f "$scopework/fallback-ran" ]] || { echo "scope: launch failure skipped original pane command" >&2; exit 1; }
+  jq -e '(.cgroup_scope_receipts // []) == [] and .cgroup_fallbacks[-1].reason == "scope-launch-failed" and .tmux_window != ""' \
+    "$scopehome/lanes/scope-fallback/state.json" >/dev/null \
+    || { echo "scope: failed launch left dishonest ownership state" >&2; exit 1; }
+  export PATH="$old_path"
+  tmux kill-session -t "$scopesession" 2>/dev/null || true
+  rm -rf "$scopelib" "$scopehome" "$scopework" "$failbin"
+)
+fi
+
+# The unavailable-host path is a first-class, truthful fallback and does not
+# require systemd to be installed on the verifier host.
+(
+  nosystemd_home="$(mktemp -d "$scratch/waspflow-nosystemd-home-XXXXXX")"
+  nosystemd_cwd="$(mktemp -d "$scratch/waspflow-nosystemd-cwd-XXXXXX")"
+  export WASPFLOW_HOME="$nosystemd_home"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  tmux_cgroup_scope_available() { return 1; }
+  lane_set no-systemd status live cwd "$nosystemd_cwd"
+  tmux_run_owned_lane_command no-systemd "$nosystemd_cwd" headless-revise -- bash -c 'printf fallback > ran'
+  [[ -f "$nosystemd_cwd/ran" ]] \
+    && jq -e '(.cgroup_scope_receipts // []) == [] and .cgroup_fallbacks[-1].reason == "scope-unavailable"' \
+      "$nosystemd_home/lanes/no-systemd/state.json" >/dev/null \
+    || { echo "scope: no-systemd fallback was not truthful/executable" >&2; exit 1; }
+  rm -rf "$nosystemd_home" "$nosystemd_cwd"
+)
+
 echo "waspflow verify: ok"

@@ -973,6 +973,9 @@ _reap_one_locked() {
   if tmux_window_exists "$lane"; then
     tmux kill-window -t "$(tmux_window_target "$lane")" 2>/dev/null || true
   fi
+  # Scope receipts are intentionally reaped only after finalization: report
+  # recovery may have started a new headless scope after the pane exited.
+  tmux_kill_owned_lane_scopes "$lane"
 
   # Bundle-before-reap: archive the branch tip to a verified git bundle BEFORE
   # removing the worktree/branch, so "reaping is cleanup, not data loss" holds
