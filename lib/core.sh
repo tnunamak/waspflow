@@ -332,12 +332,8 @@ tmux_cgroup_scope_available() {
 tmux_wrap_in_lane_scope() {
   local lane="$1" shell_command="$2" unit
   unit="waspflow-${lane}-$(new_uuid | cut -c1-8).scope"
-  # shell_command is arbitrary shell syntax from a provider adapter (e.g.
-  # `bash -lc '...'`, `exec sleep 60`) — not a bare argv. systemd-run execs its
-  # argv directly with no shell, so the whole thing must be re-quoted as ONE
-  # `bash -c '<shell_command>'` argument rather than splattered onto its argv.
   printf '%s\x1e%s\n' "$unit" \
-    "exec systemd-run --user --scope --unit=$(printf '%q' "$unit") --collect --quiet -- bash -c $(printf '%q' "$shell_command")"
+    "exec systemd-run --user --scope --unit=$(printf '%q' "$unit") --collect --quiet -- $shell_command"
 }
 
 # Confirm a recorded scope unit is still the SAME invocation we created (not a
