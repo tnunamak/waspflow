@@ -1716,6 +1716,53 @@ PROV
   "$root/bin/waspflow" reap idempotent >/dev/null 2>&1 \
     || { echo "scope: re-reaping an already-reaped lane errored" >&2; exit 1; }
 
+  # --- Case 8 (2026-07-14 gate finding): park must kill the owned scope too,
+  # not just reap. Before this fix, _park_one_locked only stopped the tmux
+  # window, so a detached/setsid grandchild kept running under a "parked"
+  # lane — the exact orphan class the incident was about, reachable via
+  # park/gc --apply instead of reap. Prove: (a) the descendant is dead after
+  # park, (b) the lane is still parked AND resumable (revise still works —
+  # resumability lives in provider session state, not in a live process),
+  # (c) an unrelated bystander scope survives park untouched.
+  park_bystander_unit="wf-verify-park-bystander-$$.scope"
+  systemd-run --user --scope --unit="$park_bystander_unit" --collect --quiet -- sleep 300 >/dev/null 2>&1 &
+  park_bystander_launcher=$!
+  for _ in $(seq 1 50); do
+    systemctl --user list-units --type=scope --all --no-legend 2>/dev/null | awk '{print $1}' | grep -qxF "$park_bystander_unit" && break
+    sleep 0.1
+  done
+
+  spawn_scope_lane park-descendant \
+    'setsid bash -c "sleep 300 & disown; wait" & disown; sleep 300'
+  for _ in $(seq 1 50); do [[ -n "$(scope_cgroup_pids park-descendant)" ]] && break; sleep 0.1; done
+  park_before="$(scope_cgroup_pids park-descendant)"
+  [[ -n "$park_before" ]] || { echo "park-scope: detached grandchild never appeared in the cgroup" >&2; exit 1; }
+  [[ "$(jq -r .cgroup_scope_capture "$scopehome/lanes/park-descendant/state.json")" == "ok" ]] \
+    || { echo "park-scope: cgroup_scope_capture was not recorded as ok" >&2; exit 1; }
+
+  "$root/bin/waspflow" park park-descendant --reason "gate regression" >/dev/null
+  [[ "$(jq -r .status "$scopehome/lanes/park-descendant/state.json")" == parked ]] \
+    || { echo "park-scope: lane was not parked" >&2; exit 1; }
+
+  for _ in $(seq 1 50); do [[ -z "$(scope_cgroup_pids park-descendant)" ]] && break; sleep 0.1; done
+  [[ -z "$(scope_cgroup_pids park-descendant)" ]] \
+    || { echo "park-scope: detached grandchild survived park (the gate-blocking bug)" >&2; exit 1; }
+  for pid in $park_before; do
+    kill -0 "$pid" 2>/dev/null && { echo "park-scope: grandchild pid $pid still alive after park" >&2; exit 1; }
+  done
+
+  test -f "$scopehome/lanes/park-descendant/transcript.log" \
+    || { echo "park-scope: transcript was removed by park" >&2; exit 1; }
+  "$root/bin/waspflow" revise park-descendant -- "resume remains available" >/dev/null \
+    || { echo "park-scope: parked lane was no longer resumable after scope kill" >&2; exit 1; }
+
+  systemctl --user list-units --type=scope --all --no-legend 2>/dev/null | awk '{print $1}' | grep -qxF "$park_bystander_unit" \
+    || { echo "park-scope: park killed an unrelated bystander scope" >&2; exit 1; }
+  systemctl --user kill --kill-whom=all --signal=SIGKILL "$park_bystander_unit" >/dev/null 2>&1 || true
+  systemctl --user stop "$park_bystander_unit" >/dev/null 2>&1 || true
+  wait "$park_bystander_launcher" 2>/dev/null || true
+  "$root/bin/waspflow" reap park-descendant --force >/dev/null 2>&1 || true
+
   tmux kill-session -t "$scopesession" 2>/dev/null || true
   rm -rf "$scopelib" "$scopehome" "$scopework"
 )

@@ -313,12 +313,27 @@ tmux_capture_lane_ownership() {
 #
 # Each lane's shell_command runs inside its OWN transient systemd --user scope
 # (`systemd-run --user --scope`), unrelated to the tmux pane PID captured above.
-# reap kills the whole scope's cgroup in one shot via `systemctl --user kill
-# --kill-whom=all`, which reaches detached grandchildren tmux can't see. This is
-# best-effort: hosts without a user systemd instance (no `systemd-run`, or
-# `XDG_RUNTIME_DIR`/user bus unavailable) fall back to tmux-window-only cleanup,
-# same as before this fix — a strict regression is never introduced, only a gap
-# closed where the primitive exists.
+# park and reap both kill the whole scope's cgroup in one shot via `systemctl
+# --user kill --kill-whom=all`, which reaches detached grandchildren tmux can't
+# see (see tmux_kill_owned_lane_scope; called from both _park_one_locked and
+# _reap_one_locked so neither lifecycle path can leave a scope-backed lane's
+# descendants running).
+#
+# THIS IS BEST-EFFORT, NOT A HARD GUARANTEE, on two distinct axes — both are
+# recorded on the lane (field `cgroup_scope_capture`) so "no scope" is never
+# silently indistinguishable from "scope not needed":
+#   - "unavailable": no user systemd instance at spawn time (no `systemd-run`,
+#     or the user bus/XDG_RUNTIME_DIR wasn't reachable) — falls back to
+#     tmux-window-only cleanup, i.e. exactly this fix's pre-image behavior.
+#   - "timeout": systemd-run was launched but its InvocationID did not appear
+#     within the capture poll window (systemd slow to register the unit, or
+#     the pane command exited before the poll caught it) — the lane still ran,
+#     but nothing durable was recorded, so cleanup ALSO falls back to
+#     tmux-window-only for that one lane.
+#   - "ok": normal case — the scope was captured and is enforced by park/reap.
+# A strict regression is never introduced by either fallback path: the worst
+# case is identical to pre-fix behavior (tmux-window cleanup only) for that
+# one lane, not a crash or a false success.
 tmux_cgroup_scope_available() {
   command -v systemd-run >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1 \
     && systemctl --user show-environment >/dev/null 2>&1
@@ -392,7 +407,8 @@ tmux_create_owned_lane_window() {
     # The scope only exists once systemd-run's child process has actually
     # started inside the pane; poll briefly rather than racing tmux's own
     # window-creation return. Never fail spawn over this — worst case we fall
-    # back to window-only cleanup for this one lane, logged via empty fields.
+    # back to window-only cleanup for this one lane (see the "timeout" case
+    # documented above tmux_cgroup_scope_available).
     local invocation="" tries=0
     while [[ -z "$invocation" && "$tries" -lt 20 ]]; do
       invocation="$(systemctl --user show "$unit" -p InvocationID --value 2>/dev/null)"
@@ -400,8 +416,12 @@ tmux_create_owned_lane_window() {
       tries=$((tries + 1))
     done
     if [[ -n "$invocation" ]]; then
-      lane_set "$lane" cgroup_scope "$unit" cgroup_scope_invocation_id "$invocation"
+      lane_set "$lane" cgroup_scope "$unit" cgroup_scope_invocation_id "$invocation" cgroup_scope_capture "ok"
+    else
+      lane_set "$lane" cgroup_scope_capture "timeout"
     fi
+  else
+    lane_set "$lane" cgroup_scope_capture "unavailable"
   fi
   printf '%s\n' "$window"
 }
