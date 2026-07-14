@@ -95,6 +95,7 @@ claude_spawn() {
     --dangerously-skip-permissions
     "${extra[@]}"
     "${MCP_ARGV[@]}"
+    --
     "$prompt")
 
   local quoted=""
@@ -348,7 +349,7 @@ claude_revise() {
     rc=0
     # Resume from the lane's cwd: claude --resume is scoped to the project dir.
     ( cd "${cwd:-$PWD}" && env "${MCP_ENV[@]}" claude --resume "$session_id" --print "${model_args[@]}" \
-        --dangerously-skip-permissions "${MCP_ARGV[@]}" "$message" </dev/null ) >"$tmp" 2>&1 || rc=$?
+        --dangerously-skip-permissions "${MCP_ARGV[@]}" -- "$message" </dev/null ) >"$tmp" 2>&1 || rc=$?
     if grep -q "No conversation found" "$tmp" 2>/dev/null; then
       sleep $(( attempt * 2 ))
       continue

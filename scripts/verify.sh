@@ -919,6 +919,7 @@ FAKE
   _exec_claude "$fixture" "" "" "prompt" "$out"
   grep -qx -- '--strict-mcp-config' "$argvfile" && grep -qx -- '--mcp-config' "$argvfile" \
     && grep -qx '{"mcpServers":{}}' "$argvfile" && grep -qx false "$envfile" \
+    && [[ "$(tail -n 2 "$argvfile")" == $'--\nprompt' ]] \
     || { echo "claude argv: strict MCP policy was not applied" >&2; exit 1; }
   rm -rf "$argvbin"
 )
@@ -988,6 +989,7 @@ FAKE
     mcp_env '{"ENABLE_CLAUDEAI_MCP_SERVERS":"false"}'
   claude_revise claude-resume prompt "$resumebin/claude-out"
   grep -qx -- '--strict-mcp-config' "$argvfile" && grep -qx false "$envfile" \
+    && [[ "$(tail -n 2 "$argvfile")" == $'--\nprompt' ]] \
     || { echo "claude resume: MCP receipt was not reapplied" >&2; exit 1; }
   rm -rf "$resumebin" "$resumehome"
 )

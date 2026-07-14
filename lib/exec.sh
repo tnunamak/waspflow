@@ -193,6 +193,7 @@ _exec_claude() {
       "${effort_args[@]}" \
       "${MCP_ARGV[@]}" \
       --dangerously-skip-permissions \
+      -- \
       "$prompt" \
       </dev/null
   ) >"$output_path"
