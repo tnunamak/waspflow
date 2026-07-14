@@ -865,6 +865,26 @@ CODEX
     || { echo "codex MCP: inherit should preserve raw config" >&2; exit 1; }
   ( mcp_policy_load_json '["ok","line\nbreak"]' '{}' test ) >/dev/null 2>&1 \
     && { echo "MCP state: newline must not change argv boundaries" >&2; exit 1; }
+
+  # Exercise Claude's policy producer through the generic parser. This catches
+  # malformed nested JSON before a worker launch reaches tmux.
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/claude.sh"
+  for requested in auto none; do
+    policy="$(claude_mcp_policy "$requested")"
+    jq -e \
+      '.resolved == "none"
+       and .argv == ["--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}"]
+       and .env == {"ENABLE_CLAUDEAI_MCP_SERVERS":"false"}' \
+      >/dev/null <<<"$policy" \
+      || { echo "claude MCP: $requested policy is malformed" >&2; exit 1; }
+    mcp_policy_load_json \
+      "$(jq -c '.argv' <<<"$policy")" \
+      "$(jq -c '.env' <<<"$policy")" \
+      "claude $requested policy"
+    [[ "${MCP_ARGV[2]}" == '{"mcpServers":{}}' ]] \
+      || { echo "claude MCP: $requested config changed across parsing" >&2; exit 1; }
+  done
   rm -rf "$mcpbin" "$mcpwork"
 )
 

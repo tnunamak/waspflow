@@ -28,7 +28,10 @@ claude_valid_models() { return 1; }
 claude_mcp_policy() {
   case "$1" in
     inherit) printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}' ;;
-    auto|none) printf '%s\n' '{"resolved":"none","warning":"","argv":["--strict-mcp-config","--mcp-config","{\\"mcpServers\\":{}}"],"env":{"ENABLE_CLAUDEAI_MCP_SERVERS":"false"}}' ;;
+    auto|none)
+      jq -cn --arg config '{"mcpServers":{}}' \
+        '{resolved:"none",warning:"",argv:["--strict-mcp-config","--mcp-config",$config],env:{ENABLE_CLAUDEAI_MCP_SERVERS:"false"}}'
+      ;;
     *) return 1 ;;
   esac
 }
