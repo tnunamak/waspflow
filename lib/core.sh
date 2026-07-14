@@ -300,19 +300,104 @@ tmux_capture_lane_ownership() {
   lane_set "$lane" tmux_session "$session" tmux_window "$window" tmux_pane_pid "$pane_pid"
 }
 
+# ---- descendant-process ownership (cgroup scope) ----------------------------
+# Incident (2026-07-14): five pytest processes launched from completed/reaped
+# lanes survived ~26h reparented to systemd --user, no TTY/no tmux ancestor,
+# because ownership only ever covered the tmux pane PID. A `setsid`/double-fork
+# grandchild detaches from the pane process tree entirely, so killing the tmux
+# window (SIGHUP to the pane) never reaches it. A cgroup does not have this
+# escape: every fork/exec descendant inherits its parent's cgroup, and being
+# reparented to PID 1 (or systemd --user) does NOT move a process to a
+# different cgroup. So the scope, not the pane PID, is the unit of ownership
+# for "everything this lane ever spawned."
+#
+# Each lane's shell_command runs inside its OWN transient systemd --user scope
+# (`systemd-run --user --scope`), unrelated to the tmux pane PID captured above.
+# reap kills the whole scope's cgroup in one shot via `systemctl --user kill
+# --kill-whom=all`, which reaches detached grandchildren tmux can't see. This is
+# best-effort: hosts without a user systemd instance (no `systemd-run`, or
+# `XDG_RUNTIME_DIR`/user bus unavailable) fall back to tmux-window-only cleanup,
+# same as before this fix — a strict regression is never introduced, only a gap
+# closed where the primitive exists.
+tmux_cgroup_scope_available() {
+  command -v systemd-run >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1 \
+    && systemctl --user show-environment >/dev/null 2>&1
+}
+
+# Wrap a shell command so it runs as the sole process of a fresh, uniquely
+# named transient scope. The scope unit name embeds the lane name (for
+# operator legibility in `systemctl --user list-units`) plus a random suffix
+# (so a reaped-then-respawned lane of the same name can never collide with a
+# stale unit name still known to systemd). Echoes "<unit>\x1e<wrapped_command>".
+tmux_wrap_in_lane_scope() {
+  local lane="$1" shell_command="$2" unit
+  unit="waspflow-${lane}-$(new_uuid | cut -c1-8).scope"
+  printf '%s\x1e%s\n' "$unit" \
+    "exec systemd-run --user --scope --unit=$(printf '%q' "$unit") --collect --quiet -- $shell_command"
+}
+
+# Confirm a recorded scope unit is still the SAME invocation we created (not a
+# stale name systemd recycled), mirroring tmux_owned_lane_window_target's
+# pane_pid re-check. Echoes the unit name on success.
+tmux_owned_lane_scope_target() {
+  local lane="$1" unit invocation got_invocation
+  unit="$(lane_get "$lane" cgroup_scope)"
+  invocation="$(lane_get "$lane" cgroup_scope_invocation_id)"
+  [[ -n "$unit" && -n "$invocation" ]] || return 1
+  got_invocation="$(systemctl --user show "$unit" -p InvocationID --value 2>/dev/null)" || return 1
+  [[ -n "$got_invocation" && "$got_invocation" == "$invocation" ]] || return 1
+  printf '%s\n' "$unit"
+}
+
+# Kill every process in a lane's scope (its own pane process plus every
+# descendant, however detached) in one shot, ownership-verified first so a
+# unit name systemd has already recycled for something else is never touched.
+# Safe to call on a lane with no scope recorded (pre-fix lanes, or a host
+# without systemd --user) — a no-op, not an error, so reap never regresses.
+tmux_kill_owned_lane_scope() {
+  local lane="$1" unit
+  unit="$(tmux_owned_lane_scope_target "$lane")" || return 0
+  systemctl --user kill --kill-whom=all --signal=SIGKILL "$unit" 2>/dev/null || true
+  # --collect removes the unit from systemd's bookkeeping once its last process
+  # exits; stop is the explicit belt-and-suspenders in case anything lingers.
+  systemctl --user stop "$unit" >/dev/null 2>&1 || true
+}
+
 # Create and claim a lane window as one provider-facing operation. `-P` returns
 # the exact new window id, avoiding tmux's ambiguous name lookup when duplicate
 # names exist. If ownership capture fails, kill that exact id before returning.
 # Args: lane cwd shell_command. Echoes the exact window id.
 tmux_create_owned_lane_window() {
   local lane="$1" cwd="$2" shell_command="$3" window
+  local wrapped="$shell_command" unit=""
+  if tmux_cgroup_scope_available; then
+    local scope_out
+    scope_out="$(tmux_wrap_in_lane_scope "$lane" "$shell_command")"
+    unit="${scope_out%%$'\x1e'*}"
+    wrapped="${scope_out#*$'\x1e'}"
+  fi
   tmux_ensure_session
   window="$(tmux new-window -d -P -F '#{window_id}' -t "$WASPFLOW_TMUX_SESSION" \
-    -n "$lane" -c "$cwd" "$shell_command")" || return 1
+    -n "$lane" -c "$cwd" "$wrapped")" || return 1
   [[ "$window" == @* ]] || return 1
   if ! tmux_capture_lane_ownership "$lane" "$window"; then
     tmux kill-window -t "$window" 2>/dev/null || true
     return 1
+  fi
+  if [[ -n "$unit" ]]; then
+    # The scope only exists once systemd-run's child process has actually
+    # started inside the pane; poll briefly rather than racing tmux's own
+    # window-creation return. Never fail spawn over this — worst case we fall
+    # back to window-only cleanup for this one lane, logged via empty fields.
+    local invocation="" tries=0
+    while [[ -z "$invocation" && "$tries" -lt 20 ]]; do
+      invocation="$(systemctl --user show "$unit" -p InvocationID --value 2>/dev/null)"
+      [[ -n "$invocation" ]] || sleep 0.1
+      tries=$((tries + 1))
+    done
+    if [[ -n "$invocation" ]]; then
+      lane_set "$lane" cgroup_scope "$unit" cgroup_scope_invocation_id "$invocation"
+    fi
   fi
   printf '%s\n' "$window"
 }
