@@ -69,6 +69,19 @@ printf 'hello\n' > README.md
 git add README.md
 git commit -q -m init
 
+# Multiline prompts must cross tmux as bracketed, literal paste: otherwise tmux
+# translates LF to CR and the TUI can keep the real task in its composer.
+(
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  paste_argv="$(mktemp "$scratch/waspflow-paste-argv-XXXXXX")"
+  tmux() { printf '%s\n' "$@" >"$paste_argv"; }
+  tmux_paste_text 'fake:0' $'first line\nsecond line\nthird line'
+  [[ "$(cat "$paste_argv")" == "$(printf 'paste-buffer\n-p\n-r\n-d\n-b\n%s\n-t\nfake:0' "$(sed -n '6p' "$paste_argv")")" ]] \
+    || { echo "tmux paste: expected bracketed literal paste-buffer -p -r" >&2; exit 1; }
+  rm -f "$paste_argv"
+)
+
 WASPFLOW_HOME="$state_home" "$root/bin/waspflow" init \
   --profile serious-repo \
   --profile live-stack-mutex \
@@ -235,6 +248,49 @@ JSONL
   [[ "$(codex_discover_session marker-b)" == "22222222-2222-2222-2222-222222222222" ]]
   [[ "$(cksum "$(lane_state_file marker-a)")" == "$marker_before" ]] \
     || { echo "codex discovery: read-only oracle mutated lane state" >&2; exit 1; }
+)
+
+# Spawn receipt needs the complete initial prompt, not only the durable marker:
+# a marker-only JSONL entry is possible when a multiline paste leaves the task
+# in Codex's composer. The same mocked TUI proves the complete prompt succeeds
+# on the first Enter, without a retry.
+(
+  spawn_home="$(mktemp -d "$scratch/waspflow-codex-spawn-home-XXXXXX")"
+  spawn_sessions="$(mktemp -d "$scratch/waspflow-codex-spawn-sessions-XXXXXX")"
+  spawn_cwd="$fixture"
+  export WASPFLOW_HOME="$spawn_home" CODEX_SESSIONS_DIR="$spawn_sessions"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/codex.sh"
+  sleep() { :; }
+  spawn_sid="66666666-6666-6666-6666-666666666666"
+  spawn_rollout="$spawn_sessions/rollout-2026-07-14T00-00-01-$spawn_sid.jsonl"
+  spawn_marker='WASPFLOW_LANE_MARKER:spawn-receipt:marker'
+  pasted_prompt=""; enter_count=0; spawn_mode=""
+  tmux_paste_text() { pasted_prompt="$2"; }
+  tmux() {
+    local last="${!#}"
+    [[ "$last" == Enter ]] || return 0
+    ((++enter_count))
+    jq -cn --arg sid "$spawn_sid" --arg cwd "$spawn_cwd" \
+      '{type:"session_meta",payload:{id:$sid,cwd:$cwd}}' >"$spawn_rollout"
+    case "$spawn_mode" in
+      marker) jq -cn --arg message "$spawn_marker" '{type:"event_msg",payload:{type:"user_message",message:$message}}' >>"$spawn_rollout" ;;
+      full)   jq -cn --arg message "$pasted_prompt" '{type:"event_msg",payload:{type:"user_message",message:$message}}' >>"$spawn_rollout" ;;
+    esac
+  }
+  lane_set spawn-receipt cwd "$spawn_cwd"
+  spawn_mode=marker; enter_count=0
+  set +e; _codex_submit_prompt spawn-receipt "$spawn_cwd" fake:0 $'three\nline\ntask' "$spawn_marker"; rc=$?; set -e
+  [[ "$rc" -ne 0 && -z "$(lane_get spawn-receipt session_id)" ]] \
+    || { echo "codex spawn: marker-only rollout was accepted as task receipt" >&2; exit 1; }
+  lane_set spawn-receipt session_id "" rollout ""
+  spawn_mode=full; enter_count=0
+  _codex_submit_prompt spawn-receipt "$spawn_cwd" fake:0 $'three\nline\ntask' "$spawn_marker"
+  [[ "$enter_count" -eq 1 && "$(lane_get spawn-receipt rollout)" == "$spawn_rollout" ]] \
+    || { echo "codex spawn: complete multiline prompt did not confirm on first Enter" >&2; exit 1; }
+  rm -rf "$spawn_home" "$spawn_sessions"
 )
 
 # ---------------------------------------------------------------------------
@@ -505,7 +561,9 @@ JSONL
 {"type":"event_msg","payload":{"type":"task_complete"}}
 JSONL
     lane_set codex-live-revise provider codex status live cwd "$fixture" \
-      session_id "$revise_sid" rollout "$revise_rollout" revise_barrier_mark 1
+      session_id "$revise_sid" rollout "$revise_rollout" revise_barrier_mark 1 \
+      revise_submitted true revise_submission_state confirmed-task-started \
+      revise_submission_error "" revise_task_started_mark 99
   }
   enter_count=0
   revise_event=""
@@ -526,6 +584,16 @@ JSONL
     fi
     return 0
   }
+
+  # An early rollout-resolution failure must overwrite a stale prior success
+  # before returning, while preserving cmd_wait's completed-turn barrier.
+  reset_revise_rollout; rm -f "$revise_rollout"; enter_count=0
+  set +e; codex_revise codex-live-revise "retry this"; rc=$?; set -e
+  [[ "$rc" -ne 0 && "$enter_count" -eq 0 ]] \
+    || { echo "codex revise: missing rollout must fail before steering" >&2; exit 1; }
+  jq -e '.revise_submitted == "false" and .revise_submission_state == "unconfirmed-missing-rollout" and .revise_submission_error == "missing-rollout" and .revise_task_started_mark == "" and .revise_barrier_mark == "1"' \
+    "$(lane_state_file codex-live-revise)" >/dev/null \
+    || { echo "codex revise: missing-rollout receipt/barrier is not truthful" >&2; exit 1; }
 
   # No rollout event: adapter must fail, mark the receipt unconfirmed, and leave
   # the caller-established completed-turn barrier untouched.

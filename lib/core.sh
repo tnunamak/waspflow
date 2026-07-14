@@ -380,16 +380,18 @@ tmux_window_exists() {
   tmux_named_lane_window_exists "$1"
 }
 
-# Paste literal text into a tmux pane without key-name parsing. Use this for
-# prompts/messages; `tmux send-keys -- "$text"` is unreliable for long text and
-# can mangle spaces or special characters.
+# Paste literal text into a tmux pane without key-name parsing or newline
+# translation. `-p -r` enables bracketed paste and preserves LF bytes; without
+# it tmux turns LF into CR, which can leave a multiline task in the composer.
+# Use this for prompts/messages; `tmux send-keys -- "$text"` is unreliable for
+# long text and can mangle spaces or special characters.
 tmux_paste_text() {
   local target="$1" text="$2" tmp buffer
   tmp="$(mktemp)"
   buffer="waspflow-$$-$RANDOM"
   printf '%s' "$text" >"$tmp"
   tmux load-buffer -b "$buffer" "$tmp"
-  tmux paste-buffer -d -b "$buffer" -t "$target"
+  tmux paste-buffer -p -r -d -b "$buffer" -t "$target"
   rm -f "$tmp"
 }
 

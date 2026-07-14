@@ -301,9 +301,11 @@ _codex_wait_composer_ready() {
   return 0  # proceed regardless; the submit step verifies real success
 }
 
-# Type the prompt and submit, then VERIFY by polling for a rollout file whose
-# session_meta.cwd == our cwd. If none appears, re-send Enter (the most common
-# failure is the Enter racing hook output). Up to a few attempts.
+# Type the prompt and submit, then verify that one rollout for this cwd contains
+# the exact full user message. A marker-only event proves only that correlation
+# text arrived; it can coexist with the real task still queued in the composer.
+# If no complete message appears, re-send Enter (the most common failure is the
+# Enter racing hook output). Up to a few attempts.
 _codex_submit_prompt() {
   local lane="$1" cwd="$2" target="$3" prompt="$4" marker="${5:-}" attempt
   # A marker is REQUIRED to confirm submission safely: codex_spawn always sets
@@ -329,7 +331,7 @@ $prompt"
     local j
     for j in $(seq 1 6); do
       local rollout=""
-      rollout="$(_codex_find_rollout_for_marker "$cwd" "$marker" || true)"
+      rollout="$(_codex_find_rollout_for_submitted_prompt "$cwd" "$full_prompt" || true)"
       if [[ -n "$rollout" ]]; then
         local sid
         sid="$(_codex_rollout_session_id "$rollout")"
@@ -340,10 +342,10 @@ $prompt"
     done
     warn "codex spawn: submit attempt $attempt did not start a turn for lane '$lane'; retrying Enter"
   done
-  warn "codex spawn: prompt may not have submitted for lane '$lane' (no rollout for $cwd). Inspect: waspflow attach $lane"
-  # Real failure signal: no rollout appeared after 5 Enter attempts, so the task
-  # was NOT confirmed submitted (dead-on-arrival). Return nonzero so cmd_spawn
-  # surfaces it loudly + exits 3, instead of a phantom "spawned" (parity with claude).
+  warn "codex spawn: prompt was not confirmed submitted for lane '$lane' (no rollout contains the complete task). Inspect: waspflow attach $lane"
+  # Real failure signal: no exact full prompt appeared after 5 Enter attempts,
+  # so the task was NOT confirmed submitted (dead-on-arrival). Return nonzero so
+  # cmd_spawn surfaces it loudly + exits 3, instead of a phantom "spawned".
   return 1
 }
 
@@ -376,6 +378,26 @@ _codex_find_rollout_for_marker() {
     fcwd="$(head -1 "$f" 2>/dev/null | jq -rc 'select(.type=="session_meta") | .payload.cwd // empty' 2>/dev/null)"
     [[ "$fcwd" == "$cwd" ]] || continue
     grep -Fq "$marker" "$f" 2>/dev/null || continue
+    echo "$f"
+    return 0
+  done <<<"$listing"
+  return 1
+}
+
+# Echo the newest rollout in cwd containing the exact initial user message.
+# This is intentionally separate from marker lookup: marker-only lookup remains
+# the durable session-discovery key, while spawn receipt requires evidence that
+# the complete task crossed the tmux/Codex boundary. Args: cwd full_prompt
+_codex_find_rollout_for_submitted_prompt() {
+  local cwd="$1" full_prompt="$2" f fcwd
+  local listing; listing="$(find "$CODEX_SESSIONS_DIR" -type f -name 'rollout-*.jsonl' -printf '%f\t%p\n' 2>/dev/null | sort -r | cut -f2-)"
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    fcwd="$(head -1 "$f" 2>/dev/null | jq -rc 'select(.type=="session_meta") | .payload.cwd // empty' 2>/dev/null)"
+    [[ "$fcwd" == "$cwd" ]] || continue
+    jq -e --arg full_prompt "$full_prompt" \
+      'select((.payload.type // .type) == "user_message" and (.payload.message // "") == $full_prompt)' \
+      "$f" >/dev/null 2>&1 || continue
     echo "$f"
     return 0
   done <<<"$listing"
@@ -445,8 +467,22 @@ _codex_normalize_directory() {
 codex_revise() {
   local lane="$1" message="$2" out_file="${3:-}" recovery_report_parent="${4:-}"
   local sid cwd model
+  # A live revise starts unconfirmed before any discovery or billing preflight.
+  # Those early failures must never leave a prior turn's confirmed receipt in
+  # state, and must not disturb cmd_wait's completed-turn barrier.
+  if tmux_window_exists "$lane"; then
+    lane_set "$lane" revise_submitted false \
+      revise_submission_state unconfirmed-pending \
+      revise_submission_error pending revise_task_started_mark ""
+  fi
   sid="$(codex_discover_session "$lane")"
-  [[ -n "$sid" ]] || { err "no session_id for lane '$lane' (has it run a turn yet?)"; return 1; }
+  [[ -n "$sid" ]] || {
+    if tmux_window_exists "$lane"; then
+      lane_set "$lane" revise_submission_state unconfirmed-no-session revise_submission_error no-session
+    fi
+    err "no session_id for lane '$lane' (has it run a turn yet?)"
+    return 1
+  }
   cwd="$(lane_get "$lane" cwd)"
   model="$(lane_get "$lane" model)"
 
@@ -469,8 +505,13 @@ codex_revise() {
     if [[ -z "$rollout" || ! -f "$rollout" ]]; then
       rollout="$(find "$CODEX_SESSIONS_DIR" -type f -name "*${sid}.jsonl" 2>/dev/null | head -1)"
     fi
-    [[ -n "$rollout" && -f "$rollout" ]] \
-      || { err "codex revise: lane '$lane' has a session_id but no resolved rollout file (inconsistent state)"; return 1; }
+    [[ -n "$rollout" && -f "$rollout" ]] || {
+      lane_set "$lane" revise_submitted false \
+        revise_submission_state unconfirmed-missing-rollout \
+        revise_submission_error missing-rollout revise_task_started_mark ""
+      err "codex revise: lane '$lane' has a session_id but no resolved rollout file (inconsistent state)"
+      return 1
+    }
     before="$(_codex_task_started_mark "$rollout")"
     tmux send-keys -t "$target" C-u
     sleep 0.3
