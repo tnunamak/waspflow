@@ -450,8 +450,12 @@ tmux_scope_capture_supervisor_live() {
 
 tmux_replay_scope_capture_output() {
   local run_dir="$1"
-  [[ -f "$run_dir/stdout" ]] && cat "$run_dir/stdout"
-  [[ -f "$run_dir/stderr" ]] && cat "$run_dir/stderr"
+  # Startup can fail before the provider has opened either capture file. Output
+  # replay is observational only; it must never replace the terminal lifecycle
+  # result or bypass the caller's cleanup under `set -e`.
+  [[ -f "$run_dir/stdout" ]] && cat "$run_dir/stdout" || true
+  [[ -f "$run_dir/stderr" ]] && cat "$run_dir/stderr" || true
+  return 0
 }
 
 tmux_enter_lane_scope_and_capture() {

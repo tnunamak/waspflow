@@ -55,7 +55,9 @@ invocation-ID reuse and a live bystander scope; idempotent reap; actual
 receipt-failure probe injects a `jq` failure after the in-scope start marker,
 then proves a bounded `125` return, no provider side effect, an inactive test
 scope, no ownership receipt, and successful acquisition by a later lane
-operation.
+operation. The probe runs the launcher under `bash -e` with both capture files
+absent, proving output replay is a successful no-op: marker and run directory
+are removed before the documented `125` reaches the caller.
 
 An additional focused smoke test exercised a daemonized headless command while
 holding the lane operation lock, then immediately reacquired that lock. Scope
@@ -71,3 +73,6 @@ detached child from pinning the lifecycle lock.
   It is not run outside a scope because doing so could duplicate a provider turn.
 - Receipt persistence failure after a scope has started also fails closed before
   the provider command executes. This favors no unowned work over availability.
+- Captured output is best-effort lifecycle diagnostics. A missing or unreadable
+  capture file cannot replace the command's terminal lifecycle result or skip
+  its cleanup.
