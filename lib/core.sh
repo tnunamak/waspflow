@@ -348,7 +348,9 @@ tmux_append_lane_scope_receipt() {
   dir="$(lane_dir "$lane")"
   mkdir -p "$dir"
   if command -v flock >/dev/null 2>&1; then
-    ( flock 9; _lane_cgroup_receipt_append_locked "$dir" "$unit" "$invocation" ) 9>"$dir/.state.lock"
+    # Scope startup cannot wait forever behind an unrelated state update: a
+    # bounded receipt-lock miss is a terminal, fail-closed startup failure.
+    ( flock -w 2 9 && _lane_cgroup_receipt_append_locked "$dir" "$unit" "$invocation" ) 9>"$dir/.state.lock"
   else
     _lane_cgroup_receipt_append_locked "$dir" "$unit" "$invocation"
   fi
@@ -410,22 +412,77 @@ tmux_enter_lane_scope() {
   exec "$@"
 }
 
+tmux_write_scope_capture_record() {
+  local run_dir="$1" name="$2" value="$3" tmp
+  tmp="$(mktemp "$run_dir/.${name}.XXXXXX")" || return 1
+  if printf '%s\n' "$value" >"$tmp" && mv "$tmp" "$run_dir/$name"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+tmux_scope_capture_startup_failed() {
+  local run_dir="$1" reason="$2"
+  # Both records are terminal outcomes. The status is written too so a parent
+  # that races startup discovery never treats a scope-entry failure as a long
+  # running provider command.
+  tmux_write_scope_capture_record "$run_dir" startup "failed:$reason" || true
+  tmux_write_scope_capture_record "$run_dir" status "startup-failed:125" || true
+}
+
+tmux_scope_capture_supervisor_token() {
+  # `$$` deliberately names the scope supervisor shell even when this helper
+  # is evaluated in a command substitution; BASHPID would name that short-lived
+  # substitution instead.
+  local pid="$$" start_ticks=""
+  [[ -r "/proc/$pid/stat" ]] && start_ticks="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
+  printf '%s:%s\n' "$pid" "$start_ticks"
+}
+
+tmux_scope_capture_supervisor_live() {
+  local pid="$1" expected_ticks="$2" actual_ticks=""
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ -z "$expected_ticks" ]] && return 0
+  actual_ticks="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
+  [[ "$actual_ticks" == "$expected_ticks" ]]
+}
+
+tmux_replay_scope_capture_output() {
+  local run_dir="$1"
+  [[ -f "$run_dir/stdout" ]] && cat "$run_dir/stdout"
+  [[ -f "$run_dir/stderr" ]] && cat "$run_dir/stderr"
+}
+
 tmux_enter_lane_scope_and_capture() {
-  local lane="$1" unit="$2" run_dir="$3" marker invocation rc
+  local lane="$1" unit="$2" run_dir="$3" marker invocation rc supervisor
   shift 3
   { exec 9>&-; } 2>/dev/null || true
   marker="$(tmux_lane_scope_start_marker "$lane" "$unit")"
-  : >"$marker"
-  invocation="$(systemctl --user show "$unit" -p InvocationID --value 2>/dev/null)" || return 125
-  [[ -n "$invocation" ]] || return 125
-  tmux_append_lane_scope_receipt "$lane" "$unit" "$invocation" || return 125
+  if ! : >"$marker"; then
+    tmux_scope_capture_startup_failed "$run_dir" "marker-write-failed"
+    return 125
+  fi
+  invocation="$(systemctl --user show "$unit" -p InvocationID --value 2>/dev/null)" || {
+    tmux_scope_capture_startup_failed "$run_dir" "invocation-unavailable"; return 125;
+  }
+  [[ -n "$invocation" ]] || {
+    tmux_scope_capture_startup_failed "$run_dir" "invocation-empty"; return 125;
+  }
+  tmux_append_lane_scope_receipt "$lane" "$unit" "$invocation" || {
+    tmux_scope_capture_startup_failed "$run_dir" "receipt-persistence-failed"; return 125;
+  }
+  supervisor="$(tmux_scope_capture_supervisor_token)"
+  tmux_write_scope_capture_record "$run_dir" startup "ready:$supervisor" || {
+    tmux_scope_capture_startup_failed "$run_dir" "startup-record-write-failed"; return 125;
+  }
   # A headless CLI may daemonize. Do not make its caller wait for the detached
   # child (the scope rightly stays alive for reap); wait only for the CLI's own
   # result and replay its output to the caller after the completion receipt.
   set +e
   "$@" >"$run_dir/stdout" 2>"$run_dir/stderr"
   rc=$?
-  printf '%s\n' "$rc" >"$run_dir/status"
+  tmux_write_scope_capture_record "$run_dir" status "completed:$rc" || return 125
   return "$rc"
 }
 
@@ -435,7 +492,7 @@ tmux_enter_lane_scope_and_capture() {
 # fails after preflight, run the original command and record the degraded truth.
 # Args: lane cwd execution -- command [args...]
 tmux_run_owned_lane_command() {
-  local lane="$1" cwd="$2" execution="$3" unit marker rc=0 run_dir=""
+  local lane="$1" cwd="$2" execution="$3" unit marker rc=0 run_dir="" startup="" state="" supervisor_pid="" supervisor_ticks=""
   shift 3
   [[ "${1:-}" == "--" ]] || return 2
   shift
@@ -464,16 +521,50 @@ tmux_run_owned_lane_command() {
         "WASPFLOW_TMUX_SESSION=$WASPFLOW_TMUX_SESSION" "PATH=$PATH" \
         bash -c 'source "$1"; tmux_enter_lane_scope_and_capture "$2" "$3" "$4" "${@:5}"' -- \
         "$WASPFLOW_LIB/core.sh" "$lane" "$unit" "$run_dir" "$@" ) || rc=$?
-    # A successful no-block submission is not proof the unit started. Wait for
-    # the in-scope marker, then for the primary CLI's completion receipt.
+    # A successful no-block submission is not proof the unit started. The
+    # in-scope startup record is total for expected setup outcomes: ready after
+    # receipt persistence, or failed with a terminal status. The bounded wait
+    # below is only for that handshake, never for a provider's normal runtime.
     local tries=0
-    while [[ ! -f "$marker" && "$tries" -lt 50 ]]; do sleep 0.1; tries=$((tries + 1)); done
-    if [[ -f "$marker" ]]; then
-      while [[ ! -f "$run_dir/status" ]]; do sleep 0.1; done
-      rc="$(<"$run_dir/status")"
-      cat "$run_dir/stdout" "$run_dir/stderr"
+    while [[ ! -f "$run_dir/startup" && ! -f "$run_dir/status" && "$tries" -lt 50 ]]; do
+      sleep 0.1
+      tries=$((tries + 1))
+    done
+    if [[ -f "$run_dir/status" && ! -f "$run_dir/startup" ]]; then
+      state="$(<"$run_dir/status")"
+      tmux_replay_scope_capture_output "$run_dir"
       rm -rf "$run_dir" "$marker"
-      return "$rc"
+      [[ "$state" == startup-failed:* ]] && return "${state##*:}"
+      return 125
+    fi
+    if [[ -f "$run_dir/startup" ]]; then
+      startup="$(<"$run_dir/startup")"
+      if [[ "$startup" == failed:* ]]; then
+        tmux_replay_scope_capture_output "$run_dir"
+        rm -rf "$run_dir" "$marker"
+        return 125
+      fi
+      [[ "$startup" == ready:* ]] || {
+        rm -rf "$run_dir" "$marker"
+        return 125
+      }
+      IFS=: read -r _ supervisor_pid supervisor_ticks <<<"$startup"
+      while [[ ! -f "$run_dir/status" ]]; do
+        tmux_scope_capture_supervisor_live "$supervisor_pid" "$supervisor_ticks" || {
+          rm -rf "$run_dir" "$marker"
+          return 125
+        }
+        sleep 0.1
+      done
+      state="$(<"$run_dir/status")"
+      tmux_replay_scope_capture_output "$run_dir"
+      rm -rf "$run_dir" "$marker"
+      [[ "$state" == completed:* ]] || return 125
+      return "${state##*:}"
+    fi
+    if [[ -f "$marker" ]]; then
+      rm -rf "$run_dir" "$marker"
+      return 125
     fi
     rm -rf "$run_dir"
   fi
@@ -488,7 +579,6 @@ tmux_run_owned_lane_command() {
   # A definite launch failure (nonzero systemd-run, no start marker) is the P2
   # fallback case below.
   if [[ "$execution" != pane && "$rc" -eq 0 ]]; then
-    lane_set "$lane" cgroup_supervision "scope-start-unconfirmed" || true
     return 1
   fi
 

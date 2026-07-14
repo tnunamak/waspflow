@@ -1600,6 +1600,9 @@ PROV
   scopework="$(mktemp -d "$scratch/waspflow-scope-work-XXXXXX")"; ( cd "$scopework" && git init -q )
   scopesession="waspflow-scope-$$"
   export WASPFLOW_LIB="$scopelib" WASPFLOW_HOME="$scopehome" WASPFLOW_TMUX_SESSION="$scopesession"
+  # The receipt-failure probe below calls the shared launcher directly, just as
+  # a provider adapter does. Load the isolated copy, never the production one.
+  source "$scopelib/core.sh"
 
   scope_receipts() { jq -r '.cgroup_scope_receipts // [] | .[] | .unit + "\u001e" + .invocation_id' "$scopehome/lanes/$1/state.json"; }
   scope_pids() {
@@ -1676,6 +1679,60 @@ PROV
     || { echo "scope: recovery adapter did not write its requested report" >&2; exit 1; }
   [[ "$(jq -r .result "$scopehome/lanes/recovery/state.json")" == recovered ]] \
     || { echo "scope: artifact recovery did not preserve its success contract" >&2; exit 1; }
+
+  # Receipt persistence fails AFTER the scope-entry marker in this reviewer-
+  # shaped probe. The launcher must return a terminal failure promptly, leave
+  # the provider unstarted, release the operation lock, and let the transient
+  # scope go inactive. A marker without a status used to wedge this forever.
+  receiptfailbin="$(mktemp -d "$scratch/waspflow-scope-receiptfail-XXXXXX")"
+  cat >"$receiptfailbin/jq" <<'FAILJQ'
+#!/usr/bin/env bash
+marker="$(compgen -G "$WASPFLOW_HOME/lanes/receipt-failure/.scope-started-waspflow-receipt-failure-*.scope" | head -n 1 || true)"
+[[ -n "$marker" ]] && printf marker-observed >"$WASPFLOW_HOME/receipt-failure-marker-observed"
+exit 1
+FAILJQ
+  chmod +x "$receiptfailbin/jq"
+  receipt_provider_marker="$scopework/receipt-provider-ran"
+  RECEIPT_FAIL_UUID="receipt-failure-$$"
+  receipt_fail_unit="waspflow-receipt-failure-${RECEIPT_FAIL_UUID}.scope"
+  receipt_failure_launch() {
+    new_uuid() { printf '%s\n' "$RECEIPT_FAIL_UUID"; }
+    tmux_run_owned_lane_command receipt-failure "$scopework" headless-revise -- \
+      bash -c 'printf provider-ran > "$1"' -- "$receipt_provider_marker"
+  }
+  lane_set receipt-failure status live cwd "$scopework"
+  old_path="$PATH"; export PATH="$receiptfailbin:$PATH"
+  ( set +e; lane_operation_run receipt-failure receipt_failure_launch; echo "$?" >"$scopework/receipt-failure.rc" ) & receipt_failure_pid=$!
+  for _ in $(seq 1 70); do
+    kill -0 "$receipt_failure_pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$receipt_failure_pid" 2>/dev/null; then
+    kill "$receipt_failure_pid" 2>/dev/null || true
+    wait "$receipt_failure_pid" 2>/dev/null || true
+    echo "scope: receipt persistence failure did not return within 7s" >&2
+    exit 1
+  fi
+  wait "$receipt_failure_pid" 2>/dev/null || true
+  export PATH="$old_path"
+  [[ "$(cat "$scopework/receipt-failure.rc")" == 125 ]] \
+    || { echo "scope: receipt persistence failure did not return terminal rc=125" >&2; exit 1; }
+  [[ -f "$scopehome/receipt-failure-marker-observed" ]] \
+    || { echo "scope: receipt persistence probe did not run after scope marker" >&2; exit 1; }
+  [[ ! -e "$receipt_provider_marker" ]] \
+    || { echo "scope: receipt persistence failure ran the provider unsupervised" >&2; exit 1; }
+  for _ in $(seq 1 30); do
+    receipt_active="$(systemctl --user show "$receipt_fail_unit" -p ActiveState --value 2>/dev/null || true)"
+    [[ "$receipt_active" != active ]] && break
+    sleep 0.1
+  done
+  [[ "${receipt_active:-}" != active ]] \
+    || { echo "scope: receipt persistence failure left its test scope active" >&2; exit 1; }
+  jq -e '(.cgroup_scope_receipts // []) == []' "$scopehome/lanes/receipt-failure/state.json" >/dev/null \
+    || { echo "scope: failed receipt was recorded as owned" >&2; exit 1; }
+  lane_operation_run receipt-failure true \
+    || { echo "scope: receipt persistence failure kept the lane operation lock" >&2; exit 1; }
+  rm -rf "$receiptfailbin"
 
   # A preflight-positive but launch-failing systemd-run must execute the original
   # pane command, retain tmux ownership, and record a degraded—not phantom—lane.
