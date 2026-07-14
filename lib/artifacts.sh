@@ -13,8 +13,9 @@
 #
 # What it adds ONLY when you pass `--report <path>` to spawn (opt-in deliverable):
 #   - On idle, verify the report exists and is substantial (>= REPORT_MIN_BYTES).
-#   - If missing, run ONE recovery pass: resume the session with write tools
-#     disabled and ask it to reconstruct the report from transcript + git diff.
+#   - If missing, run ONE recovery pass: resume with workspace-write and, only
+#     when required, the normalized external report parent; reconstruct the
+#     report from transcript + git diff.
 #   - Finalize an honest result: succeeded | recovered | report_missing | failed.
 #
 # What it adds ONLY when you pass `--verify <cmd>` to spawn:
