@@ -421,6 +421,14 @@ codex_turn_mark() {
   jq -rc 'select((.payload.type // .type) == "task_complete") | 1' "$rollout" 2>/dev/null | wc -l
 }
 
+# Count started Codex turns in one rollout. A queued user_message is intentionally
+# not a receipt: only task_started proves Codex left the composer for that turn.
+_codex_task_started_mark() {
+  local rollout="$1"
+  [[ -f "$rollout" ]] || { echo 0; return 0; }
+  jq -rc 'select((.payload.type // .type) == "task_started") | 1' "$rollout" 2>/dev/null | wc -l
+}
+
 # Revise. If the tmux window is live, steer in-pane via paste-buffer; otherwise
 # resume headlessly via `codex exec resume <SID> "<msg>" -o <FILE>`.
 # Args: lane message out_file
@@ -437,9 +445,10 @@ codex_revise() {
   billing_preflight_provider codex || return 1
 
   if tmux_window_exists "$lane"; then
-    # Live in-pane steer. The Enter can race pane state, so VERIFY the turn
-    # actually started by watching the rollout grow, re-sending Enter if not.
-    local target rollout before after attempt j
+    # Live in-pane steer. The Enter can race pane state, so verify a NEW
+    # task_started event, not merely rollout growth: a user_message can remain
+    # queued in Codex's composer without a task having started.
+    local target rollout before after attempt j attempts polls
     target="$(tmux_window_target "$lane")"
     # codex_discover_session is a read-only oracle (no lane_set side effect), so
     # `rollout` may not be cached in lane state. Resolve it the same safe way
@@ -452,23 +461,38 @@ codex_revise() {
     fi
     [[ -n "$rollout" && -f "$rollout" ]] \
       || { err "codex revise: lane '$lane' has a session_id but no resolved rollout file (inconsistent state)"; return 1; }
-    before="$(wc -l <"$rollout" 2>/dev/null || echo 0)"
+    before="$(_codex_task_started_mark "$rollout")"
     tmux send-keys -t "$target" C-u
     sleep 0.3
     tmux_paste_text "$target" "$message"
     sleep 1
-    for attempt in 1 2 3 4 5; do
+    # These bounded defaults are production behavior. The env seams only let
+    # deterministic tests exercise every receipt outcome without waiting.
+    attempts="${WASPFLOW_CODEX_REVISE_ATTEMPTS:-5}"
+    polls="${WASPFLOW_CODEX_REVISE_POLLS:-6}"
+    [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=5
+    [[ "$polls" =~ ^[1-9][0-9]*$ ]] || polls=6
+    for attempt in $(seq 1 "$attempts"); do
       tmux send-keys -t "$target" Enter
-      for j in $(seq 1 6); do
-        after="$(wc -l <"$rollout" 2>/dev/null || echo 0)"
-        # A new turn appends a task_started + the user message; line count grows.
-        [[ "$after" -gt "$before" ]] && return 0
+      for j in $(seq 1 "$polls"); do
+        after="$(_codex_task_started_mark "$rollout")"
+        if [[ "$after" -gt "$before" ]]; then
+          lane_set "$lane" revise_submitted true \
+            revise_submission_state confirmed-task-started \
+            revise_submission_error "" revise_task_started_mark "$after"
+          return 0
+        fi
         sleep 1
       done
       warn "codex revise: steer attempt $attempt didn't start a turn for lane '$lane'; retrying Enter"
     done
-    warn "codex revise: message may not have submitted for lane '$lane' (rollout did not grow)"
-    return 0
+    lane_set "$lane" revise_submitted false \
+      revise_submission_state unconfirmed-no-task-started \
+      revise_submission_error no-task-started revise_task_started_mark "$before"
+    # Keep the caller's completed-turn barrier intact. A human can still submit
+    # the pasted message later, and wait must not mistake the prior idle for it.
+    warn "codex revise: message was not confirmed submitted for lane '$lane' (no new task_started event)"
+    return 1
   fi
 
   # Headless resumed turn. Run from the lane's cwd so any repo context resolves.

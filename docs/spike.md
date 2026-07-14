@@ -44,7 +44,8 @@ Full loop, with real worker output:
 6. **Submit is racy.** `send-keys Enter` can land during hook output / `model:
    loading`, leaving the prompt unsubmitted in the composer. The adapter types
    the prompt, then re-sends Enter until a rollout for the cwd appears (spawn) or
-   the rollout grows (revise).
+   a new rollout `task_started` event appears (revise); queued `user_message`
+   events are not confirmation.
 7. **Revise (headless, after exit)**: `codex exec resume <SID> "<msg>" -o <FILE>`
    re-enters the same session with full context; `-o` gives a clean last message.
    (`codex resume` = interactive; `codex exec resume` = headless.)

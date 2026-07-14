@@ -629,15 +629,12 @@ cmd_wait() {
   # bare `revise x; wait` would return instantly on the previous turn's idle and
   # silently drop the steering instruction.
   #
-  # Barrier signal: revise records revise_barrier_mark = the provider's turn_mark
-  # (session-log line count) at revise time. wait honors an idle reading only once
-  # turn_mark has ADVANCED past that value — i.e. the new turn actually appended a
-  # session event (the pasted user message alone advances it). This keys on the
-  # PROVIDER SESSION LOG, not the pane transcript, so it is immune to the paste
-  # echo growing the transcript. Self-clearing and order-independent: if the
-  # revised turn completes before wait is ever called, turn_mark is already past
-  # the mark, so the barrier clears on the first poll — no stale flag, no false
-  # timeout. A one-time barrier: once satisfied it never re-arms within this call.
+  # Barrier signal: revise records revise_barrier_mark = the provider's completed-
+  # turn mark at revise time. wait honors idle only once that mark advances, so a
+  # prior terminal event cannot satisfy a new live revise. This keys on the
+  # provider session log, not the pane transcript. If the revised turn completes
+  # before wait is called, the mark is already past the barrier and it clears on
+  # the first poll. A queued user message alone must not clear this barrier.
   local barrier_mark
   barrier_mark="$(lane_get "$lane" revise_barrier_mark)"
   local barrier_cleared=0
@@ -898,9 +895,9 @@ _revise_one() {
   load_provider "$provider"
   if tmux_window_exists "$lane"; then
     log "revise: steering live pane for lane '$lane'"
-    # Live steer starts a NEW turn asynchronously; record the provider turn_mark
-    # (session-log line count) now so a following `wait` won't honor the PRIOR
-    # turn's stale idle until turn_mark advances past this (see cmd_wait barrier).
+    # Live steer starts a NEW turn asynchronously; record the provider completed-
+    # turn mark now so a following `wait` will not honor the PRIOR turn's stale
+    # idle until the new turn completes (see cmd_wait barrier).
     # Headless resume (else branch) blocks until the reply, so it needs no barrier.
     local mark
     mark="$("${provider}_turn_mark" "$lane" 2>/dev/null || echo 0)"

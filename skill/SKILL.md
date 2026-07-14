@@ -35,7 +35,7 @@ codex [--run]`. Serious repo needing policy: `waspflow init --profile serious-re
 ```bash
 waspflow spawn --provider codex --lane parser -- "Fix the off-by-one in src/pager.ts and add a test"
 waspflow wait parser --timeout 600        # block until it finishes its turn (see "trust wait" below)
-waspflow peek parser --lines 60           # de-escaped tail of the pane; or just read the changed files
+waspflow peek parser --lines 60           # diagnosis/progress context; not a completion oracle
 waspflow revise parser -- "Good. Now also handle the empty-input case."   # steers the LIVE session
 waspflow wait parser
 waspflow reap parser
@@ -131,7 +131,7 @@ waspflow revise <lane> --out /tmp/reply.txt -- "Summarize what you changed."
 
 ## Trust `wait`, etiquette
 
-`wait` reads the provider's session log for turn-end (Claude `end_turn`; Codex
+`wait` polls the provider's session log for turn-end (Claude `end_turn`; Codex
 `task_complete`; Grok `turn_ended`) — no need to poll `peek` to know an agent is
 done. Exit codes: `0` idle (done), `1` timeout, `4` **stalled** — the worker produced
 no output for `WASPFLOW_STALL_SECONDS` (default 45) while its turn hadn't ended.
@@ -144,10 +144,16 @@ to answer, then `wait` again — or raise `WASPFLOW_STALL_SECONDS` if the turn i
 slow. The trigger is the stall itself, not any specific prompt wording (robust to new
 or reworded prompts).
 
+For a live Codex lane, `revise` returns zero only after a new provider-log
+`task_started` event confirms the instruction left the composer. A nonzero result
+means the submission is unconfirmed (including a queued `user_message`); inspect or
+attach before deciding what to do next. Its receipt is recorded in `status` as
+`revise_submitted`, `revise_submission_state`, and `revise_submission_error`.
+
 For a native background worker whose calling harness needs a completion signal,
-run `waspflow wait <lane> --reap`: it blocks until the provider oracle verifies
-idle, then returns the final reap result. The process exit is the notification;
-waspflow does not run a daemon or promise callbacks.
+run `waspflow wait <lane> --reap`: it blocks while polling until the provider oracle
+verifies idle, then returns the final reap result. The process exit is the
+notification; waspflow does not run a daemon, event subscription, or callbacks.
 
 `waspflow park <lane>` is the non-destructive alternative for an owned,
 terminal-idle resumable lane: it stops only the recorded tmux window and keeps

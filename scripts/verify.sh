@@ -477,6 +477,85 @@ JSONL
   rm -rf "$cxdir"
 )
 
+# Live Codex revise needs a receipt stronger than rollout growth: a user_message
+# can be queued while the existing task is still active. Exercise the real adapter
+# with a deterministic tmux boundary (the suite's real-tmux uses remain on its
+# isolated socket above), no provider process or production tmux server involved.
+(
+  export WASPFLOW_HOME="$state_home"
+  revise_sessions="$(mktemp -d "$scratch/waspflow-codex-revise-XXXXXX")"
+  export CODEX_SESSIONS_DIR="$revise_sessions"
+  export WASPFLOW_CODEX_REVISE_ATTEMPTS=1 WASPFLOW_CODEX_REVISE_POLLS=1
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/codex.sh"
+  billing_preflight_provider() { return 0; }
+  tmux_window_exists() { return 0; }
+  tmux_window_target() { printf 'fake:0\n'; }
+  tmux_paste_text() { :; }
+  sleep() { :; }
+
+  revise_sid="44444444-4444-4444-4444-444444444444"
+  mkdir -p "$revise_sessions/2026/07/14"
+  revise_rollout="$revise_sessions/2026/07/14/rollout-2026-07-14T00-00-01-$revise_sid.jsonl"
+  reset_revise_rollout() {
+    cat >"$revise_rollout" <<JSONL
+{"type":"session_meta","payload":{"id":"$revise_sid","cwd":"$fixture"}}
+{"type":"event_msg","payload":{"type":"task_complete"}}
+JSONL
+    lane_set codex-live-revise provider codex status live cwd "$fixture" \
+      session_id "$revise_sid" rollout "$revise_rollout" revise_barrier_mark 1
+  }
+  enter_count=0
+  revise_event=""
+  tmux() {
+    local last="${!#}"
+    if [[ "$last" == Enter ]]; then
+      ((++enter_count))
+      case "$revise_event" in
+        queued)
+          printf '%s\n' '{"type":"event_msg","payload":{"type":"user_message"}}' >>"$revise_rollout"
+          ;;
+        started)
+          if [[ "$enter_count" -eq 1 ]]; then
+            printf '%s\n' '{"type":"event_msg","payload":{"type":"task_started"}}' >>"$revise_rollout"
+          fi
+          ;;
+      esac
+    fi
+    return 0
+  }
+
+  # No rollout event: adapter must fail, mark the receipt unconfirmed, and leave
+  # the caller-established completed-turn barrier untouched.
+  reset_revise_rollout; enter_count=0; revise_event=""
+  set +e; codex_revise codex-live-revise "retry this"; rc=$?; set -e
+  [[ "$rc" -ne 0 ]] || { echo "codex revise: no event must return nonzero" >&2; exit 1; }
+  jq -e '.revise_submitted == "false" and .revise_submission_state == "unconfirmed-no-task-started" and .revise_submission_error == "no-task-started" and .revise_barrier_mark == "1"' \
+    "$(lane_state_file codex-live-revise)" >/dev/null \
+    || { echo "codex revise: no-event receipt/barrier is not truthful" >&2; exit 1; }
+
+  # A queued user message grows the file but is NOT task_started, so it must use
+  # the same nonzero/unconfirmed path rather than claiming live steering worked.
+  reset_revise_rollout; enter_count=0; revise_event=queued
+  set +e; codex_revise codex-live-revise "retry this"; rc=$?; set -e
+  [[ "$rc" -ne 0 ]] || { echo "codex revise: queued user_message must return nonzero" >&2; exit 1; }
+  [[ "$(_codex_task_started_mark "$revise_rollout")" -eq 0 ]] \
+    || { echo "codex revise: queued user_message counted as task_started" >&2; exit 1; }
+  jq -e '.revise_submitted == "false" and .revise_submission_state == "unconfirmed-no-task-started"' \
+    "$(lane_state_file codex-live-revise)" >/dev/null \
+    || { echo "codex revise: queued receipt is not truthful" >&2; exit 1; }
+
+  # Only a new task_started event confirms receipt; preserve the same live path.
+  reset_revise_rollout; enter_count=0; revise_event=started
+  codex_revise codex-live-revise "retry this"
+  jq -e '.revise_submitted == "true" and .revise_submission_state == "confirmed-task-started" and .revise_submission_error == "" and .revise_task_started_mark == "1"' \
+    "$(lane_state_file codex-live-revise)" >/dev/null \
+    || { echo "codex revise: task_started receipt was not recorded" >&2; exit 1; }
+  rm -rf "$revise_sessions"
+)
+
 # Fan-in ledger — `close` sets outcome + requires provenance; `captured` reports
 # CAPTURED/UNIQUE/PARTIAL by CONTENT. Both are trust-critical for fleet cleanup
 # yet had no behavioral coverage. Deterministic, no agent needed.
@@ -596,8 +675,8 @@ JSONL
 
 # wait/revise stale-idle barrier (2026-07-09, root-caused on a live run). After a
 # live revise, wait must NOT honor the PRIOR turn's idle. The barrier keys on the
-# provider turn_mark (session-log line count): wait honors idle only once turn_mark
-# has advanced past revise_barrier_mark. This drives the REAL cmd_wait against a
+# provider completed-turn mark: wait honors idle only once turn_mark has advanced
+# past revise_barrier_mark. This drives the REAL cmd_wait against a
 # fake provider whose turn_mark + idle we control via sentinel files — the actual
 # shipped gate logic, no live agent, no quota.
 (

@@ -53,7 +53,7 @@ waspflow spawn --provider codex --lane fixbug -- \
 # The calling harness receives the final reap result directly.
 waspflow wait fixbug --reap
 
-# Read the tail of its pane.
+# Inspect the pane only when you need diagnosis or progress context.
 waspflow peek fixbug
 
 # Give it another instruction in the same session.
@@ -160,9 +160,9 @@ config shape.
 | `spawn --provider <claude\|codex\|grok> --lane <name> [opts] -- <task>` | Start a durable worker lane |
 | `exec --provider <claude\|codex\|grok> [opts] [-o FILE] -- <task>` | Headless one-shot: run, return, leave no lane |
 | `demo --provider <claude\|codex\|grok> [--run]` | Show or run a safe first demo |
-| `wait <lane> [--reap]` | Wait until a worker finishes; `--reap` then returns the final reap result |
-| `peek <lane>` | Show the tail of the worker pane or transcript |
-| `revise <lane> -- <message>` | Send another instruction to the same session |
+| `wait <lane> [--reap]` | Poll the provider log until a worker finishes; `--reap` then returns the final reap result |
+| `peek <lane>` | Show the tail of the worker pane or transcript for diagnosis/progress context |
+| `revise <lane> -- <message>` | Send another instruction to the same session; nonzero means live submission was not confirmed |
 | `reap <lane>` | Close the pane, verify outputs, and finalize state |
 | `park <lane>` | Close only a verified-idle owned tmux window; preserve the resumable lane |
 | `gc [--lane-age S] [--apply]` | Dry-run fleet selection for safely parkable old lanes; `--apply` parks them |
@@ -267,13 +267,16 @@ If the pane has exited, `revise` resumes the saved session headlessly:
 - Codex: `codex exec resume <session-id> "<message>" -o <file>`
 - Grok: `grok -p "<message>" --resume <session-id> --always-approve`
 
-## Blocking Completion Notification
+## Provider-log Completion Polling
 
 For a native, backgrounded worker, use `waspflow wait <lane> --reap`. The
-calling harness blocks on that process and receives the normal final reap result
-only after the provider terminal oracle has confirmed the lane is idle. There is
-no waspflow daemon, callback endpoint, or claimed asynchronous notification
-delivery: process completion is the notification mechanism.
+calling harness blocks while `wait` polls the provider session log at its
+configured interval, and receives the normal final reap result only after the
+provider terminal oracle confirms the lane is idle. There is no waspflow daemon,
+event subscription, callback endpoint, or claimed asynchronous notification
+delivery: process completion is the notification mechanism. Use `peek` after a
+nonzero `wait` result (especially rc 4 stalled) to diagnose the exception; it is
+not the completion oracle.
 
 ## Parking and Conservative Fleet GC
 
