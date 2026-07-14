@@ -777,12 +777,6 @@ _park_one_locked() {
   fi
   tmux_kill_owned_lane_window "$lane" \
     || { err "park: lane '$lane' ownership changed before its window could be stopped"; return 1; }
-  # Same ownership-verified descendant cleanup as reap (see tmux_kill_owned_lane_scope):
-  # the window stop above only reaches the pane's direct child, so a detached/setsid
-  # grandchild would otherwise keep running under a "parked" lane. Resumability lives
-  # entirely in the provider's on-disk session state, never in a live process, so
-  # killing the scope here is exactly as safe as it is on reap.
-  tmux_kill_owned_lane_scope "$lane"
   lane_set "$lane" status "parked" parked_at "$(date +%s)" park_reason "$reason"
   log "park: lane '$lane' parked — transcript, state, session, worktree, and artifacts preserved"
 }
