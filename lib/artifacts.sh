@@ -299,16 +299,40 @@ _artifacts_run_command() {
   echo "$state"
 }
 
-# Run ONE write-disabled recovery turn to reconstruct the report from evidence.
-# Uses the provider's headless revise path (resume the same session). The
-# provider adapters disable write tools for recovery via a guarded prompt; for
-# Claude we additionally pass --disallowedTools through the revise --arg channel
-# if supported. Args: lane provider report_path
+# Return the physical parent directory where recovery may write its one required
+# report. `--report` paths are already absolute in lane state; resolving here
+# keeps the capability explicit and prevents a lexical `..` path reaching a
+# provider command line. Args: report_path
+_artifacts_report_parent() {
+  local report="$1" parent
+  parent="$(dirname "$report")"
+  (cd -P "$parent" && pwd -P)
+}
+
+# Run ONE write-enabled recovery turn to reconstruct the report from evidence.
+# Uses the provider's headless revise path (resume the same session), granting
+# only the normalized parent of the required report when a provider needs an
+# explicit external write capability. Args: lane provider report_path
 _artifacts_recover() {
-  local lane="$1" provider="$2" report="$3" cwd transcript dir
+  local lane="$1" provider="$2" report="$3" cwd transcript dir report_parent report_parent_raw
   cwd="$(lane_get "$lane" cwd)"
   transcript="$(lane_get "$lane" transcript)"
   dir="$(lane_dir "$lane")"
+  report_parent_raw="$(dirname "$report")"
+  if [[ -d "$report_parent_raw" ]]; then
+    report_parent="$(_artifacts_report_parent "$report")" || {
+      err "lane '$lane': cannot resolve required report parent for recovery ($report)"
+      return 1
+    }
+  elif [[ "$report" == "$cwd/"* ]]; then
+    # Preserve ordinary workspace-write behavior for a report whose in-workspace
+    # parent does not exist yet: recovery can create it without another grant.
+    # Do not make the analogous external case broader by granting an ancestor.
+    report_parent=""
+  else
+    err "lane '$lane': required external report parent does not exist ($report_parent_raw)"
+    return 1
+  fi
 
   local recovery_prompt
   recovery_prompt="Your previous turn finished without writing the required report to:
@@ -328,5 +352,5 @@ missing. End with the verbatim output of \`git status --short\`."
 
   # The window has usually exited by finalize time; revise resumes headlessly.
   # If still live, the in-pane steer also works (the agent writes the file).
-  "${provider}_revise" "$lane" "$recovery_prompt" "$dir/recovery.log" >/dev/null 2>&1 || true
+  "${provider}_revise" "$lane" "$recovery_prompt" "$dir/recovery.log" "$report_parent" >/dev/null 2>&1 || true
 }

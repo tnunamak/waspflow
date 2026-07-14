@@ -1015,10 +1015,16 @@ FAKE
 
 # Exited-lane revise/recovery launches a fresh provider process. The original
 # receipt must cross that boundary too, and resolved MCP flags must remain last
-# so caller pass-through config cannot undo the isolation policy.
+# so caller pass-through config cannot undo the isolation policy. A report
+# recovery may add only its normalized report parent; an ordinary revise must
+# not gain any unrelated external write access.
 (
   resumebin="$(mktemp -d "$scratch/waspflow-mcp-resume-bin-XXXXXX")"
   resumehome="$(mktemp -d "$scratch/waspflow-mcp-resume-home-XXXXXX")"
+  reportdir="$(mktemp -d "$scratch/waspflow-report-parent-XXXXXX")"
+  forbidden_dir="$(mktemp -d "$scratch/waspflow-forbidden-parent-XXXXXX")"
+  normalized_reportdir="$(cd -P "$reportdir" && pwd -P)"
+  reportdir_with_dotdot="$reportdir/../$(basename "$reportdir")"
   argvfile="$resumebin/argv" envfile="$resumebin/env"
   cat >"$resumebin/codex" <<'FAKE'
 #!/usr/bin/env bash
@@ -1055,6 +1061,46 @@ FAKE
   grep -qx 'mcp_servers.alpha.enabled=false' "$argvfile" \
     && grep -qx 'mcp_servers.added-after-spawn.enabled=false' "$argvfile" \
     || { echo "codex resume: live MCP receipt was not refreshed/reapplied" >&2; exit 1; }
+  ! grep -qx -- '--add-dir' "$argvfile" \
+    || { echo "codex revise: ordinary revise gained external write access" >&2; exit 1; }
+
+  # The recovery caller passes a normalized capability. It produces one exact
+  # --add-dir pair, not the lexical source path and not any unrelated directory.
+  codex_revise codex-resume prompt "$resumebin/codex-recovery-out" "$normalized_reportdir"
+  [[ "$(grep -Fxc -- '--add-dir' "$argvfile")" -eq 1 ]] \
+    || { echo "codex recovery: expected exactly one external write capability" >&2; exit 1; }
+  [[ "$(head -n 4 "$argvfile")" == "$(printf 'exec\n--add-dir\n%s\nresume' "$normalized_reportdir")" ]] \
+    || { echo "codex recovery: --add-dir must be scoped to codex exec before resume" >&2; exit 1; }
+  grep -A1 -Fx -- '--add-dir' "$argvfile" | tail -n 1 | grep -Fx -- "$normalized_reportdir" >/dev/null \
+    || { echo "codex recovery: report parent capability was not passed exactly" >&2; exit 1; }
+  ! grep -Fx -- "$reportdir_with_dotdot" "$argvfile" >/dev/null \
+    || { echo "codex recovery: lexical report parent escaped command boundary" >&2; exit 1; }
+  ! grep -Fx -- "$forbidden_dir" "$argvfile" >/dev/null \
+    || { echo "codex recovery: unrelated external directory was granted" >&2; exit 1; }
+  codex_revise codex-resume prompt "$resumebin/codex-unnormalized-out" "$reportdir_with_dotdot" >/dev/null 2>&1 \
+    && { echo "codex recovery: unnormalized report parent was accepted" >&2; exit 1; }
+  workspace_reportdir="$fixture/existing-report-dir"; mkdir -p "$workspace_reportdir"
+  codex_revise codex-resume prompt "$resumebin/codex-workspace-recovery-out" "$workspace_reportdir"
+  ! grep -qx -- '--add-dir' "$argvfile" \
+    || { echo "codex recovery: workspace report parent received a redundant external grant" >&2; exit 1; }
+
+  # Artifact recovery, not ordinary revise, is the only caller that derives
+  # this capability. Its report path may have lexical components in old lane
+  # state, but the provider receives the normalized parent.
+  # shellcheck disable=SC1090
+  source "$root/lib/artifacts.sh"
+  recovery_capability_file="$resumebin/recovery-capability"
+  recovery_probe_revise() { printf '%s\n' "$4" >"$recovery_capability_file"; }
+  lane_set recovery-probe cwd "$fixture" transcript "$resumebin/transcript" \
+    report "$reportdir_with_dotdot/recovered.md"
+  _artifacts_recover recovery-probe recovery_probe "$reportdir_with_dotdot/recovered.md"
+  [[ "$(cat "$recovery_capability_file")" == "$normalized_reportdir" ]] \
+    || { echo "report recovery: normalized report parent was not threaded to provider" >&2; exit 1; }
+  lane_set recovery-workspace cwd "$fixture" transcript "$resumebin/transcript" \
+    report "$fixture/not-created-yet/recovered.md"
+  _artifacts_recover recovery-workspace recovery_probe "$fixture/not-created-yet/recovered.md"
+  [[ "$(cat "$recovery_capability_file")" == "" ]] \
+    || { echo "report recovery: missing workspace parent gained an external capability" >&2; exit 1; }
 
   # shellcheck disable=SC1090
   source "$root/lib/providers/claude.sh"
@@ -1070,7 +1116,7 @@ FAKE
   grep -qx -- '--strict-mcp-config' "$argvfile" && grep -qx false "$envfile" \
     && [[ "$(tail -n 2 "$argvfile")" == $'--\nprompt' ]] \
     || { echo "claude resume: MCP receipt was not reapplied" >&2; exit 1; }
-  rm -rf "$resumebin" "$resumehome"
+  rm -rf "$resumebin" "$resumehome" "$reportdir" "$forbidden_dir"
 )
 
 # Public parsing + lane receipts: default auto reaches the adapter and records

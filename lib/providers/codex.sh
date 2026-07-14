@@ -429,11 +429,21 @@ _codex_task_started_mark() {
   jq -rc 'select((.payload.type // .type) == "task_started") | 1' "$rollout" 2>/dev/null | wc -l
 }
 
+# Normalize an existing directory without resolving a report filename. This is
+# the capability boundary for external recovery reports: the command line must
+# receive a physical directory, never a lexical path that can contain `..`.
+_codex_normalize_directory() {
+  local directory="$1"
+  (cd -P "$directory" && pwd -P)
+}
+
 # Revise. If the tmux window is live, steer in-pane via paste-buffer; otherwise
-# resume headlessly via `codex exec resume <SID> "<msg>" -o <FILE>`.
-# Args: lane message out_file
+# resume headlessly via `codex exec resume <SID> "<msg>" -o <FILE>`. The optional
+# fourth argument is a normalized report-parent capability for recovery only.
+# Ordinary revisions never supply it and retain workspace-only access.
+# Args: lane message out_file [recovery_report_parent]
 codex_revise() {
-  local lane="$1" message="$2" out_file="${3:-}"
+  local lane="$1" message="$2" out_file="${3:-}" recovery_report_parent="${4:-}"
   local sid cwd model
   sid="$(codex_discover_session "$lane")"
   [[ -n "$sid" ]] || { err "no session_id for lane '$lane' (has it run a turn yet?)"; return 1; }
@@ -497,14 +507,33 @@ codex_revise() {
 
   # Headless resumed turn. Run from the lane's cwd so any repo context resolves.
   # Grant workspace-write + non-interactive approvals explicitly so a resumed
-  # turn can write files (e.g. a recovery report) regardless of the user's
-  # default sandbox config — keeps behavior portable, not reliant on a permissive
-  # global config.
+  # turn can write files inside its workspace regardless of the user's default
+  # sandbox config. Recovery may additionally write its one required external
+  # report directory; ordinary revise calls have no such capability.
   local model_args=()
   [[ -n "$model" ]] && model_args=(-m "$model")
   codex_load_process_mcp_policy "$lane" "$cwd" revise || return 1
+  local recovery_report_dir="" normalized_cwd
+  local -a recovery_dir_args=()
+  if [[ -n "$recovery_report_parent" ]]; then
+    recovery_report_dir="$(_codex_normalize_directory "$recovery_report_parent")" || {
+      err "codex revise: recovery report parent is not an accessible directory: $recovery_report_parent"
+      return 1
+    }
+    [[ "$recovery_report_parent" == "$recovery_report_dir" ]] || {
+      err "codex revise: recovery report parent must be normalized: $recovery_report_parent"
+      return 1
+    }
+    normalized_cwd="$(_codex_normalize_directory "$cwd")" || {
+      err "codex revise: lane '$lane' has an inaccessible working directory: $cwd"
+      return 1
+    }
+    if [[ "$recovery_report_dir" != "$normalized_cwd" && "$recovery_report_dir" != "$normalized_cwd/"* ]]; then
+      recovery_dir_args=(--add-dir "$recovery_report_dir")
+    fi
+  fi
   local tmp; tmp="${out_file:-$(mktemp)}"
-  ( cd "${cwd:-$PWD}" && codex exec resume "$sid" "$message" "${model_args[@]}" \
+  ( cd "${cwd:-$PWD}" && codex exec "${recovery_dir_args[@]}" resume "$sid" "$message" "${model_args[@]}" \
       -c sandbox_mode=workspace-write -c approval_policy=never "${MCP_ARGV[@]}" -o "$tmp" ) \
     >/dev/null 2>&1
   if [[ -z "$out_file" ]]; then cat "$tmp"; rm -f "$tmp"; fi
