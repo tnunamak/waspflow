@@ -138,7 +138,10 @@ waspflow reap fix                   # reuses the checkpoint if its workspace is 
 
 `verify` writes `verify-command.txt`, stdout/stderr, and `verify-result.json`
 under the lane directory, including `failure_class` (`task`, `prepare`,
-`timeout`, `infra`, or `none`). It does not change the lane's lifecycle or
+`timeout`, `infra`, `invalid_oracle`, `pre_existing`, or `none`). A failed
+checkpoint in an isolated lane also runs the oracle in a temporary detached
+fork-point worktree, so an already-failing baseline is recorded as
+`pre_existing`. It does not change the lane's lifecycle or
 result. Reap reuses a checkpoint only when a content-sensitive Git workspace
 fingerprint (HEAD, tracked changes, and untracked files) still matches; otherwise
 it runs the contract again before cleanup. Non-Git workspaces are deliberately
@@ -149,6 +152,11 @@ For new isolated lanes it compares the fork point with committed and working-tre
 changes, looking for conventional `test`/`spec`/`verify` paths and paths named in
 the command. It warns but never blocks, and reports `unknown` for lanes without
 a trustworthy recorded fork point.
+
+Use `--verify-strength suite` or `--verify-strength smoke` to declare the
+oracle class in the append-only receipt; waspflow never guesses it from the
+command. Receipts live at `$WASPFLOW_HOME/receipts.jsonl` and are emitted when a
+lane is reaped.
 
 ## Check the Project Before Launching More Workers
 
@@ -222,6 +230,7 @@ Useful `spawn` options:
 - `--report <path>` requires a written deliverable before `reap` succeeds.
 - `--verify <cmd>` configures an oracle; use `verify <lane>` before destructive reap.
 - `--prepare <cmd>` runs setup before that oracle; `--verify-timeout <seconds>` bounds both commands.
+- `--verify-strength <suite|smoke>` declares receipt comparability; it is never inferred.
 - `--model <id>` selects a provider model.
 - `--effort <none|minimal|low|medium|high|xhigh|max>` passes reasoning effort **exactly** where supported (never silent demotion; Codex accepts `xhigh`).
 - `--mcp <auto|none|inherit>` controls worker MCP exposure. `auto` is the default and is MCP-minimal where the provider supports it; use `inherit` only when the task needs the current provider configuration.

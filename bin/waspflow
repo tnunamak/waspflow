@@ -135,6 +135,8 @@ Spawn opts:
   --verify-name <s>  label for verification receipts (default: verify)
   --verify-timeout <seconds>
                     verification timeout in seconds (default: 1800)
+  --verify-strength <suite|smoke>
+                    declare oracle strength for the receipt (never inferred)
   --prepare <cmd>    run setup command before --verify
   --arg <flag>       pass an extra arg to the provider CLI
 
@@ -174,7 +176,7 @@ split_after_ddash() {
 
 cmd_spawn() {
   local provider="" lane="" model="" cwd="$PWD" isolate=0 effort="" mcp="auto" report="" no_recovery=0
-  local verify_command="" verify_name="verify" verify_timeout=1800 prepare_command=""
+  local verify_command="" verify_name="verify" verify_timeout=1800 prepare_command="" verify_strength=""
   local op_id="" OP_ID="" OP_MODE=""
   local -a extra=()
   split_after_ddash "$@"
@@ -197,6 +199,7 @@ cmd_spawn() {
       --verify) verify_command="${2:-}"; shift 2 ;;
       --verify-name) verify_name="${2:-}"; shift 2 ;;
       --verify-timeout) verify_timeout="${2:-}"; shift 2 ;;
+      --verify-strength) verify_strength="${2:-}"; shift 2 ;;
       --prepare) prepare_command="${2:-}"; shift 2 ;;
       --arg)      extra+=("${2:-}"); shift 2 ;;   # repeatable pass-through to the agent CLI
       "")         shift ;;
@@ -236,6 +239,10 @@ cmd_spawn() {
   elif [[ -n "$prepare_command" ]]; then
     die "spawn: --prepare requires --verify"
   fi
+  [[ -z "$verify_strength" || "$verify_strength" == suite || "$verify_strength" == smoke ]] \
+    || die "spawn: --verify-strength must be suite or smoke (got: $verify_strength)"
+  [[ -z "$verify_strength" || -n "$verify_command" ]] \
+    || die "spawn: --verify-strength requires --verify"
 
   require_cmd tmux jq
   # Start the dedicated server before opening the lane-operation lock. A tmux
@@ -265,7 +272,9 @@ cmd_spawn() {
 
   load_provider "$provider"
 
-  validate_model "$provider" "$model" spawn
+  local model_validation_scope
+  model_validation_scope="$(model_validation_scope "$provider" "${extra[@]}")"
+  validate_model "$provider" "$model" spawn "$model_validation_scope"
   validate_mcp_extra "$provider" "$mcp" "${extra[@]}"
   "${provider}_preflight" || die "spawn aborted: $provider preflight failed"
 
@@ -311,6 +320,7 @@ cmd_spawn() {
   case "$provider" in claude|grok) recorded_sid="$session_id" ;; esac
   # When --op was used, record policy/catalog pins for lane→evidence traceability.
   local policy_version="" catalog_ref="" policy_file=""
+  local task_family="" constraint_family=""
   if [[ -n "${OP_ID:-}" ]]; then
     ops_load 2>/dev/null || true
     if [[ -n "${OPS_POLICY_JSON:-}" ]]; then
@@ -318,7 +328,30 @@ cmd_spawn() {
       catalog_ref="$(jq -r '.catalog_ref // empty' <<<"$OPS_POLICY_JSON")"
     fi
     policy_file="${OPS_POLICY_FILE:-}"
+    local op_row
+    op_row="$(ops_get_point "$OP_ID" 2>/dev/null || true)"
+    task_family="$(jq -r '.task_family // empty' <<<"$op_row" 2>/dev/null || true)"
+    constraint_family="$(jq -r '.constraint_family // empty' <<<"$op_row" 2>/dev/null || true)"
   fi
+
+  local endpoint_profile="default" raw_provider_args="false" codex_profile="" codex_oss=0 arg
+  [[ ${#extra[@]} -gt 0 ]] && raw_provider_args="true"
+  if [[ "$provider" == codex ]]; then
+    local i
+    for ((i=0; i<${#extra[@]}; i++)); do
+      arg="${extra[$i]}"
+      case "$arg" in
+        --oss) codex_oss=1 ;;
+        --profile=*) codex_profile="${arg#--profile=}" ;;
+        --profile|-p) codex_profile="${extra[$((i + 1))]:-default}" ;;
+      esac
+    done
+    [[ "$codex_oss" -eq 1 ]] && endpoint_profile="oss" || endpoint_profile="${codex_profile:-default}"
+  fi
+  local billing_path auth_principal lane_uuid
+  billing_path="$(billing_path_v1 "$provider" "$endpoint_profile" "$raw_provider_args")"
+  auth_principal="$(billing_auth_principal "$provider")"
+  lane_uuid="$(new_uuid)"
 
   # Runtime receipt enforcement is versioned at launch. Existing lanes with no
   # marker retain their historical lifecycle semantics; new Codex lanes must
@@ -335,14 +368,32 @@ cmd_spawn() {
   [[ -n "$wt_path" ]] && verify_fork_point="$(git -C "$work_cwd" rev-parse HEAD 2>/dev/null || true)"
   lane_set "$lane" \
     provider "$provider" \
+    lane_uuid "$lane_uuid" \
+    surface "tui" \
     status "live" \
     result "" \
+    outcome "" \
+    outcome_into "" \
+    outcome_by "" \
+    outcome_reason "" \
+    outcome_epoch "" \
+    receipt_emitted "false" \
+    receipt_id "" \
     cwd "$work_cwd" \
     origin_cwd "$cwd" \
     model "$model" \
     model_requested "$model" \
     model_passed "$model" \
     effort "$effort" \
+    endpoint_profile "$endpoint_profile" \
+    raw_provider_args "$raw_provider_args" \
+    auth_principal "$auth_principal" \
+    billing_path "$billing_path" \
+    model_validation_state "$MODEL_VALIDATION_STATE" \
+    model_validation_source "$MODEL_VALIDATION_SOURCE" \
+    model_validation_scope "$MODEL_VALIDATION_SCOPE" \
+    model_validation_at "$MODEL_VALIDATION_AT" \
+    surface_changed "false" \
     mcp_requested "$mcp" \
     mcp_resolved "$MCP_RESOLVED" \
     mcp_warning "$MCP_WARNING" \
@@ -354,8 +405,18 @@ cmd_spawn() {
     runtime_settings_state "unknown" \
     runtime_refresh_state "pending" \
     runtime_refresh_error "" \
+    runtime_model "" \
+    runtime_effort "" \
+    runtime_settings_source "" \
+    runtime_settings_observed_at "" \
+    runtime_settings_match_requested "" \
+    runtime_settings_accepted_at "" \
+    runtime_settings_accepted_reason "" \
+    runtime_settings_accepted_observed_at "" \
     op "${OP_ID:-}" \
     op_mode "${OP_MODE:-}" \
+    task_family "$task_family" \
+    constraint_family "$constraint_family" \
     policy_version "$policy_version" \
     catalog_ref "$catalog_ref" \
     policy_file "$policy_file" \
@@ -372,7 +433,22 @@ cmd_spawn() {
     verify_command "$verify_command" \
     verify_name "$verify_name" \
     verify_timeout "$verify_timeout" \
+    verify_strength "$verify_strength" \
     prepare_command "$prepare_command" \
+    verify_runs "[]" \
+    verify_state "" \
+    verify_failure_class "" \
+    verify_test_files_changed "" \
+    verify_checkpoint_epoch "" \
+    verify_checkpoint_fingerprint "" \
+    verify_epoch "" \
+    verify_exit_code "" \
+    prepare_state "" \
+    prepare_exit_code "" \
+    prepare_epoch "" \
+    baseline_oracle_ran "" \
+    baseline_oracle_state "" \
+    baseline_oracle_reason "" \
     spawn_epoch "$(date +%s)" \
     prompt "$prompt"
 
@@ -1066,6 +1142,7 @@ _revise_one() {
     lane_set "$lane" revise_barrier_mark "$mark"
   else
     log "revise: lane '$lane' window exited; resuming session headlessly"
+    lane_set "$lane" surface_changed "true"
   fi
   "${provider}_revise" "$lane" "$message" "$out"
 }
@@ -1129,7 +1206,8 @@ cmd_verify() {
 
 _verify_one() {
   local lane="$1" verify_state
-  verify_state="$(artifacts_run_verify_checkpoint "$lane")"
+  verify_state="$(artifacts_run_verify_checkpoint "$lane" checkpoint)"
+  [[ "$verify_state" == passed ]] || artifacts_classify_pre_existing "$lane"
   case "$verify_state" in
     passed)
       log "verify: lane '$lane' checkpoint passed"
@@ -1183,6 +1261,7 @@ _reap_one_locked() {
   # session, and needs the worktree intact to read the diff + write the report.
   local result; result="$(artifacts_finalize "$lane" "$provider")"
   result="$(artifacts_verify "$lane" "$result")"
+  artifacts_emit_receipt_v1 "$lane" "$result" || warn "reap: could not emit receipt for lane '$lane'"
 
   if tmux_window_exists "$lane"; then
     tmux kill-window -t "$(tmux_window_target "$lane")" 2>/dev/null || true
@@ -1254,6 +1333,15 @@ cmd_doctor() {
       echo "  [warn] codex model proxy $url -> $code (start your Codex proxy, or unset WASPFLOW_CODEX_BACKEND_HEALTH_URL)"; fi
   fi
   billing_report_auth
+  if command -v clawmeter >/dev/null 2>&1; then
+    local quota_check
+    quota_check="$(quota_observation_v1 codex)"
+    if [[ "$(jq -r '.state' <<<"$quota_check")" == absent ]]; then
+      echo "  [warn] clawmeter codex envelope: $(jq -r '.reason' <<<"$quota_check")"
+    else
+      echo "  [ok]   clawmeter codex envelope shape"
+    fi
+  fi
   [[ "$agent_ok" -eq 1 ]] || ok=0
   [[ "$ok" -eq 1 ]] || {
     echo "  -> missing prerequisites"

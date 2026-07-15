@@ -98,20 +98,68 @@ guard_cwd() {
   fi
 }
 
-# Fail a bad --model FAST, with the valid set, instead of 30s into the run (or —
-# worse — silently running the wrong model). Providers own model discovery; a
-# live provider query is preferred and a local cache is only its fail-open
-# fallback. If neither can enumerate, the CLI remains the real backstop.
-# Args: provider model verb
+# Ask whether a provider's default catalog can speak for this invocation. Codex
+# enumerates bare `codex debug models`; profiles, OSS mode, config, and raw
+# pass-through flags can select a different catalog.
+# Args: provider raw_provider_args...
+model_validation_scope() {
+  local provider="$1" arg; shift
+  [[ "$provider" == codex ]] || { printf 'default\n'; return 0; }
+  for arg in "$@"; do
+    case "$arg" in
+      --oss|--profile|--profile=*|-p|-p*|-c|-c*|--config|--config=*)
+        printf 'mismatched\n'; return 0
+        ;;
+    esac
+  done
+  # Any raw provider arg is an unbounded downstream override, even if this
+  # version does not recognize its spelling yet.
+  [[ $# -gt 0 ]] && { printf 'mismatched\n'; return 0; }
+  printf 'default\n'
+}
+
+# Validate a requested model using the provider's evidence-carrying protocol.
+# The globals are deliberately the parsed observation, so spawn can persist the
+# exact decision after it has created a durable lane record; exec stays stateless.
+# Args: provider model verb query_scope(default|mismatched)
 validate_model() {
-  local provider="$1" model="$2" verb="${3:-spawn}"
-  [[ -n "$model" ]] || return 0
-  local valid; valid="$("${provider}_valid_models" 2>/dev/null || true)"
-  [[ -n "$valid" ]] || return 0                       # fail open: nothing to check against
-  grep -qxF "$model" <<<"$valid" && return 0
-  err "$verb: model '$model' is not available for $provider on the current auth."
-  err "  valid models: $(tr '\n' ' ' <<<"$valid" | tr -s ' ' | sed 's/ /, /g; s/, $//')"
-  die "  fix --model (or omit it to use the provider default)"
+  local provider="$1" model="$2" verb="${3:-spawn}" scope="${4:-default}"
+  local raw header source valid observed_at listed=0
+  MODEL_VALIDATION_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  MODEL_VALIDATION_SCOPE="$scope"
+  MODEL_VALIDATION_SOURCE="none"
+  MODEL_VALIDATION_STATE="not_applicable"
+  [[ -n "$model" ]] || { MODEL_VALIDATION_SCOPE="not_applicable"; return 0; }
+
+  raw="$("${provider}_valid_models" 2>/dev/null || true)"
+  header="$(head -n 1 <<<"$raw")"
+  case "$header" in source=live_query|source=local_cache|source=non_enumerable|source=none) source="${header#source=}" ;; *) source="none" ;; esac
+  valid="$(tail -n +2 <<<"$raw")"
+  MODEL_VALIDATION_SOURCE="$source"
+  case "$source" in
+    non_enumerable|none)
+      MODEL_VALIDATION_SCOPE="not_applicable"
+      MODEL_VALIDATION_STATE="unknown"
+      return 0
+      ;;
+  esac
+  grep -qxF "$model" <<<"$valid" && listed=1
+  if [[ "$listed" -eq 1 ]]; then
+    MODEL_VALIDATION_STATE="available"
+    return 0
+  fi
+  MODEL_VALIDATION_STATE="unknown"
+  if [[ "$source" == live_query && "$scope" == default ]]; then
+    MODEL_VALIDATION_STATE="unavailable"
+    err "$verb: model '$model' is unavailable for $provider (source=live_query, observed_at=$MODEL_VALIDATION_AT)."
+    err "  valid models: $(tr '\n' ' ' <<<"$valid" | tr -s ' ' | sed 's/ /, /g; s/, $//')"
+    die "  fix --model (or omit it to use the provider default)"
+  fi
+  if [[ "$source" == local_cache ]]; then
+    warn "$verb: model '$model' is missing from $provider local_cache; cached negatives are unknown, proceeding."
+  elif [[ "$source" == live_query ]]; then
+    warn "$verb: model '$model' is missing from the default $provider catalog, but invocation scope is mismatched; proceeding."
+  fi
 }
 
 # Resolve the public MCP policy through the provider adapter. The adapter returns

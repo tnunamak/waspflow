@@ -32,12 +32,12 @@ codex_valid_models() {
   if command -v codex >/dev/null 2>&1; then
     source="$(codex debug models 2>/dev/null || true)"
     out="$(jq -r '.models[].slug // empty' <<<"$source" 2>/dev/null || true)"
-    [[ -n "$out" ]] && { printf '%s\n' "$out"; return 0; }
+    [[ -n "$out" ]] && { printf 'source=live_query\n%s\n' "$out"; return 0; }
   fi
-  [[ -r "$CODEX_MODELS_CACHE" ]] || return 1
+  [[ -r "$CODEX_MODELS_CACHE" ]] || { printf 'source=none\n'; return 0; }
   out="$(jq -r '.models[].slug // empty' "$CODEX_MODELS_CACHE" 2>/dev/null)"
-  [[ -n "$out" ]] || return 1
-  printf '%s\n' "$out"
+  [[ -n "$out" ]] || { printf 'source=none\n'; return 0; }
+  printf 'source=local_cache\n%s\n' "$out"
 }
 
 # Provider-owned MCP policy. `auto` means MCP-minimal for Codex today: disable
