@@ -53,9 +53,11 @@ export WASPFLOW_ROOT WASPFLOW_LIB
 # shellcheck disable=SC1090
 source "$WASPFLOW_LIB/core.sh"
 # shellcheck disable=SC1090
-source "$WASPFLOW_LIB/exec.sh"
-# shellcheck disable=SC1090
 source "$WASPFLOW_LIB/ops.sh"
+# shellcheck disable=SC1090
+source "$WASPFLOW_LIB/selection.sh"
+# shellcheck disable=SC1090
+source "$WASPFLOW_LIB/exec.sh"
 # shellcheck disable=SC1090
 source "$WASPFLOW_LIB/worktree.sh"
 # shellcheck disable=SC1090
@@ -85,7 +87,7 @@ First successful run:
 
 Verbs:
   spawn   --provider <claude|codex|grok> | --op <id> --lane <name> [opts] -- <task>
-  exec    --provider <claude|codex|grok> [--model M] [--effort L] [--mcp P] [--cwd DIR] [-o FILE] -- <task prompt>
+  exec    --provider <claude|codex|grok> | --op <id> [--model M] [--auto] [--accept-provider-default] [--effort L] [--mcp P] [--cwd DIR] [-o FILE] -- <task prompt>
   ops     list|explain|resolve|path     operating-point resolver (decision cards)
   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
   demo    --provider <claude|codex|grok> [--run]            guided first lane
@@ -126,6 +128,10 @@ Fan-in (docs/lane-closeout-and-fan-in.md):
 Spawn opts:
   --op <id>          expand a task-shaped operating point (see ops list)
   --model <id>       provider model override
+  --auto              select the op fallback (requires --op)
+  --ack-deprecated    permit --auto to use an edge-deprecated fallback
+  --accept-provider-default
+                    intentionally use the provider default model
   --effort <level>   none|minimal|low|medium|high|xhigh|max (pass-through; never silent demote)
   --mcp <policy>     auto|none|inherit (default: auto; MCP-minimal where supported)
   --cwd <dir>        worker cwd (default: current dir)
@@ -141,7 +147,12 @@ Spawn opts:
   --arg <flag>       pass an extra arg to the provider CLI
 
 Exec opts:
+  --op <id>          expand a task-shaped operating point
   --model <id>       provider model override
+  --auto              select the op fallback (requires --op)
+  --ack-deprecated    permit --auto to use an edge-deprecated fallback
+  --accept-provider-default
+                    intentionally use the provider default model
   --effort <level>   none|minimal|low|medium|high|xhigh|max
   --mcp <policy>     auto|none|inherit (default: auto; MCP-minimal where supported)
   --cwd <dir>        worker cwd (default: current dir)
@@ -155,6 +166,9 @@ Billing safety:
 
 State: $WASPFLOW_HOME (default ~/.local/state/waspflow)
 tmux:  $WASPFLOW_TMUX_SESSION (default waspflow)
+
+Exit codes: 1 usage/error; 2 failed contract; 3 launch unconfirmed; 4 stalled;
+            5 selection_required (nothing launched; choose an arm and retry)
 EOF
 }
 
@@ -177,16 +191,19 @@ split_after_ddash() {
 cmd_spawn() {
   local provider="" lane="" model="" cwd="$PWD" isolate=0 effort="" mcp="auto" report="" no_recovery=0
   local verify_command="" verify_name="verify" verify_timeout=1800 prepare_command="" verify_strength=""
-  local op_id="" OP_ID="" OP_MODE=""
+  local op_id="" OP_ID="" OP_MODE="" provider_explicit=false model_explicit=false auto=false ack_deprecated=false accept_provider_default=false
   local -a extra=()
   split_after_ddash "$@"
   set -- "${FLAGS[@]:-}"
   while [[ $# -gt 0 ]]; do
     case "${1:-}" in
-      --provider) provider="${2:-}"; shift 2 ;;
+      --provider) provider="${2:-}"; provider_explicit=true; shift 2 ;;
       --op)       op_id="${2:-}"; shift 2 ;;
       --lane)     lane="${2:-}"; shift 2 ;;
-      --model)    model="${2:-}"; shift 2 ;;
+      --model)    model="${2:-}"; model_explicit=true; shift 2 ;;
+      --auto) auto=true; shift ;;
+      --ack-deprecated) ack_deprecated=true; shift ;;
+      --accept-provider-default) accept_provider_default=true; shift ;;
       --effort)   effort="${2:-}"; shift 2 ;;
       --mcp)
         [[ $# -ge 2 && -n "${2:-}" ]] || die "spawn: --mcp requires auto, none, or inherit"
@@ -208,9 +225,31 @@ cmd_spawn() {
   done
   local prompt="${REST[*]:-}"
 
+  [[ "$auto" == false || -n "$op_id" ]] || die "spawn: --auto requires --op"
+  [[ "$auto" == false || "$model_explicit" == false ]] || die "spawn: --auto conflicts with --model"
+  [[ "$auto" == false || "$accept_provider_default" == false ]] || die "spawn: --auto conflicts with --accept-provider-default"
+  [[ "$model_explicit" == false || "$accept_provider_default" == false ]] || die "spawn: --model conflicts with --accept-provider-default"
+  [[ "$ack_deprecated" == false || "$auto" == true ]] || die "spawn: --ack-deprecated applies only to --auto"
+  local selection_mode
+  selection_mode="$(selection_gate_mode)"
+  if [[ "$selection_mode" == enforce && -z "$op_id" && "$model_explicit" == false && "$accept_provider_default" == false ]]; then
+    selection_menu
+    return 5
+  fi
+  if [[ "$selection_mode" == warn && -z "$op_id" && "$model_explicit" == false && "$accept_provider_default" == false ]]; then
+    warn "selection: bare provider default; add --accept-provider-default to make this intentional"
+  fi
+
   # Expand --op first (explicit --provider/--model/--effort win over expansion).
   if [[ -n "$op_id" ]]; then
+    local op_fallback_provider op_fallback_model
+    op_fallback_provider="$(jq -r '.expands_to.provider // empty' <<<"$(ops_get_point "$op_id")")"
+    op_fallback_model="$(jq -r '.expands_to.model // empty' <<<"$(ops_get_point "$op_id")")"
+    if [[ "$provider_explicit" == true && "$model_explicit" == false && "$provider" != "$op_fallback_provider" ]]; then
+      die "op $op_id resolves $op_fallback_provider/$op_fallback_model; --provider $provider contradicts it — give --model too, or drop one"
+    fi
     ops_apply_to_spawn "$op_id"
+    [[ "$accept_provider_default" == true ]] && model=""
   fi
 
   [[ -n "$provider" ]] || die "spawn: --provider or --op is required (claude|codex|grok)"
@@ -222,6 +261,27 @@ cmd_spawn() {
   guard_cwd "$cwd"   # never hand a worker '/' silently (known grok --cwd / crash)
   if [[ -n "$effort" && ! "$effort" =~ ^(none|minimal|low|medium|high|xhigh|max)$ ]]; then
     die "spawn: --effort must be one of none|minimal|low|medium|high|xhigh|max (got: $effort)"
+  fi
+
+  # Enforced selection runs before tmux/lane creation. The selected fallback is
+  # still checked by Phase 1 below; explicit --model callers deliberately skip
+  # this selector gate (the doctrine is explicit choice proceeds).
+  local gate_endpoint="default" gate_raw=false gate_scope gate_billing
+  [[ ${#extra[@]} -gt 0 ]] && gate_raw=true
+  if [[ "$provider" == codex ]]; then
+    local gate_arg
+    for gate_arg in "${extra[@]}"; do
+      [[ "$gate_arg" == --oss ]] && gate_endpoint=oss
+      [[ "$gate_arg" == --profile=* ]] && gate_endpoint="${gate_arg#--profile=}"
+    done
+  fi
+  if [[ "$selection_mode" == enforce && -n "$op_id" && "$model_explicit" == false && "$accept_provider_default" == false ]]; then
+    load_provider "$provider"
+    gate_scope="$(model_validation_scope "$provider" "${extra[@]}")"
+    gate_billing="$(billing_path_v1 "$provider" "$gate_endpoint" "$gate_raw")"
+    local selection_rc=0
+    selection_gate_op "$op_id" "$provider" "$model" "$gate_scope" "$gate_billing" "$ack_deprecated" "$auto" || selection_rc=$?
+    [[ "$selection_rc" -eq 0 ]] || return "$selection_rc"
   fi
 
   # If capabilities-derived whitelist is loaded, enforce per provider (after op expansion).
@@ -352,6 +412,20 @@ cmd_spawn() {
   billing_path="$(billing_path_v1 "$provider" "$endpoint_profile" "$raw_provider_args")"
   auth_principal="$(billing_auth_principal "$provider")"
   lane_uuid="$(new_uuid)"
+  # Compute dispositions on every selected/explicit arm. Enforcement decides
+  # whether to stop; explicit choice always continues after its warnings.
+  if [[ -n "$op_id" ]]; then
+    selection_prepare_op "$op_id" "$provider" "$model" "$MODEL_VALIDATION_SCOPE" "$billing_path" "$ack_deprecated"
+    if [[ "$selection_mode" == warn || "$model_explicit" == true ]]; then selection_emit_warnings "$SELECTION_DISPOSITION"; fi
+  elif [[ "$model_explicit" == true ]]; then
+    local explicit_edge explicit_disposition
+    explicit_edge="$(selection_edge_label "$provider" "$model")"
+    explicit_disposition="$(selection_disposition "$MODEL_VALIDATION_STATE" unratified "$explicit_edge" none false false false explicit)"
+    selection_emit_warnings "$explicit_disposition"
+  fi
+  local selection_quota_observation selection_quota_filtered
+  selection_quota_observation="${SELECTION_QUOTA_OBSERVATION:-$(quota_observation_v1 "$provider")}"
+  selection_quota_filtered="${SELECTION_QUOTA_FILTERED:-$(selection_quota_filtered "$billing_path" "$selection_quota_observation" "$MODEL_VALIDATION_SCOPE")}"
 
   # Runtime receipt enforcement is versioned at launch. Existing lanes with no
   # marker retain their historical lifecycle semantics; new Codex lanes must
@@ -389,6 +463,8 @@ cmd_spawn() {
     raw_provider_args "$raw_provider_args" \
     auth_principal "$auth_principal" \
     billing_path "$billing_path" \
+    selection_quota_observation "$selection_quota_observation" \
+    selection_quota_filtered "$selection_quota_filtered" \
     model_validation_state "$MODEL_VALIDATION_STATE" \
     model_validation_source "$MODEL_VALIDATION_SOURCE" \
     model_validation_scope "$MODEL_VALIDATION_SCOPE" \
@@ -541,7 +617,7 @@ waspflow demo
 
 This will prove the core loop with a no-edit task:
 
-  waspflow spawn --provider $provider --lane $lane --cwd "$cwd" -- "$prompt"
+  waspflow spawn --provider $provider --accept-provider-default --lane $lane --cwd "$cwd" -- "$prompt"
   waspflow wait $lane --timeout 300
   waspflow peek $lane --lines 8
   waspflow reap $lane
@@ -553,7 +629,7 @@ EOF
     return 0
   fi
 
-  cmd_spawn --provider "$provider" --lane "$lane" --cwd "$cwd" -- "$prompt"
+  cmd_spawn --provider "$provider" --accept-provider-default --lane "$lane" --cwd "$cwd" -- "$prompt"
   cmd_wait "$lane" --timeout 300
   cmd_peek "$lane" --lines 8
   cmd_reap "$lane"

@@ -98,12 +98,13 @@ guard_cwd() {
   fi
 }
 
-# Ask whether a provider's default catalog can speak for this invocation. Codex
-# enumerates bare `codex debug models`; profiles, OSS mode, config, and raw
-# pass-through flags can select a different catalog.
+# Ask whether a provider's default catalog can speak for this invocation. Any
+# raw provider argument can alter the effective billing/model scope; Codex also
+# has named profile/OSS forms that make that mismatch explicit.
 # Args: provider raw_provider_args...
 model_validation_scope() {
   local provider="$1" arg; shift
+  [[ $# -gt 0 && "$provider" != codex ]] && { printf 'mismatched\n'; return 0; }
   [[ "$provider" == codex ]] || { printf 'default\n'; return 0; }
   for arg in "$@"; do
     case "$arg" in

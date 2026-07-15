@@ -51,7 +51,7 @@ A **lane** is one durable unit of delegated work. Use the lane name in every
 later command for that worker.
 
 ```bash
-waspflow spawn --provider codex --lane first-task -- "Find one small bug or cleanup opportunity. Do not edit yet; report what you found."
+waspflow spawn --provider codex --accept-provider-default --lane first-task -- "Find one small bug or cleanup opportunity. Do not edit yet; report what you found."
 waspflow wait first-task
 waspflow peek first-task
 ```

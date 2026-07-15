@@ -1,0 +1,7 @@
+{
+  "id":"selection-cycle", "operating_points":[],
+  "preferred_over":[
+    {"prefer":{"provider":"codex","model":"a"},"over":{"provider":"codex","model":"b"},"ratified":true},
+    {"prefer":{"provider":"codex","model":"b"},"over":{"provider":"codex","model":"a"},"ratified":true}
+  ]
+}

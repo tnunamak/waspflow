@@ -1,0 +1,16 @@
+{
+  "id": "selection-fixture",
+  "policy_version": "1",
+  "catalog_ref": "fixture",
+  "operating_points": [
+    {"id":"old","task_family":"test","constraint_family":"test","expands_to":{"provider":"codex","model":"same","effort":"low"}},
+    {"id":"new","task_family":"test","constraint_family":"test","fallback":{"provider":"codex","model":"fallback-only","effort":"low"},"requirements":{"performance_axis":"placeholder"}},
+    {"id":"both","task_family":"test","constraint_family":"test","expands_to":{"provider":"codex","model":"same","effort":"low"},"fallback":{"provider":"codex","model":"same","effort":"low"}},
+    {"id":"deprecated","task_family":"test","constraint_family":"test","fallback":{"provider":"codex","model":"b","effort":"low"}}
+  ],
+  "preferred_over": [
+    {"prefer":{"provider":"codex","model":"a"},"over":{"provider":"codex","model":"b"},"ratified":true},
+    {"prefer":{"provider":"codex","model":"b"},"over":{"provider":"codex","model":"c"},"ratified":true},
+    {"prefer":{"provider":"codex","model":"c"},"over":{"provider":"codex","model":"ignored"},"ratified":false}
+  ]
+}

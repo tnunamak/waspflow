@@ -35,6 +35,15 @@ waspflow demo --provider codex --run
 Use `--provider claude` or `--provider grok` if that is the agent CLI you have
 installed.
 
+## Selection gate
+
+Selection defaults to `warn` for one release: a bare provider-default invocation
+continues but prints one suggestion to add `--accept-provider-default`. Set
+`WASPFLOW_SELECTION_GATE=enforce` to require `--op <id>`, an explicit `--model`,
+or `--accept-provider-default`; it exits 5 (`selection_required`) without
+launching anything. `--auto` selects an op fallback and requires `--op`;
+`--ack-deprecated` applies only to that selector path.
+
 You need `tmux`, `jq`, `git`, `curl`, `uuidgen`, and at least one agent CLI:
 `codex`, `claude`, or `grok`. If something is missing, `waspflow doctor` tells
 you what to install. See [docs/prerequisites.md](docs/prerequisites.md) for links.
@@ -46,7 +55,7 @@ working directory, git diff, optional report, and final result.
 
 ```bash
 # Start a worker from any project directory.
-waspflow spawn --provider codex --lane fixbug -- \
+waspflow spawn --provider codex --accept-provider-default --lane fixbug -- \
   "Find and fix the off-by-one in src/pager.ts"
 
 # Wait until the worker finishes its current turn, then perform normal reap.
@@ -93,8 +102,8 @@ observable, steerable, resumable, and reviewable.
 Use `--isolate` when several workers may edit the same repo:
 
 ```bash
-waspflow spawn --provider claude --lane api --isolate -- "Refactor the API client"
-waspflow spawn --provider codex  --lane ui  --isolate -- "Tighten the settings page"
+waspflow spawn --provider claude --accept-provider-default --lane api --isolate -- "Refactor the API client"
+waspflow spawn --provider codex  --accept-provider-default --lane ui  --isolate -- "Tighten the settings page"
 ```
 
 Each lane gets a git worktree on branch `waspflow/<lane>`. `reap` removes that
@@ -106,7 +115,7 @@ discard it deliberately.
 Pass `--report` when the worker must leave a written result:
 
 ```bash
-waspflow spawn --provider codex --lane audit --report findings.md -- \
+waspflow spawn --provider codex --accept-provider-default --lane audit --report findings.md -- \
   "Audit auth.ts and write findings.md"
 waspflow wait audit
 waspflow reap audit
@@ -128,7 +137,7 @@ Use `--verify` to make a project oracle part of a lane, then run it while the
 lane is still intact:
 
 ```bash
-waspflow spawn --provider codex --lane fix --isolate \
+waspflow spawn --provider codex --accept-provider-default --lane fix --isolate \
   --prepare 'npm ci' --verify 'npm test' -- "Fix the failing test."
 waspflow wait fix
 waspflow verify fix                 # 0 = pass; 2 = fail; no tmux/worktree teardown
@@ -258,13 +267,13 @@ tmux window, no worktree, no lane record, no reap.
 
 ```bash
 # Analysis to a file, blocking:
-waspflow exec --provider codex -o report.md -- "Summarize the auth flow in src/auth/."
+waspflow exec --provider codex --accept-provider-default -o report.md -- "Summarize the auth flow in src/auth/."
 
 # One-shot answer to stdout:
-waspflow exec --provider claude -- "List the public functions in lib/core.sh."
+waspflow exec --provider claude --accept-provider-default -- "List the public functions in lib/core.sh."
 
 # Same shape for Grok:
-waspflow exec --provider grok -- "List the public functions in lib/core.sh."
+waspflow exec --provider grok --accept-provider-default -- "List the public functions in lib/core.sh."
 ```
 
 Options mirror `spawn` where they apply: `--model`, `--effort`, `--mcp`, `--cwd`, and
@@ -283,7 +292,7 @@ For that reason, `waspflow spawn --provider claude ...` refuses to launch while
 override intentionally for API billing:
 
 ```bash
-WASPFLOW_ALLOW_API_BILLING=1 waspflow spawn --provider claude --lane api -- \
+WASPFLOW_ALLOW_API_BILLING=1 waspflow spawn --provider claude --accept-provider-default --lane api -- \
   "Run the intended API-billed task"
 ```
 

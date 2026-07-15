@@ -122,7 +122,7 @@ waspflow doctor
 Actual blocked spawn preflight. This command stopped before worker launch and did not create lane state under the test `WASPFLOW_HOME`.
 
 ```text
-$ env PATH="/home/tnunamak/code/waspflow-waspflow-billing-guard/bin:$PATH" ANTHROPIC_API_KEY=sk-ant-test WASPFLOW_ALLOW_API_BILLING= OPENAI_API_KEY= WASPFLOW_HOME=/home/tnunamak/.local/state/waspflow-billing-guard-test waspflow spawn --provider claude --lane billing-guard-block-test --cwd /home/tnunamak/code/waspflow-waspflow-billing-guard -- "Do not run; billing guard should stop this."
+$ env PATH="/home/tnunamak/code/waspflow-waspflow-billing-guard/bin:$PATH" ANTHROPIC_API_KEY=sk-ant-test WASPFLOW_ALLOW_API_BILLING= OPENAI_API_KEY= WASPFLOW_HOME=/home/tnunamak/.local/state/waspflow-billing-guard-test waspflow spawn --provider claude --accept-provider-default --lane billing-guard-block-test --cwd /home/tnunamak/code/waspflow-waspflow-billing-guard -- "Do not run; billing guard should stop this."
 waspflow: claude billing guard: ANTHROPIC_API_KEY is set.
 waspflow: Headless Claude workers will bill pay-as-you-go API rates, NOT your subscription/Agent-SDK credit.
 waspflow: A fleet can run up large charges (see claude-code issue #37686).

@@ -23,7 +23,19 @@ ops_policy_path() {
 
 ops_load() {
   OPS_POLICY_FILE="$(ops_policy_path)"
-  OPS_POLICY_JSON="$(cat "$OPS_POLICY_FILE")"
+  OPS_POLICY_JSON="$(jq -c '
+    .operating_points as $points |
+    reduce $points[] as $op (.;
+      if (($op.expands_to? != null) and ($op.fallback? != null) and ($op.expands_to != $op.fallback))
+      then error("op " + $op.id + ": expands_to and fallback differ") else . end)
+    | .operating_points |= map(.expands_to = (.expands_to // .fallback) | .requirements = ((.requirements // {}) + {ratified:(.requirements.ratified // false)}))
+    | .preferred_over_live = [(.preferred_over // [])[] | select(.ratified == true)]
+  ' "$OPS_POLICY_FILE" 2>&1)" || die "ops: cannot load policy: $OPS_POLICY_JSON"
+  local unratified
+  while IFS= read -r unratified; do
+    [[ -z "$unratified" ]] || warn "ops: ignoring unratified preferred_over edge: $unratified"
+  done < <(jq -r '(.preferred_over // [])[] | select(.ratified == false) | "\(.prefer.provider)/\(.prefer.model) > \(.over.provider)/\(.over.model)"' <<<"$OPS_POLICY_JSON")
+  if declare -F selection_policy_validate >/dev/null; then selection_policy_validate "$OPS_POLICY_JSON"; fi
   export OPS_POLICY_FILE
 }
 
@@ -165,11 +177,22 @@ ops_resolve() {
   row="$(ops_get_point "$id")"
   ops_load
   if [[ "$json" -eq 1 ]]; then
+    local selection_disposition='{"included":true,"warnings":[],"auto_selectable":true}'
+    if declare -F selection_disposition >/dev/null; then
+      local fallback_provider fallback_model fallback_edge fallback_family
+      fallback_provider="$(jq -r '.expands_to.provider // empty' <<<"$row")"
+      fallback_model="$(jq -r '.expands_to.model // empty' <<<"$row")"
+      fallback_edge="$(selection_edge_label "$fallback_provider" "$fallback_model")"
+      fallback_family="$(jq -r '.task_family // "unknown"' <<<"$row")"
+      selection_disposition="$(selection_disposition unknown unratified "$fallback_edge" none false false true "$fallback_family")"
+    fi
     jq -n \
       --argjson op "$row" \
       --arg policy_file "$OPS_POLICY_FILE" \
+      --argjson selection_disposition "$selection_disposition" \
       --argjson policy "$(jq -c '{id, policy_version, catalog_ref, generated_at}' <<<"$OPS_POLICY_JSON")" \
       '{
+        resolve_schema_version: 2,
         op: $op.id,
         expands_to: $op.expands_to,
         task_family: $op.task_family,
@@ -180,7 +203,9 @@ ops_resolve() {
         known_gaps: $op.known_gaps,
         override_policy: $op.override_policy,
         policy: $policy,
-        policy_file: $policy_file
+        policy_file: $policy_file,
+        requirements: ($op.requirements // {ratified:false}),
+        selection: ($selection_disposition + {stats_frontier:"empty"})
       }'
   else
     log "policy: $OPS_POLICY_FILE"

@@ -75,7 +75,7 @@ $ mkdir -p "$scratch"
 $ rm -f /tmp/exec-test.txt
 $ cd "$scratch"
 $ PATH="/home/tnunamak/code/waspflow-waspflow-exec-verb/bin:$PATH" \
-    waspflow exec --provider codex -o /tmp/exec-test.txt -- "Reply with exactly: EXEC_OK"
+    waspflow exec --provider codex --accept-provider-default -o /tmp/exec-test.txt -- "Reply with exactly: EXEC_OK"
 $ printf 'rc=%s\n' "$?"
 rc=0
 $ printf 'file='; cat /tmp/exec-test.txt; printf '\n'
@@ -86,7 +86,7 @@ Codex stdout fallback when `-o` is omitted:
 
 ```bash
 $ PATH="/home/tnunamak/code/waspflow-waspflow-exec-verb/bin:$PATH" \
-    waspflow exec --provider codex -- "Reply with exactly: EXEC_STDOUT_OK"
+    waspflow exec --provider codex --accept-provider-default -- "Reply with exactly: EXEC_STDOUT_OK"
 EXEC_STDOUT_OK
 ```
 
@@ -98,7 +98,7 @@ $ mkdir -p "$scratch"
 $ rm -f /tmp/exec-claude-test.txt
 $ cd "$scratch"
 $ PATH="/home/tnunamak/code/waspflow-waspflow-exec-verb/bin:$PATH" \
-    waspflow exec --provider claude -o /tmp/exec-claude-test.txt -- "Reply with exactly: CLAUDE_EXEC_OK"
+    waspflow exec --provider claude --accept-provider-default -o /tmp/exec-claude-test.txt -- "Reply with exactly: CLAUDE_EXEC_OK"
 $ printf 'rc=%s\n' "$?"
 rc=0
 $ printf 'file='; cat /tmp/exec-claude-test.txt; printf '\n'

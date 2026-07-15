@@ -495,6 +495,39 @@ _artifacts_sha256() {
   else return 1; fi
 }
 
+# Append one already-built receipt atomically. This is deliberately lane-less:
+# exec has no state directory but shares the exact durable JSONL protocol.
+_receipts_append() {
+  local receipt="$1" fd
+  [[ -n "$receipt" ]] && jq -e 'type == "object"' >/dev/null <<<"$receipt" 2>/dev/null \
+    || { err "receipt: generated JSON is empty or invalid"; return 1; }
+  mkdir -p "$WASPFLOW_HOME" "$WASPFLOW_LOCKS_DIR"
+  command -v flock >/dev/null 2>&1 || { err "receipt: flock is required"; return 1; }
+  exec {fd}>"$WASPFLOW_LOCKS_DIR/receipts.lock" || { err "receipt: cannot open lock"; return 1; }
+  flock -x "$fd" || { exec {fd}>&-; err "receipt: cannot lock"; return 1; }
+  if ! printf '%s\n' "$receipt" >>"$WASPFLOW_HOME/receipts.jsonl"; then
+    flock -u "$fd" || true; exec {fd}>&-; err "receipt: append failed"; return 1
+  fi
+  flock -u "$fd" || { exec {fd}>&-; err "receipt: unlock failed"; return 1; }
+  exec {fd}>&-
+}
+
+artifacts_emit_exec_receipt_v1() {
+  local exec_id="$1" provider="$2" model="$3" effort="$4" mode="$5" billing="$6" availability="$7" invoked="$8" completed="$9" result="${10}" exit_code="${11}"
+  local receipt
+  receipt="$(jq -cn --arg exec_id "$exec_id" --arg provider "$provider" --arg model "$model" --arg effort "$effort" --arg mode "$mode" \
+    --argjson billing "$billing" --argjson availability "$availability" --arg invoked "$invoked" --arg completed "$completed" --arg result "$result" --argjson exit_code "$exit_code" '
+      ($invoked|tonumber) as $start | ($completed|tonumber) as $end |
+      {schema_version:1,receipt_kind:"exec",exec_id:$exec_id,
+       arm_requested:{schema_version:1,provider:$provider,surface:"headless",model:$model,effort:$effort,mode:(if $mode == "" then "standard" else $mode end),billing_path:$billing,endpoint_profile:"default",raw_provider_args:false,auth_principal:null},
+       arm_attestation:{runtime_settings_state:"unknown",observed_model:null,observed_effort:null},
+       stats_eligible:false,ineligibility_reasons:["surface_exec"],availability:$availability,
+       quota_observation:{schema_version:1,state:"absent",reason:"not_sampled_for_exec",stale:false,source:"",observation:null},
+       verify:{state:"skipped"},timestamps:{invoked_epoch:$start,completed_epoch:$end,wall_seconds:($end-$start)},
+       result:$result,exit_code:$exit_code}')"
+  _receipts_append "$receipt"
+}
+
 # Build and append Receipt v1 exactly once per lane finalization. It is kept
 # here with artifact finalization because this is where result, oracle evidence,
 # and durable lane state meet; selection remains deliberately out of scope.
@@ -504,7 +537,8 @@ artifacts_emit_receipt_v1() {
   dir="$(lane_dir "$lane")"; provider="$(lane_get "$lane" provider)"
   billing="$(lane_get "$lane" billing_path)"
   jq -e 'type == "object"' >/dev/null <<<"$billing" 2>/dev/null || billing='{"schema_version":1,"path":"unknown","evidence":"","detail":""}'
-  quota="$(quota_observation_v1 "$provider")"
+  quota="$(lane_get "$lane" selection_quota_observation)"
+  jq -e 'type == "object"' >/dev/null <<<"$quota" 2>/dev/null || quota="$(quota_observation_v1 "$provider")"
   version="$(git -C "${WASPFLOW_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}" describe --always --dirty 2>/dev/null || echo dev)"
   harness="$(printf '%s\n%s' "$(lane_get "$lane" prepare_command)" "$(lane_get "$lane" verify_command)" | _artifacts_sha256 2>/dev/null || true)"
   reasons="$(jq -cn \
@@ -537,34 +571,24 @@ artifacts_emit_receipt_v1() {
     --arg availability_state "$(lane_get "$lane" model_validation_state)" --arg availability_source "$(lane_get "$lane" model_validation_source)" --arg availability_scope "$(lane_get "$lane" model_validation_scope)" --arg availability_at "$(lane_get "$lane" model_validation_at)" \
     --arg verify_state "$(lane_get "$lane" verify_state)" --arg failure_class "$(lane_get "$lane" verify_failure_class)" --arg strength "$(lane_get "$lane" verify_strength)" --arg harness "$harness" --arg test_changed "$(lane_get "$lane" verify_test_files_changed)" --arg fork_point "$(lane_get "$lane" verify_fork_point)" \
     --arg baseline_ran "$(lane_get "$lane" baseline_oracle_ran)" --arg baseline_state "$(lane_get "$lane" baseline_oracle_state)" --arg baseline_reason "$(lane_get "$lane" baseline_oracle_reason)" \
-    --arg spawn_epoch "$(lane_get "$lane" spawn_epoch)" --arg result "$result" --arg outcome "$(lane_get "$lane" outcome)" \
+    --arg spawn_epoch "$(lane_get "$lane" spawn_epoch)" --arg result "$result" --arg outcome "$(lane_get "$lane" outcome)" --arg selection_quota_filtered "$(lane_get "$lane" selection_quota_filtered)" \
     --argjson billing "$billing" --argjson quota "$quota" --argjson reasons "$reasons" --argjson verify_runs "$verify_runs" '
       def nullable: if . == "" then null else . end;
       now as $now |
       def epoch_or_null: if . == "" then null else tonumber? end;
       ($spawn_epoch | epoch_or_null) as $spawn |
-      {schema_version:1,receipt_id:$receipt_id,lane:$lane,lane_uuid:($lane_uuid|nullable),waspflow_version:$version,segment:null,
+      {schema_version:1,receipt_kind:"lane",receipt_id:$receipt_id,lane:$lane,lane_uuid:($lane_uuid|nullable),waspflow_version:$version,segment:null,
        op:$op,task_family:($task_family|nullable),constraint_family:($constraint_family|nullable),policy_version:($policy_version|nullable),catalog_ref:($catalog_ref|nullable),
        arm_requested:{schema_version:1,provider:$provider,surface:(if $surface == "" then "tui" else $surface end),model:$model,effort:$effort,mode:(if $mode == "" then "standard" else $mode end),billing_path:$billing,endpoint_profile:(if $endpoint_profile == "" then "default" else $endpoint_profile end),raw_provider_args:($raw_provider_args == "true"),auth_principal:($auth_principal|nullable)},
        arm_attestation:{runtime_settings_state:(if $runtime_state == "" then "unknown" else $runtime_state end),observed_model:($observed_model|nullable),observed_effort:($observed_effort|nullable)},
        stats_eligible:($reasons|length == 0),ineligibility_reasons:$reasons,
        availability:{schema_version:1,provider:$provider,model:$model,state:(if $availability_state == "" then "not_applicable" else $availability_state end),evidence_source:(if $availability_source == "" then "none" else $availability_source end),query_scope:(if $availability_scope == "" then "not_applicable" else $availability_scope end),observed_at:($availability_at|nullable),detail:""},
-       quota_observation:$quota,
+       quota_observation:$quota,selection:{quota_filtered:($selection_quota_filtered == "true")},
        verify:{state:(if $verify_state == "" then "skipped" else $verify_state end),failure_class:(if $failure_class == "" then "none" else $failure_class end),verify_strength:(if $strength == "" or $verify_state == "" or $verify_state == "skipped" then "unknown" else "declared:" + $strength end),harness_hash:(if $harness == "" then null else "sha256:" + $harness end),test_files_changed:(if $test_changed == "" then "unknown" else $test_changed end),fork_point:$fork_point,baseline_oracle:{ran:($baseline_ran == "true"),state:(if $baseline_state == "" then "skipped" else $baseline_state end),reason:(if $baseline_reason == "" and $baseline_ran != "true" then "no_fork_point" else $baseline_reason end)},verify_runs:($verify_runs // [])},
        timestamps:{spawn_epoch:$spawn,finalize_epoch:($now|floor),wall_seconds:(($now|floor) - ($spawn // ($now|floor)))},
        cost_observation:{currency:(if ($billing.path // "unknown") | IN("chatgpt_subscription","subscription_env_heuristic","oauth_env_heuristic") then "quota" elif ($billing.path // "unknown") | IN("api_key","auth_token","access_token_env","api_key_env") then "usd" else "unknown" end),amount:null,attribution:"none",evidence:"billing_path"},
        result:$result,outcome:($outcome|nullable),escalation_path:[]}' )"
-  [[ -n "$receipt" ]] && jq -e 'type == "object"' >/dev/null <<<"$receipt" || { err "receipt: generated JSON is empty or invalid"; return 1; }
-  mkdir -p "$WASPFLOW_HOME" "$WASPFLOW_LOCKS_DIR"
-  command -v flock >/dev/null 2>&1 || { err "receipt: flock is required"; return 1; }
-  local fd
-  exec {fd}>"$WASPFLOW_LOCKS_DIR/receipts.lock" || { err "receipt: cannot open lock"; return 1; }
-  flock -x "$fd" || { exec {fd}>&-; err "receipt: cannot lock"; return 1; }
-  if ! printf '%s\n' "$receipt" >>"$WASPFLOW_HOME/receipts.jsonl"; then
-    flock -u "$fd" || true; exec {fd}>&-; err "receipt: append failed"; return 1
-  fi
-  flock -u "$fd" || { exec {fd}>&-; err "receipt: unlock failed"; return 1; }
-  exec {fd}>&-
+  _receipts_append "$receipt" || return 1
   printf '%s\n' "$receipt" >"$dir/receipt.json" || { err "receipt: cannot write lane copy"; return 1; }
   lane_set "$lane" receipt_emitted "true" receipt_id "$(jq -r '.receipt_id' <<<"$receipt")"
 }

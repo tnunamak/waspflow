@@ -33,7 +33,7 @@ codex [--run]`. Serious repo needing policy: `waspflow init --profile serious-re
 ## The core loop
 
 ```bash
-waspflow spawn --provider codex --lane parser -- "Fix the off-by-one in src/pager.ts and add a test"
+waspflow spawn --provider codex --accept-provider-default --lane parser -- "Fix the off-by-one in src/pager.ts and add a test"
 waspflow wait parser --timeout 600        # block until it finishes its turn (see "trust wait" below)
 waspflow peek parser --lines 60           # diagnosis/progress context; not a completion oracle
 waspflow revise parser -- "Good. Now also handle the empty-input case."   # steers the LIVE session
@@ -63,10 +63,15 @@ waspflow ops list --task implementation      # then: --op implement.standard, re
 waspflow spawn --op implement.standard --lane fix -- "Implement …"
 ```
 
+Selection defaults to warning on a bare provider default. Make that choice explicit
+with `--accept-provider-default`, or select an operation with `--op`; enforce mode
+(`WASPFLOW_SELECTION_GATE=enforce`) returns exit 5 (`selection_required`) with no
+stdin prompt. `--auto` requires `--op`; `--ack-deprecated` applies only to `--auto`.
+
 ## Holding a worker to a deliverable (`--report`)
 
 ```bash
-waspflow spawn --provider codex --lane audit --report findings.md -- "Audit auth.ts, write findings.md"
+waspflow spawn --provider codex --accept-provider-default --lane audit --report findings.md -- "Audit auth.ts, write findings.md"
 waspflow wait audit && waspflow reap audit   # reap verifies findings.md exists + is substantial
 ```
 
@@ -109,8 +114,8 @@ on serious lanes.
 ## Running a fleet (parallel, isolated)
 
 ```bash
-waspflow spawn --provider claude --lane a --isolate -- "Refactor module A"
-waspflow spawn --provider codex  --lane b --isolate -- "Refactor module B"
+waspflow spawn --provider claude --accept-provider-default --lane a --isolate -- "Refactor module A"
+waspflow spawn --provider codex  --accept-provider-default --lane b --isolate -- "Refactor module B"
 for L in a b; do waspflow wait "$L" && waspflow peek "$L" --lines 40; done
 for L in a b; do waspflow reap "$L"; done
 ```
@@ -131,8 +136,8 @@ For stateless, fire-and-return work you read once (an audit, a summary, a
 transform), skip lanes entirely:
 
 ```bash
-waspflow exec --provider codex -o out.md -- "Summarize the last 5 commits."
-waspflow exec --provider claude -- "Which files import lib/core.sh?"   # -> stdout
+waspflow exec --provider codex --accept-provider-default -o out.md -- "Summarize the last 5 commits."
+waspflow exec --provider claude --accept-provider-default -- "Which files import lib/core.sh?"   # -> stdout
 ```
 
 `exec` runs one headless turn, blocks, writes to `-o <file>` (or stdout), and

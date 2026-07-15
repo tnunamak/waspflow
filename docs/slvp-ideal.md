@@ -56,7 +56,7 @@ and the next concrete action.
 The user should learn one loop:
 
 ```bash
-waspflow spawn --provider codex --lane fix -- "Fix the bug and add a test"
+waspflow spawn --provider codex --accept-provider-default --lane fix -- "Fix the bug and add a test"
 waspflow wait fix
 waspflow peek fix
 waspflow revise fix -- "Tighten the edge case"
