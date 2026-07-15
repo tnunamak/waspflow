@@ -99,6 +99,13 @@ only when its content-sensitive Git workspace fingerprint is unchanged; otherwis
 it reruns the configured oracle. A changed/unknown test-surface flag is warning
 only, never an approval gate.
 
+Every reap also appends an outcome receipt to `$WASPFLOW_HOME/receipts.jsonl`
+(arm, billing path, availability evidence, verify outcome, wall time). Declare
+`--verify-strength suite|smoke` alongside `--verify` at spawn — a receipt only
+counts as `stats_eligible` calibration data when strength was declared and the
+lane's model/effort were explicit and attested. Costs nothing; do it by default
+on serious lanes.
+
 ## Running a fleet (parallel, isolated)
 
 ```bash
