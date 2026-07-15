@@ -53,7 +53,11 @@ waspflow spawn --provider codex --lane fixbug -- \
 # The calling harness receives the final reap result directly.
 waspflow wait fixbug --reap
 
-# Inspect the pane only when you need diagnosis or progress context.
+# Use structured provider events for orchestration observation. This never reads
+# full-screen terminal paint or exposes prompt/tool content.
+waspflow events fixbug --lines 40 --json
+
+# Inspect the pane only for UI/modal diagnosis (for example after a stalled wait).
 waspflow peek fixbug
 
 # Give it another instruction in the same session.
@@ -161,7 +165,9 @@ config shape.
 | `exec --provider <claude\|codex\|grok> [opts] [-o FILE] -- <task>` | Headless one-shot: run, return, leave no lane |
 | `demo --provider <claude\|codex\|grok> [--run]` | Show or run a safe first demo |
 | `wait <lane> [--reap]` | Poll the provider log until a worker finishes; `--reap` then returns the final reap result |
-| `peek <lane>` | Show the tail of the worker pane or transcript for diagnosis/progress context |
+| `events <lane> [--lines N] [--json]` | Safe, normalized provider-event tail for Codex, Claude, or Grok |
+| `inspect [<lane>] --json` | Read-only lane facts and explainable cleanup classifications |
+| `peek <lane> [--events]` | Pane/transcript capture for UI diagnosis; `--events` is the structured tail |
 | `revise <lane> -- <message>` | Send another instruction to the same session; nonzero means live submission was not confirmed |
 | `accept-runtime <lane> --reason <text>` | Explicitly accept the current observed Codex model/effort mismatch |
 | `reap <lane>` | Close the pane, verify outputs, and finalize state |

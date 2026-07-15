@@ -1964,4 +1964,145 @@ fi
   rm -rf "$nosystemd_home" "$nosystemd_cwd"
 )
 
+# Fleet index contract: list renders persisted receipts only. A poisoned Codex
+# source must never be touched, and --limit must stop before parsing the whole
+# historical fleet. This is intentionally a 1,600-lane fixture, close to the
+# observed control-plane scale.
+(
+  index_home="$(mktemp -d "$scratch/waspflow-index-home-XXXXXX")"
+  index_poison="$index_home/provider-log-must-not-be-read"
+  mkdir -p "$index_home/lanes"
+  for i in $(seq 1 1600); do
+    lane="idx-$(printf '%04d' "$i")"; mkdir -p "$index_home/lanes/$lane"
+    jq -n --arg p "$index_poison/$lane.jsonl" '{provider:"codex",status:"reaped",rollout:$p,cwd:"/fixture",runtime_model:"stored-model",runtime_refresh_state:"observed"}' >"$index_home/lanes/$lane/state.json"
+  done
+  jq '.outcome = ""' "$index_home/lanes/idx-0001/state.json" >"$index_home/lanes/idx-0001/state.next" && mv "$index_home/lanes/idx-0001/state.next" "$index_home/lanes/idx-0001/state.json"
+  jq '.outcome = "harvested"' "$index_home/lanes/idx-0002/state.json" >"$index_home/lanes/idx-0002/state.next" && mv "$index_home/lanes/idx-0002/state.next" "$index_home/lanes/idx-0002/state.json"
+  jq '.outcome = "superseded"' "$index_home/lanes/idx-0003/state.json" >"$index_home/lanes/idx-0003/state.next" && mv "$index_home/lanes/idx-0003/state.next" "$index_home/lanes/idx-0003/state.json"
+  jq '.outcome = "harvested-extra"' "$index_home/lanes/idx-0004/state.json" >"$index_home/lanes/idx-0004/state.next" && mv "$index_home/lanes/idx-0004/state.next" "$index_home/lanes/idx-0004/state.json"
+  before="$(find "$index_home/lanes" -name state.json -print0 | sort -z | xargs -0 sha256sum | sha256sum)"
+  start="$(date +%s)"
+  listed="$(WASPFLOW_HOME="$index_home" CODEX_SESSIONS_DIR="$index_poison" "$root/bin/waspflow" list --json --limit 1)"
+  elapsed=$(( $(date +%s) - start ))
+  after="$(find "$index_home/lanes" -name state.json -print0 | sort -z | xargs -0 sha256sum | sha256sum)"
+  jq -e 'length == 1 and .[0].runtime_model == "stored-model"' <<<"$listed" >/dev/null
+  jq -e '.[0].outcome == "open"' <<<"$listed" >/dev/null
+  [[ "$before" == "$after" && ! -e "$index_poison" && "$elapsed" -lt 5 ]] \
+    || { echo "list index: limit read/wrote provider or scanned fleet too slowly (${elapsed}s)" >&2; exit 1; }
+  # An unbounded list reads its durable index to render rows, but never provider
+  # logs or mutable runtime receipts.
+  start_all="$(date +%s%N)"
+  WASPFLOW_HOME="$index_home" CODEX_SESSIONS_DIR="$index_poison" "$root/bin/waspflow" list --json >/dev/null
+  elapsed_all_ms=$(( ( $(date +%s%N) - start_all ) / 1000000 ))
+  after_all="$(find "$index_home/lanes" -name state.json -print0 | sort -z | xargs -0 sha256sum | sha256sum)"
+  [[ "$before" == "$after_all" && ! -e "$index_poison" && "$elapsed_all_ms" -lt 5000 ]] || { echo "list index: ordinary list refreshed provider state or exceeded 5s practical bound (${elapsed_all_ms}ms)" >&2; exit 1; }
+  outcomes="$(WASPFLOW_HOME="$index_home" "$root/bin/waspflow" list --json --status harvested,superseded)"
+  jq -e 'length == 2 and all(.[]; .outcome == "harvested" or .outcome == "superseded")' <<<"$outcomes" >/dev/null
+  # A limited index is a prefix: corruption after that prefix is intentionally
+  # not surfaced, while an unbounded list retains the fail-closed signal.
+  mkdir -p "$index_home/lanes/zz-corrupt"; printf '{"provider":' >"$index_home/lanes/zz-corrupt/state.json"
+  WASPFLOW_HOME="$index_home" "$root/bin/waspflow" list --json --limit 1 >/dev/null
+  set +e; WASPFLOW_HOME="$index_home" "$root/bin/waspflow" list --json >/dev/null 2>&1; corrupt_rc=$?; set -e
+  [[ "$corrupt_rc" -eq 2 ]] || { echo "list index: unbounded corrupt record was not surfaced" >&2; exit 1; }
+  rm -rf "$index_home"
+)
+
+# Batch lifecycle parity: ownership is window-id + pane-pid, not a mutable
+# window name. Provider state in older records may encode the PID as JSON number.
+(
+  parity_home="$(mktemp -d "$scratch/waspflow-batch-parity-home-XXXXXX")"
+  parity_session="waspflow-batch-parity-$$"
+  # Share the suite's unique socket with the waspflow child. The helper calls
+  # the real binary explicitly; the child reaches the same socket via PATH.
+  parity_tmux() { env -u TMUX -u TMUX_PANE "$real_tmux" -L "$WASPFLOW_TMUX_SOCKET" "$@"; }
+  trap 'parity_tmux kill-session -t "$parity_session" >/dev/null 2>&1 || true; rm -rf "$parity_home"' EXIT
+  parity_tmux new-session -d -s "$parity_session" -n home
+  parity_tmux new-window -d -t "$parity_session" -n renamed-pane 'exec sleep 30'
+  IFS='|' read -r parity_window parity_pid < <(parity_tmux display-message -p -t "$parity_session:renamed-pane" '#{window_id}|#{pane_pid}')
+  mkdir -p "$parity_home/lanes/pid-number" "$parity_home/lanes/pid-string"
+  jq -n --arg session "$parity_session" --arg window "$parity_window" --argjson pid "$parity_pid" '{provider:"codex",status:"live",tmux_session:$session,tmux_window:$window,tmux_pane_pid:$pid}' >"$parity_home/lanes/pid-number/state.json"
+  jq -n --arg session "$parity_session" --arg window "$parity_window" --arg pid "$parity_pid" '{provider:"codex",status:"live",tmux_session:$session,tmux_window:$window,tmux_pane_pid:$pid}' >"$parity_home/lanes/pid-string/state.json"
+  parity="$(WASPFLOW_HOME="$parity_home" WASPFLOW_TMUX_SESSION="$parity_session" "$root/bin/waspflow" list --json)"
+  jq -e 'length == 2 and all(.[]; .lifecycle_state == "live")' <<<"$parity" >/dev/null \
+    || { echo "list batch: renamed/numeric owned pane lost lifecycle parity" >&2; exit 1; }
+  parity_tmux kill-session -t "$parity_session" 2>/dev/null || true
+  trap - EXIT
+  rm -rf "$parity_home"
+)
+
+# New fixture safety regression guard: every parity tmux action goes through
+# the suite's isolated socket wrapper (never the operator's default server).
+sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/verify.sh" \
+  | rg -q 'parity_tmux\(\).*real_tmux.*-L.*WASPFLOW_TMUX_SOCKET' \
+  || { echo "batch parity: bare tmux invocation regressed" >&2; exit 1; }
+! sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/verify.sh" \
+  | rg -q '^[[:space:]]*tmux[[:space:]]+(new-|display-|kill-)' \
+  || { echo "batch parity: direct tmux lifecycle invocation regressed" >&2; exit 1; }
+
+# Structured observation: all providers normalize only lifecycle facts, never
+# raw message/tool content. These fixtures also prove malformed/truncated and
+# inspection paths are read-only.
+(
+  obs_home="$(mktemp -d "$scratch/waspflow-observation-home-XXXXXX")"
+  obs_data="$(mktemp -d "$scratch/waspflow-observation-data-XXXXXX")"
+  event_tmp="$obs_data/external-temp"
+  export WASPFLOW_HOME="$obs_home" CODEX_SESSIONS_DIR="$obs_data/codex" CLAUDE_PROJECTS_DIR="$obs_data/claude" GROK_SESSIONS_DIR="$obs_data/grok" WASPFLOW_EVENT_TMPDIR="$event_tmp"
+  source "$root/lib/core.sh"; source "$root/lib/fanin.sh"
+  source "$root/lib/providers/codex.sh"; source "$root/lib/providers/claude.sh"; source "$root/lib/providers/grok.sh"; source "$root/lib/events.sh"
+  mkdir -p "$CODEX_SESSIONS_DIR" "$CLAUDE_PROJECTS_DIR/p" "$GROK_SESSIONS_DIR/p/grok-id"
+  codex_log="$CODEX_SESSIONS_DIR/rollout.jsonl"; claude_log="$CLAUDE_PROJECTS_DIR/p/claude-id.jsonl"; grok_log="$GROK_SESSIONS_DIR/p/grok-id/events.jsonl"
+  printf '%s\n' '{"type":"event_msg","timestamp":"t1","payload":{"type":"task_started","message":"PROMPT-MUST-NOT-LEAK"}}' '{"type":"event_msg","timestamp":"t2","payload":{"type":"task_complete","tool_arguments":{"secret":"MUST-NOT-LEAK"}}}' >"$codex_log"
+  printf '%s\n' '{"type":"user","timestamp":"t1","message":{"content":"PROMPT-MUST-NOT-LEAK"}}' '{"type":"assistant","timestamp":"t2","message":{"stop_reason":"end_turn","content":"MUST-NOT-LEAK"}}' >"$claude_log"
+  printf '%s\n' '{"type":"turn_started","timestamp":"t1","message":"PROMPT-MUST-NOT-LEAK"}' '{"type":"turn_ended","timestamp":"t2","tool_args":"MUST-NOT-LEAK"}' >"$grok_log"
+  lane_set obs-codex provider codex status live rollout "$codex_log"; lane_set obs-claude provider claude status live session_id claude-id; lane_set obs-grok provider grok status live session_id grok-id
+  for lane in obs-codex obs-claude obs-grok; do
+    tail="$(provider_event_tail "$lane" 9)"
+    jq -e '.source.state == "tail-window" and .turn_state == "terminal" and ([.events[].event_type] | index("turn_started") and index("turn_completed"))' <<<"$tail" >/dev/null
+    ! grep -q 'MUST-NOT-LEAK\|PROMPT-MUST-NOT-LEAK' <<<"$tail" || { echo "event tail leaked raw provider content" >&2; exit 1; }
+  done
+  printf '%s\n' '{bad json}' >"$obs_data/malformed.jsonl"; lane_set obs-malformed provider codex status live rollout "$obs_data/malformed.jsonl"
+  [[ "$(provider_event_tail obs-malformed 9 | jq -r .source.state)" == malformed-tail ]] || exit 1
+  printf '%s' '{"type":"event_msg","payload":{"type":"task_complete"}' >"$obs_data/truncated.jsonl"; lane_set obs-truncated provider codex status live rollout "$obs_data/truncated.jsonl"
+  [[ "$(provider_event_tail obs-truncated 9 | jq -r .source.state)" == truncated-tail ]] || exit 1
+  lane_set obs-missing provider codex status live rollout "$obs_data/nope.jsonl"
+  [[ "$(provider_event_tail obs-missing 9 | jq -r .source.state)" == missing ]] || exit 1
+  # Completion remains terminal when settings/metadata land after it. Claude
+  # tool results are user records but must not be mistaken for a new turn.
+  printf '%s\n' '{"type":"event_msg","payload":{"type":"task_complete"}}' '{"type":"event_msg","payload":{"type":"thread_settings_applied"}}' >"$codex_log"
+  jq -e '.turn_state == "terminal"' <<<"$(provider_event_tail obs-codex 1)" >/dev/null \
+    || { echo "event tail: settings after completion obscured terminality" >&2; exit 1; }
+  printf '%s\n' '{"type":"assistant","message":{"stop_reason":"end_turn"}}' '{"type":"user","message":{"content":[{"type":"tool_result","content":"secret"}]}}' >"$claude_log"
+  jq -e '.turn_state == "terminal" and ([.events[].event_type] | index("turn_started") | not)' <<<"$(provider_event_tail obs-claude 9)" >/dev/null
+  # Tail work is bounded even for sparse giant logs. Missing marks outside the
+  # sampled window are honestly unknown, not malformed or terminal.
+  { head -c 1048576 </dev/zero | tr '\0' ' '; printf '%s\n' '{"type":"event_msg","payload":{"type":"task_complete"}}'; } >"$obs_data/long.jsonl"
+  lane_set obs-long provider codex status live rollout "$obs_data/long.jsonl"
+  long_tail="$(WASPFLOW_EVENT_TAIL_BYTES=128 provider_event_tail obs-long 9)"
+  jq -e '.source.bytes_sampled <= 128 and .source.file_bytes > 1000000 and .turn_state == "terminal"' <<<"$long_tail" >/dev/null
+  # A read failure after snapshot creation must still clean external temp state.
+  tail() { return 1; }
+  jq -e '.source.state == "unreadable"' <<<"$(provider_event_tail obs-codex 1)" >/dev/null \
+    || { echo "event tail: unreadable source was not surfaced" >&2; exit 1; }
+  unset -f tail
+  ! find "$event_tmp" -mindepth 1 -print -quit | grep -q . \
+    || { echo "event tail left external temporary files after read failure" >&2; exit 1; }
+  # No pane plus a terminal receipt is orphaned control-plane, not an automatic cleanup claim.
+  tmux_window_exists() { return 1; }; tmux() { [[ "$1" == list-clients ]] && return 0; return 1; }
+  before="$(sha256sum "$(lane_state_file obs-codex)")"; inspected="$(lane_inspection_json obs-codex)"; after="$(sha256sum "$(lane_state_file obs-codex)")"
+  [[ "$before" == "$after" ]] || { echo "inspection wrote lane state" >&2; exit 1; }
+  jq -e '.classification == "orphaned-control-plane" and (.reasons | index("live-record-missing-owned-window"))' <<<"$inspected" >/dev/null
+  lane_set obs-blocked provider codex status live rollout "$codex_log" wait_state stalled
+  jq -e '.classification == "blocked-needs-human"' <<<"$(lane_inspection_json obs-blocked)" >/dev/null
+  # An attached client is a surfaced veto even when terminal evidence exists.
+  tmux() { if [[ "$1" == list-clients ]]; then printf '/dev/pts/9\n'; return 0; fi; return 1; }
+  lane_set obs-close provider codex status live outcome harvested rollout "$codex_log"
+  jq -e '.classification == "blocked-needs-human" and .eligibility == "vetoed-attached-client" and (.reasons | index("attached-client-veto"))' <<<"$(lane_inspection_json obs-close)" >/dev/null \
+    || { echo "inspection: attached client did not veto closeout" >&2; exit 1; }
+  ! find "$event_tmp" -mindepth 1 -print -quit | grep -q . \
+    || { echo "event tail left external temporary files behind" >&2; exit 1; }
+  ! find "$obs_home/lanes" -name '.event-*' -print -quit | grep -q . \
+    || { echo "event tail wrote temporary files under lane state" >&2; exit 1; }
+  rm -rf "$obs_home" "$obs_data"
+)
+
 echo "waspflow verify: ok"
