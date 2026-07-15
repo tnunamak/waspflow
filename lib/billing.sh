@@ -163,7 +163,7 @@ quota_observation_v1() {
       (.providers[$p].forecast | type == "object") and
       ((.providers[$p].forecast.windows // null) | type == "object") and
       all($u.windows[]; type == "object" and ((.name // .display_name // null) | type == "string") and (.utilization | type == "number") and (.resets_at | type == "string"))
-    end' >/dev/null <<<"$raw" 2>/dev/null || {
+    end)' >/dev/null <<<"$raw" 2>/dev/null || {
     jq -cn --arg reason "clawmeter JSON has unsupported provider shape" --arg source "clawmeter@${version}" '{schema_version:1,state:"absent",reason:$reason,stale:false,source:$source,observation:null}'
     return 0
   }
