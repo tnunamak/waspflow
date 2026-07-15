@@ -44,6 +44,17 @@ WASPFLOW_CODEX_BACKEND_HEALTH_URL="${WASPFLOW_CODEX_BACKEND_HEALTH_URL:-}"
 # default session.
 WASPFLOW_TMUX_SESSION="${WASPFLOW_TMUX_SESSION:-waspflow}"
 
+# A lane is an unattended child process even though its provider owns an
+# interactive tmux pane.  Inheriting the tmux server's PAGER/GIT_PAGER lets a
+# provider-invoked `git` stop the lane in less, waiting for an operator to press
+# q.  Give lane children a noninteractive default at their launch boundary.
+#
+# An operator who deliberately wants another pager *inside every new lane* may
+# set WASPFLOW_LANE_PAGER.  It intentionally wins over inherited PAGER and
+# GIT_PAGER; the latter are commonly set in an operator shell and are never a
+# safe default for an unattended lane.
+WASPFLOW_LANE_PAGER="${WASPFLOW_LANE_PAGER:-cat}"
+
 # ---- logging ----------------------------------------------------------------
 _wf_is_tty() { [[ -t 2 ]]; }
 _wf_color() { _wf_is_tty && printf '\033[%sm' "$1" || true; }
@@ -504,7 +515,7 @@ tmux_run_owned_lane_command() {
 
   if ! tmux_cgroup_scope_available; then
     tmux_record_lane_cgroup_fallback "$lane" "$execution" "scope-unavailable" || return 1
-    ( cd "$cwd" && "$@" )
+    ( cd "$cwd" && env "PAGER=$WASPFLOW_LANE_PAGER" "GIT_PAGER=$WASPFLOW_LANE_PAGER" "$@" )
     return $?
   fi
 
@@ -516,6 +527,7 @@ tmux_run_owned_lane_command() {
     ( cd "$cwd" && systemd-run --user --scope --unit="$unit" --collect --quiet -- \
         env "WASPFLOW_HOME=$WASPFLOW_HOME" "WASPFLOW_LIB=$WASPFLOW_LIB" \
         "WASPFLOW_TMUX_SESSION=$WASPFLOW_TMUX_SESSION" "PATH=$PATH" \
+        "PAGER=$WASPFLOW_LANE_PAGER" "GIT_PAGER=$WASPFLOW_LANE_PAGER" \
         bash -c 'source "$1"; tmux_enter_lane_scope "$2" "$3" "${@:4}"' -- \
         "$WASPFLOW_LIB/core.sh" "$lane" "$unit" "$@" ) || rc=$?
   else
@@ -523,6 +535,7 @@ tmux_run_owned_lane_command() {
     ( cd "$cwd" && systemd-run --user --scope --no-block --unit="$unit" --collect --quiet -- \
         env "WASPFLOW_HOME=$WASPFLOW_HOME" "WASPFLOW_LIB=$WASPFLOW_LIB" \
         "WASPFLOW_TMUX_SESSION=$WASPFLOW_TMUX_SESSION" "PATH=$PATH" \
+        "PAGER=$WASPFLOW_LANE_PAGER" "GIT_PAGER=$WASPFLOW_LANE_PAGER" \
         bash -c 'source "$1"; tmux_enter_lane_scope_and_capture "$2" "$3" "$4" "${@:5}"' -- \
         "$WASPFLOW_LIB/core.sh" "$lane" "$unit" "$run_dir" "$@" ) || rc=$?
     # A successful no-block submission is not proof the unit started. The
@@ -587,7 +600,7 @@ tmux_run_owned_lane_command() {
   fi
 
   tmux_record_lane_cgroup_fallback "$lane" "$execution" "scope-launch-failed" || return 1
-  ( cd "$cwd" && "$@" )
+  ( cd "$cwd" && env "PAGER=$WASPFLOW_LANE_PAGER" "GIT_PAGER=$WASPFLOW_LANE_PAGER" "$@" )
 }
 
 # A pane command is arbitrary shell syntax assembled by a provider adapter.
@@ -640,10 +653,11 @@ tmux_kill_owned_lane_scopes() {
 tmux_create_owned_lane_window() {
   local lane="$1" cwd="$2" shell_command="$3" window launcher
   # tmux panes inherit the tmux SERVER's environment, not necessarily the
-  # caller's current WASPFLOW_HOME. Export the lane runtime coordinates into the
-  # pane explicitly before it sources core, or its scope receipt would be
-  # written to the operator's default state directory.
-  launcher="export WASPFLOW_HOME=$(printf '%q' "$WASPFLOW_HOME") WASPFLOW_LIB=$(printf '%q' "$WASPFLOW_LIB") WASPFLOW_TMUX_SESSION=$(printf '%q' "$WASPFLOW_TMUX_SESSION") PATH=$(printf '%q' "$PATH"); source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_run_owned_lane_shell_command $(printf '%q' "$lane") $(printf '%q' "$cwd") pane $(printf '%q' "$shell_command")"
+  # caller's current WASPFLOW_HOME. Export the lane runtime coordinates and
+  # pager policy into the pane explicitly before it sources core, or its scope
+  # receipt would be written to the operator's default state directory and an
+  # explicit pager override would be lost to the tmux server environment.
+  launcher="export WASPFLOW_HOME=$(printf '%q' "$WASPFLOW_HOME") WASPFLOW_LIB=$(printf '%q' "$WASPFLOW_LIB") WASPFLOW_TMUX_SESSION=$(printf '%q' "$WASPFLOW_TMUX_SESSION") WASPFLOW_LANE_PAGER=$(printf '%q' "$WASPFLOW_LANE_PAGER") PATH=$(printf '%q' "$PATH"); source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_run_owned_lane_shell_command $(printf '%q' "$lane") $(printf '%q' "$cwd") pane $(printf '%q' "$shell_command")"
   tmux_ensure_session
   window="$(tmux new-window -d -P -F '#{window_id}' -t "$WASPFLOW_TMUX_SESSION" \
     -n "$lane" -c "$cwd" "bash -c $(printf '%q' "$launcher")")" || return 1

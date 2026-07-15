@@ -337,12 +337,24 @@ commands, and resolved provider argv/env; use `status <lane>` for one full recor
 |---|---|---|
 | `WASPFLOW_HOME` | `~/.local/state/waspflow` | Lane state and transcripts |
 | `WASPFLOW_TMUX_SESSION` | `waspflow` | tmux session that holds worker windows |
+| `WASPFLOW_LANE_PAGER` | `cat` | Pager command for provider children in new lanes; overrides inherited `PAGER` and `GIT_PAGER` for those children only |
 | `WASPFLOW_ALLOW_API_BILLING` | empty | Set to `1` to intentionally allow Claude workers while `ANTHROPIC_API_KEY` is set |
 | `WASPFLOW_CODEX_BACKEND_HEALTH_URL` | empty | Optional health check URL for proxy-routed Codex setups |
 | `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Claude session logs |
 | `CODEX_SESSIONS_DIR` | `~/.codex/sessions` | Codex session logs |
 | `GROK_HOME` | `~/.grok` | Grok config home (sessions under `$GROK_HOME/sessions`) |
 | `GROK_SESSIONS_DIR` | `$GROK_HOME/sessions` | Grok session directories |
+
+Lane provider children default both `PAGER` and `GIT_PAGER` to `cat`. This
+prevents commands such as `git log` from parking an unattended lane in an
+interactive pager inherited from the tmux server. It does not change the
+operator shell or tmux server, and the pane remains a real PTY for `attach`.
+
+Override precedence is explicit: `WASPFLOW_LANE_PAGER` wins, then the default
+is `cat`; inherited `PAGER` and `GIT_PAGER` never control a lane. Set
+`WASPFLOW_LANE_PAGER=less` only when an operator intentionally accepts that an
+unattended lane may wait in a pager. The override applies to provider children
+and headless lane recovery commands, not to the operator's shell.
 
 ## Architecture
 

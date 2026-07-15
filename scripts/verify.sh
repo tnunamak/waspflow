@@ -86,6 +86,59 @@ git commit -q -m init
   rm -f "$paste_argv"
 )
 
+# A lane pane inherits tmux's long-lived server environment, not necessarily the
+# spawning shell. Prove the child-launch boundary overrides an inherited pager:
+# this pager fixture never returns, the same operational failure as an
+# interactive pager waiting for `q`. With the lane default it must finish; an
+# explicit WASPFLOW_LANE_PAGER override must win instead.
+(
+  pager_bin="$(mktemp -d "$scratch/waspflow-pager-bin-XXXXXX")"
+  pager_result="$(mktemp "$scratch/waspflow-pager-result-XXXXXX")"
+  pager_env="$(mktemp "$scratch/waspflow-pager-env-XXXXXX")"
+  pager_override_marker="$(mktemp "$scratch/waspflow-pager-override-XXXXXX")"
+  cat >"$pager_bin/blocks-forever" <<'EOF'
+#!/usr/bin/env bash
+while :; do sleep 1; done
+EOF
+  cat >"$pager_bin/operator-pager" <<'EOF'
+#!/usr/bin/env bash
+printf 'used\n' >"$PAGER_OVERRIDE_MARKER"
+cat
+EOF
+  cat >"$pager_bin/records-pager" <<'EOF'
+#!/usr/bin/env bash
+set -e
+printf '%s\n' "${GIT_PAGER:-}|${PAGER:-}" >"$PAGER_ENV_FILE"
+printf 'pager output\n' | "${GIT_PAGER:-${PAGER:-less}}" >"$PAGER_RESULT_FILE"
+printf 'finished\n' >>"$PAGER_RESULT_FILE"
+EOF
+  chmod +x "$pager_bin/blocks-forever" "$pager_bin/operator-pager" "$pager_bin/records-pager"
+  export PATH="$pager_bin:$PATH" PAGER_RESULT_FILE="$pager_result" PAGER_ENV_FILE="$pager_env" PAGER_OVERRIDE_MARKER="$pager_override_marker"
+  export PAGER="$pager_bin/blocks-forever" GIT_PAGER="$pager_bin/blocks-forever"
+  unset WASPFLOW_LANE_PAGER
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  tmux_cgroup_scope_available() { return 1; }
+  tmux_create_owned_lane_window pager-default "$fixture" records-pager >/dev/null
+  for _ in $(seq 1 30); do [[ -f "$pager_result" ]] && grep -q '^finished$' "$pager_result" && break; sleep 0.1; done
+  grep -qx 'cat|cat' "$pager_env" \
+    || { echo "pager hygiene: inherited interactive pager reached default lane child: $(cat "$pager_env" 2>/dev/null || true)" >&2; exit 1; }
+  grep -qx 'finished' "$pager_result" \
+    || { echo "pager hygiene: default lane child blocked in pager" >&2; exit 1; }
+
+  : >"$pager_result"; : >"$pager_env"
+  export WASPFLOW_LANE_PAGER="$pager_bin/operator-pager"
+  tmux_create_owned_lane_window pager-override "$fixture" records-pager >/dev/null
+  for _ in $(seq 1 30); do [[ -f "$pager_result" ]] && grep -q '^finished$' "$pager_result" && break; sleep 0.1; done
+  grep -qx "$pager_bin/operator-pager|$pager_bin/operator-pager" "$pager_env" \
+    || { echo "pager hygiene: explicit lane pager did not take precedence" >&2; exit 1; }
+  grep -qx 'used' "$pager_override_marker" \
+    || { echo "pager hygiene: explicit lane pager was selected but never executed" >&2; exit 1; }
+  grep -qx 'finished' "$pager_result" \
+    || { echo "pager hygiene: explicit safe override did not finish" >&2; exit 1; }
+  rm -rf "$pager_bin" "$pager_result" "$pager_env" "$pager_override_marker"
+)
+
 WASPFLOW_HOME="$state_home" "$root/bin/waspflow" init \
   --profile serious-repo \
   --profile live-stack-mutex \
