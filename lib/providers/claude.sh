@@ -21,7 +21,7 @@ CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
 # and there's no auth-scoped cache to read, so we don't second-guess --model here:
 # echo nothing (rc 1) → spawn skips validation (fail OPEN). The claude CLI rejects a
 # genuinely bad model itself. Defined for provider-contract parity.
-claude_valid_models() { return 1; }
+claude_valid_models() { printf 'source=non_enumerable\n'; }
 
 # Claude supports a strict empty MCP configuration. Keep this detail in the
 # adapter: generic orchestration only handles the resolved command description.

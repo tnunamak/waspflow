@@ -233,6 +233,9 @@ artifacts_finalize() {
       sleep 1
     done
   fi
+  # A report recovery resumes a TUI lane headlessly. Receipt v1 keeps the
+  # original requested surface and marks this discontinuity as ineligible.
+  lane_set "$lane" surface_changed "true"
   _artifacts_recover "$lane" "$provider" "$report"
 
   if artifacts_report_present "$lane"; then
@@ -304,7 +307,7 @@ artifacts_verify_test_files_changed() {
 # centralized here so explicit verify and reap cannot drift in their evidence.
 # Args: lane failure_class test_files_changed workspace_fingerprint
 _artifacts_record_verify_checkpoint() {
-  local lane="$1" failure_class="$2" test_files_changed="$3" fingerprint="$4" epoch tmp
+  local lane="$1" failure_class="$2" test_files_changed="$3" fingerprint="$4" kind="${5:-checkpoint}" epoch tmp
   local result_file="$(lane_dir "$lane")/verify-result.json"
   epoch="$(date +%s)"
   tmp="${result_file}.tmp.$$"
@@ -317,6 +320,13 @@ _artifacts_record_verify_checkpoint() {
     verify_checkpoint_epoch "$epoch" \
     verify_checkpoint_fingerprint "$fingerprint" \
     verify_epoch "$epoch"
+  if [[ "$kind" == checkpoint ]]; then
+    local runs
+    runs="$(lane_get "$lane" verify_runs)"; [[ -n "$runs" ]] || runs='[]'
+    runs="$(jq -c --arg at "$epoch" --arg state "$(lane_get "$lane" verify_state)" --arg failure_class "$failure_class" \
+      '. + [{kind:"checkpoint",at:($at|tonumber),state:$state,failure_class:$failure_class}]' <<<"$runs" 2>/dev/null || echo '[]')"
+    lane_set "$lane" verify_runs "$runs"
+  fi
 }
 
 # A checkpoint is fresh only when its recorded Git workspace fingerprint exactly
@@ -337,7 +347,7 @@ artifacts_verify_checkpoint_fresh() {
 # checkpoint marker; callers decide whether that outcome should promote result.
 # Args: lane
 artifacts_run_verify_checkpoint() {
-  local lane="$1" verify_command prepare_command verify_name verify_timeout cwd dir
+  local lane="$1" kind="${2:-reap}" verify_command prepare_command verify_name verify_timeout cwd dir
   local verify_state prepare_state failure_class test_files_changed fingerprint
   verify_command="$(lane_get "$lane" verify_command)"
   [[ -n "$verify_command" ]] || return 3
@@ -361,10 +371,10 @@ artifacts_run_verify_checkpoint() {
       *)
         failure_class="prepare"
         [[ "$prepare_state" == timeout ]] && failure_class="timeout"
-        [[ ! -d "$cwd" || "$(lane_get "$lane" prepare_exit_code)" == 127 ]] && failure_class="infra"
+        [[ ! -d "$cwd" ]] && failure_class="infra"
         _artifacts_write_skipped_verify "$lane" "$verify_name" "$verify_command" "$cwd" "prepare_$prepare_state"
         fingerprint="$(artifacts_workspace_fingerprint "$cwd" 2>/dev/null || true)"
-        _artifacts_record_verify_checkpoint "$lane" "$failure_class" "$test_files_changed" "$fingerprint"
+        _artifacts_record_verify_checkpoint "$lane" "$failure_class" "$test_files_changed" "$fingerprint" "$kind"
         echo "$prepare_state"
         return 0
         ;;
@@ -377,12 +387,58 @@ artifacts_run_verify_checkpoint() {
     timeout) failure_class="timeout" ;;
     *)
       failure_class="task"
-      [[ ! -d "$cwd" || "$(lane_get "$lane" verify_exit_code)" == 127 ]] && failure_class="infra"
+      [[ ! -d "$cwd" ]] && failure_class="infra"
+      [[ "$(lane_get "$lane" verify_exit_code)" == 126 || "$(lane_get "$lane" verify_exit_code)" == 127 ]] && failure_class="invalid_oracle"
       ;;
   esac
   fingerprint="$(artifacts_workspace_fingerprint "$cwd" 2>/dev/null || true)"
-  _artifacts_record_verify_checkpoint "$lane" "$failure_class" "$test_files_changed" "$fingerprint"
+  _artifacts_record_verify_checkpoint "$lane" "$failure_class" "$test_files_changed" "$fingerprint" "$kind"
   echo "$verify_state"
+}
+
+# A checkpoint failure is comparable only with an agent-inaccessible fork-point
+# worktree. Run its configured commands without touching the lane's primary
+# receipts; every cleanup path removes the detached worktree.
+artifacts_classify_pre_existing() {
+  local lane="$1" fork repo_root tmp verify_command prepare_command timeout rc state="inconclusive"
+  [[ "$(lane_get "$lane" verify_failure_class)" == task ]] || return 0
+  fork="$(lane_get "$lane" verify_fork_point)"
+  if [[ -z "$fork" ]]; then
+    lane_set "$lane" baseline_oracle_ran "false" baseline_oracle_state "skipped" baseline_oracle_reason "no_fork_point"
+    return 0
+  fi
+  repo_root="$(lane_get "$lane" repo_root)"; [[ -n "$repo_root" ]] || repo_root="$(worktree_repo_root "$(lane_get "$lane" cwd)")"
+  if [[ -z "$repo_root" ]] || ! git -C "$repo_root" cat-file -e "$fork^{commit}" 2>/dev/null; then
+    lane_set "$lane" baseline_oracle_ran "false" baseline_oracle_state "skipped" baseline_oracle_reason "no_fork_point"
+    return 0
+  fi
+  tmp="$(mktemp -d "$(dirname "$repo_root")/.waspflow-baseline-XXXXXX")" || { lane_set "$lane" baseline_oracle_ran "true" baseline_oracle_state "inconclusive" baseline_oracle_reason "worktree_create_failed"; return 0; }
+  rmdir "$tmp" || { rm -rf "$tmp"; lane_set "$lane" baseline_oracle_ran "true" baseline_oracle_state "inconclusive" baseline_oracle_reason "worktree_create_failed"; return 0; }
+  if ! git -C "$repo_root" worktree add --detach "$tmp" "$fork" >/dev/null 2>&1; then
+    rm -rf "$tmp"; lane_set "$lane" baseline_oracle_ran "true" baseline_oracle_state "inconclusive" baseline_oracle_reason "worktree_create_failed"; return 0
+  fi
+  verify_command="$(lane_get "$lane" verify_command)"; prepare_command="$(lane_get "$lane" prepare_command)"; timeout="$(lane_get "$lane" verify_timeout)"; timeout="${timeout:-1800}"
+  state="$(
+    cleanup_baseline() { git -C "$repo_root" worktree remove --force "$tmp" >/dev/null 2>&1 || rm -rf "$tmp"; }
+    trap cleanup_baseline EXIT INT TERM
+    if [[ -n "$prepare_command" ]]; then
+      set +e; timeout "$timeout" bash -c "cd $(printf '%q' "$tmp") && $prepare_command" >/dev/null 2>&1; rc=$?; set -e
+      [[ "$rc" -eq 0 ]] || { printf 'inconclusive\n'; exit 0; }
+    fi
+    set +e; timeout "$timeout" bash -c "cd $(printf '%q' "$tmp") && $verify_command" >/dev/null 2>&1; rc=$?; set -e
+    case "$rc" in 0) printf 'passed\n' ;; 124|126|127) printf 'inconclusive\n' ;; *) printf 'failed\n' ;; esac
+  )"
+  lane_set "$lane" baseline_oracle_ran "true" baseline_oracle_state "$state" baseline_oracle_reason ""
+  if [[ "$state" == failed ]]; then
+    lane_set "$lane" verify_failure_class "pre_existing"
+    local runs; runs="$(lane_get "$lane" verify_runs)"
+    [[ -n "$runs" ]] && lane_set "$lane" verify_runs "$(jq -c 'if length > 0 then .[-1].failure_class = "pre_existing" else . end' <<<"$runs")"
+    local result_file="$(lane_dir "$lane")/verify-result.json" result_tmp
+    if [[ -f "$result_file" ]]; then
+      result_tmp="${result_file}.tmp.$$"
+      jq '.failure_class = "pre_existing"' "$result_file" >"$result_tmp" && mv "$result_tmp" "$result_file"
+    fi
+  fi
 }
 
 # Run the lane's optional verification contract for reap and return its final
@@ -431,6 +487,86 @@ artifacts_verify() {
       return 0
       ;;
   esac
+}
+
+_artifacts_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'
+  else return 1; fi
+}
+
+# Build and append Receipt v1 exactly once per lane finalization. It is kept
+# here with artifact finalization because this is where result, oracle evidence,
+# and durable lane state meet; selection remains deliberately out of scope.
+artifacts_emit_receipt_v1() {
+  local lane="$1" result="$2" dir provider billing quota version harness receipt reasons
+  [[ "$(lane_get "$lane" receipt_emitted)" == true ]] && return 0
+  dir="$(lane_dir "$lane")"; provider="$(lane_get "$lane" provider)"
+  billing="$(lane_get "$lane" billing_path)"
+  jq -e 'type == "object"' >/dev/null <<<"$billing" 2>/dev/null || billing='{"schema_version":1,"path":"unknown","evidence":"","detail":""}'
+  quota="$(quota_observation_v1 "$provider")"
+  version="$(git -C "${WASPFLOW_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}" describe --always --dirty 2>/dev/null || echo dev)"
+  harness="$(printf '%s\n%s' "$(lane_get "$lane" prepare_command)" "$(lane_get "$lane" verify_command)" | _artifacts_sha256 2>/dev/null || true)"
+  reasons="$(jq -cn \
+    --arg raw "$(lane_get "$lane" raw_provider_args)" \
+    --arg surface "$(lane_get "$lane" surface_changed)" \
+    --arg model "$(lane_get "$lane" model_requested)" \
+    --arg effort "$(lane_get "$lane" effort_requested)" \
+    --arg runtime "$(lane_get "$lane" runtime_settings_state)" \
+    --arg currency "$(billing_cost_currency "$(jq -r '.path // "unknown"' <<<"$billing")")" \
+    --arg scope "$(lane_get "$lane" model_validation_scope)" \
+    --arg strength "$(lane_get "$lane" verify_strength)" \
+    --arg verify_state "$(lane_get "$lane" verify_state)" '
+      [if $raw == "true" then "raw_provider_args" else empty end,
+       if $surface == "true" then "surface_changed" else empty end,
+       if $model == "" then "model_default" else empty end,
+       if $effort == "" then "effort_default" else empty end,
+       if $runtime == "error" then "attestation_error" elif $runtime != "observed" then "attestation_missing" else empty end,
+       if $currency == "unknown" then "billing_path_unknown" else empty end,
+       if $scope == "mismatched" then "availability_scope_mismatched" else empty end,
+       if $strength == "" or $verify_state == "" or $verify_state == "skipped" then "verify_strength_unknown" else empty end]')"
+  local verify_runs
+  verify_runs="$(lane_get "$lane" verify_runs)"; jq -e 'type == "array"' >/dev/null <<<"$verify_runs" 2>/dev/null || verify_runs='[]'
+  receipt="$(jq -cn \
+    --arg receipt_id "$(new_uuid)" --arg lane "$lane" --arg lane_uuid "$(lane_get "$lane" lane_uuid)" --arg version "$version" \
+    --arg op "$(lane_get "$lane" op)" --arg task_family "$(lane_get "$lane" task_family)" --arg constraint_family "$(lane_get "$lane" constraint_family)" \
+    --arg policy_version "$(lane_get "$lane" policy_version)" --arg catalog_ref "$(lane_get "$lane" catalog_ref)" \
+    --arg provider "$provider" --arg surface "$(lane_get "$lane" surface)" --arg model "$(lane_get "$lane" model_requested)" --arg effort "$(lane_get "$lane" effort_requested)" --arg mode "$(lane_get "$lane" op_mode)" \
+    --arg endpoint_profile "$(lane_get "$lane" endpoint_profile)" --arg raw_provider_args "$(lane_get "$lane" raw_provider_args)" --arg auth_principal "$(lane_get "$lane" auth_principal)" \
+    --arg runtime_state "$(lane_get "$lane" runtime_settings_state)" --arg observed_model "$(lane_get "$lane" runtime_model)" --arg observed_effort "$(lane_get "$lane" runtime_effort)" \
+    --arg availability_state "$(lane_get "$lane" model_validation_state)" --arg availability_source "$(lane_get "$lane" model_validation_source)" --arg availability_scope "$(lane_get "$lane" model_validation_scope)" --arg availability_at "$(lane_get "$lane" model_validation_at)" \
+    --arg verify_state "$(lane_get "$lane" verify_state)" --arg failure_class "$(lane_get "$lane" verify_failure_class)" --arg strength "$(lane_get "$lane" verify_strength)" --arg harness "$harness" --arg test_changed "$(lane_get "$lane" verify_test_files_changed)" --arg fork_point "$(lane_get "$lane" verify_fork_point)" \
+    --arg baseline_ran "$(lane_get "$lane" baseline_oracle_ran)" --arg baseline_state "$(lane_get "$lane" baseline_oracle_state)" --arg baseline_reason "$(lane_get "$lane" baseline_oracle_reason)" \
+    --arg spawn_epoch "$(lane_get "$lane" spawn_epoch)" --arg result "$result" --arg outcome "$(lane_get "$lane" outcome)" \
+    --argjson billing "$billing" --argjson quota "$quota" --argjson reasons "$reasons" --argjson verify_runs "$verify_runs" '
+      def nullable: if . == "" then null else . end;
+      now as $now |
+      def epoch_or_null: if . == "" then null else tonumber? end;
+      ($spawn_epoch | epoch_or_null) as $spawn |
+      {schema_version:1,receipt_id:$receipt_id,lane:$lane,lane_uuid:($lane_uuid|nullable),waspflow_version:$version,segment:null,
+       op:$op,task_family:($task_family|nullable),constraint_family:($constraint_family|nullable),policy_version:($policy_version|nullable),catalog_ref:($catalog_ref|nullable),
+       arm_requested:{schema_version:1,provider:$provider,surface:(if $surface == "" then "tui" else $surface end),model:$model,effort:$effort,mode:(if $mode == "" then "standard" else $mode end),billing_path:$billing,endpoint_profile:(if $endpoint_profile == "" then "default" else $endpoint_profile end),raw_provider_args:($raw_provider_args == "true"),auth_principal:($auth_principal|nullable)},
+       arm_attestation:{runtime_settings_state:(if $runtime_state == "" then "unknown" else $runtime_state end),observed_model:($observed_model|nullable),observed_effort:($observed_effort|nullable)},
+       stats_eligible:($reasons|length == 0),ineligibility_reasons:$reasons,
+       availability:{schema_version:1,provider:$provider,model:$model,state:(if $availability_state == "" then "not_applicable" else $availability_state end),evidence_source:(if $availability_source == "" then "none" else $availability_source end),query_scope:(if $availability_scope == "" then "not_applicable" else $availability_scope end),observed_at:($availability_at|nullable),detail:""},
+       quota_observation:$quota,
+       verify:{state:(if $verify_state == "" then "skipped" else $verify_state end),failure_class:(if $failure_class == "" then "none" else $failure_class end),verify_strength:(if $strength == "" or $verify_state == "" or $verify_state == "skipped" then "unknown" else "declared:" + $strength end),harness_hash:(if $harness == "" then null else "sha256:" + $harness end),test_files_changed:(if $test_changed == "" then "unknown" else $test_changed end),fork_point:$fork_point,baseline_oracle:{ran:($baseline_ran == "true"),state:(if $baseline_state == "" then "skipped" else $baseline_state end),reason:(if $baseline_reason == "" and $baseline_ran != "true" then "no_fork_point" else $baseline_reason end)},verify_runs:($verify_runs // [])},
+       timestamps:{spawn_epoch:$spawn,finalize_epoch:($now|floor),wall_seconds:(($now|floor) - ($spawn // ($now|floor)))},
+       cost_observation:{currency:(if ($billing.path // "unknown") | IN("chatgpt_subscription","subscription_env_heuristic","oauth_env_heuristic") then "quota" elif ($billing.path // "unknown") | IN("api_key","auth_token","access_token_env","api_key_env") then "usd" else "unknown" end),amount:null,attribution:"none",evidence:"billing_path"},
+       result:$result,outcome:($outcome|nullable),escalation_path:[]}' )"
+  [[ -n "$receipt" ]] && jq -e 'type == "object"' >/dev/null <<<"$receipt" || { err "receipt: generated JSON is empty or invalid"; return 1; }
+  mkdir -p "$WASPFLOW_HOME" "$WASPFLOW_LOCKS_DIR"
+  command -v flock >/dev/null 2>&1 || { err "receipt: flock is required"; return 1; }
+  local fd
+  exec {fd}>"$WASPFLOW_LOCKS_DIR/receipts.lock" || { err "receipt: cannot open lock"; return 1; }
+  flock -x "$fd" || { exec {fd}>&-; err "receipt: cannot lock"; return 1; }
+  if ! printf '%s\n' "$receipt" >>"$WASPFLOW_HOME/receipts.jsonl"; then
+    flock -u "$fd" || true; exec {fd}>&-; err "receipt: append failed"; return 1
+  fi
+  flock -u "$fd" || { exec {fd}>&-; err "receipt: unlock failed"; return 1; }
+  exec {fd}>&-
+  printf '%s\n' "$receipt" >"$dir/receipt.json" || { err "receipt: cannot write lane copy"; return 1; }
+  lane_set "$lane" receipt_emitted "true" receipt_id "$(jq -r '.receipt_id' <<<"$receipt")"
 }
 
 _artifacts_write_skipped_verify() {

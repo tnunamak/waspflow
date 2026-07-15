@@ -1,0 +1,8 @@
+{
+  "providers": {
+    "openai": {
+      "usage": {"fetched_at":"2026-07-15T20:00:00Z","stale":false,"error":"token refresh failed","windows":null,"reset_credits":{"available_count":5,"fetched_at":"2026-07-15T20:00:00Z"}},
+      "forecast": {}
+    }
+  }
+}

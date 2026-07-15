@@ -92,7 +92,8 @@ waspflow reap fix
 
 `verify` never touches tmux, lane status, result, session, or worktree. It exits
 0 on pass and 2 on failure, and writes command/stdout/stderr/JSON receipts. The
-JSON carries `failure_class` (`task`, `prepare`, `timeout`, `infra`, `none`) plus
+JSON carries `failure_class` (`task`, `prepare`, `timeout`, `infra`,
+`invalid_oracle`, `pre_existing`, `none`) plus
 the advisory `verify_test_files_changed` heuristic. Reap consumes a checkpoint
 only when its content-sensitive Git workspace fingerprint is unchanged; otherwise
 it reruns the configured oracle. A changed/unknown test-surface flag is warning

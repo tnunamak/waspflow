@@ -414,13 +414,13 @@ checkpoint_cwd="$(mktemp -d "$scratch/waspflow-checkpoint-XXXXXX")"
   git config user.email test@example.invalid
   git config user.name 'Waspflow Test'
   printf 'base\n' > README.md
-  git add README.md
+  touch lane-marker
+  git add README.md lane-marker
   git commit -q -m init
 )
 checkpoint_fork="$(git -C "$checkpoint_cwd" rev-parse HEAD)"
 mkdir -p "$checkpoint_cwd/tests"
 printf 'changed test surface\n' > "$checkpoint_cwd/tests/checkpoint_test.sh"
-touch "$checkpoint_cwd/lane-marker"
 checkpoint_counter="$checkpoint_cwd/verify-runs"
 
 mkdir -p "$state_home/lanes/checkpoint-pass"
@@ -440,8 +440,9 @@ jq -e '.status == "reaped" and .result == "verified"' "$state_home/lanes/checkpo
 [[ "$(wc -c <"$checkpoint_counter")" -eq 3 ]] || { echo "checkpoint: reap reran a fresh verify" >&2; exit 1; }
 
 mkdir -p "$state_home/lanes/checkpoint-fail"
+rm "$checkpoint_cwd/lane-marker"
 jq -n --arg cwd "$checkpoint_cwd" --arg fork "$checkpoint_fork" \
-  '{provider:"codex", status:"exited", result:"", cwd:$cwd, origin_cwd:$cwd, worktree:$cwd, verify_fork_point:$fork, git_tracked:"true", verify_command:"false", verify_name:"unit", verify_timeout:"5"}' \
+  '{provider:"codex", status:"exited", result:"", cwd:$cwd, origin_cwd:$cwd, worktree:$cwd, repo_root:$cwd, verify_fork_point:$fork, git_tracked:"true", verify_command:"test -f lane-marker", verify_name:"unit", verify_timeout:"5"}' \
   > "$state_home/lanes/checkpoint-fail/state.json"
 set +e
 WASPFLOW_HOME="$state_home" "$root/bin/waspflow" verify checkpoint-fail >/tmp/waspflow-checkpoint-fail.txt 2>&1
@@ -449,11 +450,55 @@ rc=$?
 set -e
 [[ "$rc" -eq 2 ]] || { echo "expected checkpoint_fail verify rc=2, got $rc" >&2; exit 1; }
 test -d "$checkpoint_cwd"
-test -f "$checkpoint_cwd/lane-marker"
+# The removed committed marker is the task-local change that made this oracle
+# fail; the checkpoint assertion is that the lane/worktree survives intact.
 jq -e '.status == "exited" and .result == "" and .verify_state == "failed" and .verify_failure_class == "task"' \
   "$state_home/lanes/checkpoint-fail/state.json" >/dev/null
 jq -e '.state == "failed" and .failure_class == "task"' \
   "$state_home/lanes/checkpoint-fail/verify-result.json" >/dev/null
+
+# A true baseline failure is reclassified, while a broken baseline setup stays
+# task-class because it cannot establish comparability.
+mkdir -p "$state_home/lanes/checkpoint-pre-existing"
+jq -n --arg cwd "$checkpoint_cwd" --arg fork "$checkpoint_fork" \
+  '{provider:"codex",status:"exited",result:"",cwd:$cwd,origin_cwd:$cwd,worktree:$cwd,repo_root:$cwd,verify_fork_point:$fork,git_tracked:"true",verify_command:"false",verify_name:"unit",verify_timeout:"5"}' \
+  > "$state_home/lanes/checkpoint-pre-existing/state.json"
+set +e
+WASPFLOW_HOME="$state_home" "$root/bin/waspflow" verify checkpoint-pre-existing >/tmp/waspflow-checkpoint-pre-existing.txt 2>&1
+rc=$?
+set -e
+[[ "$rc" -eq 2 ]] || { echo "expected pre_existing verify rc=2, got $rc" >&2; exit 1; }
+jq -e '.verify_failure_class == "pre_existing" and .baseline_oracle_ran == "true" and .baseline_oracle_state == "failed"' \
+  "$state_home/lanes/checkpoint-pre-existing/state.json" >/dev/null
+jq -e '.failure_class == "pre_existing"' "$state_home/lanes/checkpoint-pre-existing/verify-result.json" >/dev/null
+
+mkdir -p "$state_home/lanes/checkpoint-baseline-inconclusive"
+touch "$checkpoint_cwd/prepare-marker"
+jq -n --arg cwd "$checkpoint_cwd" --arg fork "$checkpoint_fork" \
+  '{provider:"codex",status:"exited",result:"",cwd:$cwd,origin_cwd:$cwd,worktree:$cwd,repo_root:$cwd,verify_fork_point:$fork,git_tracked:"true",prepare_command:"test -f prepare-marker",verify_command:"false",verify_name:"unit",verify_timeout:"5"}' \
+  > "$state_home/lanes/checkpoint-baseline-inconclusive/state.json"
+set +e
+WASPFLOW_HOME="$state_home" "$root/bin/waspflow" verify checkpoint-baseline-inconclusive >/tmp/waspflow-checkpoint-baseline-inconclusive.txt 2>&1
+rc=$?
+set -e
+[[ "$rc" -eq 2 ]] || { echo "expected baseline inconclusive verify rc=2, got $rc" >&2; exit 1; }
+jq -e '.verify_failure_class == "task" and .baseline_oracle_ran == "true" and .baseline_oracle_state == "inconclusive"' \
+  "$state_home/lanes/checkpoint-baseline-inconclusive/state.json" >/dev/null
+
+for invalid_rc in 126 127; do
+  invalid_lane="checkpoint-invalid-$invalid_rc"
+  mkdir -p "$state_home/lanes/$invalid_lane"
+  jq -n --arg cwd "$checkpoint_cwd" --arg command "exit $invalid_rc" \
+    '{provider:"codex",status:"exited",result:"",cwd:$cwd,origin_cwd:$cwd,git_tracked:"true",verify_command:$command,verify_name:"unit",verify_timeout:"5"}' \
+    > "$state_home/lanes/$invalid_lane/state.json"
+  set +e
+  WASPFLOW_HOME="$state_home" "$root/bin/waspflow" verify "$invalid_lane" >/tmp/waspflow-$invalid_lane.txt 2>&1
+  rc=$?
+  set -e
+  [[ "$rc" -eq 2 ]] || { echo "expected invalid oracle $invalid_rc rc=2, got $rc" >&2; exit 1; }
+  jq -e --argjson code "$invalid_rc" '.verify_failure_class == "invalid_oracle" and (.verify_exit_code | tonumber) == $code' \
+    "$state_home/lanes/$invalid_lane/state.json" >/dev/null
+done
 
 mkdir -p "$state_home/lanes/verify-true"
 jq -n \
@@ -1387,20 +1432,20 @@ grep -q 'WASPFLOW_STALL_SECONDS' "$root/bin/waspflow" || { echo "wait: stall win
   vmlib="$(mktemp -d "$scratch/waspflow-vm-XXXXXX")"
   # fake provider that enumerates a fixed model set
   cat >"$vmlib/faker.sh" <<'PROV'
-faker_valid_models() { printf '%s\n' good-1 good-2 good-3; }
+faker_valid_models() { printf 'source=live_query\n%s\n' $'good-1\ngood-2\ngood-3'; }
 PROV
   # shellcheck disable=SC1090
   source "$vmlib/faker.sh"
   # bad model -> die (nonzero), lists valid set
   out="$( (validate_model faker bad-model spawn) 2>&1 )" && { echo "vm: bad model should fail" >&2; exit 1; }
-  grep -q 'not available' <<<"$out" || { echo "vm: missing 'not available' msg" >&2; exit 1; }
+  grep -q 'unavailable' <<<"$out" || { echo "vm: missing 'unavailable' msg" >&2; exit 1; }
   grep -q 'good-1, good-2, good-3' <<<"$out" || { echo "vm: valid list not shown cleanly" >&2; exit 1; }
   # valid model -> ok
   ( validate_model faker good-2 spawn ) || { echo "vm: valid model wrongly rejected" >&2; exit 1; }
   # empty model (default) -> ok
   ( validate_model faker "" spawn ) || { echo "vm: empty model should be allowed" >&2; exit 1; }
   # provider that can't enumerate -> FAIL OPEN (any model allowed)
-  faker2_valid_models() { return 1; }
+  faker2_valid_models() { printf 'source=none\n'; }
   ( validate_model faker2 anything-goes spawn ) || { echo "vm: must fail open when no cache" >&2; exit 1; }
   rm -rf "$vmlib"
 )
@@ -1439,10 +1484,10 @@ CODEX
   # shellcheck disable=SC1090
   source "$root/lib/providers/codex.sh"
   live="$(codex_valid_models)"
-  [[ "$live" == "gpt-5.6-sol" ]] || { echo "codex models: did not prefer live discovery" >&2; exit 1; }
+  [[ "$live" == $'source=live_query\ngpt-5.6-sol' ]] || { echo "codex models: did not prefer live discovery" >&2; exit 1; }
   ! grep -q 'stale-cache-model' <<<"$live" || { echo "codex models: stale cache won over live discovery" >&2; exit 1; }
   fallback="$(CODEX_DEBUG_FAIL=1 codex_valid_models)"
-  [[ "$fallback" == "stale-cache-model" ]] || { echo "codex models: cache did not fail open after live discovery failure" >&2; exit 1; }
+  [[ "$fallback" == $'source=local_cache\nstale-cache-model' ]] || { echo "codex models: cache did not fail open after live discovery failure" >&2; exit 1; }
   policy="$(CODEX_EXPECT_CWD="$mcpwork" codex_mcp_policy auto "$mcpwork")"
   jq -e '.resolved == "none" and (.argv | index("mcp_servers.alpha.enabled=false")) and (.argv | index("mcp_servers.beta-server.enabled=false"))' \
     >/dev/null <<<"$policy" || { echo "codex MCP: live server overrides missing" >&2; exit 1; }
@@ -1685,7 +1730,7 @@ mcpp_session_resumable() { return 0; }
 mcpp_is_idle() { return 1; }
 mcpp_revise() { :; }
 mcpp_turn_mark() { echo 0; }
-mcpp_valid_models() { printf 'allowed-model\n'; }
+mcpp_valid_models() { printf 'source=live_query\nallowed-model\n'; }
 mcpp_mcp_policy() { case "$1" in auto) printf '%s\n' '{"resolved":"none","warning":"test warning","argv":[],"env":{}}' ;; *) return 1 ;; esac; }
 mcpp_spawn() {
   local lane="$1" cwd="$2"
@@ -1713,6 +1758,33 @@ PROV
   WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
     "$root/bin/waspflow" spawn --provider mcpp --lane mcp-state -- "must not overwrite" >/dev/null 2>&1 \
     && { echo "spawn: overwrote an unreaped lane" >&2; exit 1; }
+
+  # A reaped name is a new lane life. Exercise spawn's real state-reset path,
+  # not a hand-written replacement state file: both receipts must survive and
+  # have independent identities.
+  WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" reap mcp-state --no-archive >/dev/null
+  [[ "$(wc -l <"$mcphome/receipts.jsonl")" -eq 1 ]] \
+    || { echo "receipt reuse: first lane life did not append exactly one receipt" >&2; exit 1; }
+  first_receipt_id="$(jq -r '.receipt_id' "$mcphome/receipts.jsonl")"
+  first_lane_uuid="$(jq -r '.lane_uuid' "$mcphome/receipts.jsonl")"
+  jq '.outcome="abandoned" | .outcome_reason="prior life"' "$mcphome/lanes/mcp-state/state.json" >"$mcphome/lanes/mcp-state/state.next"
+  mv "$mcphome/lanes/mcp-state/state.next" "$mcphome/lanes/mcp-state/state.json"
+  WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-state -- "second life" >/dev/null
+  jq -e '.receipt_emitted == "false" and .receipt_id == "" and .verify_runs == "[]" and .outcome == "" and .outcome_reason == ""' \
+    "$mcphome/lanes/mcp-state/state.json" >/dev/null \
+    || { echo "receipt reuse: spawn retained schema lifecycle state" >&2; exit 1; }
+  WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" reap mcp-state --no-archive >/dev/null
+  [[ "$(wc -l <"$mcphome/receipts.jsonl")" -eq 2 ]] \
+    || { echo "receipt reuse: second lane life did not append a second receipt" >&2; exit 1; }
+  jq -s --arg first_receipt_id "$first_receipt_id" --arg first_lane_uuid "$first_lane_uuid" '
+    length == 2 and .[1].receipt_id != $first_receipt_id and .[1].lane_uuid != $first_lane_uuid
+  ' "$mcphome/receipts.jsonl" >/dev/null \
+    || { echo "receipt reuse: receipt or lane UUID was reused" >&2; exit 1; }
+  cmp -s "$mcphome/lanes/mcp-state/receipt.json" <(sed -n '2p' "$mcphome/receipts.jsonl") \
+    || { echo "receipt reuse: lane receipt copy was not refreshed" >&2; exit 1; }
 
   # A stale reaped receipt must not hide a same-name live window, and exact
   # window ownership must prevent tmux duplicate-name ambiguity.
@@ -2439,6 +2511,38 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   ! find "$obs_home/lanes" -name '.event-*' -print -quit | grep -q . \
     || { echo "event tail wrote temporary files under lane state" >&2; exit 1; }
   rm -rf "$obs_home" "$obs_data"
+)
+
+# Schema v1 provider protocol and clawmeter envelope contracts stay hermetic:
+# these source-level checks use only functions/fixtures, never a real provider.
+(
+  export WASPFLOW_HOME="$state_home/schema-v1"
+  export WASPFLOW_LIB="$root/lib"
+  source "$root/lib/core.sh"
+  source "$root/lib/worktree.sh"
+  source "$root/lib/artifacts.sh"
+  source "$root/lib/providers/claude.sh"
+  [[ "$(claude_valid_models)" == "source=non_enumerable" ]]
+  grok_valid_models() { printf 'source=local_cache\ngrok-listed\n'; }
+  validate_model grok grok-missing verify default
+  [[ "$MODEL_VALIDATION_STATE" == unknown && "$MODEL_VALIDATION_SOURCE" == local_cache ]]
+  codex_valid_models() { printf 'source=live_query\nlive-listed\n'; }
+  if (validate_model codex live-missing verify default) >/dev/null 2>&1; then
+    echo "schema v1: live default negative did not block" >&2; exit 1
+  fi
+  validate_model codex live-missing verify mismatched
+  [[ "$MODEL_VALIDATION_STATE" == unknown && "$MODEL_VALIDATION_SCOPE" == mismatched ]]
+  fixture_path="$root/tests/fixtures/clawmeter-healthy.json"
+  clawmeter() { [[ "${1:-}" == --version ]] && { echo v0.27.6; return 0; }; cat "$fixture_path"; }
+  jq -e '.state == "ok" and .observation.windows[0].projected_pct == 494' <<<"$(quota_observation_v1 codex)" >/dev/null
+  fixture_path="$root/tests/fixtures/clawmeter-partial-error.json"
+  jq -e '.state == "provider_error" and .reason == "token refresh failed" and .observation == null' <<<"$(quota_observation_v1 codex)" >/dev/null
+  fixture_path="$root/tests/fixtures/clawmeter-drifted.json"
+  jq -e '.state == "absent" and .observation == null and (.reason | test("unsupported provider shape"))' <<<"$(quota_observation_v1 codex)" >/dev/null
+  lane_set legacy-receipt provider grok status live result succeeded lane_uuid legacy-uuid
+  artifacts_emit_receipt_v1 legacy-receipt succeeded
+  jq -e '.lane == "legacy-receipt" and .timestamps.spawn_epoch == null and .timestamps.wall_seconds == 0' "$WASPFLOW_HOME/receipts.jsonl" >/dev/null
+  unset -f clawmeter
 )
 
 echo "waspflow verify: ok"
