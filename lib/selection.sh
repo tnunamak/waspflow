@@ -92,7 +92,7 @@ selection_policy_validate() {
 selection_menu() {
   ops_load
   printf 'selection required: choose an operating point (unranked across task families):\n' >&2
-  jq -r 'group_by(.task_family)[] | "  [" + .[0].task_family + "]", (.[] | "    \(.id)  constraint=\(.constraint_family) fallback=\(.expands_to.provider)/\(.expands_to.model // "(provider default)") quota=unknown")' <<<"$OPS_POLICY_JSON" >&2
+  jq -r '.operating_points | group_by(.task_family)[] | "  [" + .[0].task_family + "]", (.[] | "    \(.id)  constraint=\(.constraint_family) fallback=\(.expands_to.provider)/\(.expands_to.model // "(provider default)") quota=unknown")' <<<"$OPS_POLICY_JSON" >&2
   printf 'other models: any --model <id> proceeds; <provider> enumeration: waspflow doctor --models\n' >&2
   printf 'escapes: --op <id>; --model <id>; --accept-provider-default\n' >&2
 }

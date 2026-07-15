@@ -2608,6 +2608,10 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   export WASPFLOW_SELECTION_GATE=enforce
   set +e; gate_out="$("$root/bin/waspflow" spawn --lane selection-menu -- "x" 2>&1)"; gate_rc=$?; set -e
   [[ "$gate_rc" -eq 5 && "$gate_out" == *"selection required"* ]]
+  # The menu body must actually render: a task-family group header and an op row,
+  # and no jq error (a broken group_by kept the header + exit 5 and slipped past).
+  [[ "$gate_out" == *"[implementation]"* && "$gate_out" == *"implement.standard"* ]]
+  [[ "$gate_out" != *"jq: error"* ]]
   set +e; conflict_out="$(WASPFLOW_SELECTION_GATE=off "$root/bin/waspflow" spawn --auto --lane selection-auto -- "x" 2>&1)"; conflict_rc=$?; set -e
   [[ "$conflict_rc" -eq 1 && "$conflict_out" == *"--auto requires --op"* ]]
   demo_body="$(sed -n '/^cmd_demo()/,/^}/p' "$root/bin/waspflow")"
