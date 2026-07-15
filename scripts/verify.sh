@@ -403,6 +403,58 @@ rm -rf "$state_home/lanes/old-open-failed"
 long_report="$fixture/R.md"
 printf 'ok %.0s' {1..80} > "$long_report"
 
+# Non-destructive checkpoints preserve the lane/worktree/result, record the
+# test-surface signal, and are consumed by reap when the workspace still has the
+# same content. The command-side counter is deliberately inside the worktree:
+# the recorded fingerprint must include verification-generated artifacts too.
+checkpoint_cwd="$(mktemp -d "$scratch/waspflow-checkpoint-XXXXXX")"
+(
+  cd "$checkpoint_cwd"
+  git init -q
+  git config user.email test@example.invalid
+  git config user.name 'Waspflow Test'
+  printf 'base\n' > README.md
+  git add README.md
+  git commit -q -m init
+)
+checkpoint_fork="$(git -C "$checkpoint_cwd" rev-parse HEAD)"
+mkdir -p "$checkpoint_cwd/tests"
+printf 'changed test surface\n' > "$checkpoint_cwd/tests/checkpoint_test.sh"
+touch "$checkpoint_cwd/lane-marker"
+checkpoint_counter="$checkpoint_cwd/verify-runs"
+
+mkdir -p "$state_home/lanes/checkpoint-pass"
+jq -n --arg cwd "$checkpoint_cwd" --arg fork "$checkpoint_fork" --arg counter "$checkpoint_counter" \
+  '{provider:"codex", status:"live", result:"", cwd:$cwd, origin_cwd:$cwd, worktree:$cwd, verify_fork_point:$fork, git_tracked:"true", verify_command:("printf run >> \"" + $counter + "\"; test -f lane-marker"), verify_name:"unit", verify_timeout:"5"}' \
+  > "$state_home/lanes/checkpoint-pass/state.json"
+WASPFLOW_HOME="$state_home" "$root/bin/waspflow" verify checkpoint-pass
+test -d "$checkpoint_cwd"
+test -f "$checkpoint_cwd/lane-marker"
+jq -e '.status == "live" and .result == "" and .verify_state == "passed" and .verify_failure_class == "none" and .verify_test_files_changed == "true" and (.verify_checkpoint_epoch | length > 0)' \
+  "$state_home/lanes/checkpoint-pass/state.json" >/dev/null
+jq -e '.state == "passed" and .failure_class == "none" and .verify_test_files_changed == "true"' \
+  "$state_home/lanes/checkpoint-pass/verify-result.json" >/dev/null
+[[ "$(wc -c <"$checkpoint_counter")" -eq 3 ]] || { echo "checkpoint: verify did not run exactly once" >&2; exit 1; }
+WASPFLOW_HOME="$state_home" "$root/bin/waspflow" reap checkpoint-pass --keep-worktree --no-archive
+jq -e '.status == "reaped" and .result == "verified"' "$state_home/lanes/checkpoint-pass/state.json" >/dev/null
+[[ "$(wc -c <"$checkpoint_counter")" -eq 3 ]] || { echo "checkpoint: reap reran a fresh verify" >&2; exit 1; }
+
+mkdir -p "$state_home/lanes/checkpoint-fail"
+jq -n --arg cwd "$checkpoint_cwd" --arg fork "$checkpoint_fork" \
+  '{provider:"codex", status:"exited", result:"", cwd:$cwd, origin_cwd:$cwd, worktree:$cwd, verify_fork_point:$fork, git_tracked:"true", verify_command:"false", verify_name:"unit", verify_timeout:"5"}' \
+  > "$state_home/lanes/checkpoint-fail/state.json"
+set +e
+WASPFLOW_HOME="$state_home" "$root/bin/waspflow" verify checkpoint-fail >/tmp/waspflow-checkpoint-fail.txt 2>&1
+rc=$?
+set -e
+[[ "$rc" -eq 2 ]] || { echo "expected checkpoint_fail verify rc=2, got $rc" >&2; exit 1; }
+test -d "$checkpoint_cwd"
+test -f "$checkpoint_cwd/lane-marker"
+jq -e '.status == "exited" and .result == "" and .verify_state == "failed" and .verify_failure_class == "task"' \
+  "$state_home/lanes/checkpoint-fail/state.json" >/dev/null
+jq -e '.state == "failed" and .failure_class == "task"' \
+  "$state_home/lanes/checkpoint-fail/verify-result.json" >/dev/null
+
 mkdir -p "$state_home/lanes/verify-true"
 jq -n \
   --arg cwd "$fixture" \
@@ -428,7 +480,7 @@ WASPFLOW_HOME="$state_home" "$root/bin/waspflow" reap verify-false --no-archive 
 rc=$?
 set -e
 [[ "$rc" -eq 2 ]] || { echo "expected verify_false reap rc=2, got $rc" >&2; exit 1; }
-jq -e '.result == "verify_failed" and .verify_state == "failed" and .verify_exit_code == "1"' \
+jq -e '.result == "verify_failed" and .verify_state == "failed" and .verify_exit_code == "1" and .verify_failure_class == "task"' \
   "$state_home/lanes/verify-false/state.json" >/dev/null
 lane_check="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" check --no-fail --explain)"
 grep -q "lane has failed verification: lane=verify-false" <<<"$lane_check"
@@ -445,7 +497,7 @@ if command -v timeout >/dev/null 2>&1; then
   rc=$?
   set -e
   [[ "$rc" -eq 2 ]] || { echo "expected verify_timeout reap rc=2, got $rc" >&2; exit 1; }
-  jq -e '.result == "verify_failed" and .verify_state == "timeout" and .verify_exit_code == "124"' \
+  jq -e '.result == "verify_failed" and .verify_state == "timeout" and .verify_exit_code == "124" and .verify_failure_class == "timeout"' \
     "$state_home/lanes/verify-timeout/state.json" >/dev/null
 fi
 
@@ -459,10 +511,11 @@ WASPFLOW_HOME="$state_home" "$root/bin/waspflow" reap prepare-false --no-archive
 rc=$?
 set -e
 [[ "$rc" -eq 2 ]] || { echo "expected prepare_false reap rc=2, got $rc" >&2; exit 1; }
-jq -e '.result == "verify_failed" and .prepare_state == "failed" and .verify_state == "skipped"' \
+jq -e '.result == "verify_failed" and .prepare_state == "failed" and .verify_state == "skipped" and .verify_failure_class == "prepare"' \
   "$state_home/lanes/prepare-false/state.json" >/dev/null
 jq -e '.state == "failed" and .exit_code == 1' "$state_home/lanes/prepare-false/prepare-result.json" >/dev/null
 jq -e '.state == "skipped" and .exit_code == null' "$state_home/lanes/prepare-false/verify-result.json" >/dev/null
+rm -rf "$checkpoint_cwd"
 
 mkdir -p "$state_home/lanes/no-verify"
 jq -n \

@@ -122,6 +122,34 @@ write that exact path from the transcript and diff. If it is still missing,
 `reap` fails. You get the deliverable or a hard failure, not a false green from
 an unrelated report file.
 
+## Verify Before Reaping
+
+Use `--verify` to make a project oracle part of a lane, then run it while the
+lane is still intact:
+
+```bash
+waspflow spawn --provider codex --lane fix --isolate \
+  --prepare 'npm ci' --verify 'npm test' -- "Fix the failing test."
+waspflow wait fix
+waspflow verify fix                 # 0 = pass; 2 = fail; no tmux/worktree teardown
+# inspect or revise the still-live lane, then run verify again
+waspflow reap fix                   # reuses the checkpoint if its workspace is unchanged
+```
+
+`verify` writes `verify-command.txt`, stdout/stderr, and `verify-result.json`
+under the lane directory, including `failure_class` (`task`, `prepare`,
+`timeout`, `infra`, or `none`). It does not change the lane's lifecycle or
+result. Reap reuses a checkpoint only when a content-sensitive Git workspace
+fingerprint (HEAD, tracked changes, and untracked files) still matches; otherwise
+it runs the contract again before cleanup. Non-Git workspaces are deliberately
+rerun.
+
+Each verify receipt also records the advisory `verify_test_files_changed` flag.
+For new isolated lanes it compares the fork point with committed and working-tree
+changes, looking for conventional `test`/`spec`/`verify` paths and paths named in
+the command. It warns but never blocks, and reports `unknown` for lanes without
+a trustworthy recorded fork point.
+
 ## Check the Project Before Launching More Workers
 
 `waspflow check` summarizes the project state that matters for agent work:
@@ -174,6 +202,7 @@ config shape.
 | `peek <lane> [--events]` | Pane/transcript capture for UI diagnosis; `--events` is the structured tail |
 | `revise <lane> -- <message>` | Send another instruction to the same session; nonzero means live submission was not confirmed |
 | `accept-runtime <lane> --reason <text>` | Explicitly accept the current observed Codex model/effort mismatch |
+| `verify <lane>` | Run the configured prepare/verify contract without teardown (0 pass, 2 fail) |
 | `reap <lane>` | Close the pane, verify outputs, and finalize state |
 | `park <lane>` | Close only a verified-idle owned tmux window; preserve the resumable lane |
 | `gc [--lane-age S] [--apply]` | Dry-run fleet selection for safely parkable old lanes; `--apply` parks them |
@@ -191,6 +220,8 @@ Useful `spawn` options:
 
 - `--isolate` creates a git worktree for the lane.
 - `--report <path>` requires a written deliverable before `reap` succeeds.
+- `--verify <cmd>` configures an oracle; use `verify <lane>` before destructive reap.
+- `--prepare <cmd>` runs setup before that oracle; `--verify-timeout <seconds>` bounds both commands.
 - `--model <id>` selects a provider model.
 - `--effort <none|minimal|low|medium|high|xhigh|max>` passes reasoning effort **exactly** where supported (never silent demotion; Codex accepts `xhigh`).
 - `--mcp <auto|none|inherit>` controls worker MCP exposure. `auto` is the default and is MCP-minimal where the provider supports it; use `inherit` only when the task needs the current provider configuration.
