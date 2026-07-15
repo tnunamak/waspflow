@@ -25,6 +25,7 @@
 #   attach  <lane>                        attach your terminal to the pane
 #   close   <lane> --status <...> [--into|--by|--reason ...]  set fan-in outcome
 #   captured <lane> --in <ref>            is lane's work in <ref>? (by content)
+#   verify  <lane>                         non-destructive verification checkpoint
 #   reap    <lane|--status S,...> [--force] [--keep-worktree] [--no-archive]
 #   check   [--cwd DIR] [--config FILE] [--no-fail] project integrity gate
 #   doctor                                check deps + backends
@@ -103,6 +104,7 @@ Verbs:
   attach  <lane>                        attach your terminal to the pane
   close   <lane> --status <harvested|superseded|abandoned|open> [prov]  fan-in outcome
   captured <lane> --in <ref>            is lane's work already in <ref>? (by content)
+  verify  <lane>                        run prepare/verify without reaping (0 pass, 2 fail)
   reap    <lane|--status S,...> [--force] [--keep-worktree] [--no-archive]  clean up
   check   [--cwd DIR] [--config FILE] [--no-fail] [--explain] project integrity gate
   doctor                                check deps + backends
@@ -129,11 +131,11 @@ Spawn opts:
   --cwd <dir>        worker cwd (default: current dir)
   --isolate          create an isolated git worktree
   --report <path>    require a deliverable report at reap
-  --verify <cmd>     run a project verification command at reap
+  --verify <cmd>     configure a project verification command (run via verify or reap)
   --verify-name <s>  label for verification receipts (default: verify)
   --verify-timeout <seconds>
                     verification timeout in seconds (default: 1800)
-  --prepare <cmd>    run setup command before --verify at reap
+  --prepare <cmd>    run setup command before --verify
   --arg <flag>       pass an extra arg to the provider CLI
 
 Exec opts:
@@ -326,6 +328,11 @@ cmd_spawn() {
     runtime_receipt_version="2"
     runtime_receipt_enforced="true"
   fi
+  # The isolated worktree starts at this exact commit. It is the only sound
+  # baseline for the v1 test-integrity heuristic; normal/legacy lanes report
+  # that signal as unknown instead of inventing a fork point.
+  local verify_fork_point=""
+  [[ -n "$wt_path" ]] && verify_fork_point="$(git -C "$work_cwd" rev-parse HEAD 2>/dev/null || true)"
   lane_set "$lane" \
     provider "$provider" \
     status "live" \
@@ -358,6 +365,7 @@ cmd_spawn() {
     rollout "" \
     worktree "$wt_path" \
     repo_root "$repo_root" \
+    verify_fork_point "$verify_fork_point" \
     transcript "$transcript" \
     report "$report_abs" \
     no_recovery "$([[ "$no_recovery" -eq 1 ]] && echo true || echo false)" \
@@ -1105,6 +1113,35 @@ cmd_reap() {
   _reap_one "$lane" "$force" "$keep_wt" "$no_archive"
 }
 
+# Run a configured verification contract while preserving the lane's lifecycle:
+# no provider/tmux interaction, no result promotion, no worktree cleanup. The
+# operation lock only prevents a concurrent reap from deleting the cwd while the
+# command runs; it does not imply that the lane itself is stopped.
+cmd_verify() {
+  local lane="${1:-}"; shift || true
+  [[ -n "$lane" ]] || die "verify: <lane> required"
+  [[ $# -eq 0 ]] || die "verify: unexpected argument '$1'"
+  lane_exists "$lane" || die "verify: no such lane '$lane'"
+  [[ -n "$(lane_get "$lane" verify_command)" ]] \
+    || die "verify: lane '$lane' has no --verify contract"
+  lane_operation_run "$lane" _verify_one "$lane"
+}
+
+_verify_one() {
+  local lane="$1" verify_state
+  verify_state="$(artifacts_run_verify_checkpoint "$lane")"
+  case "$verify_state" in
+    passed)
+      log "verify: lane '$lane' checkpoint passed"
+      return 0
+      ;;
+    *)
+      err "verify: lane '$lane' checkpoint failed (${verify_state}; class=$(lane_get "$lane" verify_failure_class))"
+      return 2
+      ;;
+  esac
+}
+
 # Reap a single lane. Args: lane force keep_wt no_archive. Returns 2 on an unmet
 # deliverable/verification contract so callers/CI can key on it.
 _reap_one() {
@@ -1248,6 +1285,7 @@ main() {
     attach) cmd_attach "$@" ;;
     close)  cmd_close "$@" ;;
     captured) cmd_captured "$@" ;;
+    verify) cmd_verify "$@" ;;
     reap)   cmd_reap "$@" ;;
     check)  cmd_check "$@" ;;
     doctor) cmd_doctor "$@" ;;

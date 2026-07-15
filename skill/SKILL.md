@@ -78,6 +78,26 @@ If the report is missing at reap, one **recovery pass** resumes the session
 `git-status-before/after.txt`, so "what changed?" is always answerable. (Optional
 spawn flags: `--verify <cmd>`, `--prepare <cmd>`, `--isolate`.)
 
+## Verify before destructive cleanup (`verify`)
+
+When a lane has `--verify <cmd>` (and optionally `--prepare <cmd>`), run the
+oracle before reaping so a failure remains steerable and inspectable:
+
+```bash
+waspflow wait fix
+waspflow verify fix || waspflow revise fix -- "Fix the failing verification."
+waspflow verify fix
+waspflow reap fix
+```
+
+`verify` never touches tmux, lane status, result, session, or worktree. It exits
+0 on pass and 2 on failure, and writes command/stdout/stderr/JSON receipts. The
+JSON carries `failure_class` (`task`, `prepare`, `timeout`, `infra`, `none`) plus
+the advisory `verify_test_files_changed` heuristic. Reap consumes a checkpoint
+only when its content-sensitive Git workspace fingerprint is unchanged; otherwise
+it reruns the configured oracle. A changed/unknown test-surface flag is warning
+only, never an approval gate.
+
 ## Running a fleet (parallel, isolated)
 
 ```bash

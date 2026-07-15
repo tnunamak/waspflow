@@ -20,8 +20,10 @@
 #   - Finalize an honest result: succeeded | recovered | report_missing | failed.
 #
 # What it adds ONLY when you pass `--verify <cmd>` to spawn:
-#   - At reap, after report finalization and before worktree cleanup, run an
-#     optional prepare command and the verify command in the lane cwd.
+#   - `waspflow verify <lane>` runs the optional prepare command and verification
+#     command in the lane cwd without closing its window or worktree.
+#   - Reap reuses that checkpoint when its workspace fingerprint still matches;
+#     otherwise it runs the contract before cleanup.
 #   - Write local receipts for the command, stdout, stderr, and JSON result.
 #   - Promote a report-satisfied lane from succeeded/recovered to verified, or
 #     stamp verify_failed when the verification contract does not pass.
@@ -245,16 +247,100 @@ artifacts_finalize() {
   echo "failed"; return 0
 }
 
-# Run the lane's optional verification contract and return the final result.
-# Args: lane base_result
-artifacts_verify() {
-  local lane="$1" base_result="$2"
-  local verify_command prepare_command verify_name verify_timeout cwd dir
-  case "$base_result" in
-    verified|verify_failed) echo "$base_result"; return 0 ;;
-  esac
+# Return a content-sensitive fingerprint for a Git workspace. It includes HEAD,
+# tracked staged/unstaged changes, and untracked file paths/content. A missing or
+# non-Git workspace deliberately has no fingerprint and therefore no reusable
+# checkpoint: rerunning the oracle is safer than claiming freshness we cannot
+# establish.
+# Args: cwd
+artifacts_workspace_fingerprint() {
+  local cwd="$1"
+  [[ -d "$cwd" ]] || return 1
+  git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  {
+    git -C "$cwd" rev-parse HEAD 2>/dev/null || printf 'no-head\n'
+    git -C "$cwd" diff --binary HEAD 2>/dev/null
+    while IFS= read -r -d '' path; do
+      printf '%s\0' "$path"
+      git -C "$cwd" hash-object -- "$path" 2>/dev/null || printf 'unreadable\n'
+    done < <(git -C "$cwd" ls-files --others --exclude-standard -z)
+  } | git hash-object --stdin
+}
+
+# Return true|false|unknown for the verification command's likely test surface.
+# Isolated lanes record their exact fork at spawn; older/non-isolated lanes fall
+# back to HEAD + the working tree when possible, which is useful but cannot prove
+# what changed since the worker started and is therefore reported as unknown.
+# The surface is intentionally heuristic: conventional test/spec/verify path
+# names plus path-like tokens referenced directly by the verify command.
+# Args: lane verify_command
+artifacts_verify_test_files_changed() {
+  local lane="$1" command="$2" cwd fork changed path referenced=0
+  cwd="$(lane_get "$lane" cwd)"
+  [[ -d "$cwd" ]] || { printf 'unknown\n'; return 0; }
+  git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+    printf 'unknown\n'; return 0;
+  }
+  fork="$(lane_get "$lane" verify_fork_point)"
+  [[ -n "$fork" ]] && git -C "$cwd" cat-file -e "$fork^{commit}" 2>/dev/null || {
+    printf 'unknown\n'; return 0;
+  }
+  changed="$({
+    git -C "$cwd" diff --name-only "$fork...HEAD"
+    git -C "$cwd" diff --name-only HEAD
+    git -C "$cwd" ls-files --others --exclude-standard
+  } | sort -u)"
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    if grep -Eqi '(^|/)(test|tests|spec|specs|verify)(/|$|[._-])|(^|/)[^/]*(test|spec|verify)[^/]*$' <<<"$path"; then
+      printf 'true\n'; return 0
+    fi
+    if [[ "$command" == *"$path"* ]]; then referenced=1; fi
+  done <<<"$changed"
+  [[ "$referenced" -eq 1 ]] && printf 'true\n' || printf 'false\n'
+}
+
+# Add checkpoint metadata to the verify receipt and state. Receipt mutation is
+# centralized here so explicit verify and reap cannot drift in their evidence.
+# Args: lane failure_class test_files_changed workspace_fingerprint
+_artifacts_record_verify_checkpoint() {
+  local lane="$1" failure_class="$2" test_files_changed="$3" fingerprint="$4" epoch tmp
+  local result_file="$(lane_dir "$lane")/verify-result.json"
+  epoch="$(date +%s)"
+  tmp="${result_file}.tmp.$$"
+  jq --arg failure_class "$failure_class" \
+    --arg verify_test_files_changed "$test_files_changed" \
+    '. + {failure_class:$failure_class, verify_test_files_changed:$verify_test_files_changed}' \
+    "$result_file" >"$tmp" && mv "$tmp" "$result_file"
+  lane_set "$lane" verify_failure_class "$failure_class" \
+    verify_test_files_changed "$test_files_changed" \
+    verify_checkpoint_epoch "$epoch" \
+    verify_checkpoint_fingerprint "$fingerprint" \
+    verify_epoch "$epoch"
+}
+
+# A checkpoint is fresh only when its recorded Git workspace fingerprint exactly
+# matches the current one. This deliberately treats non-Git workspaces as stale.
+# Args: lane
+artifacts_verify_checkpoint_fresh() {
+  local lane="$1" checkpoint fingerprint cwd
+  checkpoint="$(lane_get "$lane" verify_checkpoint_epoch)"
+  fingerprint="$(lane_get "$lane" verify_checkpoint_fingerprint)"
+  [[ -n "$checkpoint" && -n "$fingerprint" ]] || return 1
+  cwd="$(lane_get "$lane" cwd)"
+  [[ -d "$cwd" ]] || return 1
+  [[ "$(artifacts_workspace_fingerprint "$cwd" 2>/dev/null || true)" == "$fingerprint" ]]
+}
+
+# Run the prepare/verify contract once, without changing lane lifecycle/result.
+# Echoes passed|failed|timeout|infra. Every path writes verify receipts and a
+# checkpoint marker; callers decide whether that outcome should promote result.
+# Args: lane
+artifacts_run_verify_checkpoint() {
+  local lane="$1" verify_command prepare_command verify_name verify_timeout cwd dir
+  local verify_state prepare_state failure_class test_files_changed fingerprint
   verify_command="$(lane_get "$lane" verify_command)"
-  [[ -n "$verify_command" ]] || { echo "$base_result"; return 0; }
+  [[ -n "$verify_command" ]] || return 3
 
   cwd="$(lane_get "$lane" cwd)"
   dir="$(lane_dir "$lane")"
@@ -264,39 +350,77 @@ artifacts_verify() {
   verify_timeout="${verify_timeout:-1800}"
   prepare_command="$(lane_get "$lane" prepare_command)"
 
-  case "$base_result" in
-    succeeded|recovered) ;;
-    *)
-      _artifacts_write_skipped_verify "$lane" "$verify_name" "$verify_command" "$cwd" "$base_result"
-      echo "$base_result"
-      return 0
-      ;;
-  esac
+  test_files_changed="$(artifacts_verify_test_files_changed "$lane" "$verify_command")"
+  [[ "$test_files_changed" == true ]] || warn "verify: lane '$lane' test-surface changes are $test_files_changed (heuristic; not a gate)"
 
   if [[ -n "$prepare_command" ]]; then
-    local prepare_state
     prepare_state="$(_artifacts_run_command "$lane" "$dir/prepare" "prepare" "$prepare_command" "$cwd" "$verify_timeout")"
     lane_set "$lane" prepare_state "$prepare_state"
     case "$prepare_state" in
       passed) ;;
       *)
+        failure_class="prepare"
+        [[ "$prepare_state" == timeout ]] && failure_class="timeout"
+        [[ ! -d "$cwd" || "$(lane_get "$lane" prepare_exit_code)" == 127 ]] && failure_class="infra"
         _artifacts_write_skipped_verify "$lane" "$verify_name" "$verify_command" "$cwd" "prepare_$prepare_state"
-        lane_set "$lane" result "verify_failed"
-        echo "verify_failed"
+        fingerprint="$(artifacts_workspace_fingerprint "$cwd" 2>/dev/null || true)"
+        _artifacts_record_verify_checkpoint "$lane" "$failure_class" "$test_files_changed" "$fingerprint"
+        echo "$prepare_state"
         return 0
         ;;
     esac
   fi
 
-  local verify_state
   verify_state="$(_artifacts_run_command "$lane" "$dir/verify" "$verify_name" "$verify_command" "$cwd" "$verify_timeout")"
+  case "$verify_state" in
+    passed) failure_class="none" ;;
+    timeout) failure_class="timeout" ;;
+    *)
+      failure_class="task"
+      [[ ! -d "$cwd" || "$(lane_get "$lane" verify_exit_code)" == 127 ]] && failure_class="infra"
+      ;;
+  esac
+  fingerprint="$(artifacts_workspace_fingerprint "$cwd" 2>/dev/null || true)"
+  _artifacts_record_verify_checkpoint "$lane" "$failure_class" "$test_files_changed" "$fingerprint"
+  echo "$verify_state"
+}
+
+# Run the lane's optional verification contract for reap and return its final
+# result. A fresh explicit checkpoint avoids rerunning a destructive cleanup
+# gate; stale/missing checkpoints execute the same shared runner as `verify`.
+# Args: lane base_result
+artifacts_verify() {
+  local lane="$1" base_result="$2" verify_name verify_command cwd verify_state
+  case "$base_result" in
+    verified|verify_failed) echo "$base_result"; return 0 ;;
+  esac
+  verify_command="$(lane_get "$lane" verify_command)"
+  [[ -n "$verify_command" ]] || { echo "$base_result"; return 0; }
+  verify_name="$(lane_get "$lane" verify_name)"; verify_name="${verify_name:-verify}"
+  cwd="$(lane_get "$lane" cwd)"
+
+  case "$base_result" in
+    succeeded|recovered) ;;
+    *)
+      _artifacts_write_skipped_verify "$lane" "$verify_name" "$verify_command" "$cwd" "$base_result"
+      _artifacts_record_verify_checkpoint "$lane" "none" "unknown" ""
+      echo "$base_result"
+      return 0
+      ;;
+  esac
+
+  if artifacts_verify_checkpoint_fresh "$lane"; then
+    verify_state="$(lane_get "$lane" verify_state)"
+  else
+    verify_state="$(artifacts_run_verify_checkpoint "$lane")"
+  fi
   case "$verify_state" in
     passed)
       lane_set "$lane" result "verified"
       echo "verified"
       return 0
       ;;
-    failed|timeout)
+    failed|timeout|infra)
       lane_set "$lane" result "verify_failed"
       echo "verify_failed"
       return 0
