@@ -23,8 +23,9 @@ grep -q '`flock`' "$root/docs/prerequisites.md"
 # Lane provenance: --op spawn records policy_version + catalog_ref
 grep -Eq 'policy_version' "$root/bin/waspflow"
 grep -Eq 'catalog_ref' "$root/bin/waspflow"
-! grep -E 'high\|xhigh\|max' "$root/lib/providers/codex.sh"
-! grep -E 'high\|xhigh\|max' "$root/lib/exec.sh"
+# The disallowed three-value group is a literal source fragment, not an ERE.
+! grep -Fq 'high|xhigh|max' "$root/lib/providers/codex.sh"
+! grep -Fq 'high|xhigh|max' "$root/lib/exec.sh"
 
 fixture="$(mktemp -d "$scratch/waspflow-verify-XXXXXX")"
 state_home="$(mktemp -d "$scratch/waspflow-state-XXXXXX")"
@@ -39,6 +40,10 @@ tmux_wrapper="$(mktemp -d "$scratch/waspflow-tmux-wrapper-XXXXXX")"
 tmux_socket_dir="$(mktemp -d "$HOME/.tmp/wf-tmux-XXXXXX")"
 export WASPFLOW_TMUX_SOCKET="wf-$$"
 export TMUX_TMPDIR="$tmux_socket_dir"
+# `-L` resolves this name below the isolated TMUX_TMPDIR. Keep the derived path
+# explicit for EXIT cleanup so it cannot fall back to the operator's server.
+verify_tmux_socket="$TMUX_TMPDIR/tmux-$(id -u)/$WASPFLOW_TMUX_SOCKET"
+mkdir -p -m 700 "${verify_tmux_socket%/*}"
 cat >"$tmux_wrapper/tmux" <<EOF
 #!/usr/bin/env bash
 unset TMUX TMUX_PANE
@@ -47,15 +52,127 @@ EOF
 chmod +x "$tmux_wrapper/tmux"
 export PATH="$tmux_wrapper:$PATH"
 export WASPFLOW_TMUX_SESSION="waspflow-verify-$$"
+verify_tmux() {
+  env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$TMUX_TMPDIR" \
+    "$real_tmux" -S "$verify_tmux_socket" "$@"
+}
 cleanup() {
-  tmux kill-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || true
-  # This is a test-only, uniquely named isolated socket. If a later assertion
-  # aborts before its per-session cleanup, stop that isolated server so no fake
-  # worker or inherited lock fd survives the suite.
-  tmux kill-server 2>/dev/null || true
-  rm -rf "$fixture" "$state_home" "$tmux_wrapper" "$tmux_socket_dir"
+  local exit_status=$?
+  # Kill only this suite's session on the exact isolated socket. With no
+  # remaining sessions tmux exits on its own; never kill an entire server.
+  verify_tmux kill-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || true
+  rm -rf "$fixture" "$state_home" "$tmux_wrapper" "$tmux_socket_dir" || true
+  return "$exit_status"
 }
 trap cleanup EXIT
+verify_cleanup_body="$(sed -n '/^cleanup()/,/^}/p' "$root/scripts/verify.sh")"
+grep -q 'verify_tmux kill-session -t "\$WASPFLOW_TMUX_SESSION"' <<<"$verify_cleanup_body" \
+  && ! grep -q 'kill-server' <<<"$verify_cleanup_body" \
+  || { echo "tmux EXIT cleanup: must kill only the isolated verify session" >&2; exit 1; }
+
+# A scoped tmux helper must dispose of its session on EXIT for both ordinary and
+# failing exits, and that cleanup must not mutate the operator's default server.
+# Exercise the trap in child processes so the assertion runs after their EXIT.
+default_session_count() {
+  local sessions
+  sessions="$(env -u TMUX -u TMUX_PANE -u TMUX_TMPDIR "$real_tmux" list-sessions -F '#S' 2>/dev/null || true)"
+  if [[ -z "$sessions" ]]; then
+    printf '0\n'
+  else
+    printf '%s\n' "$sessions" | wc -l | tr -d ' '
+  fi
+}
+default_sessions_before="$(default_session_count)"
+for exit_mode in success failure; do
+  scoped_tmpdir="$(mktemp -d "$HOME/.tmp/wf-exit-cleanup-XXXXXX")"
+  scoped_socket="wf-exit-cleanup-$$-$RANDOM"
+  scoped_session="waspflow-exit-cleanup-$$-$RANDOM"
+  scoped_socket_path="$scoped_tmpdir/tmux-$(id -u)/$scoped_socket"
+  scoped_receipt="$scoped_tmpdir/cleanup-ran"
+  mkdir -p -m 700 "${scoped_socket_path%/*}"
+  set +e
+  SCOPED_TMUX_TMPDIR="$scoped_tmpdir" \
+  SCOPED_TMUX_SOCKET_PATH="$scoped_socket_path" \
+  SCOPED_TMUX_SESSION="$scoped_session" \
+  SCOPED_TMUX_RECEIPT="$scoped_receipt" \
+  SCOPED_EXIT_MODE="$exit_mode" \
+  REAL_TMUX="$real_tmux" \
+  bash -c '
+    set -euo pipefail
+    scoped_tmux() {
+      env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$SCOPED_TMUX_TMPDIR" \
+        "$REAL_TMUX" -S "$SCOPED_TMUX_SOCKET_PATH" "$@"
+    }
+    cleanup() {
+      local exit_status=$?
+      scoped_tmux kill-session -t "$SCOPED_TMUX_SESSION" 2>/dev/null || true
+      printf "cleaned\n" >"$SCOPED_TMUX_RECEIPT" || true
+      return "$exit_status"
+    }
+    trap cleanup EXIT
+    scoped_tmux new-session -d -s "$SCOPED_TMUX_SESSION"
+    scoped_tmux has-session -t "$SCOPED_TMUX_SESSION"
+    [[ "$SCOPED_EXIT_MODE" == success ]] || exit 23
+  '
+  scoped_rc=$?
+  set -e
+  expected_rc=0; [[ "$exit_mode" == failure ]] && expected_rc=23
+  [[ "$scoped_rc" -eq "$expected_rc" ]] \
+    || { echo "tmux EXIT cleanup: $exit_mode path exited $scoped_rc (expected $expected_rc)" >&2; exit 1; }
+  [[ "$(cat "$scoped_receipt")" == cleaned ]] \
+    || { echo "tmux EXIT cleanup: $exit_mode path skipped cleanup" >&2; exit 1; }
+  ! env -u TMUX -u TMUX_PANE "$real_tmux" -S "$scoped_socket_path" has-session 2>/dev/null \
+    || { echo "tmux EXIT cleanup: $exit_mode path left its isolated server reachable" >&2; exit 1; }
+  rm -rf "$scoped_tmpdir"
+done
+[[ "$(default_session_count)" == "$default_sessions_before" ]] \
+  || { echo "tmux EXIT cleanup: touched the default tmux server" >&2; exit 1; }
+
+# Textual pane consumers require the plain, width-preserving capture contract:
+# normal capture has no ANSI bytes, while `-e` remains replay/debug-only.
+(
+  capture_tmpdir="$(mktemp -d "$HOME/.tmp/wf-plain-capture-XXXXXX")"
+  capture_socket="wf-plain-capture-$$-$RANDOM"
+  capture_session="waspflow-plain-capture-$$-$RANDOM"
+  capture_socket_path="$capture_tmpdir/tmux-$(id -u)/$capture_socket"
+  mkdir -p -m 700 "${capture_socket_path%/*}"
+  capture_tmux() {
+    env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$capture_tmpdir" \
+      "$real_tmux" -S "$capture_socket_path" "$@"
+  }
+  capture_cleanup() {
+    local exit_status=$?
+    capture_tmux kill-session -t "$capture_session" 2>/dev/null || true
+    rm -rf "$capture_tmpdir" || true
+    return "$exit_status"
+  }
+  trap capture_cleanup EXIT
+  capture_text="0123456789abcdefghijklmnopqrstuv"
+  capture_tmux new-session -d -s "$capture_session" \
+    "printf '\\033[31m%s\\033[0m\\n' '$capture_text'; exec sleep 30"
+  capture_tmux has-session -t "$capture_session"
+  capture_observed=false
+  for _ in $(seq 1 20); do
+    if capture_tmux capture-pane -p -t "$capture_session" | grep -qx "$capture_text"; then
+      capture_observed=true
+      break
+    fi
+    sleep 0.1
+  done
+  [[ "$capture_observed" == true ]] \
+    || { echo "plain capture: session output was never captured" >&2; exit 1; }
+  plain_capture="$(capture_tmux capture-pane -p -t "$capture_session")"
+  ansi_capture="$(capture_tmux capture-pane -ep -t "$capture_session")"
+  [[ "$plain_capture" != *$'\e'* && "$plain_capture" == *"$capture_text"* ]] \
+    || { echo "plain capture: expected text without ANSI escapes" >&2; exit 1; }
+  [[ "$(awk -v text="$capture_text" '$0 == text { print length; exit }' <<<"$plain_capture")" -eq "${#capture_text}" ]] \
+    || { echo "plain capture: expected fixed row width" >&2; exit 1; }
+  [[ "$ansi_capture" == *$'\e'* ]] \
+    || { echo "ANSI capture: expected -e to retain escapes" >&2; exit 1; }
+  peek_body="$(sed -n '/^cmd_peek()/,/^}/p' "$root/bin/waspflow")"
+  grep -q 'capture-pane -p' <<<"$peek_body" && ! grep -Eq 'capture-pane.*-[[:alpha:]]*e' <<<"$peek_body" \
+    || { echo "plain capture: peek must not request ANSI capture" >&2; exit 1; }
+)
 
 # Operating-point resolver (bundled policy pack)
 ops_list="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" ops list --task implementation)"
@@ -2150,7 +2267,13 @@ fi
   # Share the suite's unique socket with the waspflow child. The helper calls
   # the real binary explicitly; the child reaches the same socket via PATH.
   parity_tmux() { env -u TMUX -u TMUX_PANE "$real_tmux" -L "$WASPFLOW_TMUX_SOCKET" "$@"; }
-  trap 'parity_tmux kill-session -t "$parity_session" >/dev/null 2>&1 || true; rm -rf "$parity_home"' EXIT
+  parity_cleanup() {
+    local exit_status=$?
+    parity_tmux kill-session -t "$parity_session" >/dev/null 2>&1 || true
+    rm -rf "$parity_home" || true
+    return "$exit_status"
+  }
+  trap parity_cleanup EXIT
   parity_tmux new-session -d -s "$parity_session" -n home
   parity_tmux new-window -d -t "$parity_session" -n renamed-pane 'exec sleep 30'
   IFS='|' read -r parity_window parity_pid < <(parity_tmux display-message -p -t "$parity_session:renamed-pane" '#{window_id}|#{pane_pid}')
@@ -2214,6 +2337,31 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   lane_set obs-long provider codex status live rollout "$obs_data/long.jsonl"
   long_tail="$(WASPFLOW_EVENT_TAIL_BYTES=128 provider_event_tail obs-long 9)"
   jq -e '.source.bytes_sampled <= 128 and .source.file_bytes > 1000000 and .turn_state == "terminal"' <<<"$long_tail" >/dev/null
+  # A complete event record can be far larger than Linux permits in one argv
+  # element while still fitting entirely inside the 262144-byte sample window.
+  # Normalize it through stdin; the preceding record is deliberately clipped.
+  large_log="$obs_data/large-rollout.jsonl"
+  {
+    printf '{"type":"noise","payload":"'; head -c 90000 </dev/zero | tr '\0' x; printf '"}\n'
+    printf '{"type":"event_msg","timestamp":"large-complete","payload":{"type":"task_complete","blob":"'; head -c 180000 </dev/zero | tr '\0' y; printf '"}}\n'
+  } >"$large_log"
+  lane_set obs-large provider codex status live rollout "$large_log"
+  large_tail="$(provider_event_tail obs-large 9)"
+  jq -e '.source.state == "tail-window" and .source.integrity == "tail-window-only" and .source.bytes_sampled == 262144 and .source.file_bytes > 262144 and .turn_state == "terminal" and .events == [{event_time:"large-complete",event_type:"turn_completed",turn_completed_mark:true}]' <<<"$large_tail" >/dev/null \
+    || { echo "event tail: complete large record did not normalize from stdin" >&2; exit 1; }
+  ! grep -q 'yyyyyyyy' <<<"$large_tail" || { echo "event tail: large payload leaked" >&2; exit 1; }
+  # Large malformed and unterminated final records retain the existing honest
+  # tail markers without ever making their raw JSON an argv value.
+  malformed_large_log="$obs_data/malformed-large-rollout.jsonl"
+  { printf '{"type":"noise","payload":"'; head -c 90000 </dev/zero | tr '\0' x; printf '"}\n{not json '; head -c 180000 </dev/zero | tr '\0' z; printf '\n'; } >"$malformed_large_log"
+  lane_set obs-malformed-large provider codex status live rollout "$malformed_large_log"
+  jq -e '.source.state == "malformed-tail" and .source.integrity == "tail-window-only" and .source.bytes_sampled == 262144 and .events == [] and .turn_state == "unknown"' <<<"$(provider_event_tail obs-malformed-large 9)" >/dev/null \
+    || { echo "event tail: large malformed record lost its marker" >&2; exit 1; }
+  partial_large_log="$obs_data/partial-large-rollout.jsonl"
+  { printf '{"type":"noise","payload":"'; head -c 90000 </dev/zero | tr '\0' x; printf '"}\n{"type":"event_msg","payload":{"type":"task_complete","blob":"'; head -c 180000 </dev/zero | tr '\0' z; } >"$partial_large_log"
+  lane_set obs-partial-large provider codex status live rollout "$partial_large_log"
+  jq -e '.source.state == "truncated-tail" and .source.integrity == "tail-window-only" and .source.bytes_sampled == 262144 and .events == [] and .turn_state == "unknown"' <<<"$(provider_event_tail obs-partial-large 9)" >/dev/null \
+    || { echo "event tail: large partial record lost its marker" >&2; exit 1; }
   # A read failure after snapshot creation must still clean external temp state.
   tail() { return 1; }
   jq -e '.source.state == "unreadable"' <<<"$(provider_event_tail obs-codex 1)" >/dev/null \

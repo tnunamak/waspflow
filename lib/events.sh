@@ -66,25 +66,25 @@ provider_event_tail() {
     fi
     case "$provider" in
       codex)
-        if ! event="$(jq -cn --argjson x "$parsed" '
-          ($x.payload.type // $x.type // "") as $t |
-          if $t == "task_started" then {event_time:($x.timestamp // ""),event_type:"turn_started",turn_started_mark:true}
-          elif $t == "task_complete" then {event_time:($x.timestamp // ""),event_type:"turn_completed",turn_completed_mark:true}
-          elif $t == "thread_settings_applied" then {event_time:($x.timestamp // ""),event_type:"runtime_settings"}
-          else empty end')"; then rm -f "$snapshot" "$events_file"; return 1; fi
+        if ! event="$(jq -c '
+          (.payload.type // .type // "") as $t |
+          if $t == "task_started" then {event_time:(.timestamp // ""),event_type:"turn_started",turn_started_mark:true}
+          elif $t == "task_complete" then {event_time:(.timestamp // ""),event_type:"turn_completed",turn_completed_mark:true}
+          elif $t == "thread_settings_applied" then {event_time:(.timestamp // ""),event_type:"runtime_settings"}
+          else empty end' <<<"$parsed")"; then rm -f "$snapshot" "$events_file"; return 1; fi
         ;;
       claude)
-        if ! event="$(jq -cn --argjson x "$parsed" '
-          if $x.type == "user" and (($x.message.content // null) | type == "string") then {event_time:($x.timestamp // ""),event_type:"turn_started",turn_started_mark:true}
-          elif $x.type == "assistant" and ($x.message.stop_reason // "") == "end_turn" then {event_time:($x.timestamp // ""),event_type:"turn_completed",turn_completed_mark:true}
-          elif $x.type == "assistant" then {event_time:($x.timestamp // ""),event_type:"assistant_event"}
-          else empty end')"; then rm -f "$snapshot" "$events_file"; return 1; fi
+        if ! event="$(jq -c '
+          if .type == "user" and ((.message.content // null) | type == "string") then {event_time:(.timestamp // ""),event_type:"turn_started",turn_started_mark:true}
+          elif .type == "assistant" and (.message.stop_reason // "") == "end_turn" then {event_time:(.timestamp // ""),event_type:"turn_completed",turn_completed_mark:true}
+          elif .type == "assistant" then {event_time:(.timestamp // ""),event_type:"assistant_event"}
+          else empty end' <<<"$parsed")"; then rm -f "$snapshot" "$events_file"; return 1; fi
         ;;
       grok)
-        if ! event="$(jq -cn --argjson x "$parsed" '
-          if $x.type == "turn_started" then {event_time:($x.timestamp // ""),event_type:"turn_started",turn_started_mark:true}
-          elif $x.type == "turn_ended" then {event_time:($x.timestamp // ""),event_type:"turn_completed",turn_completed_mark:true}
-          else empty end')"; then rm -f "$snapshot" "$events_file"; return 1; fi
+        if ! event="$(jq -c '
+          if .type == "turn_started" then {event_time:(.timestamp // ""),event_type:"turn_started",turn_started_mark:true}
+          elif .type == "turn_ended" then {event_time:(.timestamp // ""),event_type:"turn_completed",turn_completed_mark:true}
+          else empty end' <<<"$parsed")"; then rm -f "$snapshot" "$events_file"; return 1; fi
         ;;
     esac
     if [[ -n "$event" ]] && ! printf '%s\n' "$event" >>"$events_file"; then rm -f "$snapshot" "$events_file"; return 1; fi
