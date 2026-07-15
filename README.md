@@ -163,6 +163,7 @@ config shape.
 | `wait <lane> [--reap]` | Poll the provider log until a worker finishes; `--reap` then returns the final reap result |
 | `peek <lane>` | Show the tail of the worker pane or transcript for diagnosis/progress context |
 | `revise <lane> -- <message>` | Send another instruction to the same session; nonzero means live submission was not confirmed |
+| `accept-runtime <lane> --reason <text>` | Explicitly accept the current observed Codex model/effort mismatch |
 | `reap <lane>` | Close the pane, verify outputs, and finalize state |
 | `park <lane>` | Close only a verified-idle owned tmux window; preserve the resumable lane |
 | `gc [--lane-age S] [--apply]` | Dry-run fleet selection for safely parkable old lanes; `--apply` parks them |
@@ -266,6 +267,31 @@ If the pane has exited, `revise` resumes the saved session headlessly:
 - Claude: `claude --resume <session-id> --print "<message>"`
 - Codex: `codex exec resume <session-id> "<message>" -o <file>`
 - Grok: `grok -p "<message>" --resume <session-id> --always-approve`
+
+For Codex, a headless resume reasserts the lane's requested model and passed
+reasoning effort. Waspflow then records the structured runtime settings actually
+observed for the exact correlated session; launch intent is never overwritten.
+
+## Codex Runtime Settings Receipt
+
+`model_requested`/`model_passed` and `effort_requested`/`effort_passed` are
+immutable launch-intent receipts (legacy `model`/`effort` remain unchanged).
+Codex lanes additionally expose `runtime_model`,
+`runtime_effort`, source, timestamp, and requested-match status from typed rollout
+events only (`turn_context` and `thread_settings_applied`). `status` and `list
+--json` refresh this receipt without reading TUI text, prompts, or transcripts.
+
+An explicit requested model/effort mismatch blocks normal reap with
+`result: runtime_drift` while retaining the lane and its work. After reviewing
+the evidence, an operator may explicitly accept that exact observed timestamp:
+
+```bash
+waspflow accept-runtime my-lane --reason "provider safety fallback accepted"
+waspflow reap my-lane
+```
+
+A later observed settings timestamp requires a new acceptance; Waspflow never
+silently changes the requested model or effort.
 
 ## Provider-log Completion Polling
 

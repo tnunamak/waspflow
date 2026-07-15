@@ -335,7 +335,10 @@ $prompt"
       if [[ -n "$rollout" ]]; then
         local sid
         sid="$(_codex_rollout_session_id "$rollout")"
-        [[ -n "$sid" ]] && lane_set "$lane" session_id "$sid" rollout "$rollout"
+        if [[ -n "$sid" ]]; then
+          lane_set "$lane" session_id "$sid" rollout "$rollout"
+          codex_refresh_runtime_settings "$lane"
+        fi
         return 0
       fi
       sleep 1
@@ -410,6 +413,96 @@ codex_session_resumable() {
   local lane="$1" sid
   sid="$(codex_discover_session "$lane")"
   [[ -n "$sid" ]]
+}
+
+# Refresh the runtime-settings receipt from the rollout that belongs to THIS
+# session. This deliberately reads only typed configuration events: it never
+# inspects the TUI, user messages, prompts, or assistant transcript content.
+# `thread_settings_applied` is authoritative when present; otherwise the latest
+# `turn_context` is the best available observation. Missing/malformed logs stay
+# honest rather than turning the launch request into claimed runtime truth.
+codex_refresh_runtime_settings() {
+  local lane="$1" sid rollout meta events source observed_at runtime_model runtime_effort raw_lines parsed_lines
+  sid="$(codex_discover_session "$lane")"
+  [[ -n "$sid" ]] || {
+    lane_set "$lane" runtime_settings_state unknown runtime_settings_error no-session \
+      runtime_model "" runtime_effort "" runtime_settings_source "" \
+      runtime_settings_observed_at "" runtime_settings_match_requested unknown
+    return 0
+  }
+  rollout="$(lane_get "$lane" rollout)"
+  if [[ -z "$rollout" || ! -f "$rollout" ]]; then
+    rollout="$(find "$CODEX_SESSIONS_DIR" -type f -name "*${sid}.jsonl" 2>/dev/null | head -1)"
+  fi
+  [[ -n "$rollout" && -f "$rollout" ]] || {
+    lane_set "$lane" runtime_settings_state unknown runtime_settings_error missing-rollout \
+      runtime_model "" runtime_effort "" runtime_settings_source "" \
+      runtime_settings_observed_at "" runtime_settings_match_requested unknown
+    return 0
+  }
+
+  # Require an exact session_meta identity before treating a filename match as
+  # correlated. `fromjson?` keeps a partially written/malformed JSONL readable;
+  # we separately report it as an error instead of trusting an incomplete parse.
+  meta="$(jq -Rrc --arg sid "$sid" 'fromjson? | select(.type == "session_meta" and (.payload.id // "") == $sid) | 1' "$rollout" 2>/dev/null | tail -1)"
+  raw_lines="$(awk 'END { print NR }' "$rollout" 2>/dev/null || echo 0)"
+  parsed_lines="$(jq -Rrc 'fromjson? | select(.) | 1' "$rollout" 2>/dev/null | wc -l)"
+  if [[ "$parsed_lines" != "$raw_lines" ]]; then
+    lane_set "$lane" runtime_settings_state error runtime_settings_error malformed-rollout \
+      runtime_model "" runtime_effort "" runtime_settings_source "" \
+      runtime_settings_observed_at "" runtime_settings_match_requested unknown
+    return 0
+  fi
+  if [[ "$meta" != 1 ]]; then
+    lane_set "$lane" runtime_settings_state unknown runtime_settings_error uncorrelated-rollout \
+      runtime_model "" runtime_effort "" runtime_settings_source "" \
+      runtime_settings_observed_at "" runtime_settings_match_requested unknown
+    return 0
+  fi
+  events="$(jq -Rrc '
+    fromjson? | select(.) |
+    if .type == "turn_context" then
+      ["turn_context", (.timestamp // ""), (.payload.model // ""), (.payload.effort // .payload.reasoning_effort // "")] | @tsv
+    elif .type == "event_msg" and .payload.type == "thread_settings_applied" then
+      ["thread_settings_applied", (.timestamp // ""), (.payload.thread_settings.model // ""), (.payload.thread_settings.reasoning_effort // .payload.thread_settings.effort // "")] | @tsv
+    else empty end' "$rollout" 2>/dev/null)"
+  source=""; observed_at=""; runtime_model=""; runtime_effort=""
+  # Latest thread_settings event supersedes turn_context; without any settings
+  # event, retain the latest turn_context observation.
+  while IFS=$'\t' read -r event_source event_at event_model event_effort; do
+    [[ -n "$event_source" ]] || continue
+    if [[ "$event_source" == thread_settings_applied || "$source" != thread_settings_applied ]]; then
+      source="$event_source"; observed_at="$event_at"; runtime_model="$event_model"; runtime_effort="$event_effort"
+    fi
+  done <<<"$events"
+  if [[ -z "$source" || -z "$runtime_model" || -z "$runtime_effort" ]]; then
+    lane_set "$lane" runtime_settings_state unknown runtime_settings_error no-settings-event \
+      runtime_model "" runtime_effort "" runtime_settings_source "" \
+      runtime_settings_observed_at "" runtime_settings_match_requested unknown
+    return 0
+  fi
+
+  local requested_model requested_effort match prior_match prior_at
+  requested_model="$(lane_get "$lane" model_requested)"
+  [[ -n "$requested_model" ]] || requested_model="$(lane_get "$lane" model)"
+  requested_effort="$(lane_get "$lane" effort_requested)"
+  [[ -n "$requested_effort" ]] || requested_effort="$(lane_get "$lane" effort)"
+  if [[ -z "$requested_model" && -z "$requested_effort" ]]; then
+    match=unknown
+  elif { [[ -z "$requested_model" || "$requested_model" == "$runtime_model" ]]; } && \
+       { [[ -z "$requested_effort" || "$requested_effort" == "$runtime_effort" ]]; }; then
+    match=true
+  else
+    match=false
+  fi
+  prior_match="$(lane_get "$lane" runtime_settings_match_requested)"
+  prior_at="$(lane_get "$lane" runtime_settings_observed_at)"
+  lane_set "$lane" rollout "$rollout" runtime_settings_state observed runtime_settings_error "" \
+    runtime_model "$runtime_model" runtime_effort "$runtime_effort" runtime_settings_source "$source" \
+    runtime_settings_observed_at "$observed_at" runtime_settings_match_requested "$match"
+  if [[ "$match" == false && ( "$prior_match" != false || "$prior_at" != "$observed_at" ) ]]; then
+    warn "codex runtime settings drift for lane '$lane': requested ${requested_model:-default}/${requested_effort:-default}, observed $runtime_model/$runtime_effort ($source)"
+  fi
 }
 
 # IDLE predicate: last rollout event is task_complete.
@@ -531,6 +624,7 @@ codex_revise() {
           lane_set "$lane" revise_submitted true \
             revise_submission_state confirmed-task-started \
             revise_submission_error "" revise_task_started_mark "$after"
+          codex_refresh_runtime_settings "$lane"
           return 0
         fi
         sleep 1
@@ -551,8 +645,15 @@ codex_revise() {
   # turn can write files inside its workspace regardless of the user's default
   # sandbox config. Recovery may additionally write its one required external
   # report directory; ordinary revise calls have no such capability.
-  local model_args=()
+  local model_args=() effort_args=() effort
   [[ -n "$model" ]] && model_args=(-m "$model")
+  effort="$(lane_get "$lane" effort_passed)"
+  [[ -n "$effort" ]] || effort="$(lane_get "$lane" effort_requested)"
+  case "$effort" in
+    "") ;;
+    minimal|low|medium|high|xhigh) effort_args=(-c "model_reasoning_effort=${effort}") ;;
+    *) err "codex revise: stored effort '$effort' cannot be reasserted honestly"; return 1 ;;
+  esac
   codex_load_process_mcp_policy "$lane" "$cwd" revise || return 1
   local recovery_report_dir="" normalized_cwd
   local -a recovery_dir_args=()
@@ -575,9 +676,10 @@ codex_revise() {
   fi
   local tmp; tmp="${out_file:-$(mktemp)}"
   tmux_run_owned_lane_command "$lane" "${cwd:-$PWD}" headless-revise -- \
-    codex exec "${recovery_dir_args[@]}" resume "$sid" "$message" "${model_args[@]}" \
+    codex exec "${recovery_dir_args[@]}" resume "$sid" "$message" "${model_args[@]}" "${effort_args[@]}" \
     -c sandbox_mode=workspace-write -c approval_policy=never "${MCP_ARGV[@]}" -o "$tmp" \
     >/dev/null 2>&1
+  codex_refresh_runtime_settings "$lane"
   if [[ -z "$out_file" ]]; then cat "$tmp"; rm -f "$tmp"; fi
   return 0
 }

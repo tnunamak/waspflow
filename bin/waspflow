@@ -21,6 +21,7 @@
 #   park    <lane> [--reason TEXT] [--adopt-legacy]  stop a verified-idle owned window
 #   gc      [--lane-age S] [--project DIR] [--adopt-legacy] [--apply]  dry-run park candidates
 #   revise  <lane> [--out FILE] -- <message>      steer live, or resume if exited
+#   accept-runtime <lane> --reason TEXT            accept this exact observed Codex drift
 #   attach  <lane>                        attach your terminal to the pane
 #   close   <lane> --status <...> [--into|--by|--reason ...]  set fan-in outcome
 #   captured <lane> --in <ref>            is lane's work in <ref>? (by content)
@@ -87,6 +88,7 @@ Verbs:
   gc      [--lane-age S] [--project DIR] [--adopt-legacy] [--apply]
                                       dry-run eligible terminal-idle lanes; --apply parks, never reaps
   revise  <lane> [--out FILE] -- <message>      steer live, or resume if exited
+  accept-runtime <lane> --reason TEXT            accept the current observed Codex runtime mismatch
   attach  <lane>                        attach your terminal to the pane
   close   <lane> --status <harvested|superseded|abandoned|open> [prov]  fan-in outcome
   captured <lane> --in <ref>            is lane's work already in <ref>? (by content)
@@ -311,6 +313,8 @@ cmd_spawn() {
     cwd "$work_cwd" \
     origin_cwd "$cwd" \
     model "$model" \
+    model_requested "$model" \
+    model_passed "$model" \
     effort "$effort" \
     mcp_requested "$mcp" \
     mcp_resolved "$MCP_RESOLVED" \
@@ -477,7 +481,7 @@ cmd_list() {
     [[ "$json" -eq 1 ]] && echo '[]' || echo "(no lanes)"
     return 0
   fi
-  [[ "$json" -eq 1 ]] || printf '%-20s %-8s %-8s %-11s %s\n' LANE PROVIDER STATE OUTCOME CWD
+  [[ "$json" -eq 1 ]] || printf '%-20s %-8s %-8s %-11s %-48s %s\n' LANE PROVIDER STATE OUTCOME INTENT/RUNTIME CWD
   local tmux_snapshot; tmux_snapshot="$(tmux_fleet_snapshot)"
   local lane matched=0 any_corrupt=0 emitted=0
   local -a json_rows=()
@@ -491,12 +495,16 @@ cmd_list() {
       if [[ "$json" -eq 1 ]]; then
         json_rows+=("$(jq -cn --arg lane "$lane" '{lane:$lane,lifecycle_state:"corrupt",corrupt:true,error:"unparseable state.json",scope:"unknown"}')")
       else
-        printf '%-20s %-8s %-8s %-11s %s\n' "$lane" "?" "CORRUPT" "?" "(unparseable state.json)"
+      printf '%-20s %-8s %-8s %-11s %-48s %s\n' "$lane" "?" "CORRUPT" "?" "unknown" "(unparseable state.json)"
       fi
       continue
     fi
     local provider status cwd live lifecycle outcome
     provider="$(lane_get "$lane" provider)"
+    if [[ "$provider" == codex ]]; then
+      load_provider codex
+      codex_refresh_runtime_settings "$lane"
+    fi
     status="$(lane_get "$lane" status)"
     cwd="$(lane_get "$lane" cwd)"
     outcome="$(lane_outcome "$lane")"
@@ -520,14 +528,20 @@ cmd_list() {
         {lane:$lane,provider:(.provider // ""),lifecycle_state:$lifecycle,
          record_status:(.status // ""),outcome:$outcome,result:(.result // ""),
          cwd:(.cwd // ""),origin_cwd:(.origin_cwd // ""),repo_root:(.repo_root // ""),
-         model:(.model // ""),effort:(.effort // ""),spawn_epoch:(.spawn_epoch // ""),
+         requested_model:(.model_requested // .model // ""),requested_effort:(.effort_requested // .effort // ""),
+         runtime_model:(.runtime_model // ""),runtime_effort:(.runtime_effort // ""),
+         runtime_settings_source:(.runtime_settings_source // ""),runtime_settings_observed_at:(.runtime_settings_observed_at // ""),
+         runtime_settings_state:(.runtime_settings_state // "unknown"),runtime_settings_match_requested:(.runtime_settings_match_requested // "unknown"),
+         runtime_settings_error:(.runtime_settings_error // ""),spawn_epoch:(.spawn_epoch // ""),
          updated_at:(.updated_at // ""),parked_at:(.parked_at // ""),
          spawn_submitted:(.spawn_submitted // ""),mcp_requested:(.mcp_requested // ""),
          mcp_resolved:(.mcp_resolved // ""),mcp_warning:(.mcp_warning // ""),
          tmux_session:(.tmux_session // ""),tmux_window:(.tmux_window // ""),
          tmux_pane_pid:(.tmux_pane_pid // "")}' "$(lane_state_file "$lane")")")
     else
-      printf '%-20s %-8s %-8s %-11s %s\n' "$lane" "$provider" "$live" "$outcome" "$cwd"
+      local runtime_label
+      runtime_label="$(jq -r '((.model_requested // .model // "default") + "/" + (.effort_requested // .effort // "default") + " -> ") + (if (.runtime_settings_state // "unknown") == "observed" then ((.runtime_model // "?") + "/" + (.runtime_effort // "?") + " " + (if .runtime_settings_match_requested == "false" then "DRIFT" else "match" end)) else ((.runtime_settings_state // "unknown") + if (.runtime_settings_error // "") != "" then ":" + .runtime_settings_error else "" end) end)' "$(lane_state_file "$lane")")"
+      printf '%-20s %-8s %-8s %-11s %-48s %s\n' "$lane" "$provider" "$live" "$outcome" "$runtime_label" "$cwd"
     fi
     emitted=$((emitted + 1))
   done <<<"$lanes"
@@ -579,7 +593,29 @@ cmd_status() {
   # Pretty-print the state, but on malformed JSON emit a clear waspflow error
   # instead of leaking a raw `jq: parse error` to the operator (red-team finding).
   local sf; sf="$(lane_state_file "$lane")"
+  if [[ "$(lane_get "$lane" provider)" == codex ]]; then
+    load_provider codex
+    codex_refresh_runtime_settings "$lane"
+  fi
   jq . "$sf" 2>/dev/null || die "lane '$lane' has corrupted state.json ($sf) — cannot parse"
+}
+
+cmd_accept_runtime() {
+  local lane="${1:-}"; shift || true
+  local reason=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --reason) reason="${2:-}"; shift 2 ;; *) die "accept-runtime: expected --reason TEXT" ;; esac
+  done
+  [[ -n "$lane" && -n "$reason" ]] || die "accept-runtime: <lane> and --reason TEXT are required"
+  lane_exists "$lane" || die "no such lane '$lane'"
+  [[ "$(lane_get "$lane" provider)" == codex ]] || die "accept-runtime: runtime receipts currently exist only for Codex"
+  load_provider codex
+  codex_refresh_runtime_settings "$lane"
+  [[ "$(lane_get "$lane" runtime_settings_match_requested)" == false ]] || die "accept-runtime: lane '$lane' has no observed runtime mismatch to accept"
+  lane_set "$lane" runtime_settings_accepted_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    runtime_settings_accepted_reason "$reason" \
+    runtime_settings_accepted_observed_at "$(lane_get "$lane" runtime_settings_observed_at)"
+  log "accept-runtime: accepted observed Codex runtime drift for lane '$lane' at $(lane_get "$lane" runtime_settings_observed_at)"
 }
 
 cmd_peek() {
@@ -963,6 +999,15 @@ _reap_one_locked() {
   local provider; provider="$(lane_get "$lane" provider)"
   load_provider "$provider"
 
+  if [[ "$provider" == codex ]]; then codex_refresh_runtime_settings "$lane"; fi
+  if [[ "$(lane_get "$lane" runtime_settings_match_requested)" == false ]] && \
+     [[ "$(lane_get "$lane" runtime_settings_accepted_observed_at)" != "$(lane_get "$lane" runtime_settings_observed_at)" ]]; then
+    artifacts_capture_after "$lane"
+    lane_set "$lane" result "runtime_drift" runtime_verification_state mismatch
+    err "reap: lane '$lane' has explicit requested/runtime model or effort drift; inspect status or run accept-runtime $lane --reason TEXT"
+    return 2
+  fi
+
   # Finalize FIRST (before killing the window or removing the worktree): capture
   # the diff, enforce any --report contract, and — if the report is missing —
   # run one recovery pass. Recovery may resume the live pane OR the exited
@@ -999,10 +1044,11 @@ _reap_one_locked() {
     report_missing)  err  "reap: lane '$lane' reaped — result=report_missing (recovery disabled)" ;;
     failed)          err  "reap: lane '$lane' reaped — result=failed (required report never produced)" ;;
     abandoned)       warn "reap: lane '$lane' reaped — result=abandoned (closed out via 'close --status $(lane_outcome "$lane")'; deliverable not judged, no recovery run)" ;;
+    runtime_drift)   err  "reap: lane '$lane' reaped — result=runtime_drift" ;;
     corrupt_result)  err  "reap: lane '$lane' — state has an unrecognized result value (not laundered to success); inspect state.json" ;;
     *)               log "reap: lane '$lane' reaped" ;;
   esac
-  case "$result" in failed|report_missing|verify_failed|corrupt_result) return 2 ;; esac
+  case "$result" in failed|report_missing|verify_failed|runtime_drift|corrupt_result) return 2 ;; esac
   return 0
 }
 
@@ -1063,6 +1109,7 @@ main() {
     park)   cmd_park "$@" ;;
     gc)     cmd_gc "$@" ;;
     revise) cmd_revise "$@" ;;
+    accept-runtime) cmd_accept_runtime "$@" ;;
     attach) cmd_attach "$@" ;;
     close)  cmd_close "$@" ;;
     captured) cmd_captured "$@" ;;

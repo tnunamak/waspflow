@@ -2,6 +2,10 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Verify this checkout unless an individual fixture deliberately injects a
+# provider library below. An ambient developer WASPFLOW_LIB can otherwise make
+# the suite silently exercise a different worktree.
+unset WASPFLOW_LIB
 scratch="${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}"
 mkdir -p "$scratch"
 
@@ -531,6 +535,81 @@ JSONL
   printf '%s\n' '{"type":"event_msg","payload":{"type":"task_complete"}}' >>"$roll"
   codex_is_idle cx-idle || { echo "codex_is_idle: expected idle after task_complete" >&2; exit 1; }
   rm -rf "$cxdir"
+)
+
+# Codex runtime settings receipt: synthetic exact-session JSONL, no TUI or
+# provider process. This covers the audit matrix, including the real three-event
+# Terra/medium -> Luna/medium -> Luna/low regression timeline.
+(
+  runtime_home="$(mktemp -d "$scratch/waspflow-runtime-home-XXXXXX")"
+  runtime_sessions="$(mktemp -d "$scratch/waspflow-runtime-sessions-XXXXXX")"
+  export WASPFLOW_HOME="$runtime_home" CODEX_SESSIONS_DIR="$runtime_sessions"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/codex.sh"
+  sid="55555555-5555-5555-5555-555555555555"
+  mkdir -p "$runtime_sessions/2026/07/15"
+  roll="$runtime_sessions/2026/07/15/rollout-2026-07-15T00-00-01-$sid.jsonl"
+  reset_runtime() {
+    cat >"$roll" <<JSONL
+{"type":"session_meta","payload":{"id":"$sid","cwd":"$fixture"}}
+JSONL
+    lane_set runtime provider codex status live cwd "$fixture" session_id "$sid" rollout "$roll" \
+      model gpt-5.6-terra effort medium effort_requested medium
+  }
+
+  # 1: matching turn_context observation.
+  reset_runtime
+  printf '%s\n' '{"type":"turn_context","timestamp":"2026-07-15T04:56:00.489Z","payload":{"model":"gpt-5.6-terra","effort":"medium"}}' >>"$roll"
+  codex_refresh_runtime_settings runtime
+  jq -e '.runtime_model == "gpt-5.6-terra" and .runtime_effort == "medium" and .runtime_settings_source == "turn_context" and .runtime_settings_match_requested == "true"' "$(lane_state_file runtime)" >/dev/null
+
+  # 2: model-only drift preserves immutable launch intent.
+  printf '%s\n' '{"type":"event_msg","timestamp":"2026-07-15T05:04:28.093Z","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-5.6-luna","reasoning_effort":"medium"}}}' >>"$roll"
+  codex_refresh_runtime_settings runtime
+  jq -e '.model == "gpt-5.6-terra" and .effort_requested == "medium" and .runtime_model == "gpt-5.6-luna" and .runtime_effort == "medium" and .runtime_settings_match_requested == "false"' "$(lane_state_file runtime)" >/dev/null
+
+  # 3 + 8: exact regression timeline resolves to the final Luna/low event and
+  # emits the drift warning once, not once per status/list refresh.
+  printf '%s\n' '{"type":"event_msg","timestamp":"2026-07-15T05:04:28.099Z","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-5.6-luna","reasoning_effort":"low"}}}' >>"$roll"
+  runtime_warn="$(codex_refresh_runtime_settings runtime 2>&1 >/dev/null)"
+  [[ "$(grep -c 'runtime settings drift' <<<"$runtime_warn" || true)" -eq 1 ]] || { echo "runtime receipt: expected one drift warning" >&2; exit 1; }
+  runtime_warn="$(codex_refresh_runtime_settings runtime 2>&1 >/dev/null)"
+  [[ -z "$runtime_warn" ]] || { echo "runtime receipt: duplicate drift warning" >&2; exit 1; }
+  jq -e '.runtime_model == "gpt-5.6-luna" and .runtime_effort == "low" and .runtime_settings_source == "thread_settings_applied" and .runtime_settings_observed_at == "2026-07-15T05:04:28.099Z"' "$(lane_state_file runtime)" >/dev/null
+
+  # 4: no event and malformed input remain operable and honest.
+  reset_runtime; codex_refresh_runtime_settings runtime
+  jq -e '.runtime_settings_state == "unknown" and .runtime_settings_error == "no-settings-event" and .runtime_settings_match_requested == "unknown"' "$(lane_state_file runtime)" >/dev/null
+  printf '%s\n' '{not json' >>"$roll"; codex_refresh_runtime_settings runtime
+  jq -e '.runtime_settings_state == "error" and .runtime_settings_error == "malformed-rollout"' "$(lane_state_file runtime)" >/dev/null
+
+  # 5: confirmed live revise refreshes; queued user_message does not.
+  reset_runtime
+  printf '%s\n' '{"type":"event_msg","payload":{"type":"user_message"}}' >>"$roll"
+  before="$(lane_get runtime runtime_settings_observed_at)"
+  [[ "$(_codex_task_started_mark "$roll")" == 0 ]] && [[ -z "$before" ]] || { echo "runtime receipt: queued message falsely confirmed" >&2; exit 1; }
+  printf '%s\n' '{"type":"event_msg","payload":{"type":"task_started"}}' '{"type":"event_msg","timestamp":"2026-07-15T06:00:00Z","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-5.6-luna","reasoning_effort":"low"}}}' >>"$roll"
+  codex_refresh_runtime_settings runtime
+  [[ "$(lane_get runtime runtime_settings_observed_at)" == "2026-07-15T06:00:00Z" ]] || { echo "runtime receipt: confirmed revise did not refresh" >&2; exit 1; }
+
+  # 6: resume policy is explicit in source and post-resume settings remain
+  # observable; the adapter reasserts effort via model_reasoning_effort.
+  grep -q 'effort_args=(-c "model_reasoning_effort=${effort}")' "$root/lib/providers/codex.sh"
+
+  # 7: bulk JSON exposes intent + runtime receipt but excludes prompts/argv.
+  list_json="$("$root/bin/waspflow" list --json)"
+  jq -e '.[0] | (.requested_model == "gpt-5.6-terra") and (.runtime_model == "gpt-5.6-luna") and (has("prompt") | not) and (has("mcp_argv") | not)' <<<"$list_json" >/dev/null
+
+  # Lifecycle boundary: unaccepted explicit drift must not become success;
+  # accepting the exact observation is deliberate, durable operator policy.
+  lane_set runtime runtime_settings_match_requested false runtime_settings_observed_at "2026-07-15T06:00:00Z" runtime_model gpt-5.6-luna runtime_effort low
+  set +e; "$root/bin/waspflow" reap runtime --no-archive >/dev/null 2>&1; reap_rc=$?; set -e
+  [[ "$reap_rc" -eq 2 && "$(lane_get runtime result)" == runtime_drift ]] || { echo "runtime receipt: drift did not gate reap" >&2; exit 1; }
+  "$root/bin/waspflow" accept-runtime runtime --reason "synthetic acceptance" >/dev/null
+  [[ "$(lane_get runtime runtime_settings_accepted_observed_at)" == "2026-07-15T06:00:00Z" ]] || { echo "runtime receipt: acceptance was not timestamp-bound" >&2; exit 1; }
+  rm -rf "$runtime_home" "$runtime_sessions"
 )
 
 # Live Codex revise needs a receipt stronger than rollout growth: a user_message
