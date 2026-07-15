@@ -12,7 +12,8 @@
 #   These answer "what did this agent change?" — the cheapest accountability.
 #
 # What it adds ONLY when you pass `--report <path>` to spawn (opt-in deliverable):
-#   - On idle, verify the report exists and is substantial (>= REPORT_MIN_BYTES).
+#   - On idle, verify the report exists, is substantial (>= REPORT_MIN_BYTES),
+#     and for new lanes was created or changed after spawn.
 #   - If missing, run ONE recovery pass: resume with workspace-write and, only
 #     when required, the normalized external report parent; reconstruct the
 #     report from transcript + git diff.
@@ -31,12 +32,83 @@
 
 WASPFLOW_REPORT_MIN_BYTES="${WASPFLOW_REPORT_MIN_BYTES:-200}"
 
+# Normalize the path once at the command boundary. Providers receive this exact
+# value in their prompt and reap checks this same value; no adapter should have
+# to reinterpret a user-supplied report name.
+# Args: worker_cwd report_path
+artifacts_normalize_report_path() {
+  local cwd="$1" report="$2" absolute
+  if [[ "$report" == /* ]]; then
+    absolute="$report"
+  else
+    absolute="$cwd/$report"
+  fi
+  if command -v realpath >/dev/null 2>&1; then
+    if realpath -m -- "$absolute"; then
+      return 0
+    fi
+  fi
+
+  # Keep the fallback dependency-free for systems without realpath. It can
+  # still resolve an existing parent physically; a missing parent is rejected
+  # rather than handing providers a path whose normalization we cannot prove.
+  local parent base
+  parent="$(dirname "$absolute")"
+  base="$(basename "$absolute")"
+  [[ -d "$parent" ]] || return 1
+  printf '%s/%s\n' "$(cd -P "$parent" && pwd -P)" "$base"
+}
+
+artifacts_report_contract_block() {
+  local report="$1"
+  cat <<EOF
+Waspflow report contract (exact normalized path):
+Write the required deliverable to this exact path:
+$report
+Do not infer a filename, substitute another path, or overwrite an unrelated report.
+EOF
+}
+
+# Append the contract in one shared place. The exact block check keeps a caller
+# that already composed this prompt from duplicating the contract on a revise or
+# recovery pass. Provider adapters only receive the resulting string as an argv
+# value or literal pasted text; they never shell-assemble the path themselves.
+artifacts_report_prompt() {
+  local message="$1" report="${2:-}" block
+  [[ -n "$report" ]] || { printf '%s' "$message"; return 0; }
+  block="$(artifacts_report_contract_block "$report")"
+  if [[ "$message" == *"$block"* ]]; then
+    printf '%s' "$message"
+    return 0
+  fi
+  printf '%s\n\n%s' "$message" "$block"
+}
+
+# Capture enough identity to distinguish a report written by this lane from a
+# substantial file that happened to exist before it started. Content changes
+# catch normal rewrites; nanosecond mtime/inode changes catch same-content
+# rewrites without requiring a report format or marker in user-authored files.
+artifacts_report_signature() {
+  local report="$1" checksum metadata
+  [[ -f "$report" ]] || { printf '%s\n' absent; return 0; }
+  checksum="$(cksum <"$report" | awk '{print $1 ":" $2}')"
+  metadata="$(stat -c '%Y:%y:%s:%i' "$report" 2>/dev/null \
+    || stat -f '%m:%z:%i' "$report" 2>/dev/null || true)"
+  [[ -n "$metadata" ]] || return 1
+  printf 'file:%s:%s\n' "$checksum" "$metadata"
+}
+
 # Capture working-tree state at spawn. cwd may not be a git repo — that's fine,
 # we just skip git capture and note it. Args: lane cwd prompt
 artifacts_capture_before() {
-  local lane="$1" cwd="$2" prompt="$3" dir
+  local lane="$1" cwd="$2" prompt="$3" dir report
   dir="$(lane_dir "$lane")"
   printf '%s\n' "$prompt" >"$dir/prompt.txt"
+  report="$(lane_get "$lane" report)"
+  if [[ -n "$report" ]]; then
+    lane_set "$lane" report_contract_version "2" \
+      report_before_signature "$(artifacts_report_signature "$report")"
+  fi
   if git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
     git -C "$cwd" status --short >"$dir/git-status-before.txt" 2>&1 || true
     lane_set "$lane" git_tracked "true"
@@ -63,12 +135,24 @@ artifacts_capture_after() {
 
 # Is the lane's required report present and substantial?
 artifacts_report_present() {
-  local lane="$1" report sz
+  local lane="$1" report sz before current
   report="$(lane_get "$lane" report)"
   [[ -n "$report" ]] || return 0   # no contract → vacuously satisfied
-  [[ -f "$report" ]] || return 1
+  [[ -f "$report" ]] || { lane_set "$lane" report_state "absent"; return 1; }
   sz="$(wc -c <"$report" 2>/dev/null | tr -d ' ')"
-  [[ -n "$sz" && "$sz" -ge "$WASPFLOW_REPORT_MIN_BYTES" ]]
+  [[ -n "$sz" && "$sz" -ge "$WASPFLOW_REPORT_MIN_BYTES" ]] || {
+    lane_set "$lane" report_state "insubstantial"
+    return 1
+  }
+  if [[ "$(lane_get "$lane" report_contract_version)" == "2" ]]; then
+    before="$(lane_get "$lane" report_before_signature)"
+    current="$(artifacts_report_signature "$report")"
+    if [[ -z "$before" || "$before" == "$current" ]]; then
+      lane_set "$lane" report_state "unchanged"
+      return 1
+    fi
+  fi
+  return 0
 }
 
 # Finalize a lane once it is idle: capture the diff, enforce the report contract
@@ -125,12 +209,13 @@ artifacts_finalize() {
 
   # Report missing → one recovery pass (unless recovery disabled).
   if [[ "$(lane_get "$lane" no_recovery)" == "true" ]]; then
-    lane_set "$lane" result "report_missing" report_state "absent"
+    local report_failure_state; report_failure_state="$(lane_get "$lane" report_state)"
+    lane_set "$lane" result "report_missing" report_state "${report_failure_state:-absent}"
     warn "lane '$lane': required report missing and recovery disabled ($report)"
     echo "report_missing"; return 0
   fi
 
-  warn "lane '$lane': required report missing — attempting one recovery pass"
+  warn "lane '$lane': required report missing or unchanged at the exact contracted path ($report) — attempting one recovery pass"
   # Recovery MUST use the provider's headless resume path, not in-pane steering:
   # the recovery prompt is multi-line and a TUI send-keys mangles it. Kill the
   # live window first (the worktree stays — recovery needs it to read the diff
@@ -154,7 +239,8 @@ artifacts_finalize() {
     echo "recovered"; return 0
   fi
 
-  lane_set "$lane" result "failed" report_state "absent"
+  local report_failure_state; report_failure_state="$(lane_get "$lane" report_state)"
+  lane_set "$lane" result "failed" report_state "${report_failure_state:-absent}"
   err "lane '$lane': report still missing after recovery — result=failed"
   echo "failed"; return 0
 }
@@ -315,8 +401,13 @@ _artifacts_report_parent() {
 # only the normalized parent of the required report when a provider needs an
 # explicit external write capability. Args: lane provider report_path
 _artifacts_recover() {
-  local lane="$1" provider="$2" report="$3" cwd transcript dir report_parent report_parent_raw
+  local lane="$1" provider="$2" report="$3" cwd transcript dir report_parent report_parent_raw normalized_report
   cwd="$(lane_get "$lane" cwd)"
+  normalized_report="$(artifacts_normalize_report_path "$cwd" "$report")" || {
+    err "lane '$lane': cannot normalize required report path for recovery ($report)"
+    return 1
+  }
+  report="$normalized_report"
   transcript="$(lane_get "$lane" transcript)"
   dir="$(lane_dir "$lane")"
   report_parent_raw="$(dirname "$report")"
@@ -336,9 +427,7 @@ _artifacts_recover() {
   fi
 
   local recovery_prompt
-  recovery_prompt="Your previous turn finished without writing the required report to:
-  $report
-
+  recovery_prompt="Your previous turn finished without satisfying the required report contract.
 Reconstruct that report now from the existing evidence ONLY. Do NOT modify code,
 run builds, or make commits — your sole job is to write the report file.
 
@@ -347,9 +436,10 @@ Evidence available to you:
   - The change you made: $dir/git-diff.txt
   - Working-tree status: $dir/git-status-after.txt
 
-Write a concise report to $report describing what was done and its status. If the
-evidence does not support a 'complete' result, say so plainly and state what is
-missing. End with the verbatim output of \`git status --short\`."
+Write a concise report describing what was done and its status. If the evidence
+does not support a 'complete' result, say so plainly and state what is missing.
+End with the verbatim output of \`git status --short\`."
+  recovery_prompt="$(artifacts_report_prompt "$recovery_prompt" "$report")"
 
   # The window has usually exited by finalize time; revise resumes headlessly.
   # If still live, the in-pane steer also works (the agent writes the file).

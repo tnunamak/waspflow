@@ -86,6 +86,103 @@ git commit -q -m init
   rm -f "$paste_argv"
 )
 
+# Report contracts are composed once before provider dispatch. The exact
+# normalized path must survive each provider's real launch boundary, ordinary
+# revise/recovery composition, and shell metacharacters without execution.
+(
+  prompt_home="$(mktemp -d "$scratch/waspflow-report-prompt-home-XXXXXX")"
+  prompt_sessions="$(mktemp -d "$scratch/waspflow-report-prompt-sessions-XXXXXX")"
+  prompt_dir="$fixture/report-contract"; mkdir -p "$prompt_dir"
+  sentinel="$fixture/waspflow-report-prompt-sentinel"
+  sentinel_name="waspflow-report-prompt-sentinel"
+  report_name="report-contract/exact report;\$(touch $sentinel_name).md"
+  normalized_report="$(realpath -m -- "$fixture/$report_name")"
+  task=$'Do the work.\nPreserve this multiline task.'
+  contract_prompt=""
+
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/artifacts.sh"
+  contract_prompt="$(artifacts_report_prompt "$task" "$normalized_report")"
+  [[ "$contract_prompt" == *"$normalized_report"* ]] \
+    || { echo "report prompt: normalized path missing from shared contract" >&2; exit 1; }
+  [[ "$(artifacts_report_prompt "$contract_prompt" "$normalized_report")" == "$contract_prompt" ]] \
+    || { echo "report prompt: contract was duplicated on recomposition" >&2; exit 1; }
+
+  # A substantial file that existed before a new lane started is not delivery;
+  # a later rewrite at the exact path is.
+  WASPFLOW_REPORT_MIN_BYTES=8
+  printf 'preexisting report\n' >"$normalized_report"
+  lane_set report-contract-check cwd "$fixture" report "$normalized_report" git_tracked false result ""
+  artifacts_capture_before report-contract-check "$fixture" "$contract_prompt"
+  ! artifacts_report_present report-contract-check \
+    || { echo "report contract: unchanged preexisting file was accepted" >&2; exit 1; }
+  printf 'new report written by worker\n' >"$normalized_report"
+  artifacts_report_present report-contract-check \
+    || { echo "report contract: rewritten exact file was rejected" >&2; exit 1; }
+
+  export CODEX_SESSIONS_DIR="$prompt_sessions"
+  claude_command=""; grok_command=""
+  mcp_policy_load_lane() { MCP_ARGV=(); MCP_ENV=(); }
+  tmux() { :; }
+  tmux_create_owned_lane_window() {
+    local lane="$1" _cwd="$2" command="$3"
+    case "$lane" in
+      claude-contract) printf '%s' "$command" >"$prompt_home/claude-command" ;;
+      grok-contract) printf '%s' "$command" >"$prompt_home/grok-command" ;;
+    esac
+    printf '%s:0\n' "$lane"
+  }
+  _claude_clear_trust_prompt() { :; }
+  _claude_verify_started() { :; }
+  _grok_verify_started() { :; }
+
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/claude.sh"
+  _claude_clear_trust_prompt() { :; }
+  _claude_verify_started() { :; }
+  lane_set claude-contract cwd "$fixture" report "$normalized_report" mcp_argv '[]' mcp_env '{}'
+  claude_spawn claude-contract "$fixture" "" claude-session "$prompt_home/transcript" "$contract_prompt"
+  claude_command="$(cat "$prompt_home/claude-command")"
+  escaped_report="$(printf '%q' "$normalized_report")"
+  [[ "$claude_command" == *"$escaped_report"* && ! -e "$sentinel" ]] \
+    || { echo "claude prompt: exact contract did not cross argv safely" >&2; exit 1; }
+
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/grok.sh"
+  _grok_verify_started() { :; }
+  lane_set grok-contract cwd "$fixture" report "$normalized_report" mcp_argv '[]' mcp_env '{}'
+  grok_spawn grok-contract "$fixture" "" grok-session "$prompt_home/transcript" "$contract_prompt"
+  grok_command="$(cat "$prompt_home/grok-command")"
+  [[ "$grok_command" == *"$escaped_report"* && ! -e "$sentinel" ]] \
+    || { echo "grok prompt: exact contract did not cross argv safely" >&2; exit 1; }
+
+  # Codex's submission seam uses literal paste-buffer text, with its own
+  # correlation marker before the same composed task prompt.
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/codex.sh"
+  sleep() { :; }
+  codex_sid="77777777-7777-7777-7777-777777777777"
+  codex_rollout="$prompt_sessions/rollout-2026-07-15T00-00-01-$codex_sid.jsonl"
+  pasted_prompt=""
+  tmux_paste_text() { pasted_prompt="$2"; }
+  tmux() {
+    local last="${!#}"
+    [[ "$last" == Enter ]] || return 0
+    jq -cn --arg sid "$codex_sid" --arg cwd "$fixture" \
+      '{type:"session_meta",payload:{id:$sid,cwd:$cwd}}' >"$codex_rollout"
+    jq -cn --arg message "$pasted_prompt" \
+      '{type:"event_msg",payload:{type:"user_message",message:$message}}' >>"$codex_rollout"
+  }
+  lane_set codex-contract cwd "$fixture" report "$normalized_report" session_id "" rollout ""
+  _codex_submit_prompt codex-contract "$fixture" fake:0 "$contract_prompt" 'WASPFLOW_LANE_MARKER:prompt-contract:marker'
+  [[ "$pasted_prompt" == *"$normalized_report"* && ! -e "$sentinel" ]] \
+    || { echo "codex prompt: exact contract did not cross literal paste safely" >&2; exit 1; }
+
+  rm -rf "$prompt_home" "$prompt_sessions"
+)
+
 # A lane pane inherits tmux's long-lived server environment, not necessarily the
 # spawning shell. Prove the child-launch boundary overrides an inherited pager:
 # this pager fixture never returns, the same operational failure as an
@@ -1342,17 +1439,52 @@ FAKE
   # shellcheck disable=SC1090
   source "$root/lib/artifacts.sh"
   recovery_capability_file="$resumebin/recovery-capability"
-  recovery_probe_revise() { printf '%s\n' "$4" >"$recovery_capability_file"; }
+  recovery_message_file="$resumebin/recovery-message"
+  recovery_probe_revise() {
+    printf '%s\n' "$2" >"$recovery_message_file"
+    printf '%s\n' "$4" >"$recovery_capability_file"
+  }
   lane_set recovery-probe cwd "$fixture" transcript "$resumebin/transcript" \
     report "$reportdir_with_dotdot/recovered.md"
   _artifacts_recover recovery-probe recovery_probe "$reportdir_with_dotdot/recovered.md"
   [[ "$(cat "$recovery_capability_file")" == "$normalized_reportdir" ]] \
     || { echo "report recovery: normalized report parent was not threaded to provider" >&2; exit 1; }
+  grep -Fxc -- "$normalized_reportdir/recovered.md" "$recovery_message_file" >/dev/null \
+    || { echo "report recovery: exact normalized report path was not in the prompt" >&2; exit 1; }
   lane_set recovery-workspace cwd "$fixture" transcript "$resumebin/transcript" \
     report "$fixture/not-created-yet/recovered.md"
   _artifacts_recover recovery-workspace recovery_probe "$fixture/not-created-yet/recovered.md"
   [[ "$(cat "$recovery_capability_file")" == "" ]] \
     || { echo "report recovery: missing workspace parent gained an external capability" >&2; exit 1; }
+
+  # Drive the public revise verb through a tiny injected adapter so the shared
+  # command path, not just the prompt helper, reasserts the exact contract.
+  revlib="$(mktemp -d "$scratch/waspflow-report-revise-lib-XXXXXX")"
+  mkdir -p "$revlib/providers"
+  cp "$root"/lib/*.sh "$revlib/"
+  cp -r "$root/lib/generated" "$revlib/generated"
+  cat >"$revlib/providers/revprobe.sh" <<'PROV'
+revprobe_preflight() { :; }
+revprobe_spawn() { :; }
+revprobe_discover_session() { echo revprobe-session; }
+revprobe_session_resumable() { return 0; }
+revprobe_is_idle() { return 0; }
+revprobe_turn_mark() { echo 0; }
+revprobe_valid_models() { return 1; }
+revprobe_mcp_policy() { printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}'; }
+revprobe_revise() { printf '%s' "$2" >"$REV_MESSAGE_FILE"; }
+PROV
+  rev_message_file="$revlib/revise-message"
+  mkdir -p "$resumehome/lanes/revise-contract"
+  rev_report="$normalized_reportdir/recovered.md"
+  jq -n --arg cwd "$fixture" --arg report "$rev_report" \
+    '{provider:"revprobe",status:"reaped",result:"",cwd:$cwd,report:$report}' \
+    >"$resumehome/lanes/revise-contract/state.json"
+  REV_MESSAGE_FILE="$rev_message_file" WASPFLOW_LIB="$revlib" WASPFLOW_HOME="$resumehome" \
+    "$root/bin/waspflow" revise revise-contract -- "Continue the work" >/dev/null
+  grep -Fxc -- "$rev_report" "$rev_message_file" >/dev/null \
+    || { echo "revise: exact normalized report path was not reasserted" >&2; exit 1; }
+  rm -rf "$revlib"
 
   # shellcheck disable=SC1090
   source "$root/lib/providers/claude.sh"
@@ -1760,6 +1892,7 @@ scopep_valid_models() { return 1; }
 scopep_mcp_policy() { printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}'; }
 scopep_spawn() {
   local lane="$1" cwd="$2" _model="$3" _sid="$4" _transcript="$5" prompt="$6"
+  printf '%s' "$prompt" >"$(lane_dir "$lane")/provider-prompt.txt"
   tmux_create_owned_lane_window "$lane" "$cwd" "exec bash -c $(printf '%q' "$prompt")" >/dev/null
 }
 # The provider's real headless seam uses the shared argv launcher. A normal
@@ -1854,6 +1987,8 @@ PROV
   # then reaps its freshly-created recovery scope and daemon.
   spawn_scope_lane recovery 'sleep 300' --report recovery.md
   wait_for_receipts recovery 1 || { echo "scope: recovery initial receipt missing" >&2; exit 1; }
+  grep -Fxc -- "$scopework/recovery.md" "$scopehome/lanes/recovery/provider-prompt.txt" >/dev/null \
+    || { echo "scope: initial provider prompt omitted the exact normalized report path" >&2; exit 1; }
   "$root/bin/waspflow" reap recovery --no-archive >/dev/null
   recovery_pid="$(cat "$scopehome/lanes/recovery/recovery-daemon.pid")"
   ! kill -0 "$recovery_pid" 2>/dev/null || { echo "scope: recovery daemon survived reap" >&2; exit 1; }

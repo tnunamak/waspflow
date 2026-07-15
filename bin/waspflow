@@ -296,10 +296,11 @@ cmd_spawn() {
   # agent writes it where we'll look for it.
   local report_abs=""
   if [[ -n "$report" ]]; then
-    case "$report" in
-      /*) report_abs="$report" ;;
-      *)  report_abs="$work_cwd/$report" ;;
-    esac
+    [[ "$report" != *$'\n'* && "$report" != *$'\r'* ]] \
+      || die "spawn: --report cannot contain newlines"
+    report_abs="$(artifacts_normalize_report_path "$work_cwd" "$report")" \
+      || die "spawn: cannot normalize --report path '$report'"
+    prompt="$(artifacts_report_prompt "$prompt" "$report_abs")"
   fi
 
   # Record state BEFORE spawn so a crash mid-spawn is still recoverable.
@@ -1041,8 +1042,10 @@ cmd_revise() {
 }
 
 _revise_one() {
-  local lane="$1" message="$2" out="$3"
+  local lane="$1" message="$2" out="$3" report
   local provider; provider="$(lane_get "$lane" provider)"
+  report="$(lane_get "$lane" report)"
+  message="$(artifacts_report_prompt "$message" "$report")"
   load_provider "$provider"
   if tmux_window_exists "$lane"; then
     log "revise: steering live pane for lane '$lane'"
