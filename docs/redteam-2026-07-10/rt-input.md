@@ -33,7 +33,7 @@ export PATH="/home/tnunamak/code/waspflow-waspflow-rt-input/bin:$PATH"
 tmux -L "$WASPFLOW_TMUX_SESSION" new-session -d -s waspflow
 
 LONGNAME=$(printf 'a%.0s' {1..500})
-waspflow spawn --provider claude --lane "$LONGNAME" -- "test"
+waspflow spawn --provider claude --accept-provider-default --lane "$LONGNAME" -- "test"
 ```
 
 **Actual behavior:**
@@ -62,7 +62,7 @@ mkdir -p "$WASPFLOW_HOME"
 export PATH="/home/tnunamak/code/waspflow-waspflow-rt-input/bin:$PATH"
 tmux -L "$WASPFLOW_TMUX_SESSION" new-session -d -s waspflow
 
-waspflow spawn --provider claude --lane "empty-prompt" -- ""
+waspflow spawn --provider claude --accept-provider-default --lane "empty-prompt" -- ""
 ```
 
 **Actual behavior:**
@@ -82,63 +82,63 @@ The following attacks were all rejected with appropriate error messages:
 
 ### Path traversal in lane names
 ```bash
-waspflow spawn --provider claude --lane "../../../etc/passwd" -- "test"
+waspflow spawn --provider claude --accept-provider-default --lane "../../../etc/passwd" -- "test"
 → waspflow: invalid lane name '../../../etc/passwd' (use letters, digits, . _ -)
 ```
 **Verdict:** SAFE
 
 ### Semicolon injection in lane name
 ```bash
-waspflow spawn --provider claude --lane "test;rm -rf" -- "test"
+waspflow spawn --provider claude --accept-provider-default --lane "test;rm -rf" -- "test"
 → waspflow: invalid lane name 'test;rm -rf' (use letters, digits, . _ -)
 ```
 **Verdict:** SAFE
 
 ### Backtick in lane name
 ```bash
-waspflow spawn --provider claude --lane "test\`whoami\`" -- "test"
+waspflow spawn --provider claude --accept-provider-default --lane "test\`whoami\`" -- "test"
 → waspflow: invalid lane name 'test`whoami`' (use letters, digits, . _ -)
 ```
 **Verdict:** SAFE
 
 ### Dollar-paren shell injection in lane name
 ```bash
-waspflow spawn --provider claude --lane "test\$(echo x)" -- "test"
+waspflow spawn --provider claude --accept-provider-default --lane "test\$(echo x)" -- "test"
 → waspflow: invalid lane name 'test$(echo x)' (use letters, digits, . _ -)
 ```
 **Verdict:** SAFE
 
 ### Spaces in lane names
 ```bash
-waspflow spawn --provider claude --lane "my lane" -- "test"
+waspflow spawn --provider claude --accept-provider-default --lane "my lane" -- "test"
 → waspflow: invalid lane name 'my lane' (use letters, digits, . _ -)
 ```
 **Verdict:** SAFE
 
 ### Dash at beginning of lane name (looks like flag)
 ```bash
-waspflow spawn --provider claude --lane "-badlane" -- "test"
+waspflow spawn --provider claude --accept-provider-default --lane "-badlane" -- "test"
 → waspflow: invalid lane name '-badlane' (use letters, digits, . _ -)
 ```
 **Verdict:** SAFE
 
 ### Slash in lane name
 ```bash
-waspflow spawn --provider claude --lane "test/lane" -- "test"
+waspflow spawn --provider claude --accept-provider-default --lane "test/lane" -- "test"
 → waspflow: invalid lane name 'test/lane' (use letters, digits, . _ -)
 ```
 **Verdict:** SAFE
 
 ### Unicode characters in lane name
 ```bash
-waspflow spawn --provider claude --lane "test-😀" -- "test"
+waspflow spawn --provider claude --accept-provider-default --lane "test-😀" -- "test"
 → waspflow: invalid lane name 'test-😀' (use letters, digits, . _ -)
 ```
 **Verdict:** SAFE
 
 ### Valid lane names accepted correctly
 ```bash
-waspflow spawn --provider claude --lane "test.lane_v1" -- "test"
+waspflow spawn --provider claude --accept-provider-default --lane "test.lane_v1" -- "test"
 → waspflow: spawned claude lane 'test.lane_v1' (tmux: rt-input-2546744:test.lane_v1) — next: wait/peek/revise/reap test.lane_v1
 ```
 **Verdict:** SAFE (correctly accepted valid input)

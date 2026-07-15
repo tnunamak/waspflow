@@ -167,7 +167,7 @@ mkdir -p "$WASPFLOW_HOME"
 cd /home/tnunamak/code/waspflow-waspflow-rt-state
 
 LONG_NAME=$(python3 -c "print('a'*500)")
-bin/waspflow spawn --provider claude --lane "$LONG_NAME" -- "test" 2>&1
+bin/waspflow spawn --provider claude --accept-provider-default --lane "$LONG_NAME" -- "test" 2>&1
 ```
 
 **Actual output:**

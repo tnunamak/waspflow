@@ -30,7 +30,7 @@ Build the **verification result contract** next.
 Surface:
 
 ```bash
-waspflow spawn --provider codex --lane fix --isolate \
+waspflow spawn --provider codex --accept-provider-default --lane fix --isolate \
   --report docs/reports/fix.md \
   --verify 'npm test -- --runInBand' \
   -- "Fix the bug and add the regression test."

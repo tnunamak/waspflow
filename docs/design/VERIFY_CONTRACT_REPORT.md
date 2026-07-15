@@ -8,7 +8,7 @@ Date: 2026-07-06
 `waspflow spawn` now accepts a verification contract:
 
 ```bash
-waspflow spawn --provider codex --lane fix \
+waspflow spawn --provider codex --accept-provider-default --lane fix \
   --verify 'npm test' \
   --verify-name test \
   --verify-timeout 1800 \

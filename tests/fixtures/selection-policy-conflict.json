@@ -1,0 +1,8 @@
+{
+  "id":"selection-conflict",
+  "operating_points":[
+    {"id":"conflict","task_family":"test","constraint_family":"test",
+     "expands_to":{"provider":"codex","model":"one"},
+     "fallback":{"provider":"codex","model":"two"}}
+  ]
+}

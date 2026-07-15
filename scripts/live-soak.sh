@@ -30,7 +30,7 @@ one() {
   local d; d="$(mktemp -d "$scratch/soak-$lane-XXXXXX")"
   ( cd "$d" && git init -q && git config user.email t@e.invalid && git config user.name T \
       && printf 'L0\n' > f.txt && git add -A && git commit -q -m init )
-  local -a mf=(); [[ -n "$model" ]] && mf=(--model "$model")
+  local -a mf=(); [[ -n "$model" ]] && mf=(--model "$model") || mf=(--accept-provider-default)
   ( cd "$d" && env -u OPENAI_API_KEY "$BF" spawn --provider "$prov" "${mf[@]}" --lane "$lane" -- \
       "Append ${tag}_A to f.txt then stop." ) >/dev/null 2>&1
   local sub; sub="$(env -u OPENAI_API_KEY "$BF" status "$lane" 2>/dev/null | jq -r '.spawn_submitted // "na"')"

@@ -6,6 +6,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # provider library below. An ambient developer WASPFLOW_LIB can otherwise make
 # the suite silently exercise a different worktree.
 unset WASPFLOW_LIB
+export WASPFLOW_SELECTION_GATE=off
 scratch="${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}"
 mkdir -p "$scratch"
 
@@ -574,7 +575,7 @@ init_print="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" init --profile li
 printf '%s\n' "$init_print" | jq -e '.mutexes[0].name == "live-stack"' >/dev/null
 
 demo_preview="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" demo --provider codex --lane preview-only)"
-grep -q "waspflow demo --provider codex --lane preview-only" <<<"$demo_preview"
+grep -q "waspflow spawn --provider codex --accept-provider-default --lane preview-only" <<<"$demo_preview"
 
 set +e
 missing_provider="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" exec -- "hello" 2>&1)"
@@ -2543,6 +2544,77 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   artifacts_emit_receipt_v1 legacy-receipt succeeded
   jq -e '.lane == "legacy-receipt" and .timestamps.spawn_epoch == null and .timestamps.wall_seconds == 0' "$WASPFLOW_HOME/receipts.jsonl" >/dev/null
   unset -f clawmeter
+)
+
+# Selection v1 is a pure-policy boundary: enumerate the full truth-table
+# cross-product without a provider process, then pin the durable receipt shape.
+(
+  export WASPFLOW_HOME="$state_home/selection-v1" WASPFLOW_LIB="$root/lib"
+  source "$root/lib/core.sh"; source "$root/lib/ops.sh"; source "$root/lib/selection.sh"; source "$root/lib/artifacts.sh"
+  assertions=0
+  for availability in available unknown unavailable; do
+    for bar in clears fails unratified; do
+      for edge in preferred deprecated_by_edge none; do
+        for stats in eligible none; do
+          for ack in false true; do
+            disposition="$(selection_disposition "$availability" "$bar" "$edge" "$stats" false "$ack" true implementation)"
+            expected="$(jq -cn --arg a "$availability" --arg b "$bar" --arg e "$edge" --arg ack "$ack" '
+              {included:($a != "unavailable"),
+               warnings:[if $a == "unknown" then "availability_unknown" else empty end,
+                         if $e == "deprecated_by_edge" then "deprecated_by_edge" else empty end,
+                         if $b == "fails" then "below_bar:implementation" else empty end],
+               auto_selectable:($a == "available" and $b != "fails" and ($e != "deprecated_by_edge" or $ack == "true"))}')"
+            jq -e --argjson expected "$expected" '. == $expected' <<<"$disposition" >/dev/null
+            assertions=$((assertions + 1))
+          done
+        done
+      done
+    done
+  done
+  [[ "$assertions" -eq 108 ]] || { echo "selection facts: expected 108 assertions" >&2; exit 1; }
+  fresh="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  quota_for() { jq -cn --arg at "$1" --argjson utilization "$2" --argjson credits "$3" --arg state "${4:-ok}" '{schema_version:1,state:$state,reason:"",stale:false,source:"test",observation:{windows:[{utilization_pct:$utilization}],reset_credits_available:$credits,fetched_at:$at}}'; }
+  quota="$(quota_for "$fresh" 100 0)"
+  billing='{"schema_version":1,"path":"chatgpt_subscription","evidence":"test","detail":""}'
+  [[ "$(selection_quota_filtered "$billing" "$quota" default)" == true ]]
+  [[ "$(selection_quota_filtered "$billing" "$(quota_for "$fresh" 99.999 0)" default)" == false ]]
+  [[ "$(selection_quota_filtered "$billing" "$(quota_for "$fresh" 100 -1)" default)" == false ]]
+  [[ "$(selection_quota_filtered "$billing" "$(quota_for "$(date -u -d '11 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" 100 0)" default)" == false ]]
+  [[ "$(selection_quota_filtered "$billing" "$quota" mismatched)" == false ]]
+  [[ "$(selection_quota_filtered '{"path":"api_key"}' "$quota" default)" == false ]]
+  [[ "$(selection_quota_filtered "$billing" "$(quota_for "$fresh" 100 0 absent)" default)" == false ]]
+  jq '.observation.windows=[]' <<<"$quota" | { [[ "$(selection_quota_filtered "$billing" "$(cat)" default)" == false ]]; }
+  jq '.observation.windows=[]' <<<"$quota" | { [[ "$(selection_quota_filtered "$billing" "$(cat)" default)" == false ]]; }
+  export WASPFLOW_OPS_POLICY="$root/tests/fixtures/selection-policy-fallback.json"
+  resolved="$(ops_resolve new --json)"
+  jq -e '.resolve_schema_version == 2 and .expands_to.model == "fallback-only" and .requirements.ratified == false and .requirements.performance_axis == "placeholder"' <<<"$resolved" >/dev/null
+  deprecated_resolved="$(ops_resolve deprecated --json)"
+  jq -e '.selection.auto_selectable == false and (.selection.warnings | index("deprecated_by_edge"))' <<<"$deprecated_resolved" >/dev/null
+  [[ "$(selection_edge_label codex b)" == deprecated_by_edge && "$(selection_edge_label codex a)" == preferred ]]
+  codex_valid_models() { printf 'source=live_query\nb\n'; }
+  quota_observation_v1() { quota_for "$fresh" 100 0; }
+  set +e; escape_out="$(selection_gate_op deprecated codex b default "$billing" false false 2>&1)"; escape_rc=$?; set -e
+  [[ "$escape_rc" -eq 5 && "$escape_out" == *"quota_filtered"* && "$escape_out" == *"--model <id> or --accept-provider-default"* && "$escape_out" == *"--auto --ack-deprecated"* ]]
+  unset -f codex_valid_models quota_observation_v1
+  set +e; cycle_out="$(WASPFLOW_OPS_POLICY="$root/tests/fixtures/selection-policy-cycle.json" "$root/bin/waspflow" ops list 2>&1)"; cycle_rc=$?; set -e
+  [[ "$cycle_rc" -eq 1 && "$cycle_out" == *"preferred_over cycle"* ]]
+  set +e; conflict_out="$(WASPFLOW_OPS_POLICY="$root/tests/fixtures/selection-policy-conflict.json" "$root/bin/waspflow" ops resolve conflict --json 2>&1)"; conflict_rc=$?; set -e
+  [[ "$conflict_rc" -eq 1 && "$conflict_out" == *"op conflict: expands_to and fallback differ"* ]]
+  unset WASPFLOW_OPS_POLICY
+  [[ "$(model_validation_scope claude --raw-provider-flag)" == mismatched ]]
+  unset WASPFLOW_SELECTION_GATE
+  set +e; gate_out="$("$root/bin/waspflow" spawn --lane selection-menu -- "x" 2>&1)"; gate_rc=$?; set -e
+  [[ "$gate_rc" -eq 1 && "$gate_out" == *"bare provider default"* || "$gate_out" == *"--provider or --op"* ]]
+  export WASPFLOW_SELECTION_GATE=enforce
+  set +e; gate_out="$("$root/bin/waspflow" spawn --lane selection-menu -- "x" 2>&1)"; gate_rc=$?; set -e
+  [[ "$gate_rc" -eq 5 && "$gate_out" == *"selection required"* ]]
+  set +e; conflict_out="$(WASPFLOW_SELECTION_GATE=off "$root/bin/waspflow" spawn --auto --lane selection-auto -- "x" 2>&1)"; conflict_rc=$?; set -e
+  [[ "$conflict_rc" -eq 1 && "$conflict_out" == *"--auto requires --op"* ]]
+  demo_body="$(sed -n '/^cmd_demo()/,/^}/p' "$root/bin/waspflow")"
+  grep -q 'cmd_spawn --provider "\$provider" --accept-provider-default' <<<"$demo_body"
+  availability='{"schema_version":1,"provider":"codex","model":"","state":"not_applicable","evidence_source":"none","query_scope":"not_applicable","observed_at":null,"detail":""}'
+  artifacts_emit_exec_receipt_v1 "$(new_uuid)" codex "" "" standard "$billing" "$availability" 1 2 succeeded 0
+  jq -e 'select(.receipt_kind == "exec") | (.exec_id|type == "string") and (has("lane")|not) and (.result == "succeeded") and (.exit_code == 0) and (.quota_observation.reason == "not_sampled_for_exec") and (.ineligibility_reasons == ["surface_exec"])' "$WASPFLOW_HOME/receipts.jsonl" >/dev/null
 )
 
 echo "waspflow verify: ok"
