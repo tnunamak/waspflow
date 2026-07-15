@@ -551,12 +551,18 @@ JSONL
   sid="55555555-5555-5555-5555-555555555555"
   mkdir -p "$runtime_sessions/2026/07/15"
   roll="$runtime_sessions/2026/07/15/rollout-2026-07-15T00-00-01-$sid.jsonl"
+  runtime_warn_log="$(mktemp "$scratch/waspflow-runtime-warning-XXXXXX")"
+  warn() { printf '%s\n' "$*" >>"$runtime_warn_log"; }
   reset_runtime() {
     cat >"$roll" <<JSONL
 {"type":"session_meta","payload":{"id":"$sid","cwd":"$fixture"}}
 JSONL
     lane_set runtime provider codex status live cwd "$fixture" session_id "$sid" rollout "$roll" \
-      model gpt-5.6-terra effort medium effort_requested medium
+      model gpt-5.6-terra effort medium effort_requested medium runtime_receipt_version 2 runtime_receipt_enforced true \
+      runtime_settings_state unknown runtime_refresh_state pending runtime_refresh_error "" result "" \
+      runtime_settings_accepted_observed_at "" runtime_settings_accepted_reason "" \
+      runtime_model "" runtime_effort "" runtime_settings_source "" runtime_settings_observed_at "" \
+      runtime_settings_match_requested unknown runtime_settings_warned_observed_at ""
   }
 
   # 1: matching turn_context observation.
@@ -569,21 +575,44 @@ JSONL
   printf '%s\n' '{"type":"event_msg","timestamp":"2026-07-15T05:04:28.093Z","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-5.6-luna","reasoning_effort":"medium"}}}' >>"$roll"
   codex_refresh_runtime_settings runtime
   jq -e '.model == "gpt-5.6-terra" and .effort_requested == "medium" and .runtime_model == "gpt-5.6-luna" and .runtime_effort == "medium" and .runtime_settings_match_requested == "false"' "$(lane_state_file runtime)" >/dev/null
+  [[ "$(wc -l <"$runtime_warn_log")" -eq 1 ]] || { echo "runtime receipt: first drift did not warn exactly once" >&2; exit 1; }
 
   # 3 + 8: exact regression timeline resolves to the final Luna/low event and
   # emits the drift warning once, not once per status/list refresh.
   printf '%s\n' '{"type":"event_msg","timestamp":"2026-07-15T05:04:28.099Z","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-5.6-luna","reasoning_effort":"low"}}}' >>"$roll"
-  runtime_warn="$(codex_refresh_runtime_settings runtime 2>&1 >/dev/null)"
-  [[ "$(grep -c 'runtime settings drift' <<<"$runtime_warn" || true)" -eq 1 ]] || { echo "runtime receipt: expected one drift warning" >&2; exit 1; }
-  runtime_warn="$(codex_refresh_runtime_settings runtime 2>&1 >/dev/null)"
-  [[ -z "$runtime_warn" ]] || { echo "runtime receipt: duplicate drift warning" >&2; exit 1; }
+  codex_refresh_runtime_settings runtime
+  [[ "$(lane_get runtime runtime_settings_warned_observed_at)" == "2026-07-15T05:04:28.099Z" && "$(wc -l <"$runtime_warn_log")" -eq 2 ]] || { echo "runtime receipt: distinct second drift did not warn exactly once" >&2; exit 1; }
+  codex_refresh_runtime_settings runtime
+  [[ "$(lane_get runtime runtime_settings_warned_observed_at)" == "2026-07-15T05:04:28.099Z" && "$(wc -l <"$runtime_warn_log")" -eq 2 ]] || { echo "runtime receipt: duplicate drift warning" >&2; exit 1; }
   jq -e '.runtime_model == "gpt-5.6-luna" and .runtime_effort == "low" and .runtime_settings_source == "thread_settings_applied" and .runtime_settings_observed_at == "2026-07-15T05:04:28.099Z"' "$(lane_state_file runtime)" >/dev/null
 
-  # 4: no event and malformed input remain operable and honest.
+  # 4: no event and malformed input remain operable and honest. Refresh health
+  # changes, but an existing good observation is never erased.
   reset_runtime; codex_refresh_runtime_settings runtime
-  jq -e '.runtime_settings_state == "unknown" and .runtime_settings_error == "no-settings-event" and .runtime_settings_match_requested == "unknown"' "$(lane_state_file runtime)" >/dev/null
+  jq -e '.runtime_settings_state == "unknown" and .runtime_refresh_state == "unknown" and .runtime_refresh_error == "no-settings-event" and .runtime_settings_match_requested == "unknown"' "$(lane_state_file runtime)" >/dev/null
   printf '%s\n' '{not json' >>"$roll"; codex_refresh_runtime_settings runtime
-  jq -e '.runtime_settings_state == "error" and .runtime_settings_error == "malformed-rollout"' "$(lane_state_file runtime)" >/dev/null
+  jq -e '.runtime_settings_state == "unknown" and .runtime_refresh_state == "error" and (.runtime_refresh_error | startswith("malformed-rollout:"))' "$(lane_state_file runtime)" >/dev/null
+
+  # Concurrent append: a single unterminated invalid final record is in-flight,
+  # not corruption, and cannot launder an already observed mismatch.
+  reset_runtime
+  printf '%s\n' '{"type":"event_msg","timestamp":"2026-07-15T06:10:00Z","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-5.6-luna","reasoning_effort":"low"}}}' >>"$roll"
+  codex_refresh_runtime_settings runtime
+  printf '%s' '{"type":"event_msg","timestamp":"2026-07-15T06:11:00Z","payload":' >>"$roll"
+  codex_refresh_runtime_settings runtime
+  jq -e '.runtime_model == "gpt-5.6-luna" and .runtime_effort == "low" and .runtime_settings_match_requested == "false" and .runtime_refresh_state == "in_flight" and .runtime_refresh_error == "incomplete-final-record"' "$(lane_state_file runtime)" >/dev/null
+  # Completing that same record heals the snapshot and makes it current.
+  printf '%s\n' '{"type":"thread_settings_applied","thread_settings":{"model":"gpt-5.6-terra","reasoning_effort":"medium"}}}' >>"$roll"
+  codex_refresh_runtime_settings runtime
+  jq -e '.runtime_model == "gpt-5.6-terra" and .runtime_effort == "medium" and .runtime_settings_match_requested == "true" and .runtime_refresh_state == "observed"' "$(lane_state_file runtime)" >/dev/null
+
+  # A newline-terminated malformed record is genuine corruption and blocks a
+  # newly enforced lane even when a previous observation matched.
+  printf '%s\n' '{not json' >>"$roll"
+  codex_refresh_runtime_settings runtime
+  jq -e '.runtime_settings_match_requested == "true" and .runtime_refresh_state == "error" and (.runtime_refresh_error | startswith("malformed-rollout:"))' "$(lane_state_file runtime)" >/dev/null
+  set +e; "$root/bin/waspflow" reap runtime --no-archive >/dev/null 2>&1; malformed_reap_rc=$?; set -e
+  [[ "$malformed_reap_rc" -eq 2 && "$(lane_get runtime result)" == runtime_unverified ]] || { echo "runtime receipt: malformed refresh did not fail closed" >&2; exit 1; }
 
   # 5: confirmed live revise refreshes; queued user_message does not.
   reset_runtime
@@ -604,11 +633,34 @@ JSONL
 
   # Lifecycle boundary: unaccepted explicit drift must not become success;
   # accepting the exact observation is deliberate, durable operator policy.
-  lane_set runtime runtime_settings_match_requested false runtime_settings_observed_at "2026-07-15T06:00:00Z" runtime_model gpt-5.6-luna runtime_effort low
+  lane_set runtime runtime_settings_match_requested false runtime_settings_observed_at "2026-07-15T06:00:00Z" runtime_model gpt-5.6-luna runtime_effort low runtime_refresh_state observed runtime_refresh_error ""
   set +e; "$root/bin/waspflow" reap runtime --no-archive >/dev/null 2>&1; reap_rc=$?; set -e
-  [[ "$reap_rc" -eq 2 && "$(lane_get runtime result)" == runtime_drift ]] || { echo "runtime receipt: drift did not gate reap" >&2; exit 1; }
+  [[ "$reap_rc" -eq 2 && "$(lane_get runtime result)" == runtime_unverified ]] || { echo "runtime receipt: drift did not gate reap" >&2; exit 1; }
   "$root/bin/waspflow" accept-runtime runtime --reason "synthetic acceptance" >/dev/null
   [[ "$(lane_get runtime runtime_settings_accepted_observed_at)" == "2026-07-15T06:00:00Z" ]] || { echo "runtime receipt: acceptance was not timestamp-bound" >&2; exit 1; }
+  printf '%s\n' '{"type":"event_msg","timestamp":"2026-07-15T06:01:00Z","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-5.6-luna","reasoning_effort":"medium"}}}' >>"$roll"
+  set +e; "$root/bin/waspflow" reap runtime --no-archive >/dev/null 2>&1; later_drift_rc=$?; set -e
+  [[ "$later_drift_rc" -eq 2 && "$(lane_get runtime result)" == runtime_unverified ]] || { echo "runtime receipt: later drift was incorrectly covered by old acceptance" >&2; exit 1; }
+
+  # Fresh enforced lanes fail closed for missing/uncorrelated logs; legacy lanes
+  # deliberately retain historical reap behavior because they lack the marker.
+  lane_set fresh-missing provider codex status live cwd "$fixture" model gpt-5.6-terra effort medium runtime_receipt_enforced true runtime_receipt_version 2
+  set +e; "$root/bin/waspflow" reap fresh-missing --no-archive >/dev/null 2>&1; fresh_rc=$?; set -e
+  [[ "$fresh_rc" -eq 2 && "$(lane_get fresh-missing result)" == runtime_unverified ]] || { echo "runtime receipt: missing fresh lane did not fail closed" >&2; exit 1; }
+  unknown_sid="66666666-6666-6666-6666-666666666666"
+  unknown_roll="$runtime_sessions/2026/07/15/rollout-unknown-$unknown_sid.jsonl"
+  printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"$unknown_sid\"}}" >"$unknown_roll"
+  lane_set fresh-unknown provider codex status live cwd "$fixture" session_id "$unknown_sid" rollout "$unknown_roll" model gpt-5.6-terra effort medium runtime_receipt_enforced true runtime_receipt_version 2
+  set +e; "$root/bin/waspflow" reap fresh-unknown --no-archive >/dev/null 2>&1; unknown_rc=$?; set -e
+  [[ "$unknown_rc" -eq 2 && "$(lane_get fresh-unknown result)" == runtime_unverified ]] || { echo "runtime receipt: unknown fresh lane did not fail closed" >&2; exit 1; }
+  other_sid="77777777-7777-7777-7777-777777777777"
+  lane_set fresh-uncorrelated provider codex status live cwd "$fixture" session_id "$other_sid" rollout "$unknown_roll" model gpt-5.6-terra effort medium runtime_receipt_enforced true runtime_receipt_version 2
+  set +e; "$root/bin/waspflow" reap fresh-uncorrelated --no-archive >/dev/null 2>&1; uncorrelated_rc=$?; set -e
+  [[ "$uncorrelated_rc" -eq 2 && "$(lane_get fresh-uncorrelated result)" == runtime_unverified ]] || { echo "runtime receipt: uncorrelated fresh lane did not fail closed" >&2; exit 1; }
+  lane_set legacy-runtime provider codex status live cwd "$fixture" git_tracked false
+  "$root/bin/waspflow" reap legacy-runtime --no-archive >/dev/null
+  [[ "$(lane_get legacy-runtime result)" == succeeded ]] || { echo "runtime receipt: legacy lane behavior changed" >&2; exit 1; }
+  rm -f "$runtime_warn_log"
   rm -rf "$runtime_home" "$runtime_sessions"
 )
 

@@ -306,6 +306,14 @@ cmd_spawn() {
     policy_file="${OPS_POLICY_FILE:-}"
   fi
 
+  # Runtime receipt enforcement is versioned at launch. Existing lanes with no
+  # marker retain their historical lifecycle semantics; new Codex lanes must
+  # prove a healthy current observation before reap can claim success.
+  local runtime_receipt_version="" runtime_receipt_enforced="false"
+  if [[ "$provider" == codex ]]; then
+    runtime_receipt_version="2"
+    runtime_receipt_enforced="true"
+  fi
   lane_set "$lane" \
     provider "$provider" \
     status "live" \
@@ -322,6 +330,11 @@ cmd_spawn() {
     mcp_argv "$MCP_ARGV_JSON" \
     mcp_env "$MCP_ENV_JSON" \
     effort_requested "$effort" \
+    runtime_receipt_version "$runtime_receipt_version" \
+    runtime_receipt_enforced "$runtime_receipt_enforced" \
+    runtime_settings_state "unknown" \
+    runtime_refresh_state "pending" \
+    runtime_refresh_error "" \
     op "${OP_ID:-}" \
     op_mode "${OP_MODE:-}" \
     policy_version "$policy_version" \
@@ -532,7 +545,8 @@ cmd_list() {
          runtime_model:(.runtime_model // ""),runtime_effort:(.runtime_effort // ""),
          runtime_settings_source:(.runtime_settings_source // ""),runtime_settings_observed_at:(.runtime_settings_observed_at // ""),
          runtime_settings_state:(.runtime_settings_state // "unknown"),runtime_settings_match_requested:(.runtime_settings_match_requested // "unknown"),
-         runtime_settings_error:(.runtime_settings_error // ""),spawn_epoch:(.spawn_epoch // ""),
+         runtime_settings_error:(.runtime_settings_error // ""),runtime_refresh_state:(.runtime_refresh_state // "unknown"),
+         runtime_refresh_error:(.runtime_refresh_error // ""),runtime_receipt_enforced:(.runtime_receipt_enforced // "false"),spawn_epoch:(.spawn_epoch // ""),
          updated_at:(.updated_at // ""),parked_at:(.parked_at // ""),
          spawn_submitted:(.spawn_submitted // ""),mcp_requested:(.mcp_requested // ""),
          mcp_resolved:(.mcp_resolved // ""),mcp_warning:(.mcp_warning // ""),
@@ -540,7 +554,7 @@ cmd_list() {
          tmux_pane_pid:(.tmux_pane_pid // "")}' "$(lane_state_file "$lane")")")
     else
       local runtime_label
-      runtime_label="$(jq -r '((.model_requested // .model // "default") + "/" + (.effort_requested // .effort // "default") + " -> ") + (if (.runtime_settings_state // "unknown") == "observed" then ((.runtime_model // "?") + "/" + (.runtime_effort // "?") + " " + (if .runtime_settings_match_requested == "false" then "DRIFT" else "match" end)) else ((.runtime_settings_state // "unknown") + if (.runtime_settings_error // "") != "" then ":" + .runtime_settings_error else "" end) end)' "$(lane_state_file "$lane")")"
+      runtime_label="$(jq -r '((.model_requested // .model // "default") + "/" + (.effort_requested // .effort // "default") + " -> ") + (if (.runtime_settings_state // "unknown") == "observed" then ((.runtime_model // "?") + "/" + (.runtime_effort // "?") + " " + (if .runtime_settings_match_requested == "false" then "DRIFT" else "match" end)) else (.runtime_settings_state // "unknown") end) + " [refresh=" + (.runtime_refresh_state // "unknown") + if (.runtime_refresh_error // "") != "" then ":" + .runtime_refresh_error else "" end + "]"' "$(lane_state_file "$lane")")"
       printf '%-20s %-8s %-8s %-11s %-48s %s\n' "$lane" "$provider" "$live" "$outcome" "$runtime_label" "$cwd"
     fi
     emitted=$((emitted + 1))
@@ -1000,6 +1014,20 @@ _reap_one_locked() {
   load_provider "$provider"
 
   if [[ "$provider" == codex ]]; then codex_refresh_runtime_settings "$lane"; fi
+  if [[ "$provider" == codex && "$(lane_get "$lane" runtime_receipt_enforced)" == true ]]; then
+    local runtime_health runtime_match runtime_at accepted_at
+    runtime_health="$(lane_get "$lane" runtime_refresh_state)"
+    runtime_match="$(lane_get "$lane" runtime_settings_match_requested)"
+    runtime_at="$(lane_get "$lane" runtime_settings_observed_at)"
+    accepted_at="$(lane_get "$lane" runtime_settings_accepted_observed_at)"
+    if [[ "$runtime_health" != observed ]] || \
+       { [[ "$runtime_match" != true ]] && [[ "$runtime_match" != false || "$accepted_at" != "$runtime_at" ]]; }; then
+      artifacts_capture_after "$lane"
+      lane_set "$lane" result "runtime_unverified" runtime_verification_state "${runtime_health:-unknown}:${runtime_match:-unknown}"
+      err "reap: lane '$lane' has no current verified Codex runtime receipt (refresh=${runtime_health:-unknown}, match=${runtime_match:-unknown}); inspect status or accept-runtime after reviewing an observed drift"
+      return 2
+    fi
+  fi
   if [[ "$(lane_get "$lane" runtime_settings_match_requested)" == false ]] && \
      [[ "$(lane_get "$lane" runtime_settings_accepted_observed_at)" != "$(lane_get "$lane" runtime_settings_observed_at)" ]]; then
     artifacts_capture_after "$lane"
@@ -1045,10 +1073,11 @@ _reap_one_locked() {
     failed)          err  "reap: lane '$lane' reaped — result=failed (required report never produced)" ;;
     abandoned)       warn "reap: lane '$lane' reaped — result=abandoned (closed out via 'close --status $(lane_outcome "$lane")'; deliverable not judged, no recovery run)" ;;
     runtime_drift)   err  "reap: lane '$lane' reaped — result=runtime_drift" ;;
+    runtime_unverified) err "reap: lane '$lane' reaped — result=runtime_unverified" ;;
     corrupt_result)  err  "reap: lane '$lane' — state has an unrecognized result value (not laundered to success); inspect state.json" ;;
     *)               log "reap: lane '$lane' reaped" ;;
   esac
-  case "$result" in failed|report_missing|verify_failed|runtime_drift|corrupt_result) return 2 ;; esac
+  case "$result" in failed|report_missing|verify_failed|runtime_drift|runtime_unverified|corrupt_result) return 2 ;; esac
   return 0
 }
 
