@@ -156,10 +156,9 @@ _claude_clear_trust_prompt() {
 #     other prompt appears we send Enter/Escape to dismiss and let the task run.
 # Returns 0 if submission confirmed, 1 if not (caller surfaces this loudly).
 _claude_verify_started() {
-  local lane="$1" target="$2" sid jsonl i pane
-  sid="$(claude_discover_session "$lane")"
+  local lane="$1" target="$2" expected_prompt="${3:-$(lane_get "$1" prompt)}" sid="${4:-}" nonce="${5:-}" jsonl i pane
+  [[ -n "$sid" ]] || sid="$(claude_discover_session "$lane")"
   [[ -n "$sid" ]] || return 1
-  local prompt; prompt="$(lane_get "$lane" prompt)"
   # Attempts are env-tunable so tests can exercise the failure path fast; default
   # 30 (~30s) gives a real spawn ample time to submit past startup modals.
   local attempts="${WASPFLOW_SUBMIT_ATTEMPTS:-30}"
@@ -169,7 +168,7 @@ _claude_verify_started() {
     # of the prompt so we match the real submission, not an echo of the composer.
     if [[ -n "$jsonl" && -s "$jsonl" ]]; then
       if jq -rc 'select(.type=="user") | (.message.content // .message // "" | tostring)' "$jsonl" 2>/dev/null \
-           | grep -qF "${prompt:0:40}"; then
+           | grep -qF "${nonce:-${expected_prompt:0:40}}"; then
         return 0
       fi
     fi
@@ -181,6 +180,50 @@ _claude_verify_started() {
     sleep 1
   done
   return 1
+}
+
+# Escalation is intentionally a new interactive window even when the provider
+# session is retained.  It does not claim lane ownership: the transition CAS in
+# bin/waspflow adopts this provisional window only after submission is proven.
+# Args: lane escalation_prompt [fresh]
+claude_resume_with_arm() {
+  local lane="$1" prompt="$2" fresh="${3:-false}" transition arm model effort cwd sid target ownership nonce quoted="" a
+  transition="$(lane_get "$lane" pending_transition)"
+  arm="$(jq -c '.to_arm // {}' <<<"$transition" 2>/dev/null)"
+  model="$(jq -r '.model // ""' <<<"$arm")"; effort="$(jq -r '.effort // ""' <<<"$arm")"
+  cwd="$(lane_get "$lane" cwd)"; sid="$(jq -r '.provisional_session.session_id // empty' <<<"$transition")"
+  [[ -n "$sid" ]] || sid="$(lane_get "$lane" session_id)"
+  ownership="$(jq -c '.provisional_session.ownership // null' <<<"$transition")"
+  target="$(tmux_window_if_owned "$ownership")" || { err "claude escalation: provisional window is not owned"; return 1; }
+  nonce="$(jq -r '.submission_nonce // empty' <<<"$transition")"
+  [[ -n "$sid" ]] || { err "claude escalation: no resumable session"; return 1; }
+  mcp_policy_load_lane "$lane"
+  local model_args=() effort_args=() resume_args=()
+  [[ -n "$model" ]] && model_args=(--model "$model")
+  [[ -n "$effort" ]] && effort_args=(--effort "$effort")
+  [[ "$fresh" == true ]] && resume_args=(--session-id "$sid") || resume_args=(--resume "$sid")
+  local argv=(env "${MCP_ENV[@]}" claude "${resume_args[@]}" "${model_args[@]}" "${effort_args[@]}" --name "$lane" --dangerously-skip-permissions "${MCP_ARGV[@]}" -- "$prompt")
+  for a in "${argv[@]}"; do quoted+=" $(printf '%q' "$a")"; done
+  tmux_send_owned_window_shell_command "$ownership" "bash -lc $(printf '%q' "${quoted# }")" || return 1
+  tmux pipe-pane -t "$target" -o "cat >> $(printf '%q' "$(lane_transcript "$lane")")" 2>/dev/null || true
+  _claude_clear_trust_prompt "$target"
+  if ! _claude_verify_started "$lane" "$target" "$prompt" "$sid" "$nonce"; then
+    return 1
+  fi
+  WASPFLOW_PROVISIONAL_SESSION_ID="$sid"
+  WASPFLOW_PROVISIONAL_ROLLOUT=""
+}
+
+claude_confirm_escalation_submission() {
+  local lane="$1" prompt="$2" _fresh="${3:-false}" transition ownership target sid nonce
+  transition="$(lane_get "$lane" pending_transition)"
+  ownership="$(jq -c '.provisional_session.ownership // null' <<<"$transition")"
+  target="$(tmux_window_if_owned "$ownership")" || return 1
+  sid="$(jq -r '.provisional_session.session_id // empty' <<<"$transition")"
+  nonce="$(jq -r '.submission_nonce // empty' <<<"$transition")"
+  _claude_verify_started "$lane" "$target" "$prompt" "$sid" "$nonce" || return 1
+  WASPFLOW_PROVISIONAL_SESSION_ID="$sid"
+  WASPFLOW_PROVISIONAL_ROLLOUT=""
 }
 
 # Is the session resumable yet? After a window is killed, the JSONL may not be

@@ -175,9 +175,15 @@ reap, `bin/waspflow:252`): receipts are **append-only JSONL** in
 `$WASPFLOW_HOME/receipts.jsonl` (survives lane-name reuse and lane cleanup; the
 flywheel reads one file), plus a convenience copy `receipt.json` in the lane dir. Each
 receipt: `receipt_id` (uuid), `lane_uuid` (new: uuid stamped at spawn), `waspflow_version`
-(git describe at build/install; "dev" fallback). One receipt per finalize; checkpoint
-verify runs are recorded in `verify_runs[]` within it; `segment: null` reserved for
-Phase 3 arm switches (an escalation closes a segment receipt).
+(git describe at build/install; "dev" fallback). The reap-time finalize row keeps
+`receipt_kind: "lane"`, preserving exactly one `lane` row per lane life. For an
+escalated lane, that final row carries `segment: {index:<last>, closed_by:"reap"}`;
+a never-escalated legacy lane keeps `segment: null`. An escalation-closing row uses
+`receipt_kind: "lane_segment"` and
+`segment: {index, closed_by:"escalation", transition:<uuid>}`; checkpoint verify runs
+are recorded in `verify_runs[]` within that closing row. Consumers that include
+segments key them by `(lane_uuid, segment.index)`; the lane directory's
+`receipt.json` is always the latest row.
 
 Append protocol: single `printf '%s\n'` of the complete line under `flock` on
 `$WASPFLOW_LOCKS_DIR/receipts.lock` (the existing lock-dir pattern). Duplicate

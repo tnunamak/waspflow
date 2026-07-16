@@ -251,3 +251,50 @@ grok_revise() {
   [[ -n "$out_file" ]] || { cat "$tmp"; rm -f "$tmp"; }
   return "${rc:-0}"
 }
+
+# Args: lane escalation_prompt [fresh].  This mirrors Grok's supported
+# interactive resume syntax and leaves ownership provisional for the transition
+# state machine to adopt only after the turn start is observable.
+grok_resume_with_arm() {
+  local lane="$1" prompt="$2" fresh="${3:-false}" transition arm model effort cwd sid target ownership quoted="" a
+  transition="$(lane_get "$lane" pending_transition)"
+  arm="$(jq -c '.to_arm // {}' <<<"$transition" 2>/dev/null)"
+  model="$(jq -r '.model // ""' <<<"$arm")"; effort="$(jq -r '.effort // ""' <<<"$arm")"
+  cwd="$(lane_get "$lane" cwd)"; sid="$(jq -r '.provisional_session.session_id // empty' <<<"$transition")"
+  [[ -n "$sid" ]] || sid="$(lane_get "$lane" session_id)"
+  ownership="$(jq -c '.provisional_session.ownership // null' <<<"$transition")"
+  target="$(tmux_window_if_owned "$ownership")" || { err "grok escalation: provisional window is not owned"; return 1; }
+  [[ -n "$sid" ]] || { err "grok escalation: no resumable session"; return 1; }
+  local model_args=() effort_args=() resume_args=()
+  [[ -n "$model" ]] && model_args=(-m "$model")
+  case "$effort" in "") ;; none|minimal|low|medium|high|xhigh|max) effort_args=(--effort "$effort") ;; *) err "grok escalation: unsupported effort '$effort'"; return 1 ;; esac
+  [[ "$fresh" == true ]] && resume_args=(--session-id "$sid") || resume_args=(--resume "$sid")
+  local argv=(grok "${model_args[@]}" "${effort_args[@]}" "${resume_args[@]}" --always-approve --cwd "$cwd" "$prompt")
+  for a in "${argv[@]}"; do quoted+=" $(printf '%q' "$a")"; done
+  tmux_send_owned_window_shell_command "$ownership" "bash -lc $(printf '%q' "${quoted# }")" || return 1
+  tmux pipe-pane -t "$target" -o "cat >> $(printf '%q' "$(lane_transcript "$lane")")" 2>/dev/null || true
+  local before=0 events i
+  events="$(_grok_events_file "$sid" || true)"; before="$(wc -l <"$events" 2>/dev/null || echo 0)"
+  for i in $(seq 1 "${WASPFLOW_SUBMIT_ATTEMPTS:-20}"); do
+    events="$(_grok_events_file "$sid" || true)"
+    [[ "$(wc -l <"$events" 2>/dev/null || echo 0)" -gt "$before" ]] && break
+    sleep 1
+  done
+  if [[ "$(wc -l <"$events" 2>/dev/null || echo 0)" -le "$before" ]]; then
+    return 1
+  fi
+  WASPFLOW_PROVISIONAL_SESSION_ID="$sid"
+  WASPFLOW_PROVISIONAL_ROLLOUT=""
+}
+
+grok_confirm_escalation_submission() {
+  local lane="$1" _prompt="$2" _fresh="${3:-false}" transition sid events
+  transition="$(lane_get "$lane" pending_transition)"
+  sid="$(jq -r '.provisional_session.session_id // empty' <<<"$transition")"
+  [[ -n "$sid" ]] || return 1
+  events="$(_grok_events_file "$sid" || true)"
+  [[ -n "$events" && -s "$events" ]] || return 1
+  grep -q '"type":"turn_started"\|"type":"turn_ended"\|turn_started\|phase_changed' "$events" 2>/dev/null || return 1
+  WASPFLOW_PROVISIONAL_SESSION_ID="$sid"
+  WASPFLOW_PROVISIONAL_ROLLOUT=""
+}

@@ -104,6 +104,12 @@ only when its content-sensitive Git workspace fingerprint is unchanged; otherwis
 it reruns the configured oracle. A changed/unknown test-surface flag is warning
 only, never an approval gate.
 
+If the checkpoint is task-class, `verify` proposes (but never starts)
+`waspflow escalate fix`; `verify fix --json` exposes that command in
+`suggested_argv[]`. `revise` steers the SAME arm in-session; `escalate` deliberately
+switches arms and records a closing `lane_segment` receipt before a replacement window
+is adopted.
+
 Every reap also appends an outcome receipt to `$WASPFLOW_HOME/receipts.jsonl`
 (arm, billing path, availability evidence, verify outcome, wall time). Declare
 `--verify-strength suite|smoke` alongside `--verify` at spawn — a receipt only

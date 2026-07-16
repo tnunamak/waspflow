@@ -307,7 +307,7 @@ _codex_wait_composer_ready() {
 # If no complete message appears, re-send Enter (the most common failure is the
 # Enter racing hook output). Up to a few attempts.
 _codex_submit_prompt() {
-  local lane="$1" cwd="$2" target="$3" prompt="$4" marker="${5:-}" attempt
+  local lane="$1" cwd="$2" target="$3" prompt="$4" marker="${5:-}" provisional="${6:-false}" attempt
   # A marker is REQUIRED to confirm submission safely: codex_spawn always sets
   # one before calling here. Without it, the only way to find "our" rollout is
   # cwd alone, which is AMBIGUOUS — any other lane (or a stale rollout from
@@ -336,8 +336,13 @@ $prompt"
         local sid
         sid="$(_codex_rollout_session_id "$rollout")"
         if [[ -n "$sid" ]]; then
-          lane_set "$lane" session_id "$sid" rollout "$rollout"
-          codex_refresh_runtime_settings "$lane"
+          if [[ "$provisional" == true ]]; then
+            WASPFLOW_PROVISIONAL_SESSION_ID="$sid"
+            WASPFLOW_PROVISIONAL_ROLLOUT="$rollout"
+          else
+            lane_set "$lane" session_id "$sid" rollout "$rollout"
+            codex_refresh_runtime_settings "$lane"
+          fi
         fi
         return 0
       fi
@@ -350,6 +355,60 @@ $prompt"
   # so the task was NOT confirmed submitted (dead-on-arrival). Return nonzero so
   # cmd_spawn surfaces it loudly + exits 3, instead of a phantom "spawned".
   return 1
+}
+
+# Args: lane escalation_prompt [fresh].  Codex has a distinct interactive
+# resume command; model and reasoning effort are passed on this replacement
+# process, never inferred from spawn-era state.
+codex_resume_with_arm() {
+  local lane="$1" prompt="$2" fresh="${3:-false}" transition arm model effort cwd sid target ownership marker quoted="" a
+  transition="$(lane_get "$lane" pending_transition)"
+  arm="$(jq -c '.to_arm // {}' <<<"$transition" 2>/dev/null)"
+  model="$(jq -r '.model // ""' <<<"$arm")"; effort="$(jq -r '.effort // ""' <<<"$arm")"
+  cwd="$(lane_get "$lane" cwd)"; sid="$(jq -r '.provisional_session.session_id // empty' <<<"$transition")"
+  [[ -n "$sid" ]] || sid="$(lane_get "$lane" session_id)"
+  ownership="$(jq -c '.provisional_session.ownership // null' <<<"$transition")"
+  target="$(tmux_window_if_owned "$ownership")" || { err "codex escalation: provisional window is not owned"; return 1; }
+  local model_args=() effort_args=()
+  [[ -n "$model" ]] && model_args=(-m "$model")
+  case "$effort" in "") ;; minimal|low|medium|high|xhigh) effort_args=(-c "model_reasoning_effort=${effort}") ;; *) err "codex escalation: unsupported effort '$effort'"; return 1 ;; esac
+  marker="$(jq -r '.submission_marker // empty' <<<"$transition")"
+  [[ -n "$marker" ]] || { err "codex escalation: transition has no submission marker"; return 1; }
+  if [[ "$fresh" == true ]]; then
+    local argv=(codex "${model_args[@]}" "${effort_args[@]}")
+  else
+    [[ -n "$sid" ]] || { err "codex escalation: no resumable session"; return 1; }
+    local argv=(codex resume "$sid" "${model_args[@]}" "${effort_args[@]}")
+  fi
+  for a in "${argv[@]}"; do quoted+=" $(printf '%q' "$a")"; done
+  tmux_send_owned_window_shell_command "$ownership" "bash -lc $(printf '%q' "${quoted# }")" || return 1
+  tmux pipe-pane -t "$target" -o "cat >> $(printf '%q' "$(lane_transcript "$lane")")" 2>/dev/null || true
+  _codex_clear_trust_prompt "$target"
+  _codex_wait_composer_ready "$target"
+  if ! _codex_submit_prompt "$lane" "$cwd" "$target" "$prompt" "$marker" true; then
+    return 1
+  fi
+}
+
+# Recovery confirmation is deliberately read-only with respect to lane ownership:
+# the transaction already journaled its provisional window before the launch side
+# effect. The transition marker makes a prior escalation's user event in the same
+# Codex session ineligible evidence.
+codex_confirm_escalation_submission() {
+  local lane="$1" prompt="$2" _fresh="${3:-false}" transition cwd marker full_prompt rollout sid
+  transition="$(lane_get "$lane" pending_transition)"
+  cwd="$(lane_get "$lane" cwd)"; marker="$(jq -r '.submission_marker // empty' <<<"$transition")"
+  [[ -n "$marker" ]] || return 1
+  full_prompt="$marker
+Ignore the line above; it is for waspflow session correlation.
+
+$prompt"
+  rollout="$(_codex_find_rollout_for_submitted_prompt "$cwd" "$full_prompt" || true)"
+  [[ -n "$rollout" ]] || return 1
+  sid="$(_codex_rollout_session_id "$rollout")"
+  [[ -n "$sid" ]] || return 1
+  WASPFLOW_PROVISIONAL_SESSION_ID="$sid"
+  WASPFLOW_PROVISIONAL_ROLLOUT="$rollout"
 }
 
 # Extract Codex's session id from a rollout path.
@@ -422,10 +481,14 @@ codex_session_resumable() {
 # `turn_context` is the best available observation. Missing/malformed logs stay
 # honest rather than turning the launch request into claimed runtime truth.
 codex_refresh_runtime_settings() {
-  local lane="$1" sid rollout snapshot snapshot_size last_byte line parsed source observed_at runtime_model runtime_effort
+  local lane="$1" sid rollout snapshot snapshot_size last_byte line parsed source observed_at runtime_model runtime_effort expected_generation expected_session
   local line_number=0 last_line=0 malformed="" in_flight=0
+  expected_generation="$(lane_get "$lane" arm_generation)"
+  expected_session="$(lane_get "$lane" session_id)"
   _codex_runtime_refresh_health() {
-    lane_set "$lane" runtime_refresh_state "$1" runtime_refresh_error "${2:-}" runtime_refresh_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    # A refresh that loses the arm/session snapshot is stale, never evidence
+    # against the newly adopted arm.
+    lane_update_if "$lane" "$expected_generation" "$expected_session" runtime_refresh_state "$1" runtime_refresh_error "${2:-}" runtime_refresh_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
   }
   sid="$(codex_discover_session "$lane")"
   [[ -n "$sid" ]] || {
@@ -505,12 +568,16 @@ codex_refresh_runtime_settings() {
   prior_match="$(lane_get "$lane" runtime_settings_match_requested)"
   prior_at="$(lane_get "$lane" runtime_settings_observed_at)"
   prior_warned_at="$(lane_get "$lane" runtime_settings_warned_observed_at)"
-  lane_set "$lane" rollout "$rollout" runtime_settings_state observed runtime_settings_error "" runtime_refresh_state observed runtime_refresh_error "" runtime_refresh_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  # Test-only interleave seam: the integration verifier swaps the arm/session
+  # after this refresh has read its rollout and before its CAS commit.
+  declare -F codex_test_refresh_interleave >/dev/null && codex_test_refresh_interleave "$lane"
+  lane_update_if "$lane" "$expected_generation" "$expected_session" rollout "$rollout" runtime_settings_state observed runtime_settings_error "" runtime_refresh_state observed runtime_refresh_error "" runtime_refresh_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     runtime_model "$runtime_model" runtime_effort "$runtime_effort" runtime_settings_source "$source" \
-    runtime_settings_observed_at "$observed_at" runtime_settings_match_requested "$match"
+    runtime_settings_observed_at "$observed_at" runtime_settings_match_requested "$match" || return 0
   if [[ "$match" == false && "$prior_warned_at" != "$observed_at" ]]; then
-    lane_set "$lane" runtime_settings_warned_observed_at "$observed_at"
-    warn "codex runtime settings drift for lane '$lane': requested ${requested_model:-default}/${requested_effort:-default}, observed $runtime_model/$runtime_effort ($source)"
+    if lane_update_if "$lane" "$expected_generation" "$expected_session" runtime_settings_warned_observed_at "$observed_at"; then
+      warn "codex runtime settings drift for lane '$lane': requested ${requested_model:-default}/${requested_effort:-default}, observed $runtime_model/$runtime_effort ($source)"
+    fi
   fi
   return 0
 }
