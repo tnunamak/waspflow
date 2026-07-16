@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+trap 'rc=$?; (( rc == 0 )) || printf "waspflow verify: failed at line %s (exit %s): %s\n" "$LINENO" "$rc" "$BASH_COMMAND" >&2' EXIT
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Verify this checkout unless an individual fixture deliberately injects a
 # provider library below. An ambient developer WASPFLOW_LIB can otherwise make
