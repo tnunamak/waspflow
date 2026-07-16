@@ -2574,6 +2574,79 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   artifacts_emit_receipt_v1 legacy-receipt succeeded
   jq -e '.lane == "legacy-receipt" and .receipt_kind == "lane" and .segment == null and (.timestamps | keys | sort) == ["finalize_epoch","spawn_epoch","wall_seconds"] and .timestamps.spawn_epoch == null and .timestamps.wall_seconds == 0' "$WASPFLOW_HOME/receipts.jsonl" >/dev/null
 
+  # Claude/grok runtime attestation from fixture session logs: observed state,
+  # CAS discard across arm generations, and the payoff — a claude lane can now
+  # reach stats_eligible (previously attestation_missing made that impossible
+  # for non-codex providers).
+  source "$root/lib/providers/claude.sh"; source "$root/lib/providers/grok.sh"
+  att_home="$WASPFLOW_HOME/att-fixtures"
+  mkdir -p "$att_home/claude-projects/proj" "$att_home/grok-sessions/enc/g-sid-1"
+  {
+    printf '%s\n' '{"type":"user","message":{"content":"tool result quoting \"model\":\"claude-forged-99\" inside content"}}'
+    printf '%s\n' '{"type":"tool_use","model":"claude-tool-echo"}'
+    printf '%s\n' '{"message":{"model":"claude-sonnet-5"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-1.jsonl"
+  printf '%s\n' '{"current_model_id":"grok-4.5","reasoning_effort":"high"}' >"$att_home/grok-sessions/enc/g-sid-1/summary.json"
+  lane_set att-claude provider claude status live result "" lane_uuid att-c-uuid session_id c-sid-1 model claude-sonnet-5 model_passed claude-sonnet-5 model_requested claude-sonnet-5 effort medium effort_requested medium verify_strength suite verify_state passed verify_command "true"
+  lane_set att-grok provider grok status live result "" lane_uuid att-g-uuid session_id g-sid-1 model grok-4.5 model_passed grok-4.5 effort high effort_requested high
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-claude
+  GROK_SESSIONS_DIR="$att_home/grok-sessions" grok_refresh_runtime_settings att-grok
+  [[ "$(lane_get att-claude runtime_settings_state)" == observed && "$(lane_get att-claude runtime_model)" == claude-sonnet-5 ]]
+  # Forged/tool-echoed model strings must not count as attestation.
+  [[ "$(lane_get att-claude runtime_model)" != *forged* && "$(lane_get att-claude runtime_settings_match_requested)" == true ]]
+  # Multiple served models (provider fallback) -> observed but mismatched.
+  { printf '%s\n' '{"message":{"model":"claude-sonnet-5"},"type":"assistant"}'
+    printf '%s\n' '{"message":{"model":"claude-haiku-4-5"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-multi.jsonl"
+  lane_set att-multi provider claude status live result "" session_id c-sid-multi model_requested claude-sonnet-5
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-multi
+  [[ "$(lane_get att-multi runtime_settings_match_requested)" == false && "$(lane_get att-multi runtime_settings_error)" == multiple-models-observed ]]
+  # Observed-but-different model -> attestation_mismatch ineligibility (all providers).
+  lane_set att-drift provider grok status live result "" lane_uuid att-d-uuid session_id g-sid-1 model grok-4 model_passed grok-4 model_requested grok-4 effort high effort_requested high
+  GROK_SESSIONS_DIR="$att_home/grok-sessions" grok_refresh_runtime_settings att-drift
+  [[ "$(lane_get att-drift runtime_settings_match_requested)" == false ]]
+  artifacts_emit_receipt_v1 att-drift succeeded
+  jq -e 'select(.lane == "att-drift") | .ineligibility_reasons | index("attestation_mismatch")' "$WASPFLOW_HOME/receipts.jsonl" >/dev/null
+  # Effort drift on an attesting provider (fixture serves high, lane requested xhigh).
+  lane_set att-effort provider grok status live result "" session_id g-sid-1 model grok-4.5 model_passed grok-4.5 model_requested grok-4.5 effort xhigh effort_requested xhigh
+  GROK_SESSIONS_DIR="$att_home/grok-sessions" grok_refresh_runtime_settings att-effort
+  [[ "$(lane_get att-effort runtime_settings_match_requested)" == false ]]
+  # Pathological session log (FIFO) must be skipped, never block reap.
+  mkfifo "$att_home/claude-projects/proj/c-sid-fifo.jsonl"
+  lane_set att-fifo provider claude status live result "" session_id c-sid-fifo
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-fifo
+  [[ "$(lane_get att-fifo runtime_refresh_state)" == unknown && "$(lane_get att-fifo runtime_refresh_error)" == no-session-log ]]
+  # Refresher passes its (generation, session) snapshot to the CAS primitive.
+  cas_args_file="$att_home/cas-args.txt"
+  ( lane_update_if() { printf '%s %s\n' "$2" "$3" >>"$cas_args_file"; return 0; }
+    lane_set att-cas2 provider grok status live result "" session_id g-sid-1 arm_generation 7
+    GROK_SESSIONS_DIR="$att_home/grok-sessions" grok_refresh_runtime_settings att-cas2 )
+  grep -q "^7 g-sid-1$" "$cas_args_file"
+  [[ "$(lane_get att-grok runtime_settings_state)" == observed && "$(lane_get att-grok runtime_model)" == grok-4.5 && "$(lane_get att-grok runtime_effort)" == high ]]
+  # Missing session log -> honest unknown with reason, settings untouched.
+  lane_set att-missing provider claude status live result "" session_id nope-sid
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-missing
+  [[ "$(lane_get att-missing runtime_refresh_state)" == unknown && "$(lane_get att-missing runtime_refresh_error)" == no-session-log ]]
+  # CAS: a refresh whose (generation, session) snapshot predates an arm switch
+  # must be discarded — simulate by bumping arm_generation mid-flight.
+  lane_set att-cas provider grok status live result "" session_id g-sid-1 arm_generation 1
+  ( expected_generation=0; expected_session=g-sid-1
+    lane_update_if att-cas "$expected_generation" "$expected_session" runtime_settings_state observed || true )
+  [[ "$(lane_get att-cas runtime_settings_state)" != observed ]]
+  # Payoff: observed attestation + explicit arm + declared strength -> eligible.
+  artifacts_emit_receipt_v1 att-claude verified
+  jq -e 'select(.lane == "att-claude") | .arm_attestation.runtime_settings_state == "observed" and .arm_attestation.observed_model == "claude-sonnet-5" and (.ineligibility_reasons | index("attestation_missing") | not)' "$WASPFLOW_HOME/receipts.jsonl" >/dev/null
+
+  # receipts summary: aggregates the ledger, tolerates malformed lines,
+  # rejects unknown flags, and reports the eligible fraction. Malformed-line
+  # tolerance runs against a scratch copy so the shared ledger stays clean.
+  mkdir -p "$att_home/sumhome"
+  cp "$WASPFLOW_HOME/receipts.jsonl" "$att_home/sumhome/receipts.jsonl"
+  printf '%s\n' 'this is not json {' >>"$att_home/sumhome/receipts.jsonl"
+  summary_out="$(WASPFLOW_HOME="$att_home/sumhome" "$root/bin/waspflow" receipts summary --json)"
+  ! "$root/bin/waspflow" receipts summary --bogus >/dev/null 2>&1
+  jq -e '.lanes >= 2 and (.by_arm | type == "array") and (.eligible | type == "number") and (.top_ineligibility | type == "array")' <<<"$summary_out" >/dev/null
+
   lane_set segment-repair provider grok status live result succeeded lane_uuid segment-repair-uuid segment_index 0 receipt_emitted false receipt_emitted_segment -1
   artifacts_emit_segment_receipt_v1 segment-repair repair-transition succeeded
   durable_segment_id="$(jq -r 'select(.lane_uuid == "segment-repair-uuid" and .receipt_kind == "lane_segment") | .receipt_id' "$WASPFLOW_HOME/receipts.jsonl")"

@@ -403,3 +403,65 @@ claude_revise() {
   [[ -n "$out_file" ]] || { cat "$tmp"; rm -f "$tmp"; }
   return "${rc:-0}"
 }
+
+# Runtime attestation from Claude's own session log (~/.claude/projects/*/
+# <sid>.jsonl): the authoritative record of which model actually served each
+# message. Claude does not expose a per-session effort in the log, so
+# runtime_effort stays empty (receipts record null — observed, not guessed).
+# v1 observes only; no drift comparison (requested aliases like "opus" resolve
+# to canonical ids like "claude-opus-4-8", so naive equality would false-alarm).
+# The (arm_generation, session_id) snapshot mirrors codex: a refresh that
+# straddles an escalation must never commit stale evidence.
+claude_refresh_runtime_settings() {
+  local lane="$1" sid file model expected_generation expected_session
+  expected_generation="$(lane_get "$lane" arm_generation)"
+  expected_session="$(lane_get "$lane" session_id)"
+  _claude_runtime_refresh_health() {
+    lane_update_if "$lane" "$expected_generation" "$expected_session" runtime_refresh_state "$1" runtime_refresh_error "${2:-}" runtime_refresh_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
+  }
+  sid="$expected_session"
+  [[ -n "$sid" ]] || { _claude_runtime_refresh_health unknown no-session; return 0; }
+  file="$(find "${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}" -maxdepth 2 -name "${sid}.jsonl" 2>/dev/null | head -1)"
+  [[ -n "$file" && -f "$file" && ! -p "$file" && -r "$file" ]] || { _claude_runtime_refresh_health unknown no-session-log; return 0; }
+  # Typed extraction, not raw grep: task/tool content can embed forged
+  # "model":"claude-…" strings, and attestation feeding flywheel eligibility
+  # must not be forgeable from untrusted content. grep narrows candidate lines
+  # (logs reach hundreds of MB), jq types them: only top-level assistant
+  # records count. timeout guards reap against pathological files.
+  local models grep_cmd=(grep -a '"model":"claude-' "$file")
+  # When timeout exists it is the ONLY grep we run: a fallback rerun after an
+  # expiry would be exactly the unbounded scan the guard exists to prevent.
+  command -v timeout >/dev/null 2>&1 && grep_cmd=(timeout 15 "${grep_cmd[@]}")
+  models="$("${grep_cmd[@]}" 2>/dev/null \
+    | jq -r 'select(type == "object" and .type? == "assistant") | .message.model // empty' 2>/dev/null | sort -u)"
+  [[ -n "$models" ]] || { _claude_runtime_refresh_health unknown no-model-events; return 0; }
+  if [[ "$(wc -l <<<"$models")" -gt 1 ]]; then
+    # More than one model served this session (provider fallback, /model switch
+    # outside waspflow) — the arm axis was NOT stable. Observed, but mismatched.
+    lane_update_if "$lane" "$expected_generation" "$expected_session" \
+      runtime_settings_state observed runtime_settings_error "multiple-models-observed" \
+      runtime_model "$(tail -1 <<<"$models")" runtime_effort "" \
+      runtime_settings_match_requested false \
+      runtime_refresh_state observed runtime_refresh_error "" \
+      runtime_refresh_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
+    return 0
+  fi
+  model="$models"
+  # Alias-tolerant corroboration: requested "opus" serves as "claude-opus-4-8".
+  local requested match
+  requested="$(lane_get "$lane" model_requested)"
+  [[ -n "$requested" ]] || requested="$(lane_get "$lane" model)"
+  # Token-boundary containment: alias "opus" matches "claude-opus-4-8", but
+  # "grok-4" must NOT match "grok-4.5" (that is drift, not an alias).
+  if [[ -z "$requested" || "$model" == "$requested" || "-$model-" == *"-$requested-"* ]]; then
+    match=true
+  else
+    match=false
+  fi
+  lane_update_if "$lane" "$expected_generation" "$expected_session" \
+    runtime_settings_state observed runtime_settings_error "" \
+    runtime_model "$model" runtime_effort "" \
+    runtime_settings_match_requested "$match" \
+    runtime_refresh_state observed runtime_refresh_error "" \
+    runtime_refresh_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
+}

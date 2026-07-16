@@ -298,3 +298,50 @@ grok_confirm_escalation_submission() {
   WASPFLOW_PROVISIONAL_SESSION_ID="$sid"
   WASPFLOW_PROVISIONAL_ROLLOUT=""
 }
+
+# Runtime attestation from Grok's session summary
+# (~/.grok/sessions/<urlencoded-cwd>/<sid>/summary.json): carries BOTH
+# current_model_id and reasoning_effort, authoritative for the session. v1
+# observes only (no drift comparison). Snapshot discipline mirrors codex:
+# stale (generation, session) evidence never commits across an escalation.
+grok_refresh_runtime_settings() {
+  local lane="$1" sid dir summary model effort expected_generation expected_session
+  expected_generation="$(lane_get "$lane" arm_generation)"
+  expected_session="$(lane_get "$lane" session_id)"
+  _grok_runtime_refresh_health() {
+    lane_update_if "$lane" "$expected_generation" "$expected_session" runtime_refresh_state "$1" runtime_refresh_error "${2:-}" runtime_refresh_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
+  }
+  sid="$expected_session"
+  [[ -n "$sid" ]] || { _grok_runtime_refresh_health unknown no-session; return 0; }
+  dir="$(find "${GROK_SESSIONS_DIR:-$HOME/.grok/sessions}" -maxdepth 2 -type d -name "$sid" 2>/dev/null | head -1)"
+  summary="$dir/summary.json"
+  [[ -n "$dir" && -f "$summary" && ! -p "$summary" && -r "$summary" ]] || { _grok_runtime_refresh_health unknown no-session-summary; return 0; }
+  # Single read: two independent jq passes could pair a model from one write
+  # of summary.json with the effort of a concurrent later write.
+  local pair
+  pair="$(jq -r '[(.current_model_id // ""), (.reasoning_effort // "")] | @tsv' "$summary" 2>/dev/null)"
+  model="${pair%%$'\t'*}"; effort="${pair#*$'\t'}"; [[ "$effort" == "$pair" ]] && effort=""
+  [[ -n "$model" ]] || { _grok_runtime_refresh_health unknown no-model-in-summary; return 0; }
+  local requested requested_effort match
+  requested="$(lane_get "$lane" model_requested)"
+  [[ -n "$requested" ]] || requested="$(lane_get "$lane" model)"
+  requested_effort="$(lane_get "$lane" effort_requested)"
+  [[ -n "$requested_effort" ]] || requested_effort="$(lane_get "$lane" effort)"
+  # Token-boundary containment: alias "opus" matches "claude-opus-4-8", but
+  # "grok-4" must NOT match "grok-4.5" (that is drift, not an alias). Grok
+  # attests BOTH axes, so a requested-but-not-served effort is drift too.
+  if [[ -z "$requested" || "$model" == "$requested" || "-$model-" == *"-$requested-"* ]]; then
+    match=true
+  else
+    match=false
+  fi
+  if [[ "$match" == true && -n "$requested_effort" && -n "$effort" && "$effort" != "$requested_effort" ]]; then
+    match=false
+  fi
+  lane_update_if "$lane" "$expected_generation" "$expected_session" \
+    runtime_settings_state observed runtime_settings_error "" \
+    runtime_model "$model" runtime_effort "$effort" \
+    runtime_settings_match_requested "$match" \
+    runtime_refresh_state observed runtime_refresh_error "" \
+    runtime_refresh_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
+}

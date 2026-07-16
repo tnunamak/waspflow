@@ -607,7 +607,7 @@ artifacts_emit_receipt_v1() {
     --arg surface "$(lane_get "$lane" surface_changed)" \
     --arg model "$(lane_get "$lane" model_requested)" \
     --arg effort "$(lane_get "$lane" effort_requested)" \
-    --arg runtime "$(lane_get "$lane" runtime_settings_state)" \
+    --arg runtime "$(lane_get "$lane" runtime_settings_state)" --arg runtime_match "$(lane_get "$lane" runtime_settings_match_requested)" \
     --arg currency "$(billing_cost_currency "$(jq -r '.path // "unknown"' <<<"$billing")")" \
     --arg scope "$(lane_get "$lane" model_validation_scope)" \
     --arg strength "$(lane_get "$lane" verify_strength)" \
@@ -617,6 +617,7 @@ artifacts_emit_receipt_v1() {
        if $model == "" then "model_default" else empty end,
        if $effort == "" then "effort_default" else empty end,
        if $runtime == "error" then "attestation_error" elif $runtime != "observed" then "attestation_missing" else empty end,
+       if $runtime == "observed" and $runtime_match == "false" then "attestation_mismatch" else empty end,
        if $currency == "unknown" then "billing_path_unknown" else empty end,
        if $scope == "mismatched" then "availability_scope_mismatched" else empty end,
        if $strength == "" or $verify_state == "" or $verify_state == "skipped" then "verify_strength_unknown" else empty end]')"
