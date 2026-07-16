@@ -218,8 +218,9 @@ config shape.
 | `inspect [<lane>] --json` | Read-only lane facts and explainable cleanup classifications |
 | `peek <lane> [--events]` | Pane/transcript capture for UI diagnosis; `--events` is the structured tail |
 | `revise <lane> -- <message>` | Send another instruction to the same session; nonzero means live submission was not confirmed |
+| `escalate <lane> [--to …] [--handoff]` | Switch arms after a failed checkpoint; `revise` instead steers the same arm |
 | `accept-runtime <lane> --reason <text>` | Explicitly accept the current observed Codex model/effort mismatch |
-| `verify <lane>` | Run the configured prepare/verify contract without teardown (0 pass, 2 fail) |
+| `verify <lane> [--json]` | Run the configured prepare/verify contract without teardown (0 pass, 2 fail); failed task checkpoints propose `escalate` |
 | `reap <lane>` | Close the pane, verify outputs, and finalize state |
 | `park <lane>` | Close only a verified-idle owned tmux window; preserve the resumable lane |
 | `gc [--lane-age S] [--apply]` | Dry-run fleet selection for safely parkable old lanes; `--apply` parks them |

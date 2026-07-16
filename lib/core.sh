@@ -275,6 +275,33 @@ lane_set() {
   fi
 }
 
+# Conditionally merge fields only when the arm/session snapshot read by a
+# provider is still current.  Runtime observers use this instead of lane_set:
+# an observer for the old session must never overwrite state after an arm
+# transition.  The comparison and write deliberately share the state lock.
+# Args: lane expected_arm_generation expected_session_id key value ...
+lane_update_if() {
+  local lane="$1" expected_generation="$2" expected_session="$3"; shift 3
+  local dir; dir="$(lane_dir "$lane")"
+  mkdir -p "$dir"
+  if command -v flock >/dev/null 2>&1; then
+    local lockf="$dir/.state.lock"
+    ( flock 9; _lane_update_if_locked "$dir" "$expected_generation" "$expected_session" "$@" ) 9>"$lockf"
+  else
+    _lane_update_if_locked "$dir" "$expected_generation" "$expected_session" "$@"
+  fi
+}
+
+_lane_update_if_locked() {
+  local dir="$1" expected_generation="$2" expected_session="$3"; shift 3
+  local sf="$dir/state.json"
+  [[ -f "$sf" ]] || return 1
+  jq -e --arg generation "$expected_generation" --arg session "$expected_session" \
+    '(.arm_generation // "") == $generation and (.session_id // "") == $session' "$sf" >/dev/null 2>&1 \
+    || return 1
+  _lane_set_locked "$dir" "$@"
+}
+
 # Serialize lifecycle transitions that must re-check provider/tmux state and
 # then act on it atomically with respect to other waspflow commands. State-file
 # writes have their own short lock; this longer operation lock covers
@@ -351,12 +378,23 @@ tmux_window_target() {
 # Record the exact tmux objects created for a successful spawn. Window ids are
 # server-unique; the pane PID adds a cheap identity check before lifecycle code
 # kills anything. They contain no prompts, session tokens, or provider secrets.
-tmux_capture_lane_ownership() {
-  local lane="$1" target="${2:-$(tmux_window_target "$1")}" session window pane_pid
+tmux_window_ownership_json() {
+  local target="$1" session window pane_pid
   IFS='|' read -r session window pane_pid < <(
     tmux display-message -p -t "$target" '#{session_name}|#{window_id}|#{pane_pid}' 2>/dev/null
   ) || return 1
   [[ -n "$session" && -n "$window" && "$pane_pid" =~ ^[0-9]+$ ]] || return 1
+  jq -cn --arg session "$session" --arg window "$window" --arg pane_pid "$pane_pid" \
+    '{tmux_session:$session,tmux_window:$window,tmux_pane_pid:$pane_pid}'
+}
+
+tmux_capture_lane_ownership() {
+  local lane="$1" target="${2:-$(tmux_window_target "$1")}" session window pane_pid
+  local ownership
+  ownership="$(tmux_window_ownership_json "$target")" || return 1
+  session="$(jq -r '.tmux_session' <<<"$ownership")"
+  window="$(jq -r '.tmux_window' <<<"$ownership")"
+  pane_pid="$(jq -r '.tmux_pane_pid' <<<"$ownership")"
   lane_set "$lane" tmux_session "$session" tmux_window "$window" tmux_pane_pid "$pane_pid"
 }
 
@@ -377,15 +415,15 @@ tmux_cgroup_scope_available() {
 }
 
 _lane_cgroup_receipt_append_locked() {
-  local dir="$1" unit="$2" invocation="$3" sf="$dir/state.json" tmp
+  local dir="$1" unit="$2" invocation="$3" execution="$4" sf="$dir/state.json" tmp
   [[ -f "$sf" ]] || echo '{}' >"$sf"
   tmp="$(mktemp "$dir/.state.XXXXXX")"
-  if jq --arg unit "$unit" --arg invocation "$invocation" '
+  if jq --arg unit "$unit" --arg invocation "$invocation" --arg execution "$execution" '
       .cgroup_scope_receipts = (
         (.cgroup_scope_receipts // [])
         | if type == "array" then . else [] end
         | if any(.[]; .unit == $unit and .invocation_id == $invocation) then .
-          else . + [{unit:$unit, invocation_id:$invocation}]
+          else . + [{unit:$unit, invocation_id:$invocation,execution:$execution}]
           end
       )
       | .cgroup_supervision = "systemd-scope"
@@ -403,16 +441,16 @@ _lane_cgroup_receipt_append_locked() {
 # unit name. The per-lane lock preserves earlier receipts while a headless turn
 # is being started.
 tmux_append_lane_scope_receipt() {
-  local lane="$1" unit="$2" invocation="$3" dir
+  local lane="$1" unit="$2" invocation="$3" execution="${4:-unknown}" dir
   [[ "$unit" =~ ^waspflow-[A-Za-z0-9._-]+\.scope$ && "$invocation" =~ ^[A-Fa-f0-9-]+$ ]] || return 1
   dir="$(lane_dir "$lane")"
   mkdir -p "$dir"
   if command -v flock >/dev/null 2>&1; then
     # Scope startup cannot wait forever behind an unrelated state update: a
     # bounded receipt-lock miss is a terminal, fail-closed startup failure.
-    ( flock -w 2 9 && _lane_cgroup_receipt_append_locked "$dir" "$unit" "$invocation" ) 9>"$dir/.state.lock"
+    ( flock -w 2 9 && _lane_cgroup_receipt_append_locked "$dir" "$unit" "$invocation" "$execution" ) 9>"$dir/.state.lock"
   else
-    _lane_cgroup_receipt_append_locked "$dir" "$unit" "$invocation"
+    _lane_cgroup_receipt_append_locked "$dir" "$unit" "$invocation" "$execution"
   fi
 }
 
@@ -458,8 +496,8 @@ tmux_lane_scope_start_marker() {
 # started but receipt persistence failed" from "systemd-run could not create a
 # scope"; only the latter may execute the original command outside a scope.
 tmux_enter_lane_scope() {
-  local lane="$1" unit="$2" marker invocation
-  shift 2
+  local lane="$1" unit="$2" execution="$3" marker invocation
+  shift 3
   # revise/reap hold the lane operation lock on fd 9. A detached child must
   # never inherit it or it can keep the lane permanently locked after its CLI
   # parent returns.
@@ -468,7 +506,7 @@ tmux_enter_lane_scope() {
   : >"$marker"
   invocation="$(systemctl --user show "$unit" -p InvocationID --value 2>/dev/null)" || return 125
   [[ -n "$invocation" ]] || return 125
-  tmux_append_lane_scope_receipt "$lane" "$unit" "$invocation" || return 125
+  tmux_append_lane_scope_receipt "$lane" "$unit" "$invocation" "$execution" || return 125
   exec "$@"
 }
 
@@ -519,8 +557,8 @@ tmux_replay_scope_capture_output() {
 }
 
 tmux_enter_lane_scope_and_capture() {
-  local lane="$1" unit="$2" run_dir="$3" marker invocation rc supervisor
-  shift 3
+  local lane="$1" unit="$2" execution="$3" run_dir="$4" marker invocation rc supervisor
+  shift 4
   { exec 9>&-; } 2>/dev/null || true
   marker="$(tmux_lane_scope_start_marker "$lane" "$unit")"
   if ! : >"$marker"; then
@@ -533,7 +571,7 @@ tmux_enter_lane_scope_and_capture() {
   [[ -n "$invocation" ]] || {
     tmux_scope_capture_startup_failed "$run_dir" "invocation-empty"; return 125;
   }
-  tmux_append_lane_scope_receipt "$lane" "$unit" "$invocation" || {
+  tmux_append_lane_scope_receipt "$lane" "$unit" "$invocation" "$execution" || {
     tmux_scope_capture_startup_failed "$run_dir" "receipt-persistence-failed"; return 125;
   }
   supervisor="$(tmux_scope_capture_supervisor_token)"
@@ -572,21 +610,25 @@ tmux_run_owned_lane_command() {
   marker="$(tmux_lane_scope_start_marker "$lane" "$unit")"
   rm -f "$marker"
 
-  if [[ "$execution" == pane ]]; then
+  # `escalation:<transition-id>` is still an interactive pane launch. Its
+  # distinct receipt label binds the provisional process tree to the durable
+  # transition, while its execution lifecycle remains non-blocking like an
+  # ordinary pane.
+  if [[ "$execution" == pane || "$execution" == escalation:* ]]; then
     ( cd "$cwd" && systemd-run --user --scope --unit="$unit" --collect --quiet -- \
         env "WASPFLOW_HOME=$WASPFLOW_HOME" "WASPFLOW_LIB=$WASPFLOW_LIB" \
         "WASPFLOW_TMUX_SESSION=$WASPFLOW_TMUX_SESSION" "PATH=$PATH" \
         "PAGER=$WASPFLOW_LANE_PAGER" "GIT_PAGER=$WASPFLOW_LANE_PAGER" \
-        bash -c 'source "$1"; tmux_enter_lane_scope "$2" "$3" "${@:4}"' -- \
-        "$WASPFLOW_LIB/core.sh" "$lane" "$unit" "$@" ) || rc=$?
+        bash -c 'source "$1"; tmux_enter_lane_scope "$2" "$3" "$4" "${@:5}"' -- \
+        "$WASPFLOW_LIB/core.sh" "$lane" "$unit" "$execution" "$@" ) || rc=$?
   else
     run_dir="$(mktemp -d "$(lane_dir "$lane")/.scope-run.XXXXXX")"
     ( cd "$cwd" && systemd-run --user --scope --no-block --unit="$unit" --collect --quiet -- \
         env "WASPFLOW_HOME=$WASPFLOW_HOME" "WASPFLOW_LIB=$WASPFLOW_LIB" \
         "WASPFLOW_TMUX_SESSION=$WASPFLOW_TMUX_SESSION" "PATH=$PATH" \
         "PAGER=$WASPFLOW_LANE_PAGER" "GIT_PAGER=$WASPFLOW_LANE_PAGER" \
-        bash -c 'source "$1"; tmux_enter_lane_scope_and_capture "$2" "$3" "$4" "${@:5}"' -- \
-        "$WASPFLOW_LIB/core.sh" "$lane" "$unit" "$run_dir" "$@" ) || rc=$?
+        bash -c 'source "$1"; tmux_enter_lane_scope_and_capture "$2" "$3" "$4" "$5" "${@:6}"' -- \
+        "$WASPFLOW_LIB/core.sh" "$lane" "$unit" "$execution" "$run_dir" "$@" ) || rc=$?
     # A successful no-block submission is not proof the unit started. The
     # in-scope startup record is total for expected setup outcomes: ready after
     # receipt persistence, or failed with a terminal status. The bounded wait
@@ -678,21 +720,43 @@ tmux_lane_scope_receipts() {
   ' "$sf" 2>/dev/null || true
 }
 
+# Scope receipts are normally lane-wide. Escalation also needs to bind its
+# provisional process tree to one immutable transition id for crash cleanup.
+tmux_lane_scope_receipts_for_execution() {
+  local lane="$1" execution="$2" sf
+  sf="$(lane_state_file "$lane")"
+  [[ -f "$sf" ]] || return 0
+  jq -c --arg execution "$execution" '
+    (.cgroup_scope_receipts // [])
+    | if type == "array" then . else [] end
+    | map(select(.execution == $execution and (.unit | type == "string") and (.invocation_id | type == "string")))
+  ' "$sf" 2>/dev/null || printf '[]\n'
+}
+
+tmux_kill_scope_receipt_if_owned() {
+  local receipt="$1" unit invocation actual
+  command -v systemctl >/dev/null 2>&1 || return 0
+  unit="$(jq -r '.unit // empty' <<<"$receipt" 2>/dev/null)"
+  invocation="$(jq -r '.invocation_id // empty' <<<"$receipt" 2>/dev/null)"
+  # Receipts are advisory cleanup authority. A malformed or forged row must
+  # never be acted on, but it also must not turn reaping a valid lane into an
+  # error.
+  [[ "$unit" =~ ^waspflow-[A-Za-z0-9._-]+\.scope$ && "$invocation" =~ ^[A-Fa-f0-9-]+$ ]] || return 0
+  actual="$(systemctl --user show "$unit" -p InvocationID --value 2>/dev/null)" || return 0
+  [[ "$actual" == "$invocation" ]] || return 0
+  systemctl --user kill --kill-whom=all --signal=SIGKILL "$unit" >/dev/null 2>&1 || true
+  systemctl --user stop --no-block "$unit" >/dev/null 2>&1 || true
+}
+
 # Reap every receipt independently. A stale/reused unit is harmless because its
 # current InvocationID must equal the recorded value before it is signalled.
 tmux_kill_owned_lane_scopes() {
-  local lane="$1" unit invocation actual
-  command -v systemctl >/dev/null 2>&1 || return 0
+  local lane="$1" unit invocation
   while IFS=$'\x1e' read -r unit invocation; do
     [[ -n "$unit" && -n "$invocation" ]] || continue
-    actual="$(systemctl --user show "$unit" -p InvocationID --value 2>/dev/null)" || continue
-    [[ "$actual" == "$invocation" ]] || continue
-    systemctl --user kill --kill-whom=all --signal=SIGKILL "$unit" >/dev/null 2>&1 || true
-    # The kill is the lifecycle action. Do not let a manager bookkeeping delay
-    # (or a pathological descendant) block lane reaping after the signal was
-    # issued; the verifier polls the cgroup independently.
-    systemctl --user stop --no-block "$unit" >/dev/null 2>&1 || true
+    tmux_kill_scope_receipt_if_owned "$(jq -cn --arg unit "$unit" --arg invocation "$invocation" '{unit:$unit,invocation_id:$invocation}')"
   done < <(tmux_lane_scope_receipts "$lane")
+  return 0
 }
 
 # Create and claim a lane window as one provider-facing operation. `-P` returns
@@ -700,18 +764,22 @@ tmux_kill_owned_lane_scopes() {
 # names exist. If ownership capture fails, kill that exact id before returning.
 # Args: lane cwd shell_command. Echoes the exact window id.
 tmux_create_owned_lane_window() {
-  local lane="$1" cwd="$2" shell_command="$3" window launcher
+  local lane="$1" cwd="$2" shell_command="$3" ownership="${4:-claim}" execution="${5:-pane}" window launcher
   # tmux panes inherit the tmux SERVER's environment, not necessarily the
   # caller's current WASPFLOW_HOME. Export the lane runtime coordinates and
   # pager policy into the pane explicitly before it sources core, or its scope
   # receipt would be written to the operator's default state directory and an
   # explicit pager override would be lost to the tmux server environment.
-  launcher="export WASPFLOW_HOME=$(printf '%q' "$WASPFLOW_HOME") WASPFLOW_LIB=$(printf '%q' "$WASPFLOW_LIB") WASPFLOW_TMUX_SESSION=$(printf '%q' "$WASPFLOW_TMUX_SESSION") WASPFLOW_LANE_PAGER=$(printf '%q' "$WASPFLOW_LANE_PAGER") PATH=$(printf '%q' "$PATH"); source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_run_owned_lane_shell_command $(printf '%q' "$lane") $(printf '%q' "$cwd") pane $(printf '%q' "$shell_command")"
+  launcher="export WASPFLOW_HOME=$(printf '%q' "$WASPFLOW_HOME") WASPFLOW_LIB=$(printf '%q' "$WASPFLOW_LIB") WASPFLOW_TMUX_SESSION=$(printf '%q' "$WASPFLOW_TMUX_SESSION") WASPFLOW_LANE_PAGER=$(printf '%q' "$WASPFLOW_LANE_PAGER") PATH=$(printf '%q' "$PATH"); source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_run_owned_lane_shell_command $(printf '%q' "$lane") $(printf '%q' "$cwd") $(printf '%q' "$execution") $(printf '%q' "$shell_command")"
   tmux_ensure_session
   window="$(tmux new-window -d -P -F '#{window_id}' -t "$WASPFLOW_TMUX_SESSION" \
     -n "$lane" -c "$cwd" "bash -c $(printf '%q' "$launcher")")" || return 1
   [[ "$window" == @* ]] || return 1
-  if ! tmux_capture_lane_ownership "$lane" "$window"; then
+  [[ "$ownership" == claim || "$ownership" == provisional ]] || {
+    tmux kill-window -t "$window" 2>/dev/null || true
+    return 1
+  }
+  if [[ "$ownership" == claim ]] && ! tmux_capture_lane_ownership "$lane" "$window"; then
     tmux kill-window -t "$window" 2>/dev/null || true
     return 1
   fi
@@ -742,6 +810,43 @@ tmux_kill_owned_lane_window() {
   local target
   target="$(tmux_owned_lane_window_target "$1")" || return 1
   tmux kill-window -t "$target"
+}
+
+# Kill a recorded window only if it still resolves to the exact session/pane
+# that an escalation transition journaled.  This is the provisional-window
+# cleanup boundary; a reused tmux id is never killed on our authority.
+tmux_kill_window_if_owned() {
+  local ownership="$1" target
+  target="$(tmux_window_if_owned "$ownership")" || return 1
+  tmux kill-window -t "$target"
+}
+
+# Echo a provisional window only when it still names the exact session/pane
+# journaled by an escalation transition.
+tmux_window_if_owned() {
+  local ownership="$1" session window pane_pid got_session got_window got_pid
+  session="$(jq -r '.tmux_session // empty' <<<"$ownership" 2>/dev/null)"
+  window="$(jq -r '.tmux_window // empty' <<<"$ownership" 2>/dev/null)"
+  pane_pid="$(jq -r '.tmux_pane_pid // empty' <<<"$ownership" 2>/dev/null)"
+  [[ -n "$session" && "$window" == @* && "$pane_pid" =~ ^[0-9]+$ ]] || {
+    err "tmux: refusing provisional cleanup with malformed ownership"
+    return 1
+  }
+  IFS='|' read -r got_session got_window got_pid < <(
+    tmux display-message -p -t "$window" '#{session_name}|#{window_id}|#{pane_pid}' 2>/dev/null
+  ) || return 1
+  [[ "$got_session" == "$session" && "$got_window" == "$window" && "$got_pid" == "$pane_pid" ]] || {
+    err "tmux: refusing provisional cleanup; recorded window identity no longer matches"
+    return 1
+  }
+  printf '%s\n' "$window"
+}
+
+tmux_send_owned_window_shell_command() {
+  local ownership="$1" shell_command="$2" target
+  target="$(tmux_window_if_owned "$ownership")" || return 1
+  tmux send-keys -t "$target" -l -- "exec $shell_command" || return 1
+  tmux send-keys -t "$target" Enter
 }
 
 # Name lookup exists only for explicit legacy adoption. Safety-critical cleanup

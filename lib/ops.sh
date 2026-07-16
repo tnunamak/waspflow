@@ -36,7 +36,46 @@ ops_load() {
     [[ -z "$unratified" ]] || warn "ops: ignoring unratified preferred_over edge: $unratified"
   done < <(jq -r '(.preferred_over // [])[] | select(.ratified == false) | "\(.prefer.provider)/\(.prefer.model) > \(.over.provider)/\(.over.model)"' <<<"$OPS_POLICY_JSON")
   if declare -F selection_policy_validate >/dev/null; then selection_policy_validate "$OPS_POLICY_JSON"; fi
+  # A same-arm edge is harmless in authored policy but must not become a
+  # no-op escalation.  Retain the authored order and warn at load time; the
+  # runtime still compares a target to the lane's persisted arm.
+  while IFS=$'\t' read -r source target; do
+    [[ -n "$source" && -n "$target" ]] || continue
+    warn "ops: skipping structurally same-arm escalation edge: $source -> $target"
+  done < <(jq -r '
+    .operating_points as $ops |
+    $ops[] as $source |
+    ($source.expands_to) as $from |
+    (($source.fallback_ladder // $source.escalate_to // [])[]) as $target |
+    ($ops[] | select(.id == $target) | .expands_to) as $to |
+    select($to != null and $from.provider == $to.provider and ($from.model // "") == ($to.model // "") and ($from.effort // "") == ($to.effort // "") and ($from.mode // "standard") == ($to.mode // "standard")) |
+    "\($source.id)\t\($target)"' <<<"$OPS_POLICY_JSON")
   export OPS_POLICY_FILE
+}
+
+# Effective escalation ladder for an op.  This owns the policy-facing rules;
+# callers decide which candidate is distinct from a concrete persisted arm.
+# Emits compact rows {id,arm} in authored order.
+ops_effective_ladder() {
+  local op="$1"
+  ops_get_point "$op" >/dev/null
+  ops_load
+  jq -c --arg op "$op" '
+    .operating_points as $ops |
+    ($ops[] | select(.id == $op)) as $source |
+    ($source.fallback_ladder // $source.escalate_to // [])[] as $id |
+    ($ops[] | select(.id == $id)) as $target |
+    select($target != null) |
+    select(($target.expands_to.provider != $source.expands_to.provider) or
+           (($target.expands_to.model // "") != ($source.expands_to.model // "")) or
+           (($target.expands_to.effort // "") != ($source.expands_to.effort // "")) or
+           (($target.expands_to.mode // "standard") != ($source.expands_to.mode // "standard"))) |
+    {id:$id,arm:$target.expands_to}' <<<"$OPS_POLICY_JSON"
+}
+
+ops_arm_json() {
+  local op="$1"
+  jq -c '.expands_to' <<<"$(ops_get_point "$op")"
 }
 
 ops_jq() {

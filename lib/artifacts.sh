@@ -326,6 +326,9 @@ _artifacts_record_verify_checkpoint() {
     runs="$(jq -c --arg at "$epoch" --arg state "$(lane_get "$lane" verify_state)" --arg failure_class "$failure_class" \
       '. + [{kind:"checkpoint",at:($at|tonumber),state:$state,failure_class:$failure_class}]' <<<"$runs" 2>/dev/null || echo '[]')"
     lane_set "$lane" verify_runs "$runs"
+    # A green checkpoint is the evidence-backed recovery boundary for the
+    # poisoned-context counter.  Do not reset the audit-total counter.
+    [[ "$(lane_get "$lane" verify_state)" == passed ]] && lane_set "$lane" consecutive_failed_segments "0"
   fi
 }
 
@@ -512,6 +515,35 @@ _receipts_append() {
   exec {fd}>&-
 }
 
+# Append a closing segment receipt exactly once across the receipt JSONL and
+# lane-state durability domains.  The caller repairs its lane marker when this
+# finds an already-durable row after a crash.
+_receipts_append_segment_once() {
+  local lane_uuid="$1" segment_index="$2" receipt="$3" fd existing
+  [[ -n "$receipt" ]] && jq -e 'type == "object"' >/dev/null <<<"$receipt" 2>/dev/null \
+    || { err "receipt: generated segment JSON is empty or invalid"; return 1; }
+  mkdir -p "$WASPFLOW_HOME" "$WASPFLOW_LOCKS_DIR"
+  command -v flock >/dev/null 2>&1 || { err "receipt: flock is required"; return 1; }
+  exec {fd}>"$WASPFLOW_LOCKS_DIR/receipts.lock" || return 1
+  flock -x "$fd" || { exec {fd}>&-; return 1; }
+  if [[ -f "$WASPFLOW_HOME/receipts.jsonl" ]] && jq -e --arg lane_uuid "$lane_uuid" --argjson index "$segment_index" \
+      'select(.receipt_kind == "lane_segment" and .lane_uuid == $lane_uuid and .segment.index == $index)' \
+      "$WASPFLOW_HOME/receipts.jsonl" >/dev/null 2>&1; then
+    existing="$(jq -c --arg lane_uuid "$lane_uuid" --argjson index "$segment_index" \
+      'select(.receipt_kind == "lane_segment" and .lane_uuid == $lane_uuid and .segment.index == $index)' \
+      "$WASPFLOW_HOME/receipts.jsonl" | tail -1)"
+    flock -u "$fd" || true; exec {fd}>&-
+    [[ -n "$existing" ]] && printf '%s\n' "$existing"
+    return 10
+  fi
+  if ! printf '%s\n' "$receipt" >>"$WASPFLOW_HOME/receipts.jsonl"; then
+    flock -u "$fd" || true; exec {fd}>&-
+    return 1
+  fi
+  flock -u "$fd" || { exec {fd}>&-; return 1; }
+  exec {fd}>&-
+}
+
 artifacts_emit_exec_receipt_v1() {
   local exec_id="$1" provider="$2" model="$3" effort="$4" mode="$5" billing="$6" availability="$7" invoked="$8" completed="$9" result="${10}" exit_code="${11}"
   local receipt
@@ -532,8 +564,37 @@ artifacts_emit_exec_receipt_v1() {
 # here with artifact finalization because this is where result, oracle evidence,
 # and durable lane state meet; selection remains deliberately out of scope.
 artifacts_emit_receipt_v1() {
-  local lane="$1" result="$2" dir provider billing quota version harness receipt reasons
-  [[ "$(lane_get "$lane" receipt_emitted)" == true ]] && return 0
+  # An explicit third argument closes an escalation segment. Final lane rows
+  # derive their reap-closing segment from durable lane state so that legacy
+  # lanes retain segment:null while escalated lanes keep their last-arm
+  # attribution.
+  local lane="$1" result="$2" segment_json="${3:-}" dir provider billing quota version harness receipt reasons
+  local receipt_kind="lane" segment_index="" emitted_segment="" wall_start="" history=""
+  local escalated_lane=false
+  if [[ -n "$segment_json" ]]; then
+    jq -e '.index | type == "number"' >/dev/null <<<"$segment_json" 2>/dev/null \
+      || { err "receipt: invalid segment metadata"; return 1; }
+    receipt_kind="lane_segment"
+    segment_index="$(jq -r '.index' <<<"$segment_json")"
+    emitted_segment="$(lane_get "$lane" receipt_emitted_segment)"
+    [[ "$emitted_segment" =~ ^[0-9]+$ && "$emitted_segment" -ge "$segment_index" ]] && return 0
+    wall_start="$(lane_get "$lane" segment_started_epoch)"
+  else
+    [[ "$(lane_get "$lane" receipt_emitted)" == true ]] && return 0
+    segment_index="$(lane_get "$lane" segment_index)"
+    history="$(lane_get "$lane" arm_history)"
+    if [[ "$segment_index" =~ ^[0-9]+$ && "$segment_index" -gt 0 ]]; then
+      escalated_lane=true
+    elif jq -e 'type == "array" and length > 0' >/dev/null 2>&1 <<<"$history"; then
+      escalated_lane=true
+    fi
+    if [[ "$escalated_lane" == true ]]; then
+      [[ "$segment_index" =~ ^[0-9]+$ ]] \
+        || { err "receipt: escalated lane has invalid segment_index"; return 1; }
+      segment_json="$(jq -cn --argjson index "$segment_index" '{index:$index,closed_by:"reap"}')"
+      wall_start="$(lane_get "$lane" segment_started_epoch)"
+    fi
+  fi
   dir="$(lane_dir "$lane")"; provider="$(lane_get "$lane" provider)"
   billing="$(lane_get "$lane" billing_path)"
   jq -e 'type == "object"' >/dev/null <<<"$billing" 2>/dev/null || billing='{"schema_version":1,"path":"unknown","evidence":"","detail":""}'
@@ -561,6 +622,9 @@ artifacts_emit_receipt_v1() {
        if $strength == "" or $verify_state == "" or $verify_state == "skipped" then "verify_strength_unknown" else empty end]')"
   local verify_runs
   verify_runs="$(lane_get "$lane" verify_runs)"; jq -e 'type == "array"' >/dev/null <<<"$verify_runs" 2>/dev/null || verify_runs='[]'
+  local escalation_path
+  escalation_path="$(lane_get "$lane" escalation_path)"
+  jq -e 'type == "array"' >/dev/null <<<"$escalation_path" 2>/dev/null || escalation_path='[]'
   receipt="$(jq -cn \
     --arg receipt_id "$(new_uuid)" --arg lane "$lane" --arg lane_uuid "$(lane_get "$lane" lane_uuid)" --arg version "$version" \
     --arg op "$(lane_get "$lane" op)" --arg task_family "$(lane_get "$lane" task_family)" --arg constraint_family "$(lane_get "$lane" constraint_family)" \
@@ -571,13 +635,15 @@ artifacts_emit_receipt_v1() {
     --arg availability_state "$(lane_get "$lane" model_validation_state)" --arg availability_source "$(lane_get "$lane" model_validation_source)" --arg availability_scope "$(lane_get "$lane" model_validation_scope)" --arg availability_at "$(lane_get "$lane" model_validation_at)" \
     --arg verify_state "$(lane_get "$lane" verify_state)" --arg failure_class "$(lane_get "$lane" verify_failure_class)" --arg strength "$(lane_get "$lane" verify_strength)" --arg harness "$harness" --arg test_changed "$(lane_get "$lane" verify_test_files_changed)" --arg fork_point "$(lane_get "$lane" verify_fork_point)" \
     --arg baseline_ran "$(lane_get "$lane" baseline_oracle_ran)" --arg baseline_state "$(lane_get "$lane" baseline_oracle_state)" --arg baseline_reason "$(lane_get "$lane" baseline_oracle_reason)" \
-    --arg spawn_epoch "$(lane_get "$lane" spawn_epoch)" --arg result "$result" --arg outcome "$(lane_get "$lane" outcome)" --arg selection_quota_filtered "$(lane_get "$lane" selection_quota_filtered)" \
+    --arg spawn_epoch "$(lane_get "$lane" spawn_epoch)" --arg wall_start "$wall_start" --arg result "$result" --arg outcome "$(lane_get "$lane" outcome)" --arg selection_quota_filtered "$(lane_get "$lane" selection_quota_filtered)" \
+    --arg receipt_kind "$receipt_kind" --argjson segment "${segment_json:-null}" --argjson escalation_path "$escalation_path" \
     --argjson billing "$billing" --argjson quota "$quota" --argjson reasons "$reasons" --argjson verify_runs "$verify_runs" '
       def nullable: if . == "" then null else . end;
       now as $now |
       def epoch_or_null: if . == "" then null else tonumber? end;
       ($spawn_epoch | epoch_or_null) as $spawn |
-      {schema_version:1,receipt_kind:"lane",receipt_id:$receipt_id,lane:$lane,lane_uuid:($lane_uuid|nullable),waspflow_version:$version,segment:null,
+      ($wall_start | epoch_or_null) as $segment_start |
+      {schema_version:1,receipt_kind:$receipt_kind,receipt_id:$receipt_id,lane:$lane,lane_uuid:($lane_uuid|nullable),waspflow_version:$version,segment:$segment,
        op:$op,task_family:($task_family|nullable),constraint_family:($constraint_family|nullable),policy_version:($policy_version|nullable),catalog_ref:($catalog_ref|nullable),
        arm_requested:{schema_version:1,provider:$provider,surface:(if $surface == "" then "tui" else $surface end),model:$model,effort:$effort,mode:(if $mode == "" then "standard" else $mode end),billing_path:$billing,endpoint_profile:(if $endpoint_profile == "" then "default" else $endpoint_profile end),raw_provider_args:($raw_provider_args == "true"),auth_principal:($auth_principal|nullable)},
        arm_attestation:{runtime_settings_state:(if $runtime_state == "" then "unknown" else $runtime_state end),observed_model:($observed_model|nullable),observed_effort:($observed_effort|nullable)},
@@ -585,12 +651,34 @@ artifacts_emit_receipt_v1() {
        availability:{schema_version:1,provider:$provider,model:$model,state:(if $availability_state == "" then "not_applicable" else $availability_state end),evidence_source:(if $availability_source == "" then "none" else $availability_source end),query_scope:(if $availability_scope == "" then "not_applicable" else $availability_scope end),observed_at:($availability_at|nullable),detail:""},
        quota_observation:$quota,selection:{quota_filtered:($selection_quota_filtered == "true")},
        verify:{state:(if $verify_state == "" then "skipped" else $verify_state end),failure_class:(if $failure_class == "" then "none" else $failure_class end),verify_strength:(if $strength == "" or $verify_state == "" or $verify_state == "skipped" then "unknown" else "declared:" + $strength end),harness_hash:(if $harness == "" then null else "sha256:" + $harness end),test_files_changed:(if $test_changed == "" then "unknown" else $test_changed end),fork_point:$fork_point,baseline_oracle:{ran:($baseline_ran == "true"),state:(if $baseline_state == "" then "skipped" else $baseline_state end),reason:(if $baseline_reason == "" and $baseline_ran != "true" then "no_fork_point" else $baseline_reason end)},verify_runs:($verify_runs // [])},
-       timestamps:{spawn_epoch:$spawn,finalize_epoch:($now|floor),wall_seconds:(($now|floor) - ($spawn // ($now|floor)))},
+      timestamps:({spawn_epoch:$spawn,finalize_epoch:($now|floor),wall_seconds:(($now|floor) - ($segment_start // $spawn // ($now|floor)))} + (if $receipt_kind == "lane_segment" or $segment != null then {segment_started_epoch:$segment_start} else {} end)),
        cost_observation:{currency:(if ($billing.path // "unknown") | IN("chatgpt_subscription","subscription_env_heuristic","oauth_env_heuristic") then "quota" elif ($billing.path // "unknown") | IN("api_key","auth_token","access_token_env","api_key_env") then "usd" else "unknown" end),amount:null,attribution:"none",evidence:"billing_path"},
-       result:$result,outcome:($outcome|nullable),escalation_path:[]}' )"
-  _receipts_append "$receipt" || return 1
+       result:$result,outcome:($outcome|nullable),escalation_path:$escalation_path}' )"
+  if [[ "$receipt_kind" == lane_segment ]]; then
+    local append_rc=0 existing_receipt=""
+    existing_receipt="$(_receipts_append_segment_once "$(lane_get "$lane" lane_uuid)" "$segment_index" "$receipt")" || append_rc=$?
+    [[ "$append_rc" -eq 0 || "$append_rc" -eq 10 ]] || return "$append_rc"
+    if [[ "$append_rc" -eq 10 ]]; then
+      jq -e 'type == "object"' >/dev/null <<<"$existing_receipt" 2>/dev/null \
+        || { err "receipt: durable segment row could not be repaired"; return 1; }
+      receipt="$existing_receipt"
+    fi
+  else
+    _receipts_append "$receipt" || return 1
+  fi
   printf '%s\n' "$receipt" >"$dir/receipt.json" || { err "receipt: cannot write lane copy"; return 1; }
-  lane_set "$lane" receipt_emitted "true" receipt_id "$(jq -r '.receipt_id' <<<"$receipt")"
+  if [[ "$receipt_kind" == lane_segment ]]; then
+    lane_set "$lane" receipt_emitted_segment "$segment_index" segment_receipt_id "$(jq -r '.receipt_id' <<<"$receipt")"
+  else
+    lane_set "$lane" receipt_emitted "true" receipt_id "$(jq -r '.receipt_id' <<<"$receipt")"
+  fi
+}
+
+artifacts_emit_segment_receipt_v1() {
+  local lane="$1" transition_id="$2" result="${3:-verify_failed}" index
+  index="$(lane_get "$lane" segment_index)"; [[ "$index" =~ ^[0-9]+$ ]] || index=0
+  artifacts_emit_receipt_v1 "$lane" "$result" \
+    "$(jq -cn --argjson index "$index" --arg transition "$transition_id" '{index:$index,closed_by:"escalation",transition:$transition}')"
 }
 
 _artifacts_write_skipped_verify() {
