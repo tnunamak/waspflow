@@ -335,7 +335,12 @@ grok_refresh_runtime_settings() {
   else
     match=false
   fi
-  if [[ "$match" == true && -n "$requested_effort" && -n "$effort" && "$effort" != "$requested_effort" ]]; then
+  # Grok attests BOTH axes (SCHEMAS_V1). A requested effort the session summary
+  # does NOT confirm is unattested, not a match — fail CLOSED, as codex does on
+  # an unobserved effort. (F4: the old `-n "$effort"` guard let an effort-less
+  # summary keep match=true and produce an eligible receipt attributing an
+  # effort that was never observed.)
+  if [[ "$match" == true && -n "$requested_effort" && "$effort" != "$requested_effort" ]]; then
     match=false
   fi
   lane_update_if "$lane" "$expected_generation" "$expected_session" \
