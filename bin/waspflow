@@ -804,9 +804,14 @@ cmd_list() {
     # Read each durable record once. All filtering and rendering below operates
     # on that value, never by re-opening state.json or provider session logs.
     local provider status cwd outcome origin_cwd repo_root window pane_pid live lifecycle
-    IFS=$'\t' read -r provider status cwd outcome origin_cwd repo_root window pane_pid < <(
-      jq -r '[(.provider // ""),(.status // ""),(.cwd // ""),(if (.outcome // "") == "" then "open" else .outcome end),(.origin_cwd // ""),(.repo_root // ""),(.tmux_window // ""),(.tmux_pane_pid // "")] | @tsv' <<<"$record"
-    )
+    # Delimit with US (\x1f), NOT tab: tab is IFS-whitespace, so `read` collapses
+    # consecutive tabs and an empty middle field (e.g. repo_root="" on a
+    # non-isolated lane) shifts every later field left — window/pane_pid empty,
+    # so a dead lane matches on name and prints live, disagreeing with --json
+    # (excellence audit Ranks 1 & 11). US never appears in these values.
+    IFS=$'\x1f' read -r provider status cwd outcome origin_cwd repo_root window pane_pid < <(
+      jq -j '[(.provider // ""),(.status // ""),(.cwd // ""),(if (.outcome // "") == "" then "open" else .outcome end),(.origin_cwd // ""),(.repo_root // ""),(.tmux_window // ""),(.tmux_pane_pid // "")] | join("\u001f")' <<<"$record"
+    ) || true
     # --status filters on the fan-in OUTCOME (the reap-safe question).
     if [[ -n "$status_filter" ]]; then
       [[ ",$status_filter," == *",$outcome,"* ]] || continue
@@ -1029,7 +1034,7 @@ cmd_wait() {
   # WASPFLOW_STALL_SECONDS *and* the pane looks blocked, return a distinct
   # 'blocked' state (rc 4) with the pane text — so the orchestrator answers via
   # `revise` in seconds instead of losing the whole timeout. We never auto-answer.
-  local stall_secs="${WASPFLOW_STALL_SECONDS:-45}"
+  local stall_secs; stall_secs="$(numeric_knob WASPFLOW_STALL_SECONDS 45)"
   local transcript; transcript="$(lane_transcript "$lane")"
   local last_size; last_size="$(wc -c <"$transcript" 2>/dev/null || echo 0)"
   local last_change; last_change="$(date +%s)"
@@ -1187,7 +1192,7 @@ cmd_park() {
 }
 
 cmd_gc() {
-  local lane_age="${WASPFLOW_GC_LANE_AGE_SECONDS:-86400}" project="" apply=0 adopt_legacy=0
+  local lane_age project="" apply=0 adopt_legacy=0; lane_age="$(numeric_knob WASPFLOW_GC_LANE_AGE_SECONDS 86400)"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --lane-age) [[ $# -ge 2 ]] || die "gc: --lane-age requires seconds"; lane_age="$2"; shift 2 ;;

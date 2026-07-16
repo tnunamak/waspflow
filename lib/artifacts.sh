@@ -32,7 +32,7 @@
 # caller / `wait` keys on. Without a report or verify contract, result is
 # succeeded once the provider reports idle (the agent finished its turn cleanly).
 
-WASPFLOW_REPORT_MIN_BYTES="${WASPFLOW_REPORT_MIN_BYTES:-200}"
+WASPFLOW_REPORT_MIN_BYTES="$(numeric_knob WASPFLOW_REPORT_MIN_BYTES 200)"
 
 # Normalize the path once at the command boundary. Providers receive this exact
 # value in their prompt and reap checks this same value; no adapter should have

@@ -380,6 +380,28 @@ project_check_commands() {
   count="$(jq -r '(.commands // []) | length' "$config" 2>/dev/null || echo 0)"
   [[ "$count" -gt 0 ]] || { _check_ok "no configured commands"; return 0; }
 
+  # SECURITY (excellence audit Rank 5): a `.waspflow` config's `commands` run
+  # arbitrary shell. project_find_config walks UP into ancestor directories, so
+  # a config planted in any parent (a cloned repo, a shared parent, an
+  # attacker-controlled dir you cd into) would otherwise execute as you. Two
+  # gates: (1) the config must live inside the project root we resolved — never
+  # an ancestor above it; (2) running the shell requires explicit opt-in. Built-in
+  # checks (git/worktrees/lanes/mutexes/globs/reports) are unaffected; only the
+  # arbitrary-command block is gated.
+  local config_dir
+  config_dir="$(_project_abs_dir "$(dirname "$config")")"
+  case "$config_dir/" in
+    "$root/"*) ;;   # config is at or below the project root — in-tree, trusted scope
+    *)
+      _check_warn "configured commands SKIPPED: config '$config' is outside the project root ($root) — refusing to run its shell commands (ancestor-config trust boundary)"
+      return 0
+      ;;
+  esac
+  if [[ "${WASPFLOW_ALLOW_PROJECT_COMMANDS:-}" != "1" ]]; then
+    _check_warn "$count configured command(s) NOT run: they execute arbitrary shell. Review '$config', then set WASPFLOW_ALLOW_PROJECT_COMMANDS=1 to enable."
+    return 0
+  fi
+
   local i name command severity tmp rc
   for ((i=0; i<count; i++)); do
     name="$(jq -r --argjson i "$i" '.commands[$i].name // ("command-" + ($i|tostring))' "$config")"
