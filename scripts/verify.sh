@@ -2655,6 +2655,65 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   artifacts_emit_segment_receipt_v1 segment-repair repair-transition succeeded
   jq -e --arg id "$durable_segment_id" '.receipt_id == $id' "$(lane_dir segment-repair)/receipt.json" >/dev/null
   [[ "$(lane_get segment-repair segment_receipt_id)" == "$durable_segment_id" ]] || { echo "segment receipt repair replaced the durable receipt id" >&2; exit 1; }
+
+  # Red-team 2026-07-16 regressions (docs/design/REDTEAM_2026-07-16.md).
+  # F1 — lane append is idempotent by receipt_id across the append->marker crash
+  # window: a second append of the same receipt does NOT duplicate the row.
+  rt_home="$att_home/rt-receipts"; mkdir -p "$rt_home/locks"
+  ( export WASPFLOW_HOME="$rt_home" WASPFLOW_LOCKS_DIR="$rt_home/locks"
+    # F1 must drive the REAL re-emit path: artifacts_emit_receipt_v1 mints a
+    # FRESH receipt_id every call, so the crash-recovery re-emit produces a
+    # DIFFERENT receipt_id. Dedup is on (lane_uuid, kind==lane), so the second
+    # emit must not duplicate. (A same-object re-append test would have passed
+    # even against a broken receipt_id-keyed dedup — the reviewer's catch.)
+    lane_set f1lane provider grok status reaped result succeeded lane_uuid f1u \
+      model grok-4.5 model_passed grok-4.5 model_requested grok-4.5
+    artifacts_emit_receipt_v1 f1lane succeeded
+    first_id="$(lane_get f1lane receipt_id)"
+    n1="$(jq -r 'fromjson? // empty | select(.receipt_kind=="lane" and .lane_uuid=="f1u") | .receipt_id' -R "$WASPFLOW_HOME/receipts.jsonl" | wc -l)"
+    [[ "$n1" -eq 1 ]] || { echo "F1: first emit produced $n1 lane rows" >&2; exit 1; }
+    # Simulate the crash between append and marker: clear receipt_emitted so the
+    # guard does not fire, forcing a real re-emit with a fresh receipt_id.
+    lane_set f1lane receipt_emitted "" receipt_id ""
+    artifacts_emit_receipt_v1 f1lane succeeded
+    n2="$(jq -r 'fromjson? // empty | select(.receipt_kind=="lane" and .lane_uuid=="f1u") | .receipt_id' -R "$WASPFLOW_HOME/receipts.jsonl" | wc -l)"
+    [[ "$n2" -eq 1 ]] || { echo "F1: crash re-emit duplicated the lane receipt ($n2 rows for one lane_uuid)" >&2; exit 1; }
+    rm -f "$WASPFLOW_HOME/receipts.jsonl"
+    # F3 — a torn (no trailing newline) last line is healed before append so the
+    # next receipt is not glued on and both rows remain parseable.
+    printf '{"receipt_id":"F3A","receipt_kind":"lane"}' >"$WASPFLOW_HOME/receipts.jsonl"
+    _receipts_append '{"receipt_id":"F3B","receipt_kind":"lane"}'
+    got="$(jq -r 'fromjson? // empty | .receipt_id' -R "$WASPFLOW_HOME/receipts.jsonl" | tr '\n' ' ')"
+    [[ "$got" == "F3A F3B "* ]] || { echo "F3: torn line dropped a receipt (got: $got)" >&2; exit 1; }
+    # F2 — a malformed line elsewhere must not defeat segment dedup.
+    printf '%s\n' '{"receipt_kind":"lane_segment","lane_uuid":"f2u","segment":{"index":0},"receipt_id":"F2S"}' >"$WASPFLOW_HOME/receipts.jsonl"
+    printf '%s\n' 'TORN {' >>"$WASPFLOW_HOME/receipts.jsonl"
+    rc=0; out="$(_receipts_append_segment_once f2u 0 '{"receipt_kind":"lane_segment","lane_uuid":"f2u","segment":{"index":0},"receipt_id":"F2Sdup"}')" || rc=$?
+    [[ "$rc" -eq 10 && "$(jq -r .receipt_id <<<"$out")" == "F2S" ]] || { echo "F2: malformed line defeated segment dedup (rc=$rc)" >&2; exit 1; }
+  )
+
+  # F4 — grok attests BOTH axes: a requested effort the summary does not confirm
+  # yields match=false (fail closed like codex), NOT an eligible mismatched receipt.
+  mkdir -p "$att_home/grok-sessions/enc/g-noeffort"
+  printf '%s\n' '{"current_model_id":"grok-4.5"}' >"$att_home/grok-sessions/enc/g-noeffort/summary.json"
+  lane_set att-noeffort provider grok status live result "" session_id g-noeffort model grok-4.5 model_passed grok-4.5 model_requested grok-4.5 effort high effort_requested high
+  GROK_SESSIONS_DIR="$att_home/grok-sessions" grok_refresh_runtime_settings att-noeffort
+  [[ "$(lane_get att-noeffort runtime_settings_match_requested)" == false ]] || { echo "F4: grok effort-less summary kept match=true" >&2; exit 1; }
+
+  # F6 — a gitignored dependency named by the verify command busts the checkpoint
+  # fingerprint (no stale-green reuse); unreferenced gitignored noise does not.
+  f6="$att_home/f6repo"; mkdir -p "$f6"
+  ( cd "$f6"; git init -q; printf 'ignored/\ndep.env\n' >.gitignore; mkdir -p ignored; printf 'v1\n' >dep.env
+    git add .gitignore; git -c user.email=t@t -c user.name=t commit -qm init )
+  fp1="$(artifacts_workspace_fingerprint "$f6" 'true' 'run dep.env')"
+  printf 'v2\n' >"$f6/dep.env"
+  fp2="$(artifacts_workspace_fingerprint "$f6" 'true' 'run dep.env')"
+  [[ "$fp1" != "$fp2" ]] || { echo "F6: gitignored oracle dep change did not bust fingerprint" >&2; exit 1; }
+  fp3="$(artifacts_workspace_fingerprint "$f6" 'true' 'run other')"
+  printf 'junk\n' >"$f6/ignored/junk"
+  fp4="$(artifacts_workspace_fingerprint "$f6" 'true' 'run other')"
+  [[ "$fp3" == "$fp4" ]] || { echo "F6: unreferenced gitignored noise leaked into fingerprint" >&2; exit 1; }
+
   unset -f clawmeter
 )
 
@@ -2831,6 +2890,16 @@ PROV
   jq -e '.reason | test("immutably bound")' <<<"$resume_different_json" >/dev/null
   set +e; run_escalate esc-failure >/dev/null 2>&1; rc=$?; set -e
   [[ "$rc" -eq 1 ]] || { echo "escalate bare retry: expected explicit recovery refusal" >&2; exit 1; }
+
+  # F5 (red-team 2026-07-16): a segment-receipt failure at the PREPARED phase
+  # abandons the transition (nothing committed) and MUST clear pending_transition
+  # so reap/revise are not left with a resumable-but-ungated orphan. Original arm
+  # is preserved; the lane is cleanly reap-able.
+  make_escalation_lane esc-prepared-fail
+  set +e; WASPFLOW_ESCALATION_TEST_SEGMENT_FAIL=yes run_escalate esc-prepared-fail --to codex/target/high --json >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 2 ]] || { echo "F5: prepared-phase segment fail expected rc2, got $rc" >&2; exit 1; }
+  jq -e '.status == "escalate_failed" and .model == "old" and (.pending_transition == "" or .pending_transition == null)' "$eschome/lanes/esc-prepared-fail/state.json" >/dev/null \
+    || { echo "F5: prepared-phase failure left an orphaned pending_transition" >&2; exit 1; }
   lane_set esc-failure fake_launch_fail no
   run_escalate esc-failure --resume-transition >/dev/null
   jq -s 'map(select(.lane_uuid == "esc-failure-uuid" and .receipt_kind == "lane_segment")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true

@@ -251,13 +251,17 @@ artifacts_finalize() {
 }
 
 # Return a content-sensitive fingerprint for a Git workspace. It includes HEAD,
-# tracked staged/unstaged changes, and untracked file paths/content. A missing or
-# non-Git workspace deliberately has no fingerprint and therefore no reusable
-# checkpoint: rerunning the oracle is safer than claiming freshness we cannot
-# establish.
-# Args: cwd
+# tracked staged/unstaged changes, and untracked (non-gitignored) file paths/
+# content. Gitignored files are excluded WHOLESALE by design (node_modules, build
+# trees) — but an oracle whose result depends on a gitignored dependency would
+# otherwise reuse a stale green checkpoint (F6). So we ADDITIONALLY fold in any
+# gitignored path that the verify/prepare commands explicitly reference: those
+# are the oracle's declared deps, and a change to them must bust the checkpoint.
+# A missing or non-Git workspace deliberately has no fingerprint and therefore no
+# reusable checkpoint: rerunning the oracle is safer than false freshness.
+# Args: cwd [oracle_command...]
 artifacts_workspace_fingerprint() {
-  local cwd="$1"
+  local cwd="$1"; shift || true
   [[ -d "$cwd" ]] || return 1
   git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
   {
@@ -267,6 +271,25 @@ artifacts_workspace_fingerprint() {
       printf '%s\0' "$path"
       git -C "$cwd" hash-object -- "$path" 2>/dev/null || printf 'unreadable\n'
     done < <(git -C "$cwd" ls-files --others --exclude-standard -z)
+    # Oracle-referenced gitignored deps: hash each path-like token from the
+    # commands that names a real, git-ignored file/dir under cwd.
+    local tok p
+    for tok in $*; do
+      # Any token that resolves to a real path under cwd AND is gitignored is an
+      # oracle dep worth hashing — including bare dir names (node_modules, venv).
+      # A leading '-' would be a flag, not a path; skip it.
+      [[ -n "$tok" && "$tok" != -* ]] || continue
+      p="$tok"; [[ "$p" != /* ]] && p="$cwd/$p"
+      [[ -e "$p" ]] || continue
+      git -C "$cwd" check-ignore -q -- "$p" 2>/dev/null || continue
+      printf 'oracle-dep:%s\0' "$tok"
+      if [[ -f "$p" ]]; then
+        git -C "$cwd" hash-object -- "$p" 2>/dev/null || printf 'unreadable\n'
+      else
+        # Directory dep (installed tree): hash its recursive listing + sizes.
+        find "$p" -type f -printf '%p %s %T@\n' 2>/dev/null | sort | git hash-object --stdin
+      fi
+    done
   } | git hash-object --stdin
 }
 
@@ -342,7 +365,7 @@ artifacts_verify_checkpoint_fresh() {
   [[ -n "$checkpoint" && -n "$fingerprint" ]] || return 1
   cwd="$(lane_get "$lane" cwd)"
   [[ -d "$cwd" ]] || return 1
-  [[ "$(artifacts_workspace_fingerprint "$cwd" 2>/dev/null || true)" == "$fingerprint" ]]
+  [[ "$(artifacts_workspace_fingerprint "$cwd" "$(lane_get "$lane" prepare_command)" "$(lane_get "$lane" verify_command)" 2>/dev/null || true)" == "$fingerprint" ]]
 }
 
 # Run the prepare/verify contract once, without changing lane lifecycle/result.
@@ -376,7 +399,7 @@ artifacts_run_verify_checkpoint() {
         [[ "$prepare_state" == timeout ]] && failure_class="timeout"
         [[ ! -d "$cwd" ]] && failure_class="infra"
         _artifacts_write_skipped_verify "$lane" "$verify_name" "$verify_command" "$cwd" "prepare_$prepare_state"
-        fingerprint="$(artifacts_workspace_fingerprint "$cwd" 2>/dev/null || true)"
+        fingerprint="$(artifacts_workspace_fingerprint "$cwd" "$(lane_get "$lane" prepare_command)" "$(lane_get "$lane" verify_command)" 2>/dev/null || true)"
         _artifacts_record_verify_checkpoint "$lane" "$failure_class" "$test_files_changed" "$fingerprint" "$kind"
         echo "$prepare_state"
         return 0
@@ -394,7 +417,7 @@ artifacts_run_verify_checkpoint() {
       [[ "$(lane_get "$lane" verify_exit_code)" == 126 || "$(lane_get "$lane" verify_exit_code)" == 127 ]] && failure_class="invalid_oracle"
       ;;
   esac
-  fingerprint="$(artifacts_workspace_fingerprint "$cwd" 2>/dev/null || true)"
+  fingerprint="$(artifacts_workspace_fingerprint "$cwd" "$(lane_get "$lane" prepare_command)" "$(lane_get "$lane" verify_command)" 2>/dev/null || true)"
   _artifacts_record_verify_checkpoint "$lane" "$failure_class" "$test_files_changed" "$fingerprint" "$kind"
   echo "$verify_state"
 }
@@ -500,14 +523,43 @@ _artifacts_sha256() {
 
 # Append one already-built receipt atomically. This is deliberately lane-less:
 # exec has no state directory but shares the exact durable JSONL protocol.
+# Ensure the ledger's last line is newline-terminated before we append, so a
+# torn tail (a crash mid-append, F3) can never glue the next receipt onto a
+# partial line and silently drop both. Must run under the receipts lock.
+_receipts_heal_tail() {
+  local f="$WASPFLOW_HOME/receipts.jsonl"
+  [[ -s "$f" ]] || return 0
+  # A file whose final byte is not \n has a torn/partial last line.
+  [[ "$(tail -c1 "$f" 2>/dev/null)" == "" ]] || printf '\n' >>"$f"
+}
+
+# Append a final lane/exec receipt, idempotent across the append→marker crash
+# window (F1). Dedup key is (lane_uuid, receipt_kind=="lane"), NOT receipt_id:
+# the caller (artifacts_emit_receipt_v1) mints a FRESH receipt_id on every
+# re-emit, so a receipt_id key would never match a crash-orphaned row. This
+# mirrors the segment path's (lane_uuid, index) model. exec receipts have no
+# lane_uuid — they carry a unique exec_id and are never re-emitted (one-shot),
+# so they append unconditionally.
 _receipts_append() {
-  local receipt="$1" fd
+  local receipt="$1" fd kind lane_uuid
   [[ -n "$receipt" ]] && jq -e 'type == "object"' >/dev/null <<<"$receipt" 2>/dev/null \
     || { err "receipt: generated JSON is empty or invalid"; return 1; }
+  kind="$(jq -r '.receipt_kind // "lane"' <<<"$receipt")"
+  lane_uuid="$(jq -r '.lane_uuid // empty' <<<"$receipt")"
   mkdir -p "$WASPFLOW_HOME" "$WASPFLOW_LOCKS_DIR"
   command -v flock >/dev/null 2>&1 || { err "receipt: flock is required"; return 1; }
   exec {fd}>"$WASPFLOW_LOCKS_DIR/receipts.lock" || { err "receipt: cannot open lock"; return 1; }
   flock -x "$fd" || { exec {fd}>&-; err "receipt: cannot lock"; return 1; }
+  # A lane row for this lane_uuid already landed (a prior partial finalize whose
+  # marker never committed) → do NOT append a second. fromjson? tolerates a
+  # malformed/torn line so a corrupt ledger cannot hide the existing row (F2).
+  if [[ "$kind" == lane && -n "$lane_uuid" && -f "$WASPFLOW_HOME/receipts.jsonl" ]] \
+     && jq -e --arg u "$lane_uuid" -R \
+        'fromjson? // empty | select(.receipt_kind == "lane" and .lane_uuid == $u)' \
+        "$WASPFLOW_HOME/receipts.jsonl" >/dev/null 2>&1; then
+    flock -u "$fd" || true; exec {fd}>&-; return 0
+  fi
+  _receipts_heal_tail
   if ! printf '%s\n' "$receipt" >>"$WASPFLOW_HOME/receipts.jsonl"; then
     flock -u "$fd" || true; exec {fd}>&-; err "receipt: append failed"; return 1
   fi
@@ -526,16 +578,20 @@ _receipts_append_segment_once() {
   command -v flock >/dev/null 2>&1 || { err "receipt: flock is required"; return 1; }
   exec {fd}>"$WASPFLOW_LOCKS_DIR/receipts.lock" || return 1
   flock -x "$fd" || { exec {fd}>&-; return 1; }
-  if [[ -f "$WASPFLOW_HOME/receipts.jsonl" ]] && jq -e --arg lane_uuid "$lane_uuid" --argjson index "$segment_index" \
-      'select(.receipt_kind == "lane_segment" and .lane_uuid == $lane_uuid and .segment.index == $index)' \
-      "$WASPFLOW_HOME/receipts.jsonl" >/dev/null 2>&1; then
-    existing="$(jq -c --arg lane_uuid "$lane_uuid" --argjson index "$segment_index" \
-      'select(.receipt_kind == "lane_segment" and .lane_uuid == $lane_uuid and .segment.index == $index)' \
-      "$WASPFLOW_HOME/receipts.jsonl" | tail -1)"
-    flock -u "$fd" || true; exec {fd}>&-
-    [[ -n "$existing" ]] && printf '%s\n' "$existing"
-    return 10
+  # `fromjson?` per line, NOT a whole-file `jq -e`: a single malformed line
+  # elsewhere in the ledger must not make the existence check fail and let a
+  # duplicate segment row through (F2). Match on (lane_uuid, index).
+  if [[ -f "$WASPFLOW_HOME/receipts.jsonl" ]]; then
+    existing="$(jq -c --arg lane_uuid "$lane_uuid" --argjson index "$segment_index" -R \
+      'fromjson? // empty | select(.receipt_kind == "lane_segment" and .lane_uuid == $lane_uuid and .segment.index == $index)' \
+      "$WASPFLOW_HOME/receipts.jsonl" 2>/dev/null | tail -1)"
+    if [[ -n "$existing" ]]; then
+      flock -u "$fd" || true; exec {fd}>&-
+      printf '%s\n' "$existing"
+      return 10
+    fi
   fi
+  _receipts_heal_tail
   if ! printf '%s\n' "$receipt" >>"$WASPFLOW_HOME/receipts.jsonl"; then
     flock -u "$fd" || true; exec {fd}>&-
     return 1

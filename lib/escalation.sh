@@ -364,7 +364,16 @@ escalate_run_locked() {
       lane_set "$lane" consecutive_failed_segments "$((consecutive + 1))" pending_transition "$(jq -c '.poison_counted=true' <<<"$transition")"
       transition="$(lane_get "$lane" pending_transition)"
     fi
-    artifacts_emit_segment_receipt_v1 "$lane" "$(jq -r .id <<<"$transition")" "$segment_result" || { lane_set "$lane" status escalate_failed escalation_error "closing segment receipt failed"; escalate_emit "$json" 2 "closing segment receipt failed" "$(jq -c .from_arm <<<"$transition")" "$(jq -c .to_arm <<<"$transition")" "$(jq -r .segment_index <<<"$transition")"; return; }
+    # Failure here is at `prepared` phase: nothing has been committed (no receipt
+    # row, no arm switch, no launch). The transition is safely abandonable, so
+    # CLEAR pending_transition rather than leave a resumable-but-ungated orphan
+    # that reap/revise ignore (F5). The lane stays on its original arm; a fresh
+    # `escalate` may retry cleanly.
+    if [[ "${WASPFLOW_ESCALATION_TEST_SEGMENT_FAIL:-}" == yes ]] \
+       || ! artifacts_emit_segment_receipt_v1 "$lane" "$(jq -r .id <<<"$transition")" "$segment_result"; then
+      lane_set "$lane" status escalate_failed escalation_error "closing segment receipt failed" pending_transition ""
+      escalate_emit "$json" 2 "closing segment receipt failed" "$(jq -c .from_arm <<<"$transition")" "$(jq -c .to_arm <<<"$transition")" "$(jq -r .segment_index <<<"$transition")"; return
+    fi
     escalate_maybe_test_crash_after_phase receipt_appended || return $?
     lane_set "$lane" pending_transition "$(jq -c '.phase="receipt_committed"' <<<"$transition")"
     escalate_maybe_test_crash_after_phase receipt_committed || return $?
