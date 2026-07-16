@@ -1939,6 +1939,38 @@ grep -q 'flock' "$root/lib/core.sh" || { echo "core: lane_set concurrency lock m
   [[ "$(jq -r .result "$state_home/lanes/smystery/state.json")" == "corrupt_result" ]]     || { echo "seam: reap laundered an unknown result instead of flagging it" >&2; exit 1; }
 )
 
+# Excellence-audit 2026-07-16 regressions (docs/design/EXCELLENCE_AUDIT_2026-07-16.md).
+(
+  set +e
+  ea_home="$state_home-ea"; mkdir -p "$ea_home/lanes"
+  BF="$root/bin/waspflow"
+  # Rank 12 — a garbage numeric knob fails LOUD, never a set-u "unbound variable".
+  # Needs a real live lane so `wait` reaches the stall-knob read.
+  mkdir -p "$ea_home/lanes/knobtest"
+  jq -n '{provider:"codex",status:"live",cwd:"/tmp"}' >"$ea_home/lanes/knobtest/state.json"
+  o="$(WASPFLOW_HOME="$ea_home" WASPFLOW_STALL_SECONDS=abc "$BF" wait knobtest --timeout 1 2>&1)"
+  grep -q 'WASPFLOW_STALL_SECONDS must be a non-negative integer' <<<"$o" || { echo "ea: garbage stall knob not cleanly rejected" >&2; exit 1; }
+  if grep -qi 'unbound variable' <<<"$o"; then echo "ea: garbage knob leaked a bash crash" >&2; exit 1; fi
+  # Ranks 1 & 11 — a dead lane whose repo_root is empty must NOT read as live
+  # (the tab-collapse field-shift), and human `list` must agree with `--json`.
+  mkdir -p "$ea_home/lanes/dead"
+  jq -n '{provider:"claude",status:"exited",cwd:"/tmp",repo_root:"",tmux_window:"@99999","tmux_pane_pid":"999999"}' >"$ea_home/lanes/dead/state.json"
+  hs="$(WASPFLOW_HOME="$ea_home" "$BF" list 2>/dev/null | awk '/^dead /{print $3}')"
+  js="$(WASPFLOW_HOME="$ea_home" "$BF" list --json 2>/dev/null | jq -r '.[]|select(.lane=="dead")|.lifecycle_state')"
+  [[ "$hs" == "exited" && "$js" == "exited" ]] || { echo "ea: empty-repo_root lane mis-read (human=$hs json=$js)" >&2; exit 1; }
+  # Rank 5 — check refuses arbitrary shell from an ANCESTOR .waspflow config, and
+  # skips even an in-tree config's commands unless explicitly opted in.
+  mkdir -p "$ea_home/repo/sub"; ( cd "$ea_home/repo" && git init -q )
+  printf '{"commands":[{"name":"x","command":"touch %s/ea-pwned"}]}' "$ea_home" >"$ea_home/repo/.waspflow.json"
+  ( cd "$ea_home/repo/sub" && WASPFLOW_HOME="$ea_home/h1" "$BF" check --no-fail >/dev/null 2>&1 )
+  if [[ -e "$ea_home/ea-pwned" ]]; then echo "ea: ancestor .waspflow config ran arbitrary shell" >&2; exit 1; fi
+  ( cd "$ea_home/repo" && WASPFLOW_HOME="$ea_home/h2" "$BF" check --no-fail >/dev/null 2>&1 )
+  if [[ -e "$ea_home/ea-pwned" ]]; then echo "ea: in-tree config commands ran without opt-in" >&2; exit 1; fi
+  ( cd "$ea_home/repo" && WASPFLOW_ALLOW_PROJECT_COMMANDS=1 WASPFLOW_HOME="$ea_home/h3" "$BF" check --no-fail >/dev/null 2>&1 )
+  [[ -e "$ea_home/ea-pwned" ]] || { echo "ea: opt-in did not enable in-tree config commands" >&2; exit 1; }
+  rm -rf "$ea_home"
+)
+
 # Bounded lifecycle controls: use a fake provider terminal oracle plus a real,
 # uniquely named tmux session. This proves wait --reap, owned-window parking,
 # fleet GC dry-run/apply, and index filters without touching provider accounts or

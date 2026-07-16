@@ -98,6 +98,19 @@ guard_cwd() {
   fi
 }
 
+# Resolve a non-negative-integer env knob to its value or fall back to a default.
+# A garbage value (e.g. WASPFLOW_STALL_SECONDS=abc) otherwise reaches an
+# arithmetic context and, under `set -u`, aborts the whole command with an
+# opaque "abc: unbound variable" (excellence audit Rank 12). Fail loud and clear
+# instead. Args: env_var_name default_value
+numeric_knob() {
+  local name="$1" default="$2" val
+  val="$(eval "printf '%s' \"\${$name:-}\"")"
+  [[ -n "$val" ]] || { printf '%s\n' "$default"; return 0; }
+  [[ "$val" =~ ^[0-9]+$ ]] || die "$name must be a non-negative integer (got: '$val')"
+  printf '%s\n' "$val"
+}
+
 # Ask whether a provider's default catalog can speak for this invocation. Any
 # raw provider argument can alter the effective billing/model scope; Codex also
 # has named profile/OSS forms that make that mismatch explicit.
