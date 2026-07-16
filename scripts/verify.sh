@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-trap 'rc=$?; (( rc == 0 )) || printf "waspflow verify: failed at line %s (exit %s): %s\n" "$LINENO" "$rc" "$BASH_COMMAND" >&2' EXIT
+failure_line=unknown
+failure_command=unknown
+trap 'failure_line=$LINENO; failure_command=$BASH_COMMAND' ERR
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Verify this checkout unless an individual fixture deliberately injects a
@@ -65,6 +67,10 @@ cleanup() {
   # remaining sessions tmux exits on its own; never kill an entire server.
   verify_tmux kill-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || true
   rm -rf "$fixture" "$state_home" "$tmux_wrapper" "$tmux_socket_dir" || true
+  if (( exit_status != 0 )); then
+    printf 'waspflow verify: failed at line %s (exit %s): %s\n' \
+      "$failure_line" "$exit_status" "$failure_command" >&2
+  fi
   return "$exit_status"
 }
 trap cleanup EXIT
