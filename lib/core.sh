@@ -957,3 +957,15 @@ is_known_provider() {
   for p in "${WASPFLOW_PROVIDERS[@]}"; do [[ "$p" == "$1" ]] && return 0; done
   return 1
 }
+
+# Refresh runtime attestation for whatever provider owns the lane. Providers
+# without a refresher (or ones that fail to load) are a silent no-op: refresh
+# is evidence-gathering, never a gate.
+provider_refresh_runtime_settings() {
+  local lane="$1" p
+  p="$(lane_get "$lane" provider)"
+  [[ -n "$p" ]] || return 0
+  load_provider "$p" 2>/dev/null || return 0
+  declare -F "${p}_refresh_runtime_settings" >/dev/null 2>&1 || return 0
+  "${p}_refresh_runtime_settings" "$lane" || true
+}

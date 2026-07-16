@@ -1,0 +1,3 @@
+# Output and reasoning budgets should be operating-point data
+
+Investigate making `max_tokens`, reasoning effort/budget, and compaction reasoning policy explicit operating-point data instead of scattered harness constants. Keep output allowance distinct from context window and hidden-reasoning budget; expose the resolved values in lane receipts; allow genuinely distinct high/xhigh/max policies; and evaluate whether compaction should remain reasoning-free or use a small bounded budget plus deterministic summary validation. The motivating failure was a local 102400-context Qwen coding turn whose 16384 output cap truncated a large write tool call, while Pi thinking levels independently mapped to finite engine reasoning budgets.

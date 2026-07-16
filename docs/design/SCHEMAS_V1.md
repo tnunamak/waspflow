@@ -203,7 +203,10 @@ residual duplicate detectable downstream.
   "arm_requested": { … Arm v1 … },
   "arm_attestation": {
     "runtime_settings_state": "observed",   // observed | unknown | error
-    "observed_model": "gpt-5.6-terra",      // codex: from rollout; claude/grok: null
+    "observed_model": "gpt-5.6-terra",      // codex: rollout; claude: session log
+                                            // (model only); grok: session summary
+                                            // (model + effort). Gap closed 2026-07-15;
+                                            // claude observed_effort remains null.
     "observed_effort": "high"
   },
   "stats_eligible": true, "ineligibility_reasons": [],

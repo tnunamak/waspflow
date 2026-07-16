@@ -95,6 +95,7 @@ Verbs:
   demo    --provider <claude|codex|grok> [--run]            guided first lane
   list    [--status S,...] [--lifecycle-state S,...] [--project DIR] [--limit N] [--json]
                                           show the durable global lane index
+  receipts summary [--json]               outcome ledger: arms, verify results, stats-eligible fraction
   status  <lane> [--tail-events N --json] one lane's state or safe provider-event tail
   events  <lane> [--lines N] [--json]   normalized provider event tail (automation default)
   inspect [<lane>] [--json]              read-only lane reconciliation/classification
@@ -694,6 +695,52 @@ cmd_list_json_batch() {
   [[ ${#rows[@]} -eq 0 ]] && echo '[]' || printf '%s\n' "${rows[@]}" | jq -cs .
 }
 
+# The flywheel made visible: what the outcome ledger holds, and how much of it
+# is stats-eligible calibration data. Read-only over receipts.jsonl.
+cmd_receipts() {
+  local sub="${1:-summary}" json=0
+  shift || true
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      *) die "receipts: unknown option '$1' (usage: receipts summary [--json])" ;;
+    esac
+  done
+  [[ "$sub" == summary ]] || die "receipts: unknown subcommand '$sub' (only: summary [--json])"
+  local ledger="$WASPFLOW_HOME/receipts.jsonl"
+  [[ -r "$ledger" ]] || { log "receipts: no ledger yet ($ledger)"; return 0; }
+  local report
+  report="$(jq -cR 'fromjson? // empty' "$ledger" | jq -cs '
+    map(select(type == "object")) as $all |
+    ($all | map(select(.receipt_kind == "lane" or (.receipt_kind // "lane") == "lane"))) as $lanes |
+    {
+      total_rows: ($all | length),
+      lanes: ($lanes | length),
+      execs: ($all | map(select(.receipt_kind == "exec")) | length),
+      segments: ($all | map(select(.receipt_kind == "lane_segment")) | length),
+      eligible: ($lanes | map(select(.stats_eligible == true)) | length),
+      escalations: ($all | map(.escalation_path // [] | length) | add // 0),
+      by_arm: ($lanes | group_by((.arm_requested.provider // "?") + "/" + (if (.arm_requested.model // "") == "" then "(default)" else .arm_requested.model end)) |
+        map({arm: ((.[0].arm_requested.provider // "?") + "/" + (if (.[0].arm_requested.model // "") == "" then "(default)" else .[0].arm_requested.model end)),
+             n: length,
+             verified: (map(select(.result == "verified")) | length),
+             verify_failed: (map(select(.result == "verify_failed")) | length),
+             eligible: (map(select(.stats_eligible == true)) | length)}) | sort_by(-.n)),
+      top_ineligibility: ($lanes | map((.ineligibility_reasons? // []) | if type == "array" then .[] else empty end) | group_by(.) |
+        map({reason: .[0], n: length}) | sort_by(-.n) | .[0:5])
+    }')"
+  if [[ "$json" -eq 1 ]]; then printf '%s\n' "$report"; return 0; fi
+  jq -r '
+    "receipts: \(.lanes) lanes, \(.segments) segments, \(.execs) execs (\(.total_rows) rows)",
+    "eligible calibration data: \(.eligible)/\(.lanes) lane receipts",
+    "escalations recorded: \(.escalations)",
+    "per arm (n verified/failed eligible):",
+    (.by_arm[] | "  \(.arm)  \(.n)  \(.verified)/\(.verify_failed)  \(.eligible)"),
+    "top ineligibility reasons:",
+    (if (.top_ineligibility | length) == 0 then "  (none)" else (.top_ineligibility[] | "  \(.reason)  \(.n)") end)
+  ' <<<"$report"
+}
+
 cmd_list() {
   local status_filter="" lifecycle_filter="" project="" limit="" json=0
   while [[ $# -gt 0 ]]; do
@@ -794,7 +841,7 @@ cmd_list() {
          tmux_pane_pid:(.tmux_pane_pid // "")}' <<<"$record")")
     else
       local runtime_label
-      runtime_label="$(jq -r '((.model_requested // .model // "default") + "/" + (.effort_requested // .effort // "default") + " -> ") + (if (.runtime_settings_state // "unknown") == "observed" then ((.runtime_model // "?") + "/" + (.runtime_effort // "?") + " " + (if .runtime_settings_match_requested == "false" then "DRIFT" else "match" end)) else (.runtime_settings_state // "unknown") end) + " [refresh=" + (.runtime_refresh_state // "unknown") + if (.runtime_refresh_error // "") != "" then ":" + .runtime_refresh_error else "" end + "]"' <<<"$record")"
+      runtime_label="$(jq -r '((.model_requested // .model // "default") + "/" + (.effort_requested // .effort // "default") + " -> ") + (if (.runtime_settings_state // "unknown") == "observed" then ((.runtime_model // "?") + "/" + (.runtime_effort // "?") + " " + (if .runtime_settings_match_requested == "false" then "DRIFT" elif .runtime_settings_match_requested == "true" then "match" else "observed" end)) else (.runtime_settings_state // "unknown") end) + " [refresh=" + (.runtime_refresh_state // "unknown") + if (.runtime_refresh_error // "") != "" then ":" + .runtime_refresh_error else "" end + "]"' <<<"$record")"
       printf '%-20s %-8s %-8s %-11s %-48s %s\n' "$lane" "$provider" "$live" "$outcome" "$runtime_label" "$cwd"
     fi
     emitted=$((emitted + 1))
@@ -861,9 +908,11 @@ cmd_status() {
   # Pretty-print the state, but on malformed JSON emit a clear waspflow error
   # instead of leaking a raw `jq: parse error` to the operator (red-team finding).
   local sf; sf="$(lane_state_file "$lane")"
+  # Hot path: codex refresh tails a bounded rollout snapshot; claude/grok
+  # refreshers scan whole session logs (hundreds of MB) and belong at reap
+  # time only. status shows their attestation once a reap/receipt computed it.
   if [[ "$(lane_get "$lane" provider)" == codex ]]; then
-    load_provider codex
-    codex_refresh_runtime_settings "$lane"
+    provider_refresh_runtime_settings "$lane"
   fi
   jq . "$sf" 2>/dev/null || die "lane '$lane' has corrupted state.json ($sf) — cannot parse"
 }
@@ -1378,7 +1427,7 @@ _reap_one_locked() {
   local provider; provider="$(lane_get "$lane" provider)"
   load_provider "$provider"
 
-  if [[ "$provider" == codex ]]; then codex_refresh_runtime_settings "$lane"; fi
+  provider_refresh_runtime_settings "$lane"
   if [[ "$provider" == codex && "$(lane_get "$lane" runtime_receipt_enforced)" == true ]]; then
     local runtime_health runtime_match runtime_at accepted_at
     runtime_health="$(lane_get "$lane" runtime_refresh_state)"
@@ -1518,6 +1567,7 @@ main() {
     init)   cmd_init "$@" ;;
     demo)   cmd_demo "$@" ;;
     list|ls) cmd_list "$@" ;;
+    receipts) cmd_receipts "$@" ;;
     status) cmd_status "$@" ;;
     events) cmd_events "$@" ;;
     inspect) cmd_inspect "$@" ;;
