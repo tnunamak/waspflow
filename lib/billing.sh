@@ -152,6 +152,16 @@ quota_observation_v1() {
       return 0
     }
   fi
+  # clawmeter >= 0.28 declares its --json contract; a declared-but-unknown major
+  # is drift we must not shape-guess through. Absent field = pre-contract
+  # binary: fall through to the shape checks below exactly as before.
+  local declared_schema
+  declared_schema="$(jq -r '.schema_version // empty' <<<"$raw" 2>/dev/null)"
+  if [[ -n "$declared_schema" && "$declared_schema" != 1 ]]; then
+    jq -cn --arg reason "clawmeter --json schema_version ${declared_schema} unsupported (expected 1)" --arg source "clawmeter@${version}" \
+      '{schema_version:1,state:"absent",reason:$reason,stale:false,source:$source,observation:null}'
+    return 0
+  fi
   jq -e --arg p "$provider_key" '
     .providers[$p].usage as $u |
     ($u | type == "object") and

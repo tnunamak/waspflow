@@ -130,3 +130,31 @@ selection_gate_op() {
   fi
   return 5
 }
+
+# preferred_over edges are point-in-time judgments and are EXPECTED to rot when
+# a newer model family ships (the gpt-5.4-mini→luna edge will itself go stale
+# the day a post-5.6 family GAs). This surfaces that instead of letting the
+# edge decay into a silent deny-list entry. Catalog is enrichment, never a
+# gate: no catalog → no output, and this never blocks anything. Heuristic:
+# an edge is stale-suspect when a GA model exists whose family shares the
+# prefer-model family's alphabetic prefix but version-sorts newer.
+# Args: policy_json catalog_models_json_path. Emits warn lines; rc 0 always.
+selection_edge_staleness_report() {
+  local policy="$1" catalog="$2"
+  [[ -r "$catalog" ]] || return 0
+  jq -r --slurpfile cat "$catalog" '
+    def fam_prefix: sub("[-.0-9]+$"; "");
+    def fam_ver: capture("(?<v>[0-9][-.0-9]*)$") | .v;
+    ($cat[0].models // []) as $models |
+    (.preferred_over_live // .preferred_over // []) | .[] |
+    select((.ratified // true) == true) | . as $edge |
+    .prefer.model as $pm |
+    ($models[] | select(.id == $pm) | .family // empty) as $pfam |
+    ($pfam | fam_prefix) as $prefix |
+    [ $models[] | select(.status == "ga") | .family // empty
+      | select(startswith($prefix)) | select(. != null) ] | unique as $fams |
+    ($fams | sort_by(fam_ver | split(".") | map(tonumber? // 0)) | last) as $newest_fam |
+    select($pfam != $newest_fam) |
+    "  [warn] policy edge \($pm) over \($edge.over.model // "?") may be STALE: newest GA family in the \($prefix) lineage is \($newest_fam), prefer-side is \($pfam). Re-ratify or retire the edge."
+  ' <<<"$policy" 2>/dev/null || true
+}

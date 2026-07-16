@@ -2555,6 +2555,21 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   jq -e '.state == "provider_error" and .reason == "token refresh failed" and .observation == null' <<<"$(quota_observation_v1 codex)" >/dev/null
   fixture_path="$root/tests/fixtures/clawmeter-drifted.json"
   jq -e '.state == "absent" and .observation == null and (.reason | test("unsupported provider shape"))' <<<"$(quota_observation_v1 codex)" >/dev/null
+  fixture_path="$root/tests/fixtures/clawmeter-future-schema.json"
+  jq -e '.state == "absent" and .observation == null and (.reason | test("schema_version 99 unsupported"))' <<<"$(quota_observation_v1 codex)" >/dev/null
+
+  # Edge staleness: silent when prefer-side family is the newest GA in its
+  # lineage; warns when the catalog gains a newer family.
+  source "$root/lib/selection.sh"
+  stale_policy='{"preferred_over":[{"prefer":{"provider":"codex","model":"m-luna"},"over":{"provider":"codex","model":"old-mini"},"ratified":true}]}'
+  stale_cat_fresh='{"models":[{"id":"m-luna","family":"m-5.6","status":"ga"},{"id":"old-mini","family":"m-5.4","status":"ga"}]}'
+  stale_cat_future='{"models":[{"id":"m-luna","family":"m-5.6","status":"ga"},{"id":"old-mini","family":"m-5.4","status":"ga"},{"id":"m-new","family":"m-5.8","status":"ga"}]}'
+  mkdir -p "$WASPFLOW_HOME"
+  printf '%s\n' "$stale_cat_fresh" >"$WASPFLOW_HOME/stale-cat-fresh.json"
+  printf '%s\n' "$stale_cat_future" >"$WASPFLOW_HOME/stale-cat-future.json"
+  [[ -z "$(selection_edge_staleness_report "$stale_policy" "$WASPFLOW_HOME/stale-cat-fresh.json")" ]]
+  selection_edge_staleness_report "$stale_policy" "$WASPFLOW_HOME/stale-cat-future.json" | grep -q "may be STALE: newest GA family in the m lineage is m-5.8"
+  [[ -z "$(selection_edge_staleness_report "$stale_policy" "$WASPFLOW_HOME/does-not-exist.json")" ]]
   lane_set legacy-receipt provider grok status live result succeeded lane_uuid legacy-uuid
   artifacts_emit_receipt_v1 legacy-receipt succeeded
   jq -e '.lane == "legacy-receipt" and .receipt_kind == "lane" and .segment == null and (.timestamps | keys | sort) == ["finalize_epoch","spawn_epoch","wall_seconds"] and .timestamps.spawn_epoch == null and .timestamps.wall_seconds == 0' "$WASPFLOW_HOME/receipts.jsonl" >/dev/null

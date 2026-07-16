@@ -1488,6 +1488,17 @@ cmd_doctor() {
       echo "  [ok]   clawmeter codex envelope shape"
     fi
   fi
+  # Policy edges rot by design (they are dated judgments); surface staleness
+  # here rather than letting an old edge decay into a silent deny-list entry.
+  if ops_load 2>/dev/null; then
+    local edge_warnings
+    edge_warnings="$(selection_edge_staleness_report "$OPS_POLICY_JSON" \
+      "${MINNOWS_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/minnows-data}/model-catalog/models.json")"
+    if [[ -n "$edge_warnings" ]]; then printf '%s\n' "$edge_warnings"
+    elif jq -e '(.preferred_over // []) | length > 0' <<<"$OPS_POLICY_JSON" >/dev/null 2>&1; then
+      echo "  [ok]   policy preferred_over edges current vs catalog"
+    fi
+  fi
   [[ "$agent_ok" -eq 1 ]] || ok=0
   [[ "$ok" -eq 1 ]] || {
     echo "  -> missing prerequisites"
