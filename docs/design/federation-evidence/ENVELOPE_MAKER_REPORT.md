@@ -3,7 +3,7 @@
 ## Revision and outcome
 
 - Base revision inspected: `718ab9e`.
-- Implementation revision: recorded by the commit that includes this report.
+- Implementation revision: `6d5c3a8d81f365d2b8e9b59bdc22696e79f384e6` (`feat(federation): add signed v0 envelopes`).
 - Outcome: a dependency-free, manually reviewable signed task-file-in/result-bundle-out envelope boundary is implemented in `lib/federation-envelope.mjs`, with the `bin/federation-envelope` CLI.
 
 ## Schema decisions
