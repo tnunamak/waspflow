@@ -55,6 +55,15 @@ $ command -v jailer || true
 (no output)
 $ ls -l /dev/kvm
 crw-rw----+ 1 root kvm 10, 232 Jul 13 16:12 /dev/kvm
+$ getfacl -p /dev/kvm
+# file: /dev/kvm
+# owner: root
+# group: kvm
+user::rw-
+user:tnunamak:rw-
+group::rw-
+mask::rw-
+other::---
 $ id -nG
 tnunamak adm cdrom sudo dip video plugdev input render lpadmin lxd sambashare i2c docker
 ```
@@ -66,8 +75,9 @@ container/namespace backend. It is now part of the repository suite.
 
 ## Untested boundaries
 
-- No guest image, vsock bridge, TAP/firewall helper, cgroup enforcement, or
-  Firecracker API launch ran in this checkout.
+- No **committed** guest image, vsock bridge, TAP/firewall helper, cgroup
+  enforcement, or runner-owned Firecracker API lifecycle exists in this checkout.
+  The Docker helper did boot an ephemeral initramfs guest using a config file.
 - Pi has a contract/profile declaration but was not run in a guest.
 - Claude/Codex have supported configuration plans only; real CLI streaming,
   cancellation, revocation, and rate-limit compatibility were not run.
@@ -78,15 +88,50 @@ container/namespace backend. It is now part of the repository suite.
 
 ## Exact Firecracker evidence or blocker
 
-**Blocker:** `firecracker` and `jailer` are absent; no runner-owned pinned kernel,
-rootfs, guest init, or host firewall helper exists in this worktree. The checked-in
-profile deliberately marks each asset digest `UNPINNED_IN_THIS_CHECKOUT`, which
-causes `execute` to fail closed even if paths are supplied. `/dev/kvm` exists and
-the current user is in `kvm`, but that is insufficient evidence of a Firecracker
-backend. No real Firecracker security claim is made.
+### Real backend evidence (Docker used only as a privileged host test helper)
+
+```text
+$ docker run --rm --privileged --device=/dev/kvm alpine:3.21 ...
+docker_privileged_kvm_and_net_admin=ok
+
+$ docker run --rm --privileged --device=/dev/kvm ... firecracker --no-seccomp --config-file /run/fc.json
+Running Firecracker v1.15.1
+Successfully started microvm that was configured from one single json
+[    0.000000] Linux version 6.1.155+ (root@c3d8009cd6d2) ...
+Hypervisor detected: KVM
+Run /init as init process
+WF_GUEST_BOOTED
+Linux (none) 6.1.155+ #1 SMP PREEMPT_DYNAMIC Thu Dec 18 15:17:16 UTC 2025 x86_64 Linux
+WF_HOST_BLOCKED
+WF_METADATA_BLOCKED
+WF_INTERNET_FAILED
+WF_GUEST_DONE
+reboot: System halted
+```
+
+This proves a released Firecracker process used `/dev/kvm` and booted a distinct
+guest kernel; it is not Docker-only containment evidence. The test used the
+official Firecracker v1.15.1 release binary and the official Firecracker CI
+`vmlinux-6.1.155`, downloaded to disk-backed
+`~/.tmp/waspflow-federation-assets`. The durable transcript is
+[`FIRECRACKER_REAL_BOOT_2026-07-18.log`](FIRECRACKER_REAL_BOOT_2026-07-18.log).
+
+### Security BLOCKED
+
+The host capability blocker is narrower than previously reported: the current user
+is **not** in the `kvm` group; KVM access is granted by the POSIX ACL
+`user:tnunamak:rw-`. `sudo -n` fails with `interactive authentication is required`.
+
+The v0 release gate remains blocked because the real guest test has not achieved
+the required Internet-allowed result (`WF_INTERNET_FAILED`), and this worktree
+still lacks a committed, pinned rootfs/guest agent, TAP firewall lifecycle,
+copy-on-write workspace, resource-cgroup owner, and vsock injector bridge.
+Therefore `execute` remains fail-closed, and Pi/real Claude/real Codex were not
+run. Calling this runner complete would be a false security claim.
 
 ## Confidence
 
 **High** for the tested host-side schema/CAS/M3/injector configuration and
-fail-closed behavior. **Low** for actual Firecracker isolation and gateway/CLI
-compatibility until the blocked assets and real-host acceptance suite exist.
+fail-closed behavior; **high** that an actual Firecracker/KVM guest boot occurred;
+**low** for the incomplete network, VM lifecycle, resource, ephemerality, and
+gateway/CLI gates. The overall runner status is **SECURITY BLOCKED**.

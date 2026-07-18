@@ -1,0 +1,18 @@
+# Raw selected serial/API transcript from the real Firecracker boot command.
+# Command used a privileged Docker container solely as a host test/provisioning
+# helper, with /dev/kvm passed through. Firecracker itself created the KVM guest.
+
+2026-07-18T15:02:50.658429878 [anonymous-instance:main] Running Firecracker v1.15.1
+2026-07-18T15:02:50.658535250 [anonymous-instance:main] Listening on API socket ("/run/firecracker.socket").
+2026-07-18T15:02:50.672425939 [anonymous-instance:main] Successfully started microvm that was configured from one single json
+[    0.000000] Linux version 6.1.155+ (root@c3d8009cd6d2) (gcc (Ubuntu 11.4.0-1ubuntu1~22.04.2) 11.4.0, GNU ld (GNU Binutils for Ubuntu) 2.38) #1 SMP PREEMPT_DYNAMIC Thu Dec 18 15:17:16 UTC 2025
+[    0.000000] Hypervisor detected: KVM
+[    0.216771] Run /init as init process
+WF_GUEST_BOOTED
+Linux (none) 6.1.155+ #1 SMP PREEMPT_DYNAMIC Thu Dec 18 15:17:16 UTC 2025 x86_64 Linux
+WF_GUEST_NETWORK_BEGIN
+WF_HOST_BLOCKED
+WF_METADATA_BLOCKED
+WF_INTERNET_FAILED
+WF_GUEST_DONE
+[    6.298227] reboot: System halted
