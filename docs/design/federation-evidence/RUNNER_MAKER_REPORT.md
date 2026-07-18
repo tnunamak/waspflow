@@ -2,7 +2,7 @@
 
 ## Revision
 
-Base: `718ab9e`. Code implementation revision: `3be98dab3c62350eb1d6703508e1ae8cd952fbec`.
+Base: `718ab9e`. Code implementation revisions: `3be98dab3c62350eb1d6703508e1ae8cd952fbec` and `f0f63531b08e1c4c368339924b68c54a223d8cfb`.
 
 ## Design
 
@@ -14,7 +14,8 @@ Base: `718ab9e`. Code implementation revision: `3be98dab3c62350eb1d6703508e1ae8c
   reserved envelope `oracle_ref`, `result_verdict`, and `settlement` fields.
 - Artifact ingress is local CAS only: SHA-256 verification, canonical task JSON,
   schema rejection, and archive size/entry/path/link/device checks occur before
-  any backend is considered.
+  any backend is considered. ZIP is rejected outright because v0 has no need to
+  support its producer-specific link metadata safely.
 - `launch-plan` implements critique M3: one claim, one task, one gateway ref,
   one route, and one owner key are bound outside the guest at VM launch. The
   guest-facing plan exposes only a non-secret sentinel and no selectors.
