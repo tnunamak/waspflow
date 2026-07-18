@@ -1,0 +1,77 @@
+#!/usr/bin/env node
+import { readFile, writeFile, lstat, mkdir, copyFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { parseCanonicalEnvelope, parseCanonicalJson, signEnvelope, verifyEnvelope, jcs, sha256, EnvelopeError } from '../lib/federation-envelope.mjs';
+
+const usage = `Usage: federation-envelope <command> [options]
+
+Commands:
+  sign task|result --payload FILE --private-key FILE --key-id ID --out FILE
+  verify task|result --envelope FILE --public-key FILE [--allow-expired]
+  handoff task --task FILE --author-key FILE
+  handoff result --result FILE --executor-key FILE --task FILE --author-key FILE
+  bundle result --result FILE --candidate FILE --executor-key FILE --out DIRECTORY
+
+Files supplied to sign must be RFC 8785 canonical JSON.  Handoff performs no
+execution and no oracle/settlement decision; it only validates signed identity.
+Task v0 reserves oracle_ref, result_verdict, and settlement as null.\n`;
+const die = (message) => { process.stderr.write(`federation-envelope: ${message}\n`); process.exitCode = 2; };
+const option = (args, name) => { const i = args.indexOf(name); if (i < 0 || !args[i + 1]) throw new EnvelopeError(`${name} is required`); return args[i + 1]; };
+const safeRead = async (file) => { const stat = await lstat(file); if (stat.isSymbolicLink() || !stat.isFile()) throw new EnvelopeError(`${file} must be a regular, non-symlink file`); return readFile(file); };
+const safeWrite = async (file, data) => {
+  try { if ((await lstat(file)).isSymbolicLink()) throw new EnvelopeError(`${file} must not be a symlink`); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
+  await writeFile(file, data, { flag: 'w' });
+};
+const safeCopy = async (source, destination) => {
+  try { if ((await lstat(destination)).isSymbolicLink()) throw new EnvelopeError(`${destination} must not be a symlink`); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
+  await copyFile(source, destination);
+};
+const readEnvelope = async (file) => parseCanonicalEnvelope(await safeRead(file));
+try {
+  const [command, kind, ...args] = process.argv.slice(2);
+  if (!command || command === '--help' || command === '-h') { process.stdout.write(usage); }
+  else if (command === 'sign') {
+    if (!['task', 'result'].includes(kind)) throw new EnvelopeError('sign requires task or result');
+    const payload = parseCanonicalJson(await safeRead(option(args, '--payload')));
+    const envelope = signEnvelope(payload, await safeRead(option(args, '--private-key')), option(args, '--key-id'));
+    const actual = envelope.payload.schema.endsWith(`.${kind}.v0`) ? kind : null;
+    if (!actual) throw new EnvelopeError(`payload is not a ${kind}`);
+    await safeWrite(option(args, '--out'), jcs(envelope));
+    process.stdout.write(`${kind}:sha256:${sha256(jcs(payload))}\n`);
+  } else if (command === 'verify') {
+    if (!['task', 'result'].includes(kind)) throw new EnvelopeError('verify requires task or result');
+    const verified = verifyEnvelope(await readEnvelope(option(args, '--envelope')), await safeRead(option(args, '--public-key')), { allowExpired: args.includes('--allow-expired') });
+    if (verified.kind !== kind) throw new EnvelopeError(`envelope is not a ${kind}`);
+    process.stdout.write(`${verified.address}\n`);
+  } else if (command === 'handoff') {
+    if (kind === 'task') {
+      const verified = verifyEnvelope(await readEnvelope(option(args, '--task')), await safeRead(option(args, '--author-key')));
+      if (verified.kind !== 'task') throw new EnvelopeError('task file is not a task envelope');
+      process.stdout.write(`${verified.address}\n`);
+    } else if (kind === 'result') {
+      const task = verifyEnvelope(await readEnvelope(option(args, '--task')), await safeRead(option(args, '--author-key')));
+      const resultEnvelope = await readEnvelope(option(args, '--result'));
+      const result = verifyEnvelope(resultEnvelope, await safeRead(option(args, '--executor-key')));
+      if (task.kind !== 'task' || result.kind !== 'result') throw new EnvelopeError('handoff kinds are invalid');
+      if (`sha256:${task.digest}` !== resultEnvelope.payload.task_digest) throw new EnvelopeError('result does not bind the supplied task digest');
+      process.stdout.write(`${result.address}\n`);
+    } else throw new EnvelopeError('handoff requires task or result');
+  } else if (command === 'bundle') {
+    if (kind !== 'result') throw new EnvelopeError('bundle requires result');
+    const envelope = await readEnvelope(option(args, '--result'));
+    const verified = verifyEnvelope(envelope, await safeRead(option(args, '--executor-key')));
+    if (verified.kind !== 'result') throw new EnvelopeError('result file is not a result envelope');
+    const candidateFile = option(args, '--candidate'); const candidate = await safeRead(candidateFile);
+    const ref = envelope.payload.candidate.artifact;
+    if (candidate.length !== ref.bytes || sha256(candidate) !== ref.sha256) throw new EnvelopeError('candidate bytes do not match signed artifact reference');
+    const output = option(args, '--out');
+    try { if ((await lstat(output)).isSymbolicLink()) throw new EnvelopeError(`${output} must not be a symlink`); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
+    await mkdir(output, { recursive: true });
+    const artifactDirectory = join(output, 'artifacts');
+    try { if ((await lstat(artifactDirectory)).isSymbolicLink()) throw new EnvelopeError(`${artifactDirectory} must not be a symlink`); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
+    await mkdir(artifactDirectory, { recursive: true });
+    await safeWrite(join(output, 'result.envelope.json'), jcs(envelope));
+    await safeCopy(candidateFile, join(artifactDirectory, ref.sha256));
+    process.stdout.write(`${verified.address}\n`);
+  } else throw new EnvelopeError(`unknown command ${command}`);
+} catch (error) { die(error instanceof Error ? error.message : String(error)); }
