@@ -55,7 +55,10 @@ validate_archive() {
     # a candidate ingress artifact. Reject rather than trying to sanitize them.
     tar -tvf "$p" | awk '$1 ~ /^[lhbcp]/ { exit 1 }' || die "archive contains link or device entry"
   elif unzip -Z1 "$p" >/dev/null 2>&1; then
-    entries="$(unzip -Z1 "$p")"
+    # ZIP external attributes have several producer-specific link/device
+    # encodings. v0 needs no ZIP-specific benefit, so reject the whole format
+    # rather than risk accepting a link whose metadata we parsed incorrectly.
+    die "zip artifacts are not supported by the v0 ingress boundary"
   else
     return 0
   fi
