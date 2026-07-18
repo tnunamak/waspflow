@@ -2,7 +2,7 @@
 
 ## Revision
 
-Base: `718ab9e`. Implemented revision: `42b5902237ac44e622a8a73944892ff362384293`.
+Base: `718ab9e`. Code implementation revision: `3be98dab3c62350eb1d6703508e1ae8cd952fbec`.
 
 ## Design
 
