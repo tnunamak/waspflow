@@ -1,0 +1,44 @@
+{
+  "profile": "wf-federation-linux-v0",
+  "profile_version": 1,
+  "runner_version": 1,
+  "firecracker": {
+    "binary": "firecracker",
+    "kernel_sha256": "UNPINNED_IN_THIS_CHECKOUT",
+    "rootfs_sha256": "UNPINNED_IN_THIS_CHECKOUT",
+    "guest_init_sha256": "UNPINNED_IN_THIS_CHECKOUT",
+    "firewall_helper_sha256": "UNPINNED_IN_THIS_CHECKOUT",
+    "vsock_port": 1024
+  },
+  "guest": {
+    "uid": 65534,
+    "read_only_root": true,
+    "writable_paths": ["/work", "/tmp", "/run"],
+    "allow_task_devcontainer": false,
+    "allow_host_mounts": false,
+    "allow_docker": false
+  },
+  "network": {
+    "default": "internet_allowed_host_and_lan_denied",
+    "direct_dns": false,
+    "host_metadata": false,
+    "guest_gateway_selection": false,
+    "requires_host_firewall_helper": true
+  },
+  "limits": {
+    "vcpus": 2,
+    "memory_mib": 4096,
+    "pids": 256,
+    "open_files": 1024,
+    "workspace_bytes": 2147483648,
+    "workspace_inodes": 200000,
+    "output_bytes": 10485760,
+    "wall_seconds": 3600,
+    "artifact_bytes": 536870912,
+    "artifact_entries": 100000
+  },
+  "harnesses": {
+    "execute": ["pi"],
+    "compatibility": ["claude", "codex"]
+  }
+}

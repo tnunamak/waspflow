@@ -3195,4 +3195,5 @@ JSON
   jq -e 'select(.receipt_kind == "exec") | (.exec_id|type == "string") and (has("lane")|not) and (.result == "succeeded") and (.exit_code == 0) and (.quota_observation.reason == "not_sampled_for_exec") and (.ineligibility_reasons == ["surface_exec"])' "$WASPFLOW_HOME/receipts.jsonl" >/dev/null
 )
 
+bash "$root/tests/federation-runner.sh"
 echo "waspflow verify: ok"

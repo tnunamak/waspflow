@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# Firecracker-only Federation v0 runner. This is intentionally separate from
+# waspflow lanes: lanes and worktrees are orchestration conveniences, not a
+# hostile-code boundary.
+set -euo pipefail
+
+self="${BASH_SOURCE[0]}"
+while [[ -h "$self" ]]; do
+  base="$(cd "$(dirname "$self")" && pwd)"; self="$(readlink "$self")"
+  [[ "$self" = /* ]] || self="$base/$self"
+done
+ROOT="$(cd "$(dirname "$self")/.." && pwd)"
+# The profile path is intentionally not environment-overridable. Changing it is
+# a reviewed executor policy release, not a task or launch option.
+PROFILE="$ROOT/profiles/wf-federation-linux-v0.json"
+CAS="${WASPFLOW_FEDERATION_CAS:-}"
+RUNTIME="${WASPFLOW_FEDERATION_RUNTIME_DIR:-}"
+FIREWALL_HELPER="${WASPFLOW_FEDERATION_FIREWALL_HELPER:-}"
+
+die() { printf 'federation-runner: %s\n' "$*" >&2; exit 1; }
+digest_file() { sha256sum -- "$1" | awk '{print $1}'; }
+is_digest() { [[ "$1" =~ ^[a-f0-9]{64}$ ]]; }
+
+profile_digest() { digest_file "$PROFILE"; }
+profile_limits() { jq -ce '.limits | {vcpus,memory_mib,pids,open_files,workspace_bytes,workspace_inodes,output_bytes,wall_seconds,artifact_bytes,artifact_entries}' "$PROFILE"; }
+require_profile() {
+  [[ -r "$PROFILE" ]] || die "immutable profile missing: $PROFILE"
+  jq -e '
+    .profile == "wf-federation-linux-v0" and .profile_version == 1 and
+    .firecracker.vsock_port == 1024 and
+    (.firecracker.kernel_sha256|type == "string") and (.firecracker.rootfs_sha256|type == "string") and
+    (.firecracker.guest_init_sha256|type == "string") and (.firecracker.firewall_helper_sha256|type == "string") and
+    .guest.read_only_root == true and .guest.allow_task_devcontainer == false and
+    .guest.allow_host_mounts == false and .guest.allow_docker == false and
+    .network.default == "internet_allowed_host_and_lan_denied" and
+    .network.direct_dns == false and .network.host_metadata == false and
+    .network.guest_gateway_selection == false and
+    (.harnesses.execute == ["pi"]) and (.harnesses.compatibility == ["claude","codex"])
+  ' "$PROFILE" >/dev/null || die "profile is not wf-federation-linux-v0"
+}
+require_cas() { [[ -n "$CAS" && -d "$CAS" ]] || die "WASPFLOW_FEDERATION_CAS must name a local content-addressed store"; }
+artifact_path() { local d="$1"; is_digest "$d" || die "invalid content digest"; printf '%s/%s\n' "$CAS" "$d"; }
+verify_artifact() {
+  local d="$1" p; p="$(artifact_path "$d")"; [[ -f "$p" ]] || die "artifact not present: $d"
+  [[ "$(digest_file "$p")" == "$d" ]] || die "artifact digest mismatch: $d"
+  printf '%s\n' "$p"
+}
+validate_archive() {
+  local p="$1" max_bytes max_entries entries
+  max_bytes="$(jq -r '.limits.artifact_bytes' "$PROFILE")"; max_entries="$(jq -r '.limits.artifact_entries' "$PROFILE")"
+  [[ "$(stat -c %s -- "$p")" -le "$max_bytes" ]] || die "artifact exceeds profile byte ceiling"
+  if tar -tf "$p" >/dev/null 2>&1; then
+    entries="$(tar -tf "$p")"
+    # Symlinks, hardlinks, devices, fifos, and sockets are never meaningful in
+    # a candidate ingress artifact. Reject rather than trying to sanitize them.
+    tar -tvf "$p" | awk '$1 ~ /^[lhbcp]/ { exit 1 }' || die "archive contains link or device entry"
+  elif unzip -Z1 "$p" >/dev/null 2>&1; then
+    entries="$(unzip -Z1 "$p")"
+  else
+    return 0
+  fi
+  [[ "$(wc -l <<<"$entries")" -le "$max_entries" ]] || die "artifact exceeds profile entry ceiling"
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    [[ "$entry" != /* && "$entry" != *$'\0'* && "$entry" != ../* && "$entry" != */../* && "$entry" != *'/..' ]] \
+      || die "unsafe archive path: $entry"
+  done <<<"$entries"
+}
+validate_task() {
+  local p="$1"
+  [[ "$(cat -- "$p")" == "$(jq -cS . "$p")" ]] || die "task envelope is not canonical JSON"
+  jq -e '
+    type == "object" and
+    ([keys[]] - (["schema_version","profile","profile_digest","source_digest","prompt_digest","oracle_ref","result_verdict","settlement","gateway_ref","route","network","limits"]) | length == 0) and
+    .schema_version == 1 and .profile == "wf-federation-linux-v0" and
+    (.source_digest|type == "string") and (.prompt_digest|type == "string") and
+    (.gateway_ref|type == "string" and test("^[A-Za-z0-9._-]+$")) and
+    (.route|type == "string" and test("^[A-Za-z0-9._-]+$")) and
+    (.network == "on" or .network == "off") and
+    (.oracle_ref == null or (.oracle_ref|type == "object")) and
+    (.result_verdict == null or (.result_verdict|type == "object")) and
+    (.settlement == null or (.settlement|type == "object")) and
+    ((.limits // {}) | type == "object" and ([keys[]] - ["wall_seconds","output_bytes"] | length == 0))
+  ' "$p" >/dev/null || die "task envelope violates the v0 runner schema"
+  [[ "$(jq -r .profile_digest "$p")" == "$(profile_digest)" ]] || die "task profile digest is not executor-owned profile"
+  is_digest "$(jq -r .source_digest "$p")" && is_digest "$(jq -r .prompt_digest "$p")" || die "task artifact digest invalid"
+}
+backend_blocker() {
+  local reasons=()
+  command -v firecracker >/dev/null 2>&1 || reasons+=("firecracker binary is absent")
+  [[ -r /dev/kvm && -w /dev/kvm ]] || reasons+=("/dev/kvm is unavailable or not writable")
+  local kernel rootfs init
+  kernel="${WASPFLOW_FEDERATION_KERNEL:-}"; rootfs="${WASPFLOW_FEDERATION_ROOTFS:-}"; init="${WASPFLOW_FEDERATION_GUEST_INIT:-}"
+  [[ -n "$kernel" && -f "$kernel" ]] || reasons+=("WASPFLOW_FEDERATION_KERNEL is not a readable pinned kernel image")
+  [[ -n "$rootfs" && -f "$rootfs" ]] || reasons+=("WASPFLOW_FEDERATION_ROOTFS is not a readable runner-owned rootfs image")
+  [[ -n "$init" && -x "$init" ]] || reasons+=("WASPFLOW_FEDERATION_GUEST_INIT is not an executable runner-owned guest init")
+  [[ -n "$FIREWALL_HELPER" && -x "$FIREWALL_HELPER" ]] || reasons+=("WASPFLOW_FEDERATION_FIREWALL_HELPER is not an executable host/LAN-deny firewall helper")
+  local asset env_path expected
+  for asset in kernel rootfs guest_init firewall_helper; do
+    case "$asset" in
+      kernel) env_path="$kernel" ;;
+      rootfs) env_path="$rootfs" ;;
+      guest_init) env_path="$init" ;;
+      firewall_helper) env_path="$FIREWALL_HELPER" ;;
+    esac
+    expected="$(jq -r ".firecracker.${asset}_sha256" "$PROFILE")"
+    [[ "$expected" =~ ^[a-f0-9]{64}$ ]] || { reasons+=("profile does not pin ${asset}_sha256"); continue; }
+    [[ -f "$env_path" && "$(digest_file "$env_path")" == "$expected" ]] || reasons+=("${asset} digest does not match immutable profile")
+  done
+  ((${#reasons[@]} == 0)) || { printf '%s\n' "${reasons[@]}" >&2; return 1; }
+}
+cmd_inspect() { require_profile; require_cas; [[ $# == 1 ]] || die 'usage: inspect-artifact <digest>'; local p; p="$(verify_artifact "$1")"; validate_archive "$p"; jq -cn --arg digest "$1" --arg profile_digest "$(profile_digest)" --argjson limits "$(profile_limits)" '{status:"accepted",digest:$digest,profile_digest:$profile_digest,limits:$limits}'; }
+cmd_preflight() {
+  require_profile; require_cas; [[ $# == 1 ]] || die 'usage: preflight <task-digest>'
+  local p source prompt; p="$(verify_artifact "$1")"; validate_task "$p"
+  source="$(verify_artifact "$(jq -r .source_digest "$p")")"; prompt="$(verify_artifact "$(jq -r .prompt_digest "$p")")"
+  validate_archive "$source"; validate_archive "$prompt"
+  printf '%s\n' 'preflight request accepted; a real Firecracker backend is required to run the immutable oracle'
+}
+cmd_launch_plan() {
+  require_profile; require_cas; [[ $# == 2 ]] || die 'usage: launch-plan <task-digest> <claim-file>'
+  local task claim; task="$(verify_artifact "$1")"; claim="$2"; [[ -r "$claim" ]] || die "claim file is unreadable"; validate_task "$task"
+  jq -e 'type == "object" and ([keys[]] - ["claim_id","task_digest","gateway_ref","route","key_file","expires_at"]) == [] and (.claim_id|type == "string" and test("^[A-Za-z0-9._-]+$")) and (.key_file|type == "string") and (.expires_at|type == "string")' "$claim" >/dev/null || die "claim capability schema invalid"
+  [[ "$(jq -r .task_digest "$claim")" == "$1" ]] || die "claim is not bound to this task"
+  [[ "$(jq -r .gateway_ref "$claim")" == "$(jq -r .gateway_ref "$task")" && "$(jq -r .route "$claim")" == "$(jq -r .route "$task")" ]] || die "claim gateway or route does not match task"
+  [[ -f "$(jq -r .key_file "$claim")" ]] || die "claim owner key file is not regular"
+  [[ $(( $(stat -c '%a' -- "$(jq -r .key_file "$claim")") % 100 )) -eq 0 ]] || die "claim owner key file is group/world readable"
+  [[ "$(date -d "$(jq -r .expires_at "$claim")" +%s 2>/dev/null || echo 0)" -gt "$(date +%s)" ]] || die "claim capability is expired"
+  # The guest sees only this public sentinel. Claim, gateway, route, and key are launch-bound host state.
+  jq -cn --arg task "$1" --arg claim "$(jq -r .claim_id "$claim")" --arg profile_digest "$(profile_digest)" --arg sentinel 'wf-vm-launch-bound-sentinel' --argjson limits "$(profile_limits)" '{task_digest:$task,claim_id:$claim,profile_digest:$profile_digest,guest_auth_sentinel:$sentinel,limits:$limits,guest_selectors:false}'
+}
+cmd_execute() {
+  require_profile; require_cas; [[ $# == 2 ]] || die 'usage: execute <task-digest> <claim-file>'
+  cmd_launch_plan "$1" "$2" >/dev/null
+  [[ -n "$RUNTIME" && -d "$RUNTIME" ]] || die "WASPFLOW_FEDERATION_RUNTIME_DIR must be an executor-owned runtime directory"
+  backend_blocker || die "Firecracker backend unavailable; refusing namespace/container fallback"
+  die "Firecracker host integration is not wired: guest image must expose the pinned vsock agent and firewall helper must create the per-VM TAP policy"
+}
+cmd_compat_plan() {
+  require_profile; [[ $# == 1 ]] || die 'usage: compatibility-plan <claude|codex>'
+  case "$1" in
+    claude) jq -cn '{harness:"claude",transport:"injector-vsock",required_env:{ANTHROPIC_BASE_URL:"http://vsock-injector/v1",ANTHROPIC_API_KEY:"wf-vm-launch-bound-sentinel"},must_reject:["provider API key","direct DNS","model override","admin endpoints"]}' ;;
+    codex) jq -cn '{harness:"codex",transport:"injector-vsock",required_env:{OPENAI_BASE_URL:"http://vsock-injector/v1",OPENAI_API_KEY:"wf-vm-launch-bound-sentinel"},must_reject:["provider API key","direct DNS","model override","admin endpoints"]}' ;;
+    *) die 'compatibility harness must be claude or codex' ;;
+  esac
+}
+case "${1:-}" in
+  inspect-artifact) shift; cmd_inspect "$@" ;;
+  preflight) shift; cmd_preflight "$@" ;;
+  launch-plan) shift; cmd_launch_plan "$@" ;;
+  execute) shift; cmd_execute "$@" ;;
+  compatibility-plan) shift; cmd_compat_plan "$@" ;;
+  profile) require_profile; jq -cn --arg digest "$(profile_digest)" --argjson profile "$(cat "$PROFILE")" '{digest:$digest,profile:$profile}' ;;
+  *) die 'usage: {profile|inspect-artifact|preflight|launch-plan|execute|compatibility-plan}' ;;
+esac

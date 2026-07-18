@@ -1,0 +1,85 @@
+#!/usr/bin/env node
+/*
+ * Per-VM credential injector. It is deliberately a small host-side process:
+ * one launch config, one owner key, one gateway/route, one Unix socket. A
+ * guest cannot select a claim, gateway, route, key, or upstream destination.
+ */
+'use strict';
+
+const fs = require('node:fs');
+const http = require('node:http');
+const https = require('node:https');
+
+function fail(message) { process.stderr.write(`federation-injector: ${message}\n`); process.exit(1); }
+function readJson(file) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { fail(`invalid JSON: ${file}`); } }
+function isObject(value) { return value && typeof value === 'object' && !Array.isArray(value); }
+function ownKeysExactly(value, allowed) { return isObject(value) && Object.keys(value).every((key) => allowed.includes(key)); }
+
+function loadLaunchConfig(file) {
+  const config = readJson(file);
+  if (!ownKeysExactly(config, ['claim_id', 'task_digest', 'gateway_ref', 'route', 'key_file', 'expires_at', 'socket', 'max_requests', 'max_body_bytes', 'max_concurrent'])) fail('launch config has unsupported fields');
+  for (const key of ['claim_id', 'task_digest', 'gateway_ref', 'route', 'key_file', 'expires_at', 'socket']) if (typeof config[key] !== 'string' || config[key] === '') fail(`launch config field ${key} is required`);
+  for (const key of ['max_requests', 'max_body_bytes', 'max_concurrent']) if (!Number.isInteger(config[key]) || config[key] <= 0) fail(`launch config field ${key} must be a positive integer`);
+  if (!/^[A-Za-z0-9._-]+$/.test(config.claim_id) || !/^[a-f0-9]{64}$/.test(config.task_digest) || !/^[A-Za-z0-9._-]+$/.test(config.gateway_ref) || !/^[A-Za-z0-9._-]+$/.test(config.route)) fail('launch config identifiers are invalid');
+  const expiry = Date.parse(config.expires_at);
+  if (!Number.isFinite(expiry) || expiry <= Date.now()) fail('launch capability is expired');
+  const stat = fs.statSync(config.key_file);
+  if ((stat.mode & 0o077) !== 0) fail('owner key file must not be group/world readable');
+  const key = fs.readFileSync(config.key_file, 'utf8').trim();
+  if (!key) fail('owner key file is empty');
+  return { config, key };
+}
+
+function loadGateway(file, ref, route) {
+  const registry = readJson(file);
+  if (!isObject(registry) || !isObject(registry.gateways) || !isObject(registry.gateways[ref])) fail('gateway reference is not registered');
+  const gateway = registry.gateways[ref];
+  if (!ownKeysExactly(gateway, ['url', 'routes'])) fail('gateway registry entry has unsupported fields');
+  if (typeof gateway.url !== 'string' || !gateway.url.startsWith('https://')) fail('gateway endpoint must use https');
+  if (!isObject(gateway.routes) || !isObject(gateway.routes[route]) || typeof gateway.routes[route].model !== 'string') fail('gateway route is not registered');
+  const endpoint = new URL(gateway.url);
+  if (endpoint.username || endpoint.password || !endpoint.hostname) fail('gateway URL is invalid');
+  return { endpoint, model: gateway.routes[route].model };
+}
+
+function permittedPath(method, requestPath) {
+  return method === 'POST' && ['/v1/messages', '/v1/responses', '/v1/chat/completions'].includes(requestPath);
+}
+function forbiddenHeaders(headers) {
+  return ['host', 'x-waspflow-claim', 'x-waspflow-gateway', 'x-waspflow-route', 'x-waspflow-upstream', 'proxy-authorization'].some((name) => name in headers);
+}
+function start(config, ownerKey, gateway) {
+  let requests = 0;
+  let concurrent = 0;
+  try { fs.unlinkSync(config.socket); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const server = http.createServer((request, response) => {
+    const reject = (status, message) => { response.writeHead(status, {'content-type':'application/json'}); response.end(JSON.stringify({error: message})); };
+    if (Date.parse(config.expires_at) <= Date.now()) return reject(401, 'claim_expired');
+    if (!permittedPath(request.method, request.url) || forbiddenHeaders(request.headers)) return reject(403, 'method_or_header_denied');
+    if (request.headers.authorization !== 'Bearer wf-vm-launch-bound-sentinel') return reject(401, 'invalid_guest_sentinel');
+    if (requests >= config.max_requests || concurrent >= config.max_concurrent) return reject(429, 'launch_limit_exceeded');
+    const chunks = []; let total = 0;
+    request.on('data', (chunk) => { total += chunk.length; if (total > config.max_body_bytes) request.destroy(); else chunks.push(chunk); });
+    request.on('error', () => reject(413, 'body_too_large'));
+    request.on('end', () => {
+      if (total > config.max_body_bytes) return reject(413, 'body_too_large');
+      let body;
+      try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return reject(400, 'json_required'); }
+      if (!isObject(body) || (body.model !== undefined && body.model !== gateway.model)) return reject(403, 'model_override_denied');
+      body.model = gateway.model;
+      requests++; concurrent++;
+      const upstream = https.request({
+        protocol: gateway.endpoint.protocol, hostname: gateway.endpoint.hostname, port: gateway.endpoint.port || 443,
+        path: request.url, method: 'POST', headers: {'authorization': `Bearer ${ownerKey}`, 'content-type':'application/json', 'content-length': Buffer.byteLength(JSON.stringify(body)), 'x-waspflow-claim': config.claim_id, 'x-waspflow-task': config.task_digest}
+      }, (upstreamResponse) => { response.writeHead(upstreamResponse.statusCode || 502, upstreamResponse.headers); upstreamResponse.pipe(response); upstreamResponse.on('end', () => { concurrent--; }); });
+      upstream.on('error', () => { concurrent--; reject(502, 'gateway_unavailable'); });
+      upstream.end(JSON.stringify(body));
+    });
+  });
+  server.listen(config.socket, () => { fs.chmodSync(config.socket, 0o600); process.stdout.write(JSON.stringify({status:'ready', socket:config.socket, claim_id:config.claim_id, gateway_ref:config.gateway_ref, route:config.route, key_exposed_to_guest:false}) + '\n'); });
+}
+
+const [verb, ...args] = process.argv.slice(2);
+if (verb === 'check-config' && args.length === 2) { const {config, key} = loadLaunchConfig(args[0]); loadGateway(args[1], config.gateway_ref, config.route); process.stdout.write(JSON.stringify({status:'valid', claim_id:config.claim_id, key_exposed_to_guest:false, key_bytes:key.length}) + '\n'); }
+else if (verb === 'serve' && args.length === 2) { const {config, key} = loadLaunchConfig(args[0]); start(config, key, loadGateway(args[1], config.gateway_ref, config.route)); }
+else fail('usage: {check-config|serve} <launch-config.json> <gateway-registry.json>');
