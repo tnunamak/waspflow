@@ -2,8 +2,45 @@
 
 **Date:** 2026-07-18
 **Candidate branch:** `waspflow/federation-v0-orchestrator`
-**Candidate before this report:** `1972d38`
-**Verdict:** **BLOCKED / REJECT — not release-ready and not merge-ready as Federation v0**
+**Continuation checkpoint base:** `d76b392`
+**Verdict:** **PAUSED / BLOCKED — quota stop-line enforced before continuation work**
+
+## 2026-07-18 paced continuation checkpoint
+
+Tim directed the build to continue, but also imposed a hard fleet rule: check
+Clawmeter before every worker spawn and do not spawn when the Codex seven-day
+estimate-at-reset is at or above 90%. The pre-spawn check reported:
+
+```text
+Codex 7d: current 21%; projected at reset 192.1%; runs out 3d8h early
+Claude 7d All: current 38%; projected at reset 145.8%; runs out 2d4h early
+```
+
+No continuation worker was spawned and no pay-as-you-go API billing was
+substituted for the quota ceiling. The branch remains at the previously verified
+security checkpoint except for this report update.
+
+Work must resume, serially, only after Codex projects below 90%:
+
+1. A Luna maker should wire the complete integrated Firecracker lifecycle:
+   validate the signed task, create per-run disks/network/cgroups, boot KVM,
+   execute through guest init, collect bounded output, and destroy every host
+   resource on success, failure, signal, and timeout. Absence of Firecracker or
+   KVM must fail closed with no alternate containment backend.
+2. Reuse that warm maker lane to implement and prove TAP/NAT egress. The guest
+   must fetch a public Internet endpoint while host addresses, RFC 1918 ranges,
+   link-local/cloud metadata, LAN routes, and alternate-interface bypasses are
+   denied. Cleanup must remove the TAP, forwarding, and firewall state.
+3. Complete the remaining integrated §B.3.5 fixtures: hostile policy-field
+   rejection, host secrets and cross-run isolation, credential injection and
+   revocation, fork/memory/disk/inode/log/time bombs, archive escapes,
+   destroy/recreate, real Pi/Claude/Codex gateway journeys, resource
+   measurements, asset/profile digests, and a clean-host rerun.
+4. Only after maker evidence passes, spawn a distinct security judge arm to run
+   the real-Firecracker command independently from the exact candidate commit
+   and write its own PASS/FAIL artifact. A maker report is not acceptance.
+5. If and only if the integrated and independent gates pass, replace this
+   paused verdict with the evidence-backed release verdict and open the PR.
 
 ## Protected invariant and stop decision
 
@@ -176,12 +213,15 @@ stable permanent seam.
 3. **No merge-ready PR.** Opening or presenting this as Federation v0 would
    launder a blocked state into progress. The partial components remain on the
    feature branch for diagnosis/reuse only.
-4. **Budget projection exceeded.** Clawmeter started at Codex 4% used and an
-   estimated 60% at reset. It reached 87% after the maker fleet and 99% during
-   the independent Sol judge, exceeding the requested under-90% projection.
+4. **Budget projection exceeded and continuation paused.** Clawmeter started at
+   Codex 4% used and an estimated 60% at reset. It reached 87% after the maker
+   fleet and 99% during the independent Sol judge, exceeding the requested
+   under-90% projection.
    The judge was interrupted immediately; no model downgrade was accepted and
-   no further worker calls were made. This pacing failure is explicit rather
-   than hidden.
+   no further worker calls were made. On the requested continuation, the
+   pre-spawn reading was 21% used and 192.1% projected at reset. The hard 90%
+   stop-line therefore prevented every new maker or judge spawn. This pacing
+   failure and clean pause are explicit rather than hidden.
 5. **Docker helper use.** Docker was used as a privileged ephemeral host setup
    wrapper for the one-off Firecracker probes, never as the hostile-code
    boundary. That probe does not substitute for the missing checked-in runner
@@ -226,7 +266,7 @@ Internet probe, incompatible signed-task/runner schemas, and absence of most
 required fixtures. There is **no positive confidence claim** for the bettable
 containment invariant.
 
-**Release decision: BLOCKED / REJECT.** The smallest truthful next milestone is
+**Release decision: PAUSED / BLOCKED.** The smallest truthful next milestone is
 a single checked-in command that boots the wired Firecracker runner and produces
 an expected-vs-observed report for Internet success plus host/LAN denial, with
 resource and destroy/recreate fixtures. Until the full matrix and independent
