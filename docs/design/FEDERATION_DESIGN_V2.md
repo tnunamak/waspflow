@@ -1,6 +1,11 @@
 # Federation v2 — Hostile-Code-First Two-Tier Design
 
 **Status:** Revised design proposal; build against Tier B only.
+**v0 scope (2026-07-18): see `FEDERATION_V0_SCOPE.md` — it WINS for the first cut.**
+Owner steer: keep Firecracker + gateway + signed envelope; DEFER escrow/credit and
+author-side re-verification (additive later); network is host/LAN-blocked but
+internet-ALLOWED (tasks need egress; exfiltration out of v0 threat model); open-harness
+scope includes Claude/Codex CLIs pointed at other models via the gateway.
 **Date:** 2026-07-16.
 **Supersedes:** `FEDERATION_DESIGN.md`.
 **Credential-substrate revision:** v2 now uses owner-operated Claude/Codex-compatible
