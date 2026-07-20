@@ -3,12 +3,50 @@
 **Date:** 2026-07-20
 **Branch:** `waspflow/fedv0-docker-backend` (child of `feat/federation-v0`)
 **Source of truth:** `inbox/2026-07-20-chatgpt-sandbox.md` (the "Runtime Decision" note)
-**Verdict:** **Federation Preview, mechanism-complete, install UX complete, security-gates
-unproven.** Merge-ready as a gated preview backend behind an operator-run live conformance pass.
-**Not** ready to accept stranger-submitted jobs — no graduation gate that requires a real `sbx`
-sandbox has been exercised. **Owner handoff:** three specific commands need a real `sbx` install to
-close the remaining gates — see "Owner handoff: closing the live gates" below for exactly what to
-run and where to hand the baton back.
+**Verdict:** **Federation Preview, mechanism-complete, install UX complete, detector fixed against
+real sbx, security-gates still unproven.** Merge-ready as a gated preview backend behind an
+operator-run live conformance pass. **Not** ready to accept stranger-submitted jobs — no graduation
+gate that requires a real `sbx` sandbox has been exercised. **Owner handoff:** two per-harness
+auth-proof and conformance-suite commands remain, now un-blocked by a real install — see "Owner
+handoff: closing the live gates" below.
+
+## Owner UAT findings and fixes (2026-07-20, real sbx v0.35.0)
+
+The owner installed a real `sbx` (v0.35.0, `/usr/bin/sbx`, authenticated as `timvana`) and found
+two real defects by running the mechanism against it — exactly the value the owner-handoff
+checkpoint was designed to surface. Both reproduced and fixed in this revision:
+
+**Defect 1 (blocker) — `bin/federation-detect-sbx` probed a flag that doesn't exist.** It ran `sbx
+--version`, but `sbx` has no `--version` flag: `sbx --version` → `ERROR: unknown flag: --version`,
+exit 1. The detector's `status !== 0 → available:false` logic then falsely reported "sbx not found
+on PATH" even though sbx was installed, authenticated, and on PATH. **This would have made the
+install UX built in the prior revision lie to every real user** — `waspflow doctor` and
+`federation-install-sbx`'s "already installed" branch would both have misreported a working sbx
+install as absent. Fixed: the detector now probes the `version` SUBCOMMAND (`sbx version` →
+`sbx version: v0.35.0 <sha>`, exit 0 — confirmed against the real install on this machine, not
+just the owner's report) and treats `spawnSync`'s own `ENOENT` as the only signal for "truly
+absent" — a present binary that errors or returns unparseable output on `version` is reported as
+present-with-a-parse-failure, never as not-found. Added `tests/federation-detect-sbx.sh` with the
+exact regression case (a stub that rejects `--version` and accepts `version`, matching the real
+sbx v0.35.0 shape byte-for-byte) plus two adjacent cases (present-but-broken-for-another-reason;
+truly-absent via ENOENT) so this class of bug cannot silently return. Re-verified against the real
+`sbx` binary now installed on this machine: `bin/federation-detect-sbx` correctly reports
+`sbx detected: version 0.35.0`, and `waspflow doctor` reports the matching `[ok]` line.
+
+**Defect 2 (friction) — the Linux apt install command wasn't non-interactive.** README's
+`sudo apt-get install docker-sbx` and the identical line in this report's "Owner handoff" section
+were missing `-y`, so a copy-pasted install would stop and wait for a confirmation keypress —
+low-friction was an explicit design goal for this install UX. `bin/federation-install-sbx` already
+had `-y` (correct from the prior revision); fixed the two doc copies to match. Added a
+`scripts/verify.sh` structural assertion that greps all three locations
+(`README.md`, `bin/federation-install-sbx`, this report) for any non-`-y` `apt-get install
+docker-sbx` line — verified it fails when the flag is removed and passes on the fixed source, so
+this specific friction regression is now caught automatically.
+
+Per the owner's note, `sbx diagnose` exists for deeper install-health checks beyond a bare version
+probe (daemon/`sandboxd` reachability etc) — flagged as a documented follow-up in
+`bin/federation-detect-sbx`'s header comment, not built now, per the explicit "keep fixes minimal,
+don't rebuild anything" instruction.
 
 ## What changed and why
 
@@ -35,7 +73,7 @@ real today, versus what is real, runnable code correctly waiting on a live sandb
 | Backend-neutral `SandboxBackend` interface + `ValidatedJobSpec` | `lib/federation-runtime.mjs` | Built, unit-tested (30 tests), independently reproduced |
 | `DockerSbxBackend` (mechanism over the `sbx` CLI) | `lib/federation-docker-backend.mjs` | Built, unit-tested (14 tests, 1 honest skip), independently reproduced |
 | Credential/state hygiene proof | `tests/federation-docker-hygiene.test.mjs` | Built, unit-tested (4 tests), independently reproduced |
-| `sbx` installer/detection stub | `bin/federation-detect-sbx`, `profiles/wf-federation-docker-v0.json` | Built, exercised in the "absent" branch (the only branch reachable here) |
+| `sbx` installer/detection stub | `bin/federation-detect-sbx`, `profiles/wf-federation-docker-v0.json`, `tests/federation-detect-sbx.sh` | Built, fixed after owner UAT found a real detection bug (probed a nonexistent `--version` flag), re-verified against a real `sbx` v0.35.0 install on this machine — see "Owner UAT findings and fixes" |
 | Graduation-gate conformance suite (A-J) | `tests/federation-docker-conformance.sh`, `docs/design/FEDERATION_V0_CONFORMANCE_MATRIX.md`, `scripts/federation-conformance-live-run.sh` | Built, 2/10 gates pass for real (H, I), 8/10 correctly SKIP pending a live sandbox (gate J's suite-recorded status is SKIP — see below for why its static half is nonetheless proven) |
 | Backend-neutral `HarnessSpec` (6 explicit auth strategies) | `lib/federation-harness-spec.mjs` | Built, unit-tested (13 tests), including an adversarial "CORE SAFETY CHECK" proving a spec cannot claim docker-builtin refresh under a strategy that structurally can't provide it |
 | 3 concrete harness classifications (Codex, Claude Code, gh-cli) | `lib/federation-harnesses.mjs`, `kits/wf-gh-cli.kit.yaml` | Built, unit-tested (6 tests), each independently classified against Docker docs/issues, not assumed identical |
@@ -437,13 +475,15 @@ built on.** The mechanism, install UX, and every gate/proof that can run without
 done and verified (see above). This is the exact, minimal set of commands for the owner to run to
 close the remaining gates, and where to hand the baton back.
 
-**Owner: run these three, in order, on a machine you're willing to install `sbx` on:**
+**Status: step 1 is already done.** The owner's real `sbx` v0.35.0 install (found the two defects
+fixed above) means steps 2 and 3 below are the only remaining commands:
 
 ```bash
-# 1. Install sbx (or let `install.sh` attempt it automatically first)
+# 1. DONE — sbx v0.35.0 is installed and authenticated (found the two defects this
+#    revision fixes). If starting fresh on another machine:
 brew tap docker/tap && brew install docker/tap/sbx   # macOS
 # or, Linux (apt-based):
-curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh && sudo apt-get install docker-sbx
+curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh && sudo apt-get install -y docker-sbx
 sudo usermod -aG kvm $USER && newgrp kvm
 sbx login
 

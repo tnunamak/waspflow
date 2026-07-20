@@ -7,6 +7,11 @@
 // Waspflow does not yet have redistribution rights (§"Commercial use is
 // allowed; redistribution is not established"). Absent `sbx` is reported with
 // a pointer to Docker's own installer.
+//
+// Follow-up (not built here, deliberately kept minimal per owner steer after
+// real-sbx UAT): `sbx diagnose` exists for deeper install-health checks
+// (daemon/sandboxd reachability etc, beyond a bare version check) and could
+// back a `--deep`/`--diagnose` flag on this tool later.
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -40,14 +45,26 @@ function compareVersions(a, b) {
   return 0;
 }
 
+// `sbx` has no `--version` FLAG (`sbx --version` -> "ERROR: unknown flag:
+// --version", exit 1) — the real interface is the `version` SUBCOMMAND
+// ("sbx version: v0.35.0 <sha>", exit 0). Confirmed against a real sbx
+// v0.35.0 install. `spawnSync`'s own ENOENT (binary truly absent, not
+// spawnable at all) is the only signal that means "not found" — a nonzero
+// exit or unparseable output from a binary that DID spawn means present but
+// erroring/unparseable, never absence. This distinction is exactly defect 1:
+// probing an unrecognized flag/subcommand must never be read as "not found
+// on PATH."
 function detect() {
   let result;
   try {
-    result = spawnSync('sbx', ['--version'], { encoding: 'utf8' });
-  } catch {
-    result = null;
+    result = spawnSync('sbx', ['version'], { encoding: 'utf8' });
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return { available: false };
+    throw error;
   }
-  if (!result || result.error || result.status !== 0) {
+  if (result.error) {
+    if (result.error.code === 'ENOENT') return { available: false };
+    // Some other failure to spawn at all (e.g. EACCES) — still not "found and runnable".
     return { available: false };
   }
   const raw = `${result.stdout ?? ''}${result.stderr ?? ''}`.trim();

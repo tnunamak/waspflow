@@ -46,7 +46,7 @@ brew tap docker/tap && brew install docker/tap/sbx && sbx login
 
 # Linux (apt-based)
 curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh
-sudo apt-get install docker-sbx
+sudo apt-get install -y docker-sbx
 sudo usermod -aG kvm $USER && newgrp kvm
 sbx login
 ```
