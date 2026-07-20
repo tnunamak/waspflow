@@ -16,3 +16,7 @@ esac
 
 echo
 "$root/bin/waspflow" doctor || true
+
+echo
+echo "Federation Preview (Docker Sandboxes backend):"
+"$root/bin/federation-install-sbx" || true

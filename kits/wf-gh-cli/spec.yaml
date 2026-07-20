@@ -1,0 +1,81 @@
+# Waspflow-authored custom sbx kit — extensibility proof (not a built-in agent).
+#
+# Purpose: prove HarnessSpec/DockerSbxBackend extends past the two Docker-curated
+# built-in agent templates (codex, claude) to an arbitrary custom harness, using
+# Docker Sandboxes' documented kit credential-injection mechanism
+# (docs.docker.com/ai/sandboxes/customize/kit-reference/) rather than a
+# Waspflow-built gateway.
+#
+# Harness: GitHub CLI (`gh`). Chosen deliberately because its credential (a
+# Personal Access Token via GH_TOKEN) is STATIC — it does not self-refresh or
+# rewrite itself the way Codex's auth.json does. This is the auth_strategy this
+# kit is honestly suited for: host-env-proxy. It is NOT a proof that arbitrary
+# refreshing-OAuth harnesses can be onboarded this way — that remains
+# 'host-auth-adapter-required' territory (see lib/federation-harness-spec.mjs).
+#
+# File location/schema confirmed against the REAL sbx CLI (`sbx kit validate`),
+# not assumed: the manifest file must be named exactly spec.yaml inside a kit
+# directory (kits/wf-gh-cli/spec.yaml, not kits/wf-gh-cli.kit.yaml), and
+# schemaVersion is a required top-level field. `sbx kit validate` reports the
+# fields below as valid for schema v1, with deprecation warnings pointing at a
+# newer v2 shape (credentials[].apiKey.inject[] instead of network.serviceAuth/
+# serviceDomains, caps.network.allow instead of network.allowedDomains) — v1 is
+# kept here since it is confirmed working against the installed sbx v0.35.0;
+# migrating to v2 is a documented follow-up, not required for this proof.
+#
+# Invocation (confirmed against a real, detached, immediately-torn-down sbx
+# run): for a `kind: sandbox` kit, the AGENT positional passed to `sbx run`
+# must be this kit's own `name` field ("wf-gh-cli"), not a built-in agent name
+# like `shell` — sbx errors explicitly if they don't match:
+#   sbx run --name <sandbox-name> wf-gh-cli <workspace-path> --kit kits/wf-gh-cli --detached
+schemaVersion: "1"
+kind: sandbox
+name: wf-gh-cli
+displayName: "Waspflow gh-cli extensibility proof"
+description: "GitHub CLI in a Docker Sandbox, static PAT via GH_TOKEN, host-env-proxy auth_strategy"
+
+sandbox:
+  image: "docker/sandbox-templates:shell-docker"
+  entrypoint:
+    run: ["gh"]
+
+network:
+  allowedDomains:
+    - api.github.com
+    - github.com
+    - objects.githubusercontent.com
+  serviceDomains:
+    api.github.com: github
+    github.com: github
+  serviceAuth:
+    github:
+      headerName: Authorization
+      valueFormat: "Bearer %s"
+
+credentials:
+  sources:
+    github:
+      env:
+        - GH_TOKEN
+  # No `file` source declared: GH_TOKEN is deliberately the only source, since
+  # this kit exists to prove the SIMPLEST correct case (host-env-proxy, static
+  # value) rather than to also exercise host-file-proxy's json-parser path.
+
+environment:
+  proxyManaged:
+    - GH_TOKEN
+
+commands:
+  install:
+    - command: "apt-get update && apt-get install -y gh"
+      user: "0"
+      description: "Install GitHub CLI (not baked into the shell-docker base template)"
+
+# Explicit non-goals for this kit (documented so a future reader does not
+# extend it past what was proven):
+#   - Does NOT prove refresh-aware credential handling — GH_TOKEN is static.
+#   - Does NOT prove host-file-proxy's json:<path> parser — a follow-up kit
+#     could add that using a plain-text or JSON-static-field PAT file, but it
+#     would still be a STATIC value, not a refreshing one.
+#   - Scoping the PAT to least privilege (e.g. read-only) is an operator
+#     responsibility when generating the token, not enforced by this kit.

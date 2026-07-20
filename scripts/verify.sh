@@ -15,6 +15,17 @@ scratch="${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}"
 mkdir -p "$scratch"
 
 bash -n "$root/bin/waspflow" "$root"/lib/*.sh "$root"/lib/providers/*.sh
+bash -n "$root/install.sh" "$root/bin/federation-install-sbx"
+
+# Federation install UX: never fails the overall waspflow install, never
+# prompts for a sudo password, and always falls through to the README.
+grep -Fq 'bin/federation-install-sbx" || true' "$root/install.sh"
+grep -Fq 'sudo -n true' "$root/bin/federation-install-sbx"
+grep -Fq 'Install sbx (Docker Sandboxes)' "$root/README.md"
+grep -Fq 'Install sbx (Docker Sandboxes)' "$root/bin/federation-install-sbx"
+# apt-get install must be -y (low-friction, owner UAT defect 2): assert no
+# non-interactive `docker-sbx` install line is missing the flag anywhere.
+! grep -RnE 'apt-get install[^-]*docker-sbx' "$root/README.md" "$root/bin/federation-install-sbx" "$root/docs/design/FEDERATION_V0_UAT_REPORT.md" | grep -v ' -y '
 
 # Codex effort honesty: xhigh must pass through (never clamp xhigh|max → high)
 grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/providers/codex.sh"
@@ -3196,4 +3207,5 @@ JSON
 )
 
 bash "$root/tests/federation-runner.sh"
+bash "$root/tests/federation-detect-sbx.sh"
 echo "waspflow verify: ok"

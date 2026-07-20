@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# federation-install-sbx — attempt an automatic Docker Sandboxes (sbx) install,
+# falling through to clear manual instructions on any platform/permission gap.
+#
+# Called by install.sh at the end of a normal waspflow install (best-effort,
+# never fails the waspflow install itself). Can also be run standalone:
+#   bin/federation-install-sbx
+#
+# Design constraints (owner steer, Federation v0 install UX):
+#   - Never prompt for a sudo password. Only attempt a privileged step when
+#     passwordless sudo is already available (`sudo -n true`), mirroring
+#     clawmeter's own installer gating for its Linux tray dependency.
+#   - Never download or bundle the sbx binary ourselves — always go through
+#     Docker's own officially documented installer (brew/apt/winget), per the
+#     redistribution-rights gap already documented in profiles/wf-federation-
+#     docker-v0.json and docs/design/FEDERATION_V0_UAT_REPORT.md.
+#   - On ANY failure or unsupported platform, fall through to a short,
+#     copy-pasteable message pointing at the README's sbx-install section —
+#     never leave the user with a silent no-op or a wall of text.
+set -uo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+say() { printf '  %s\n' "$*"; }
+warn() { printf '  \033[33mnote:\033[0m %s\n' "$*" >&2; }
+
+fallback_message() {
+  echo
+  say "sbx (Docker Sandboxes) was not installed automatically."
+  say "See the \"Install sbx (Docker Sandboxes)\" section in README.md for a"
+  say "30-second manual install, or run: bin/federation-detect-sbx"
+}
+
+already_installed() {
+  command -v sbx >/dev/null 2>&1
+}
+
+if already_installed; then
+  say "sbx already on PATH — skipping auto-install."
+  exec "$root/bin/federation-detect-sbx"
+fi
+
+os="$(uname -s)"
+case "$os" in
+  Darwin)
+    if ! command -v brew >/dev/null 2>&1; then
+      warn "Homebrew not found — sbx auto-install requires it on macOS."
+      fallback_message
+      exit 0
+    fi
+    say "Installing sbx via Homebrew (brew tap docker/tap && brew install docker/tap/sbx)..."
+    if brew tap docker/tap >/dev/null 2>&1 && brew install docker/tap/sbx; then
+      say "sbx installed. Run 'sbx login' once to authenticate (opens a browser)."
+      exec "$root/bin/federation-detect-sbx"
+    else
+      warn "Homebrew install failed."
+      fallback_message
+      exit 0
+    fi
+    ;;
+  Linux)
+    if ! sudo -n true 2>/dev/null; then
+      warn "sbx auto-install on Linux needs passwordless sudo (adds Docker's apt"
+      warn "repo, installs docker-sbx, and adds you to the kvm group); none is"
+      warn "configured here, so we will not prompt for a password mid-install."
+      fallback_message
+      exit 0
+    fi
+    if ! command -v apt-get >/dev/null 2>&1; then
+      warn "sbx auto-install currently only supports apt-based Linux."
+      fallback_message
+      exit 0
+    fi
+    say "Installing sbx via Docker's apt repository (requires passwordless sudo)..."
+    if curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh >/dev/null 2>&1 \
+      && sudo apt-get install -y docker-sbx >/dev/null 2>&1; then
+      sudo usermod -aG kvm "$USER" 2>/dev/null || true
+      say "sbx installed."
+      say "IMPORTANT: log out and back in (or run 'newgrp kvm') for KVM group"
+      say "access to take effect, then run 'sbx login' once to authenticate."
+      exec "$root/bin/federation-detect-sbx"
+    else
+      warn "apt-based sbx install failed."
+      fallback_message
+      exit 0
+    fi
+    ;;
+  *)
+    warn "sbx auto-install is not supported on $os yet (macOS and Linux only)."
+    fallback_message
+    exit 0
+    ;;
+esac
