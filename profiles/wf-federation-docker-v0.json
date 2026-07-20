@@ -1,0 +1,11 @@
+{
+  "profile": "wf-federation-docker-v0",
+  "profile_version": 1,
+  "_owner_review_required": "The sbx version range below is UNREVIEWED. Only a floor is pinned (the version mentioned in the 2026-07-20 decision note, docs.docker.com/ai/sandboxes/release-notes as of that date). Do not add an upper bound without deliberately re-running the adversarial conformance suite (decision note §H) against the candidate release and getting owner sign-off. Do not treat this file as a graduation gate pass — see docs/design/federation-evidence/HYGIENE_DETECTION_MAKER_REPORT.md.",
+  "sbx": {
+    "min_version": "0.35.0",
+    "max_version": null,
+    "version_source": "inbox/2026-07-20-chatgpt-sandbox.md, as of 2026-07-10 release",
+    "conformance_suite_passed": false
+  }
+}
