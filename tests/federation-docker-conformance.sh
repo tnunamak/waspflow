@@ -378,42 +378,63 @@ gate_i_legal_product_confirmation() {
 gate_j_native_auth_no_custom_gateway() {
   local name="J: native Docker auth substrate, no custom gateway"
   local backend="$root/lib/federation-docker-backend.mjs"
+  local harnesses="$root/lib/federation-harnesses.mjs"
   if [[ ! -f "$backend" ]]; then
     record "$name" SKIP "lib/federation-docker-backend.mjs does not exist in this checkout"
     return
   fi
 
+  # Code-shaped patterns only (an assignment, string literal used as a value,
+  # or env-var name), not bare English words — this file's own doc comments
+  # legitimately discuss "not a Waspflow-built gateway" and Anthropic's own
+  # documented ANTHROPIC_AUTH_TOKEN gateway auth mode as PROSE, which must not
+  # trip this guard. The guard's job is to catch CODE that implements or
+  # configures a custom gateway/base-URL, not comments that discuss the
+  # concept in order to correctly rule it out.
   local forbidden_patterns=(
-    'ANTHROPIC_BASE_URL' 'OPENAI_BASE_URL' 'base_url' 'baseURL'
-    'gateway' 'openai-compatible' 'OpenAI-compatible'
+    'ANTHROPIC_BASE_URL' 'OPENAI_BASE_URL'                # real env vars: any reference is code-relevant
+    '[a-zA-Z_]*[bB]ase_?[uU]rl[a-zA-Z_]*\s*[:=]'          # an assignment/field like base_url: or baseURL =
+    '(new\s+)?[a-zA-Z_]*[gG]ateway[a-zA-Z_]*\s*\('        # a constructor/function call shaped like *Gateway(...)
+    "['\"]openai-compatible['\"]"                          # a string literal value, not the word in prose
   )
-  local hit=0 pattern
+  local hit=0 pattern check_files=("$backend")
+  [[ -f "$harnesses" ]] && check_files+=("$harnesses")
   for pattern in "${forbidden_patterns[@]}"; do
-    if grep -qiE -- "$pattern" "$backend"; then
-      echo "  found forbidden pattern in backend source: $pattern"
-      hit=1
-    fi
+    for f in "${check_files[@]}"; do
+      if grep -qE -- "$pattern" "$f"; then
+        echo "  found forbidden pattern in $(basename "$f"): $pattern"
+        hit=1
+      fi
+    done
   done
   if [[ "$hit" -eq 1 ]]; then
-    record "$name" FAIL "lib/federation-docker-backend.mjs references a custom gateway/base-URL/proxy pattern — v0 must rely on sbx's own native OAuth/credential proxy for Codex and Claude, not a Waspflow-built substitute"
+    record "$name" FAIL "backend/harness source references a custom gateway/base-URL/proxy pattern — v0 must rely on sbx's own native OAuth/credential proxy or its documented kit credential-injection mechanism, not a Waspflow-built substitute"
     return
   fi
 
-  local proof_script="$root/scripts/federation-auth-proof-live-run.sh"
+  local proof_script="$root/scripts/federation-harness-auth-proof-live-run.sh"
   if [[ ! -x "$proof_script" ]]; then
-    record "$name" FAIL "backend source is clean of custom-gateway patterns, but scripts/federation-auth-proof-live-run.sh (the owner-run live proof for native sbx OAuth) is missing or not executable"
+    record "$name" FAIL "backend/harness source is clean of custom-gateway patterns, but scripts/federation-harness-auth-proof-live-run.sh (the owner-run, HarnessSpec-driven live proof) is missing or not executable"
     return
   fi
   if ! bash -n "$proof_script"; then
-    record "$name" FAIL "scripts/federation-auth-proof-live-run.sh has a syntax error"
+    record "$name" FAIL "scripts/federation-harness-auth-proof-live-run.sh has a syntax error"
+    return
+  fi
+  if [[ ! -f "$harnesses" ]]; then
+    record "$name" FAIL "lib/federation-harnesses.mjs (the three HarnessSpec instances: codex, claude-code, gh-cli) does not exist"
+    return
+  fi
+  if ! node --check "$harnesses" 2>/dev/null; then
+    record "$name" FAIL "lib/federation-harnesses.mjs has a syntax error"
     return
   fi
 
   if ! have_sbx; then
-    record "$name" SKIP "sbx not installed — backend source contains no custom-gateway pattern (static check passes) and the live auth proof script (scripts/federation-auth-proof-live-run.sh) is present and syntactically valid, but the six numbered live requirements (host-side login, in-sandbox execution, credential-negative guest search, real quota consumption, cancellation, rm-without-credential-loss) require a real sbx install and an interactive OAuth login to exercise"
+    record "$name" SKIP "sbx not installed — backend/harness source contains no custom-gateway pattern (static check passes) and the HarnessSpec-driven live auth proof script is present, syntactically valid, and resolves all three harnesses (codex, claude-code, gh-cli), but the six-column matrix per harness (existing host login | extra login required | credential stays outside VM | refresh works | subscription allowance used | full CLI runs in VM) requires a real sbx install and interactive logins to exercise"
     return
   fi
-  record "$name" SKIP "sbx is installed, but this suite does not run the interactive OAuth login proof automatically — run 'bash scripts/federation-auth-proof-live-run.sh codex' and 'bash scripts/federation-auth-proof-live-run.sh claude' by hand and record results in docs/design/FEDERATION_V0_UAT_REPORT.md"
+  record "$name" SKIP "sbx is installed, but this suite does not run the interactive per-harness auth proofs automatically — run 'bash scripts/federation-harness-auth-proof-live-run.sh {codex|claude-code|gh-cli}' by hand for all three harnesses and record the six-column matrix in docs/design/FEDERATION_V0_UAT_REPORT.md"
 }
 
 # =========================================================================

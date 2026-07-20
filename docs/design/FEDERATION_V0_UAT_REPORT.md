@@ -34,7 +34,9 @@ real today, versus what is real, runnable code correctly waiting on a live sandb
 | Credential/state hygiene proof | `tests/federation-docker-hygiene.test.mjs` | Built, unit-tested (4 tests), independently reproduced |
 | `sbx` installer/detection stub | `bin/federation-detect-sbx`, `profiles/wf-federation-docker-v0.json` | Built, exercised in the "absent" branch (the only branch reachable here) |
 | Graduation-gate conformance suite (A-J) | `tests/federation-docker-conformance.sh`, `docs/design/FEDERATION_V0_CONFORMANCE_MATRIX.md`, `scripts/federation-conformance-live-run.sh` | Built, 2/10 gates pass for real (H, I), 8/10 correctly SKIP pending a live sandbox (gate J's suite-recorded status is SKIP — see below for why its static half is nonetheless proven) |
-| Auth architecture correction + six-point proof harness | `scripts/federation-auth-proof-live-run.sh`, gate J in the conformance suite | Built. Gate J's static regression guard was verified adversarially outside the suite's pass/fail accounting (see "Auth architecture"); the suite itself records gate J as SKIP because its live half — the actual subject of the gate — cannot run here |
+| Backend-neutral `HarnessSpec` (6 explicit auth strategies) | `lib/federation-harness-spec.mjs` | Built, unit-tested (13 tests), including an adversarial "CORE SAFETY CHECK" proving a spec cannot claim docker-builtin refresh under a strategy that structurally can't provide it |
+| 3 concrete harness classifications (Codex, Claude Code, gh-cli) | `lib/federation-harnesses.mjs`, `kits/wf-gh-cli.kit.yaml` | Built, unit-tested (6 tests), each independently classified against Docker docs/issues, not assumed identical |
+| Per-harness six-column auth proof (HarnessSpec-driven) | `scripts/federation-harness-auth-proof-live-run.sh`, gate J in the conformance suite | Built, syntax-checked, HarnessSpec resolution verified for all 3 harnesses. Gate J's static regression guard was verified adversarially (see "Auth architecture"); the suite itself records gate J as SKIP because its live half — the actual per-harness proof — cannot run here |
 
 All work is layered on `feat/federation-v0` (signed envelope + firewall helper + Firecracker
 runner, all unchanged and kept as documented Linux-native fallback/reference per the note).
@@ -105,72 +107,128 @@ with a live `sbx` install to turn each SKIP into a reproduced PASS or FAIL. Gate
 revision) is a static regression guard plus a pointer to the dedicated auth-architecture live proof
 script; see "Auth architecture" below for the full account.
 
-## Auth architecture (corrected 2026-07-20)
+## Auth architecture (tightened 2026-07-20)
 
-**Correction applied in this revision.** The original plan for this cut assumed Federation jobs
-would authenticate to model providers through *some* credential-injection mechanism, without
-committing to a specific design (the pre-pivot `docs/design/FEDERATION_V0_SCOPE.md` had proposed a
-Waspflow-owned "owner-gateway" — a custom OpenAI-compatible proxy issuing scoped keys). **That
-gateway is explicitly NOT being built for v0.** Docker Sandboxes already ships a host-side
-OAuth/credential proxy for exactly this purpose, and reusing it is strictly less work and less
-attack surface than building and operating a parallel one.
+**This section supersedes an earlier, looser correction in this same report.** The prior revision
+correctly ruled out building a custom Waspflow gateway, but it treated auth as roughly one solved
+case — "Docker's native OAuth proxy keeps Codex/Claude tokens out of the guest" — as if that one
+fact settled both harnesses identically and settled the billing question. It does not. Two specific
+assumptions in that framing were dangerous enough to warrant this rewrite:
 
-### The corrected model
+1. **"Compatible base URL == subscription auth" is false.** A CLI hitting its normal, unmodified
+   provider endpoint tells you nothing about which credential authorized the request. OpenAI's own
+   documentation distinguishes ChatGPT-login (subscription allowance) from API-key auth
+   (usage-billed at standard rates) as two different auth modes the SAME CLI can use — Codex's
+   `codex login status` reports this explicitly as an `auth_mode` field (`apiKey` | `chatgpt` |
+   `chatgptAuthTokens`), and Claude Code's `/status` reports an equivalent "Auth token" field
+   (`CLAUDE_CODE_OAUTH_TOKEN` = subscription vs. `ANTHROPIC_API_KEY` = usage-billed vs.
+   `ANTHROPIC_AUTH_TOKEN` = gateway). **A successful request through a compatible endpoint proves
+   the request worked, not which billing mode paid for it.** This report now requires the CLI's own
+   reported mode as proof, per harness.
+2. **"Reading a host token == OAuth support" is false.** Docker Sandboxes' documented kit mechanism
+   (`credentials.sources`, confirmed via `docs.docker.com/ai/sandboxes/customize/kit-reference/`)
+   supports a `file` source with a `parser: json:<dot.path>` field extractor — this genuinely
+   exists. But an **open Docker feature request**
+   ([`docker/sbx-releases#300`](https://github.com/docker/sbx-releases/issues/300), fetched and
+   read in full during this work) states plainly: *"This works well for static credentials (API
+   keys, PATs). It breaks for OAuth access tokens, which are short-lived (~1h) and must be
+   refreshed... Docker already does this internally [for] the built-in `--oauth` provider logins
+   (Claude Code, Codex)... This request is to make that existing capability user-extensible."*
+   Codex's own `~/.codex/auth.json` is actively refreshed and **rewritten by the Codex process
+   itself** (confirmed via OpenAI's Codex CI/CD documentation, which specifically warns against
+   overwriting a refreshed `auth.json` in automation). A generic `file`/`json:path` credential
+   source pointed at that file would read a **static snapshot at kit-discovery time** — it would
+   NOT participate in Codex's own refresh cycle, and the injected token would go stale in about an
+   hour. **"A token is extractable from a host file" and "the subscription is usable indefinitely"
+   are separate claims; this report never treats the first as proof of the second.**
 
-- **Codex:** the operator runs `sbx secret set -g openai --oauth` once on the host. This opens a
-  host-side browser OAuth flow; Docker's own credential-isolation documentation states the
-  resulting token "never enters the sandbox" and the guest sees only a proxy-managed sentinel
-  (confirmed directly against `docs.docker.com/ai/sandboxes/security/credentials/` during this
-  work — quoted in "Independent verification" below).
-- **Claude Code:** the operator (or the built-in `claude` sandbox template on first run) types
-  `/login` *inside* the sandbox's interactive session. This is the one place the wording could be
-  misread: the login *interaction* happens in-session, but per the same Docker documentation the
-  underlying mechanism is the identical host-side HTTP/HTTPS proxy that "intercepts outbound
-  requests from the sandbox, looks up the matching credential on the host, and overwrites the auth
-  header before forwarding" — the real credential does not become guest-resident just because the
-  command that triggers it was typed in the guest's terminal.
-- **Waspflow's job spec change:** `ValidatedJobSpec.image` for `DockerSbxBackend` in v0 is the
-  **built-in `sbx` agent template name** (`"codex"` or `"claude"`), not a custom Docker image or a
-  gateway endpoint — `sbx run --name <name> <workspace> codex` invokes Docker's own template
-  unmodified. This was already compatible with the existing `lib/federation-runtime.mjs` schema
-  (the `image` field was already a generic string); this revision adds a doc comment making the
-  built-in-template-name convention explicit so a future reader doesn't reintroduce a custom image.
-- **No custom base-URL, no OpenAI-compatible endpoint, no Waspflow gateway** for Codex/Claude in
-  v0. `tests/federation-docker-conformance.sh`'s new **gate J** is a static grep-based regression
-  guard against `lib/federation-docker-backend.mjs` for exactly these patterns
-  (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `gateway`, `OpenAI-compatible`, etc.) — verified
-  adversarially in this session by temporarily injecting a forbidden pattern and confirming the
-  gate flips to FAIL, then removing it and confirming it flips back.
+### Six explicit auth strategies, not one case
 
-### The six-point proof plan and its honest status
+`lib/federation-harness-spec.mjs` defines a `HarnessSpec` schema with an explicit `auth_strategy`
+field, one of six values (`AUTH_STRATEGIES`, enforced structurally — an unrecognized value fails
+validation):
 
-Per the correction, auth must be proven to satisfy six requirements. `scripts/federation-auth-proof-live-run.sh`
-is a new, real, runnable script implementing all six as a single operator-run pass per agent
-(`bash scripts/federation-auth-proof-live-run.sh codex` / `claude`):
-
-| # | Requirement | Status |
+| Strategy | What it means | Who it currently fits |
 | --- | --- | --- |
-| 1 | Login via Docker's documented flow | **Script written, not run.** Prompts for `sbx secret set -g openai --oauth` (Codex) or an in-sandbox `/login` (Claude); requires a real Docker account and interactive browser step this environment cannot perform. |
-| 2 | Codex/Claude executes entirely inside the sandbox | **Script written, not run.** Uses `sbx run --name <n> <scratch> {codex\|claude}` (the built-in template) and confirms via `sbx ls`. |
-| 3 | No reusable OAuth token / host auth dir readable inside the guest | **Script written, not run.** Searches guest env, common credential file paths (`~/.codex/auth.json`, `~/.claude/.credentials.json`, provider config dirs), and `ps aux` for anything that looks like a real token rather than a `proxy-managed`/`sbx-cs-<rand>` sentinel. The script's heuristic is explicitly flagged as non-exhaustive — it can miss a provider-specific token format it wasn't written to recognize; an operator must eyeball the raw output, not trust the grep alone. |
-| 4 | A real task consumes the host owner's subscription allowance | **Script written, not run.** Cannot be verified by the script itself — it can trigger a real task (`codex exec` / `claude --print`) but the operator must manually compare their own quota/usage display before and after, since no external tool can observe another account's billing state. |
-| 5 | Cancellation kills the process and the sandbox | **Script written, not run.** Starts a background sleep in a second sandbox, `sbx stop`s it, and confirms via `sbx ls` that it no longer shows running. |
-| 6 | `sbx rm` destroys guest state without deleting the host credential | **Script written, not run.** Removes the first sandbox, confirms absence via `sbx ls`, then creates a third sandbox and confirms it can authenticate (no fresh login prompt) — proving host-side credential survival across guest teardown. |
+| `docker-native-oauth` | Docker's own built-in `--oauth` login for a small, Docker-curated set of agents. Per `docker/sbx-releases#300`'s own admission, these get privileged host-side token refresh no generic kit source currently exposes. **The only strategy with currently-shipping, Docker-confirmed indefinite refresh.** | Codex, Claude Code |
+| `host-file-proxy` | A kit's `credentials.sources` declares a host **file** + `json:<path>` parser. Correct for a credential a CLI persists **statically**; wrong for one the CLI itself refreshes/rewrites unless proven otherwise. | Not used by any of the three v0 harnesses (available for a future static-file credential) |
+| `host-env-proxy` | A kit declares a host **env var** source. Same static-value scope as `host-file-proxy`. | gh-cli (the extensibility proof) |
+| `docker-stored-secret` | `sbx secret set -g <service>` (non-`--oauth` form) — a secret in the OS keychain, static value. | Not used by any of the three v0 harnesses |
+| `host-auth-adapter-required` | The credential is keychain-held and/or refresh-dependent in a way none of the proxy mechanisms above reach. No solution exists yet short of a purpose-built host-side adapter (the shape `docker/sbx-releases#300` itself requests) — **never** solved by copying a refresh token/client secret/full auth file into the guest. | Not needed by any of the three v0 harnesses; reserved for a future harness that genuinely requires it |
+| `unsupported` | No known strategy applies. Fail closed — Waspflow must not guess. | n/a |
 
-**All six requirements have real, executable proof code. None have been executed against a real
-`sbx` install**, because `sbx` is not installed on this machine and the proof inherently requires
-an interactive, real-account OAuth login this session cannot perform. This is recorded as gate J's
-live half in the conformance matrix, following the same honest-SKIP convention as gates A-G.
+`lib/federation-harness-spec.mjs`'s validator **structurally forbids** the exact dangerous claim
+assumption #2 above describes: a spec using `host-file-proxy` or `host-env-proxy` cannot declare
+`oauth_refresh.refresh_owner: 'docker-builtin'` — attempting to do so throws a `HarnessSpecError`
+citing `docker/sbx-releases#300` by name. This was unit-tested adversarially (`tests/federation-
+harness-spec.test.mjs`, "CORE SAFETY CHECK" test), not just asserted in a comment.
 
-### Gemini: explicitly deferred, not assumed equivalent
+### The three UAT harnesses and their classification
 
-Per the correction, Gemini's Docker Sandboxes auth path is **not** the same durable, host-only
-subscription OAuth flow as Codex/Claude — it is API-key/proxy-managed instead. This means the
-"subscription pooling via native Docker auth" model this section describes does **not** extend to
-Gemini by analogy, and no code or proof in this revision assumes it does. Gemini support is an
-explicitly separate, unresolved spike, tracked here rather than silently folded into the Codex/
-Claude auth story. No `DockerSbxBackend` code path currently special-cases Gemini at all — this is
-a documentation flag for future work, not a built or tested capability.
+`lib/federation-harnesses.mjs` declares three concrete `HarnessSpec` instances, each independently
+classified against the evidence above (not assumed identical because two of them share a strategy
+label):
+
+- **Codex** — `docker-native-oauth`. `install: 'codex'` (Docker's built-in template, not a custom
+  image). Login: `sbx secret set -g openai --oauth` (host-side browser flow; Docker's own docs:
+  "the flow runs on the host, so the token is never exposed inside the sandbox"). Refresh:
+  `refresh_owner: 'docker-builtin'`, evidence cited inline in the spec. Reported-mode proof:
+  `codex login status` → `auth_mode` field. One real usability caveat (not a correctness gap): the
+  `--oauth` flow expects a local browser callback, awkward on headless Linux — an open Docker issue
+  (`docker/sbx-releases#208`) requests a device-code flow instead.
+- **Claude Code** — `docker-native-oauth`. `install: 'claude'`. Login: `/login`, typed *inside* the
+  sandbox session — the one place Docker's own wording could be misread as "credential lives in the
+  guest." Independently confirmed this is the same host-side proxy-interception mechanism as
+  Codex's; the *interaction* is in-session, the *credential* is not. Reported-mode proof: `/status`
+  → "Auth token" field. Waspflow's own `lib/billing.sh` already guards this exact ambiguity
+  (`ANTHROPIC_API_KEY` silently overriding subscription auth) for its own headless workers — a
+  previously-encountered failure mode, not a hypothetical one, cited directly in the spec.
+- **gh-cli** — `host-env-proxy` (the extensibility proof: a non-built-in harness onboarded via a
+  Waspflow-authored kit, `kits/wf-gh-cli.kit.yaml`, using Docker's documented `credentials.sources`
+  env-var injection — not a Waspflow gateway). Deliberately chosen because `GH_TOKEN` is a
+  **static** Personal Access Token that `gh` does not self-refresh — this keeps the extensibility
+  proof honest: it demonstrates a new harness CAN be onboarded through the documented kit
+  mechanism, without also (mis)claiming that mechanism handles refresh. `oauth_refresh.refresh_owner:
+  'none'` because none is needed, not because refresh was proven safe for this strategy in general.
+
+All three specs are unit-tested (`tests/federation-harnesses.test.mjs`, 6 tests) to confirm: Codex
+and Claude Code are each independently classified rather than copy-pasted; both report an explicit
+auth mode; both have Docker-proven indefinite refresh; gh-cli correctly uses a different strategy
+and installs via a custom kit, not a built-in template; and none of the three harnesses violate the
+`host-file-proxy`/`host-env-proxy` docker-builtin-refresh guard.
+
+### Per-harness six-column proof matrix
+
+`scripts/federation-harness-auth-proof-live-run.sh` supersedes the prior single-purpose auth proof
+script. It is **HarnessSpec-parameterized** — it reads `lib/federation-harnesses.mjs` at runtime and
+drives whatever that spec declares, rather than hardcoding one flow shared across harnesses. Usage:
+`bash scripts/federation-harness-auth-proof-live-run.sh {codex|claude-code|gh-cli}`.
+
+The six columns, and their honest status for each harness (all **written, executable, and
+independently unit-verified for the code paths that don't require a live sandbox** — none executed
+against a real `sbx` install, because `sbx` is not installed on this machine and the proof
+inherently requires interactive host logins):
+
+| Column | Codex | Claude Code | gh-cli |
+| --- | --- | --- | --- |
+| Existing host login detected | **Not exercised.** Script prompts the operator to confirm or perform `sbx secret set -g openai --oauth`. | **Not exercised.** Script starts the sandbox for an in-session `/login`. | **Not exercised.** Script checks whether `GH_TOKEN` is already set on the host. |
+| Extra login required | **Not exercised** (depends on operator's answer above). | **Not exercised** (depends on whether `/login` was already completed). | **Not exercised** (depends on whether `GH_TOKEN` was pre-set). |
+| Credential stays outside VM | **Not exercised.** Script's hostile-guest search (env, `ps aux`, `~/.codex/auth.json`) is written and heuristic-checked, not run against a live guest. | **Not exercised.** Same search targets `~/.claude/.credentials.json`. | **Not exercised.** Same search greps for `gh[a-z]_`-prefixed PAT patterns. |
+| Refresh works | **Not exercised, and cannot be meaningfully proven in a short run** — the script documents that proving refresh requires holding a sandbox open past a real token's expiry window (~1h for OAuth access tokens), which this session cannot do; a short run cannot distinguish "never needed refresh" from "refresh works." | Same limitation as Codex — refresh proof requires a long-duration follow-up. | **N/A** — `GH_TOKEN` is static; `oauth_refresh.supports_refresh: false` in the HarnessSpec, so this column does not apply by design, not by omission. |
+| Subscription allowance used | **Not exercised.** Script greps `codex login status` output for `auth_mode: chatgpt/chatgptAuthTokens` (pass) vs. `apiKey` (fail) — the REPORTED-mode proof, not a bare "request succeeded" check. | **Not exercised.** Script greps `/status` output for `CLAUDE_CODE_OAUTH_TOKEN` (pass) vs. `ANTHROPIC_API_KEY` (fail). | **N/A** — gh-cli has no subscription/API-key billing distinction; column does not apply. |
+| Full CLI runs in VM | **Not exercised.** Script runs `sbx run --name <n> <scratch> codex` and confirms via `sbx ls`. | **Not exercised.** Same pattern with `claude`. | **Not exercised.** Same pattern with `sbx run ... --kit kits/wf-gh-cli.kit.yaml`. |
+
+**Every cell above is "script written, not run."** This is the honest state: three real,
+executable, HarnessSpec-driven proof paths exist and were verified as far as this environment
+allows (syntax-checked, HarnessSpec resolution tested, unit tests for the classification logic
+they depend on) — none have touched a real `sbx` sandbox, because none exists here.
+
+### Gemini: still explicitly deferred, not assumed equivalent
+
+Unchanged from the prior revision's correction: Gemini's Docker Sandboxes auth path is **not** the
+same durable, host-only subscription OAuth flow as Codex/Claude — it is API-key/proxy-managed
+instead. No `HarnessSpec`, kit, or code in this revision assumes otherwise. Gemini remains a
+separate, unresolved spike.
 
 ## Graduation gates: what actually passes
 
@@ -185,7 +243,7 @@ a documentation flag for future work, not a built or tested capability.
 | G. Reliable teardown and orphan recovery | **SKIP-NO-SBX** | Requires a live sandbox; only destroy+re-list is covered even in the live path — scratch/token/receipt/startup-reaper coverage is a documented gap. |
 | H. Version-pinned conformance testing | **PASS** | `bin/federation-detect-sbx` correctly refuses a stubbed below-floor `sbx` version. Reproduced independently (see below). Scope: floor-only — an unvetted high version is currently *accepted*, not rejected, since no ceiling is pinned yet. |
 | I. Legal and product confirmation from Docker | **PASS (documentation gate)** | The conformance matrix correctly records all 8 of Docker's outstanding legal/product questions as unanswered. This is a completeness check on the documentation, not a claim that Docker answered anything — none have been obtained. |
-| J. Native Docker auth substrate, no custom gateway | **SKIP (suite-recorded)** | The suite records one status per gate; because gate J's actual subject — the six-point native-auth proof — cannot run without a real `sbx` install and interactive OAuth login, its recorded status is honestly SKIP, not PASS. Its static regression guard (no custom base-URL/gateway pattern in `lib/federation-docker-backend.mjs`) does pass every time the suite runs, and was verified adversarially outside the suite's own PASS/FAIL/SKIP accounting — see "Auth architecture" below. |
+| J. Native Docker auth substrate, no custom gateway | **SKIP (suite-recorded)** | The suite records one status per gate; because gate J's actual subject — the per-harness six-column auth proof for all three harnesses (codex, claude-code, gh-cli) — cannot run without a real `sbx` install and interactive host logins, its recorded status is honestly SKIP, not PASS. Its static regression guard (no custom base-URL/gateway/proxy-shaped code in `lib/federation-docker-backend.mjs` or `lib/federation-harnesses.mjs`, precise enough to avoid tripping on this file's own "not a gateway" prose) does pass every time the suite runs, and was verified adversarially with three distinct injected violations (a real env var reference, a `base_url:` assignment shape, and a `new *Gateway(` constructor call), each correctly caught and each correctly reverting to a clean pass once removed — see "Auth architecture" below. |
 
 **2 of 10 gates pass for real (H, I). 8 of 10 correctly SKIP** (including gate J, whose static
 regression guard is proven but whose named subject — the live auth proof — is not) **pending a
@@ -243,6 +301,29 @@ orchestrating pass in this session:
    removed the injected line and confirmed it reverted to its normal SKIP status (the suite still
    correctly reports SKIP, not PASS, once the pattern is gone — because gate J's live half remains
    unexercised regardless of whether its static half is clean).
+8. **Fetched and read a real, open Docker feature request in full** (`docker/sbx-releases#300`,
+   via `gh api`, not a web-search summary) before designing `HarnessSpec`'s auth-strategy taxonomy.
+   Its own wording — "Docker already does this internally [for] the built-in `--oauth` provider
+   logins (Claude Code, Codex)... This request is to make that existing capability
+   user-extensible" — is the direct evidence that only `docker-native-oauth` currently has
+   Docker-confirmed indefinite refresh, and that a generic `credentials.sources` `file`/`env`
+   source (which the issue itself describes as working "well for static credentials... [but]
+   breaks for OAuth access tokens") must never be conflated with it. This citation is load-bearing
+   for the entire `HarnessSpec` refresh-strategy guard, not decorative.
+9. **Independently confirmed Codex's own `auth_mode` reporting field and refresh-and-rewrite
+   behavior** via OpenAI's own Codex CI/CD documentation (which explicitly warns against
+   overwriting a refreshed `auth.json` in automation) and a third-party technical analysis of the
+   Codex auth-file schema (`auth_mode: "apiKey" | "chatgpt" | "chatgptAuthTokens"`), rather than
+   assuming Codex's refresh behavior parallels Claude's from the correction's wording alone.
+10. **Adversarially re-verified gate J's regression guard after tightening its patterns**: the
+    first version of the guard (bare-word `gateway` grep) produced a FALSE POSITIVE against this
+    revision's own legitimate documentation prose (`lib/federation-harnesses.mjs`'s comment "not a
+    Waspflow-built gateway"). Caught by re-running the full suite after adding the new file, not
+    assumed clean. Fixed by narrowing the patterns to code-shaped regexes (assignment syntax,
+    constructor-call syntax, literal env-var names), then re-verified with three fresh injected
+    violations (a real `ANTHROPIC_BASE_URL` reference, a `base_url:` assignment, and a `new
+    *Gateway(` call) — each caught, and the clean tree correctly reverted to SKIP, not a lingering
+    FAIL, once every injection was removed.
 
 No claim in this report rests solely on a subagent's self-report. Every PASS above was reproduced
 by direct command execution in this session after all three lanes were merged together.
@@ -267,10 +348,25 @@ Per the decision note's constraints, this work does **not** claim:
 - **That `sbx exec`/`sbx cp` invocations are syntactically correct.** Two CLI surfaces are marked
   unverified in-code and must be confirmed against a real `sbx --help` before any job can run.
 - **That Docker's native OAuth/credential proxy has been proven to keep Codex/Claude tokens out of
-  the guest.** `scripts/federation-auth-proof-live-run.sh`'s six-point proof is real, runnable code
-  that has not been executed against a real `sbx` install — this is asserted by Docker's own
-  documentation (independently confirmed, see above) but not yet proven by this project's own
-  adversarial test.
+  the guest.** `scripts/federation-harness-auth-proof-live-run.sh`'s six-column proof is real,
+  HarnessSpec-driven, runnable code for all three harnesses that has not been executed against a
+  real `sbx` install — this is asserted by Docker's own documentation (independently confirmed, see
+  above) but not yet proven by this project's own adversarial test.
+- **That "a token is extractable from a host file/env var" means "the subscription is usable
+  indefinitely."** These are separate claims. `host-file-proxy`/`host-env-proxy` strategies are
+  structurally forbidden from claiming Docker-managed refresh (`lib/federation-harness-spec.mjs`'s
+  validator enforces this) — only `docker-native-oauth` currently has Docker-confirmed indefinite
+  refresh, and even that has not been proven by this project's own long-duration test (the "refresh
+  works" column is explicitly "not exercised, cannot be meaningfully proven in a short run" for both
+  Codex and Claude Code in the per-harness matrix above).
+- **That a successful request through a compatible provider endpoint proves subscription billing.**
+  It does not — only the CLI's own reported auth mode (`codex login status`'s `auth_mode` field,
+  Claude Code's `/status` "Auth token" field) is treated as proof in this report, and neither has
+  been executed against a real sandbox yet.
+- **That the gh-cli extensibility kit generalizes to arbitrary custom harnesses**, especially ones
+  with a refreshing credential. It proves the documented kit mechanism works for a **static**
+  credential; a harness needing `host-auth-adapter-required` remains unsupported until a
+  purpose-built adapter exists.
 - **That subscription pooling works for Gemini the way it does for Codex/Claude.** Explicitly not
   assumed — Gemini's Docker auth path is API-key/proxy-managed, tracked as a separate deferred
   spike.
@@ -279,9 +375,13 @@ Per the decision note's constraints, this work does **not** claim:
 
 1. **Confirm `sbx exec`/`sbx cp` syntax** against a real `sbx` install (or `sbx --help` output) —
    this blocks any live job from running at all, independent of the security gates.
-2. **Run `scripts/federation-auth-proof-live-run.sh codex` and `claude`** on a machine with `sbx`
-   installed, once per agent, completing the one-time interactive OAuth login for each — this is
-   the auth-architecture correction's own acceptance test and should run before or alongside item 3.
+2. **Run `scripts/federation-harness-auth-proof-live-run.sh {codex|claude-code|gh-cli}`** on a
+   machine with `sbx` installed, once per harness, completing the one-time interactive host login
+   for each (and setting `GH_TOKEN` for gh-cli) — this is the auth-architecture correction's own
+   acceptance test and should run before or alongside item 3. For the "refresh works" column
+   specifically, a SEPARATE long-duration follow-up is needed: hold a Codex/Claude Code sandbox
+   open past a real token's expiry window (~1h) and confirm the CLI still works without a fresh
+   login — a short run cannot distinguish "never needed refresh" from "refresh actually works."
 3. **Run `scripts/federation-conformance-live-run.sh`** on a machine with `sbx` installed and
    authenticated to turn gates A, B, D, E, G's SKIPs into reproduced PASS/FAIL. This is a
    privileged/live one-off; the script is written and ready for an owner to run, per this task's
@@ -309,13 +409,21 @@ and internally consistent — every claim in this report was independently repro
 command execution, not inferred from a maker's self-report, and one real integration bug was
 caught and fixed by that independent verification.
 
-**High confidence** in the corrected auth architecture *as documented by Docker* — the "token
-never enters the sandbox" claim for both Codex and Claude was independently confirmed against
-Docker's own credential-isolation documentation, not merely asserted from the correction's
-wording. **No confidence claim, positive or negative,** that this project has itself proven that
-claim end-to-end: `scripts/federation-auth-proof-live-run.sh` implements the full six-point proof
-but has not been executed against a real `sbx` install, since that requires an interactive
-real-account OAuth login unavailable in this environment.
+**High confidence** in the tightened auth architecture *as documented by Docker and its own open
+issue tracker* — the "token never enters the sandbox" claim for both Codex and Claude was
+independently confirmed against Docker's own credential-isolation documentation; the
+static-vs-refreshing credential distinction was independently confirmed against a specific, real,
+open Docker feature request (`docker/sbx-releases#300`) that states exactly this limitation in
+Docker's own words, not inferred from the correction's wording alone. The structural guard against
+misclassifying a strategy's refresh capability (`lib/federation-harness-spec.mjs`) was unit-tested
+adversarially, not merely asserted.
+
+**No confidence claim, positive or negative,** that this project has itself proven any of the three
+harnesses' auth claims end-to-end against a real sandbox: `scripts/federation-harness-auth-proof-
+live-run.sh` implements the full per-harness six-column proof for Codex, Claude Code, and gh-cli,
+but none of it has been executed against a real `sbx` install, since that requires interactive
+host logins (and, for the "refresh works" column, a long-duration follow-up spanning a real token's
+expiry window) unavailable in this environment.
 
 **No confidence claim, positive or negative,** on whether Docker Sandboxes actually delivers the
 containment properties graduation gates A-G require. They were never exercised against a real
