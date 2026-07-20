@@ -1533,6 +1533,19 @@ cmd_doctor() {
       echo "  [warn] codex model proxy $url -> $code (start your Codex proxy, or unset WASPFLOW_CODEX_BACKEND_HEALTH_URL)"; fi
   fi
   billing_report_auth
+  # Federation Preview (Docker Sandboxes backend) is optional: sbx absence
+  # never counts against `ok` or the "missing prerequisites" verdict below.
+  if [[ -x "$WASPFLOW_ROOT/bin/federation-detect-sbx" ]]; then
+    if command -v sbx >/dev/null 2>&1; then
+      local sbx_line sbx_extra
+      sbx_line="$("$WASPFLOW_ROOT/bin/federation-detect-sbx" 2>/dev/null | sed 's/^federation-detect-sbx: //')"
+      sbx_extra="$("$WASPFLOW_ROOT/bin/federation-detect-sbx" 2>&1 >/dev/null | sed 's/^federation-detect-sbx: /  [warn] sbx: /')"
+      echo "  [ok]   $sbx_line"
+      [[ -n "$sbx_extra" ]] && echo "$sbx_extra"
+    else
+      echo "  [warn] sbx not found — Federation Preview unavailable; see README.md \"Install sbx (Docker Sandboxes)\" or run bin/federation-install-sbx"
+    fi
+  fi
   if command -v clawmeter >/dev/null 2>&1; then
     local quota_check
     quota_check="$(quota_observation_v1 codex)"

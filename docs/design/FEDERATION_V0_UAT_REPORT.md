@@ -3,9 +3,12 @@
 **Date:** 2026-07-20
 **Branch:** `waspflow/fedv0-docker-backend` (child of `feat/federation-v0`)
 **Source of truth:** `inbox/2026-07-20-chatgpt-sandbox.md` (the "Runtime Decision" note)
-**Verdict:** **Federation Preview, mechanism-complete, security-gates unproven.** Merge-ready as a
-gated preview backend behind an operator-run live conformance pass. **Not** ready to accept
-stranger-submitted jobs — no graduation gate that requires a real `sbx` sandbox has been exercised.
+**Verdict:** **Federation Preview, mechanism-complete, install UX complete, security-gates
+unproven.** Merge-ready as a gated preview backend behind an operator-run live conformance pass.
+**Not** ready to accept stranger-submitted jobs — no graduation gate that requires a real `sbx`
+sandbox has been exercised. **Owner handoff:** three specific commands need a real `sbx` install to
+close the remaining gates — see "Owner handoff: closing the live gates" below for exactly what to
+run and where to hand the baton back.
 
 ## What changed and why
 
@@ -37,9 +40,65 @@ real today, versus what is real, runnable code correctly waiting on a live sandb
 | Backend-neutral `HarnessSpec` (6 explicit auth strategies) | `lib/federation-harness-spec.mjs` | Built, unit-tested (13 tests), including an adversarial "CORE SAFETY CHECK" proving a spec cannot claim docker-builtin refresh under a strategy that structurally can't provide it |
 | 3 concrete harness classifications (Codex, Claude Code, gh-cli) | `lib/federation-harnesses.mjs`, `kits/wf-gh-cli.kit.yaml` | Built, unit-tested (6 tests), each independently classified against Docker docs/issues, not assumed identical |
 | Per-harness six-column auth proof (HarnessSpec-driven) | `scripts/federation-harness-auth-proof-live-run.sh`, gate J in the conformance suite | Built, syntax-checked, HarnessSpec resolution verified for all 3 harnesses. Gate J's static regression guard was verified adversarially (see "Auth architecture"); the suite itself records gate J as SKIP because its live half — the actual per-harness proof — cannot run here |
+| Install UX: auto-install sbx + graceful fallback | `bin/federation-install-sbx`, `install.sh`, `bin/waspflow doctor` | Built, tested end-to-end on this machine (the real "no passwordless sudo" fallback path — see "Install UX" below) |
+| README sbx-install section | `README.md` "Install sbx (Docker Sandboxes)" | Built — two copy-pasteable code blocks + one official link, no prose wall |
 
 All work is layered on `feat/federation-v0` (signed envelope + firewall helper + Firecracker
 runner, all unchanged and kept as documented Linux-native fallback/reference per the note).
+
+## Install UX
+
+**The v0 user journey, made real in code, per owner steer.** A user installs waspflow the way
+`tnunamak/clawmeter` is installed: clone, run `install.sh`. During that install, `install.sh` now
+attempts `sbx` auto-install as its last step; on any failure or unsupported platform it falls
+through to a short, copy-pasteable README section — never a silent no-op, never a wall of text.
+
+### `bin/federation-install-sbx`
+
+A new script, mirroring `bin/federation-detect-sbx`'s naming and called automatically at the end of
+`install.sh` (`|| true` — a failed sbx install never fails the overall waspflow install):
+
+- **Already installed:** skips straight to `federation-detect-sbx` for a version check.
+- **macOS:** `brew tap docker/tap && brew install docker/tap/sbx`, then points at `sbx login`.
+  Commands verified against `docker/sbx-releases`' own README (fetched directly, not inferred from
+  a blog summary) and Docker's official get-started docs.
+- **Linux (apt-based):** `curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh && sudo apt-get
+  install docker-sbx`, then `usermod -aG kvm`. **Only attempted when `sudo -n true` succeeds** (i.e.
+  passwordless sudo is already configured) — mirrors clawmeter's own installer gating for its Linux
+  tray dependency exactly (`sudo -n true` before any privileged step, never an interactive password
+  prompt). On this development machine, passwordless sudo is NOT configured, so this is the actual,
+  real fallback path exercised end-to-end, not a hypothetical: verified it prints a clear message
+  and exits 0 without ever blocking on stdin (`< /dev/null` redirect) or attempting `sudo`.
+- **Any other OS, or any install failure:** falls through to a short message pointing at the
+  README's "Install sbx (Docker Sandboxes)" section — both files reference that exact heading
+  string, so the pointer cannot silently drift out of sync with the README.
+- **Never bundles or downloads the `sbx` binary itself** — every path goes through Docker's own
+  officially documented installer, consistent with the redistribution-rights gap already tracked in
+  `profiles/wf-federation-docker-v0.json` and gate I.
+
+### README section
+
+`README.md`'s new "Install sbx (Docker Sandboxes)" section (right after "First Run") is two code
+blocks (macOS, Linux) plus one official Docker link plus a one-line pointer to
+`bin/federation-detect-sbx` to confirm — not a wall of text, consumable at a glance.
+
+### `waspflow doctor` wiring
+
+`bin/waspflow doctor` now reports sbx status as a bracketed `[ok]`/`[warn]` line, consistent with
+every other doctor check, and **never affects the "ready"/"missing prerequisites" verdict** — sbx
+is optional (Federation Preview only), so its absence must never block a plain
+non-Federation waspflow user from a clean "ready" result. Verified: `doctor` reports `-> ready` with
+exit 0 both with and without `sbx` present, using a real fake-`sbx`-on-PATH fixture for the present
+case (not merely inspected in source).
+
+### End-to-end journey verified today (mechanism, not the live sbx result)
+
+Ran the full `install.sh` → `doctor` → `federation-install-sbx` chain on this machine start to
+finish: links the binary, runs doctor (all checks pass except the expected `OPENAI_API_KEY`
+billing warning, pre-existing and unrelated), then reaches the Federation Preview step and reports
+the real "no passwordless sudo, falling through to README" outcome with a clean exit. This is the
+mechanism proof — it is not a claim that `sbx` was actually installed on any machine, since that
+requires either passwordless sudo (absent here) or a human running the manual README commands.
 
 ### The interface (`lib/federation-runtime.mjs`)
 
@@ -371,34 +430,58 @@ Per the decision note's constraints, this work does **not** claim:
   assumed — Gemini's Docker auth path is API-key/proxy-managed, tracked as a separate deferred
   spike.
 
-## What's next (in priority order)
+## Owner handoff: closing the live gates
+
+**Everything below requires a real `sbx` install, which does not exist on the machine this work was
+built on.** The mechanism, install UX, and every gate/proof that can run without a live sandbox are
+done and verified (see above). This is the exact, minimal set of commands for the owner to run to
+close the remaining gates, and where to hand the baton back.
+
+**Owner: run these three, in order, on a machine you're willing to install `sbx` on:**
+
+```bash
+# 1. Install sbx (or let `install.sh` attempt it automatically first)
+brew tap docker/tap && brew install docker/tap/sbx   # macOS
+# or, Linux (apt-based):
+curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh && sudo apt-get install docker-sbx
+sudo usermod -aG kvm $USER && newgrp kvm
+sbx login
+
+# 2. Per-harness auth proof (repeat for all three; set GH_TOKEN before the gh-cli run)
+bash scripts/federation-harness-auth-proof-live-run.sh codex
+bash scripts/federation-harness-auth-proof-live-run.sh claude-code
+GH_TOKEN=<your PAT> bash scripts/federation-harness-auth-proof-live-run.sh gh-cli
+
+# 3. Graduation-gate conformance pass (gates A, B, D, E, G — set env vars per the script's own
+#    usage comment at the top of the file; gate C additionally needs personal sbx credentials
+#    configured on the SAME machine first, per the decision note)
+bash scripts/federation-conformance-live-run.sh
+```
+
+**Then hand back:** paste the raw output of all three (or point at where you saved it) and this
+report gets finalized with the live PASS/FAIL results replacing the current SKIPs — no gate is
+marked PASS without that reproduced evidence, so the handoff itself is what turns this from
+"mechanism-complete" into "graduation gates proven." One item cannot be closed even with `sbx`
+installed: the "refresh works" column needs a SEPARATE long-duration run holding a Codex/Claude
+Code sandbox open past a real token's expiry window (~1h) — a short pass, even with real `sbx`,
+cannot distinguish "never needed refresh" from "refresh actually works," so that one is a
+deliberately separate follow-up, not part of the three-command handoff above.
+
+## What's next (in priority order, after the owner handoff above)
 
 1. **Confirm `sbx exec`/`sbx cp` syntax** against a real `sbx` install (or `sbx --help` output) —
-   this blocks any live job from running at all, independent of the security gates.
-2. **Run `scripts/federation-harness-auth-proof-live-run.sh {codex|claude-code|gh-cli}`** on a
-   machine with `sbx` installed, once per harness, completing the one-time interactive host login
-   for each (and setting `GH_TOKEN` for gh-cli) — this is the auth-architecture correction's own
-   acceptance test and should run before or alongside item 3. For the "refresh works" column
-   specifically, a SEPARATE long-duration follow-up is needed: hold a Codex/Claude Code sandbox
-   open past a real token's expiry window (~1h) and confirm the CLI still works without a fresh
-   login — a short run cannot distinguish "never needed refresh" from "refresh actually works."
-3. **Run `scripts/federation-conformance-live-run.sh`** on a machine with `sbx` installed and
-   authenticated to turn gates A, B, D, E, G's SKIPs into reproduced PASS/FAIL. This is a
-   privileged/live one-off; the script is written and ready for an owner to run, per this task's
-   instruction not to block on privilege the orchestrating session doesn't have.
-4. **Configure personal `sbx` credentials on the same test machine** before attempting gate C —
-   the note is explicit that a clean-machine test is insufficient for the credential-negative
-   guest check.
-5. **Wire gate F's fork-bomb/memory/disk fixtures into an actual pass/fail measurement** against
+   this blocks any live job from running at all, independent of the security gates. Can be
+   confirmed as a side effect of the owner handoff's step 2/3 above.
+2. **Wire gate F's fork-bomb/memory/disk fixtures into an actual pass/fail measurement** against
    declared resource limits, once `sbx`'s real limit-enforcement flags are confirmed.
-6. **Contact Docker** on the 8 outstanding questions tracked in
+3. **Contact Docker** on the 8 outstanding questions tracked in
    `docs/design/FEDERATION_V0_CONFORMANCE_MATRIX.md` (redistribution, commercial-use scope, OEM/
    account-free mode, automation API, independent profile mechanism, SSH-agent disable guarantee,
    storage cap, compatibility/security-support commitments) — none block this preview, but several
    block a production release decision per the note's explicit gate.
-7. **Pin a version ceiling** in `profiles/wf-federation-docker-v0.json` once a real adversarial
+4. **Pin a version ceiling** in `profiles/wf-federation-docker-v0.json` once a real adversarial
    conformance pass validates a specific `sbx` release.
-8. **Scope a Gemini spike separately** once Codex/Claude's native-auth model is proven — do not
+5. **Scope a Gemini spike separately** once Codex/Claude's native-auth model is proven — do not
    assume the same design transfers; Gemini's Docker auth path is API-key/proxy-managed, not
    subscription OAuth.
 
@@ -430,7 +513,16 @@ containment properties graduation gates A-G require. They were never exercised a
 sandbox in this environment. This report is a proof that the mechanism is real, testable, honestly
 scoped code — not a claim that Federation v0 is safe to expose to stranger-submitted jobs today.
 
-**UAT-ready** in the sense the task defined: an operator can install `sbx`, and once the two
-unverified CLI surfaces are confirmed, point Waspflow at a job and watch it attempt to run
-contained in a Docker sandbox, with an honest, automated report of exactly which security
-properties have and have not been proven for that specific release.
+**High confidence** in the install UX mechanism — `install.sh`'s sbx auto-install attempt and
+graceful fallback was run end-to-end on this machine, including the actual "no passwordless sudo"
+fallback path (not a hypothetical branch), and `waspflow doctor`'s sbx reporting was verified both
+with a fake-`sbx`-on-PATH fixture and in its real absent state, confirming sbx's presence/absence
+never affects the overall "ready" verdict.
+
+**UAT-ready** in the sense the task defined: an operator can install waspflow, have `sbx`
+auto-installed or be pointed at a 30-second manual install, and — once the owner closes the three
+handoff commands above and the two unverified CLI surfaces are confirmed — point Waspflow at a job
+and watch it attempt to run contained in a Docker sandbox, with an honest, automated report of
+exactly which security properties have and have not been proven for that specific release. **The
+one deliberately open item is the owner handoff itself** — everything this session could prove
+without a real `sbx` install has been proven; everything else is teed up above, not blocked on.

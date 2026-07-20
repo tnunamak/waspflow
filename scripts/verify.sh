@@ -15,6 +15,14 @@ scratch="${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}"
 mkdir -p "$scratch"
 
 bash -n "$root/bin/waspflow" "$root"/lib/*.sh "$root"/lib/providers/*.sh
+bash -n "$root/install.sh" "$root/bin/federation-install-sbx"
+
+# Federation install UX: never fails the overall waspflow install, never
+# prompts for a sudo password, and always falls through to the README.
+grep -Fq 'bin/federation-install-sbx" || true' "$root/install.sh"
+grep -Fq 'sudo -n true' "$root/bin/federation-install-sbx"
+grep -Fq 'Install sbx (Docker Sandboxes)' "$root/README.md"
+grep -Fq 'Install sbx (Docker Sandboxes)' "$root/bin/federation-install-sbx"
 
 # Codex effort honesty: xhigh must pass through (never clamp xhigh|max → high)
 grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/providers/codex.sh"

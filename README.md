@@ -35,6 +35,29 @@ waspflow demo --provider codex --run
 Use `--provider claude` or `--provider grok` if that is the agent CLI you have
 installed.
 
+## Install sbx (Docker Sandboxes)
+
+`install.sh` tries this for you automatically. If it couldn't (no Homebrew, no
+passwordless sudo, unsupported OS), run one of these yourself:
+
+```bash
+# macOS
+brew tap docker/tap && brew install docker/tap/sbx && sbx login
+
+# Linux (apt-based)
+curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh
+sudo apt-get install docker-sbx
+sudo usermod -aG kvm $USER && newgrp kvm
+sbx login
+```
+
+Full docs: https://docs.docker.com/ai/sandboxes/get-started/
+
+Then confirm: `bin/federation-detect-sbx`
+
+This powers Federation Preview — running a job contained in a Docker sandbox
+instead of on your bare host. Skip this if you're not using Federation.
+
 ## Selection gate
 
 Selection defaults to `warn` for one release: a bare provider-default invocation
