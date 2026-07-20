@@ -365,6 +365,58 @@ gate_i_legal_product_confirmation() {
 }
 
 # =========================================================================
+# Gate J: native Docker auth, no custom Waspflow gateway (fully runnable today)
+# =========================================================================
+# Auth architecture correction (2026-07-20): Docker Sandboxes' own host-side
+# OAuth/credential proxy IS the auth substrate for Codex/Claude v0 jobs —
+# `sbx secret set -g openai --oauth` and Claude's `/login`. Waspflow must NOT
+# build or wire a custom provider gateway, OpenAI-compatible endpoint, or
+# custom base-URL override for these two agents in v0. This is a static
+# regression guard: it greps the backend source for anything that would
+# reintroduce that removed complexity, and confirms the live proof script for
+# the six numbered auth requirements exists and is runnable.
+gate_j_native_auth_no_custom_gateway() {
+  local name="J: native Docker auth substrate, no custom gateway"
+  local backend="$root/lib/federation-docker-backend.mjs"
+  if [[ ! -f "$backend" ]]; then
+    record "$name" SKIP "lib/federation-docker-backend.mjs does not exist in this checkout"
+    return
+  fi
+
+  local forbidden_patterns=(
+    'ANTHROPIC_BASE_URL' 'OPENAI_BASE_URL' 'base_url' 'baseURL'
+    'gateway' 'openai-compatible' 'OpenAI-compatible'
+  )
+  local hit=0 pattern
+  for pattern in "${forbidden_patterns[@]}"; do
+    if grep -qiE -- "$pattern" "$backend"; then
+      echo "  found forbidden pattern in backend source: $pattern"
+      hit=1
+    fi
+  done
+  if [[ "$hit" -eq 1 ]]; then
+    record "$name" FAIL "lib/federation-docker-backend.mjs references a custom gateway/base-URL/proxy pattern — v0 must rely on sbx's own native OAuth/credential proxy for Codex and Claude, not a Waspflow-built substitute"
+    return
+  fi
+
+  local proof_script="$root/scripts/federation-auth-proof-live-run.sh"
+  if [[ ! -x "$proof_script" ]]; then
+    record "$name" FAIL "backend source is clean of custom-gateway patterns, but scripts/federation-auth-proof-live-run.sh (the owner-run live proof for native sbx OAuth) is missing or not executable"
+    return
+  fi
+  if ! bash -n "$proof_script"; then
+    record "$name" FAIL "scripts/federation-auth-proof-live-run.sh has a syntax error"
+    return
+  fi
+
+  if ! have_sbx; then
+    record "$name" SKIP "sbx not installed — backend source contains no custom-gateway pattern (static check passes) and the live auth proof script (scripts/federation-auth-proof-live-run.sh) is present and syntactically valid, but the six numbered live requirements (host-side login, in-sandbox execution, credential-negative guest search, real quota consumption, cancellation, rm-without-credential-loss) require a real sbx install and an interactive OAuth login to exercise"
+    return
+  fi
+  record "$name" SKIP "sbx is installed, but this suite does not run the interactive OAuth login proof automatically — run 'bash scripts/federation-auth-proof-live-run.sh codex' and 'bash scripts/federation-auth-proof-live-run.sh claude' by hand and record results in docs/design/FEDERATION_V0_UAT_REPORT.md"
+}
+
+# =========================================================================
 # run all gates
 # =========================================================================
 main() {
@@ -377,6 +429,7 @@ main() {
   gate_g_reliable_teardown
   gate_h_version_pinned_conformance
   gate_i_legal_product_confirmation
+  gate_j_native_auth_no_custom_gateway
 
   echo
   echo "=== Federation v0 Docker Sandboxes conformance summary ==="
