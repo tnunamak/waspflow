@@ -25,21 +25,39 @@
 #
 # Usage:
 #   bash scripts/federation-harness-auth-proof-live-run.sh codex
-#   bash scripts/federation-harness-auth-proof-live-run.sh claude-code
+#   bash scripts/federation-harness-auth-proof-live-run.sh claude-code               # subscription (default, product intent)
+#   bash scripts/federation-harness-auth-proof-live-run.sh claude-code-api-key       # usage-billed, smoother (operator opt-in)
 #   bash scripts/federation-harness-auth-proof-live-run.sh gh-cli
+#
+# Claude Code has two real auth paths — a product tradeoff the OPERATOR
+# chooses, this script does not silently pick one (owner steer, 2026-07-20).
+# Confirmed against a real sbx v0.35.0 install: `sbx secret set --oauth` is
+# openai-only ("anthropic OAuth cannot be started from `sbx secret set`; sign
+# in from inside the Claude sandbox" is the CLI's own error for
+# `-g anthropic --oauth`). So:
+#   claude-code           — subscription billing (the product intent: pooling
+#                            wasted SUBSCRIPTION capacity). Login is `/login`
+#                            typed inside an attached sandbox session —
+#                            UNAVOIDABLE friction in v0, an sbx limitation,
+#                            not a Waspflow design choice.
+#   claude-code-api-key   — usage-billed at standard API rates, but host-side
+#                            and waspflow-drivable, same smooth shape as
+#                            Codex's OAuth. Requires ANTHROPIC_API_KEY set on
+#                            the host before running this script.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 harness="${1:-}"
 
 usage() {
-  echo "usage: $0 {codex|claude-code|gh-cli}" >&2
-  echo "  codex       — Docker built-in agent, docker-native-oauth strategy" >&2
-  echo "  claude-code — Docker built-in agent, docker-native-oauth strategy" >&2
-  echo "  gh-cli      — Waspflow custom kit (kits/wf-gh-cli.kit.yaml), host-env-proxy strategy (extensibility proof)" >&2
+  echo "usage: $0 {codex|claude-code|claude-code-api-key|gh-cli}" >&2
+  echo "  codex               — Docker built-in agent, docker-native-oauth strategy" >&2
+  echo "  claude-code         — Docker built-in agent, docker-native-oauth (subscription, default; unavoidable in-sandbox /login)" >&2
+  echo "  claude-code-api-key — Docker built-in agent, docker-stored-secret (usage-billed, smoother; requires ANTHROPIC_API_KEY on host)" >&2
+  echo "  gh-cli              — Waspflow custom kit (kits/wf-gh-cli/spec.yaml), host-env-proxy strategy (extensibility proof)" >&2
   exit 2
 }
-[[ "$harness" == "codex" || "$harness" == "claude-code" || "$harness" == "gh-cli" ]] || usage
+[[ "$harness" == "codex" || "$harness" == "claude-code" || "$harness" == "claude-code-api-key" || "$harness" == "gh-cli" ]] || usage
 
 if ! command -v sbx >/dev/null 2>&1; then
   echo "ERROR: sbx is not installed. Install from https://docs.docker.com/ai/sandboxes/get-started/" >&2
@@ -53,7 +71,7 @@ fi
 # --- pull the declared HarnessSpec so this script drives the spec, not the
 #     other way around. A change to the spec (e.g. reclassifying a harness's
 #     auth_strategy) changes what this script attempts without editing bash.
-harness_spec_snippet="import { CODEX_HARNESS, CLAUDE_CODE_HARNESS, GH_CLI_HARNESS } from '$root/lib/federation-harnesses.mjs'; const specs = { codex: CODEX_HARNESS, 'claude-code': CLAUDE_CODE_HARNESS, 'gh-cli': GH_CLI_HARNESS }; const spec = specs['$harness'];"
+harness_spec_snippet="import { CODEX_HARNESS, CLAUDE_CODE_SUBSCRIPTION_HARNESS, CLAUDE_CODE_API_KEY_HARNESS, GH_CLI_HARNESS } from '$root/lib/federation-harnesses.mjs'; const specs = { codex: CODEX_HARNESS, 'claude-code': CLAUDE_CODE_SUBSCRIPTION_HARNESS, 'claude-code-api-key': CLAUDE_CODE_API_KEY_HARNESS, 'gh-cli': GH_CLI_HARNESS }; const spec = specs['$harness'];"
 spec_json="$(node --input-type=module -e "$harness_spec_snippet process.stdout.write(JSON.stringify(spec));")"
 field() { node -e "process.stdout.write(String(JSON.parse(process.argv[1])$1 ?? ''))" "$spec_json"; }
 
@@ -87,15 +105,22 @@ trap cleanup EXIT
 
 run_sandbox() {
   # $1 = sandbox name, $2 = scratch dir
+  # `sbx run [flags] [AGENT] [PATH...]` — the AGENT positional comes BEFORE
+  # the workspace path (confirmed against a real, detached sbx run; the
+  # earlier reversed order made sbx read the path as an unknown agent name
+  # and fail with "'<path>' is not a sandbox or known agent"). For a
+  # kind:sandbox kit, AGENT must equal the kit's own manifest `name` (sbx
+  # errors explicitly otherwise) — `install` already carries that value for
+  # gh-cli.
   if [[ "$harness" == "gh-cli" ]]; then
     if [[ -z "${GH_TOKEN:-}" ]]; then
       echo "ERROR: GH_TOKEN must be set on the HOST for the gh-cli extensibility proof (host-env-proxy strategy)." >&2
-      echo "This is intentionally a static PAT, not a refreshing credential — see kits/wf-gh-cli.kit.yaml." >&2
+      echo "This is intentionally a static PAT, not a refreshing credential — see kits/wf-gh-cli/spec.yaml." >&2
       exit 1
     fi
-    sbx run --name "$1" "$2" --kit "$root/kits/wf-gh-cli.kit.yaml"
+    sbx run --name "$1" "$install" "$2" --kit "$root/kits/$install"
   else
-    sbx run --name "$1" "$2" "$install"
+    sbx run --name "$1" "$install" "$2"
   fi
 }
 
@@ -165,6 +190,32 @@ case "$auth_strategy" in
       record "extra_login_required" "yes ($env_var must be set on host before this run — see usage above)"
     fi
     ;;
+  docker-stored-secret)
+    # Smooth, host-side, waspflow-drivable path (e.g. claude-code-api-key):
+    # `sbx secret ls` detect-first, then `sbx secret set -g <service>` via
+    # stdin if unset — same detect-first discipline as startAuthFlow's
+    # host-url-flow, just without a browser step since a static API key
+    # needs no user interaction at all beyond having exported it on the host.
+    secret_name="$(field '.credential_discovery.secret_name')"
+    if [[ "$harness" == "claude-code-api-key" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
+      echo "ERROR: ANTHROPIC_API_KEY must be set on the HOST for claude-code-api-key (docker-stored-secret strategy)." >&2
+      echo "This is the usage-billed alternative to the default subscription harness — see usage above for the tradeoff." >&2
+      exit 1
+    fi
+    ls_output="$(sbx secret ls -g --service "$secret_name" 2>&1 || true)"
+    if grep -qi "No secrets found" <<<"$ls_output"; then
+      record "existing_host_login_detected" "no"
+      echo "Setting the '$secret_name' secret via stdin (waspflow drives this; the operator never types the raw sbx command)..."
+      if echo "${ANTHROPIC_API_KEY:-}" | sbx secret set -g "$secret_name" >/dev/null 2>&1; then
+        record "extra_login_required" "yes — waspflow drove 'sbx secret set -g $secret_name' via stdin from the host's ANTHROPIC_API_KEY; no browser/interactive step needed"
+      else
+        record "extra_login_required" "FAIL-CANDIDATE — sbx secret set -g $secret_name did not succeed"
+      fi
+    else
+      record "existing_host_login_detected" "yes (detected via sbx secret ls — no login triggered)"
+      record "extra_login_required" "no"
+    fi
+    ;;
 esac
 
 echo
@@ -202,6 +253,9 @@ case "$auth_strategy" in
   host-env-proxy)
     record "refresh_works" "N/A — $harness's credential ($env_var) is static and does not refresh (oauth_refresh.supports_refresh=false in the HarnessSpec); this column does not apply"
     ;;
+  docker-stored-secret)
+    record "refresh_works" "N/A — $harness's credential ($secret_name) is a static API key and does not refresh (oauth_refresh.supports_refresh=false in the HarnessSpec); this column does not apply"
+    ;;
 esac
 
 echo
@@ -227,6 +281,20 @@ case "$harness" in
       record "subscription_allowance_used" "PASS-CANDIDATE — Auth token field reports CLAUDE_CODE_OAUTH_TOKEN (subscription)"
     elif grep -qi 'ANTHROPIC_API_KEY' <<<"$status_output"; then
       record "subscription_allowance_used" "FAIL-CANDIDATE — Auth token field reports ANTHROPIC_API_KEY (usage-billed), not subscription"
+    else
+      record "subscription_allowance_used" "INCONCLUSIVE — could not parse the Auth token field from /status output above; operator must inspect manually"
+    fi
+    ;;
+  claude-code-api-key)
+    # Inverted expectation vs claude-code: THIS harness's whole point is the
+    # usage-billed path, so ANTHROPIC_API_KEY reporting is the CORRECT
+    # result, not a failure — flag CLAUDE_CODE_OAUTH_TOKEN as unexpected
+    # instead (would mean the sandbox fell back to a stray subscription
+    # login rather than the configured API key).
+    if grep -qi 'ANTHROPIC_API_KEY' <<<"$status_output"; then
+      record "subscription_allowance_used" "PASS-CANDIDATE (usage-billed, as intended for this harness) — Auth token field reports ANTHROPIC_API_KEY, not subscription. This is the expected/correct result for claude-code-api-key, not a failure."
+    elif grep -qi 'CLAUDE_CODE_OAUTH_TOKEN' <<<"$status_output"; then
+      record "subscription_allowance_used" "FAIL-CANDIDATE — Auth token field reports CLAUDE_CODE_OAUTH_TOKEN (subscription); expected ANTHROPIC_API_KEY for this harness"
     else
       record "subscription_allowance_used" "INCONCLUSIVE — could not parse the Auth token field from /status output above; operator must inspect manually"
     fi

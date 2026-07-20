@@ -3,18 +3,20 @@
 **Date:** 2026-07-20
 **Branch:** `waspflow/fedv0-docker-backend` (child of `feat/federation-v0`)
 **Source of truth:** `inbox/2026-07-20-chatgpt-sandbox.md` (the "Runtime Decision" note)
-**Verdict:** **Federation Preview, mechanism-complete, install UX complete, detector fixed against
-real sbx, security-gates still unproven.** Merge-ready as a gated preview backend behind an
-operator-run live conformance pass. **Not** ready to accept stranger-submitted jobs — no graduation
-gate that requires a real `sbx` sandbox has been exercised. **Owner handoff:** two per-harness
-auth-proof and conformance-suite commands remain, now un-blocked by a real install — see "Owner
-handoff: closing the live gates" below.
+**Verdict:** **Federation Preview, mechanism-complete, install UX complete, auth UX live-verified,
+`sbx run` invocation fixed against real sbx, security-gates still unproven.** Merge-ready as a
+gated preview backend behind an operator-run live conformance pass. **Not** ready to accept
+stranger-submitted jobs — no graduation gate that requires a real `sbx` sandbox has been exercised.
+**Owner decision needed:** Claude Code now has two selectable auth strategies with a real billing
+tradeoff — see "Claude Code auth: a real product tradeoff, not a default we silently picked" below.
+**Owner handoff:** conformance-suite commands remain — see "Owner handoff: closing the live gates."
 
 ## Owner UAT findings and fixes (2026-07-20, real sbx v0.35.0)
 
-The owner installed a real `sbx` (v0.35.0, `/usr/bin/sbx`, authenticated as `timvana`) and found
-two real defects by running the mechanism against it — exactly the value the owner-handoff
-checkpoint was designed to surface. Both reproduced and fixed in this revision:
+The owner installed a real `sbx` (v0.35.0, `/usr/bin/sbx`, authenticated as `timvana`) and ran the
+mechanism against it across multiple rounds — exactly the value the owner-handoff checkpoint was
+designed to surface. Three real defects found and fixed so far, each the same class: a guessed CLI
+surface that turned out wrong once tested against the real tool.
 
 **Defect 1 (blocker) — `bin/federation-detect-sbx` probed a flag that doesn't exist.** It ran `sbx
 --version`, but `sbx` has no `--version` flag: `sbx --version` → `ERROR: unknown flag: --version`,
@@ -48,6 +50,68 @@ probe (daemon/`sandboxd` reachability etc) — flagged as a documented follow-up
 `bin/federation-detect-sbx`'s header comment, not built now, per the explicit "keep fixes minimal,
 don't rebuild anything" instruction.
 
+**Defect 3 (blocker) — `sbx run`'s AGENT/PATH argument order was reversed.**
+`scripts/federation-harness-auth-proof-live-run.sh`'s `run_sandbox()` called
+`sbx run --name "$1" "$2" "$install"` — passing the scratch-dir PATH before the AGENT name. Real
+`sbx run [flags] [AGENT] [PATH...]` reads the first positional as the agent, so the scratch dir was
+read as an unrecognized agent and every call failed with `'/tmp/tmp.XXXX' is not a sandbox or known
+agent`. This blocked gate [2/6] ("full CLI runs in VM") and every downstream gate for **both**
+Codex and Claude Code (the gh-cli kit path had the identical reversed shape). Fixed: agent now comes
+before the path — `sbx run --name <name> <agent> <path>`. Additionally found and fixed, while
+confirming the fix against the real CLI (not assumed): `kits/wf-gh-cli.kit.yaml`'s own schema was
+invalid — `sbx kit validate` requires the manifest file to be named exactly `spec.yaml` inside a kit
+directory (not an arbitrary `.kit.yaml` filename) and a `schemaVersion` field that was missing
+entirely; moved to `kits/wf-gh-cli/spec.yaml` and added `schemaVersion: "1"`, re-validated as
+`VALID` (with informational deprecation warnings pointing at a newer v2 schema, not required for
+this proof). Also discovered that for a `kind: sandbox` kit, the AGENT positional must equal the
+kit's own manifest `name` field, not a generic built-in agent — `sbx` itself reports this precisely
+(`agent name "shell" does not match agent kit name "wf-gh-cli"`) when it doesn't match; `install`
+for `GH_CLI_HARNESS` now correctly carries `"wf-gh-cli"` (the kit's name), not a file path.
+
+All three `sbx run` invocations (Codex, Claude Code, gh-cli) were verified end-to-end against the
+real install in this session: each created a real, `--detached` sandbox, was confirmed listed by
+`sbx ls`, and was immediately torn down with `sbx rm` — not merely re-read from documentation.
+
+## Claude Code auth: a real product tradeoff, not a default we silently picked
+
+**Owner decision needed here.** Live UAT surfaced that the in-sandbox `/login` step for Claude Code
+felt like friction. Investigating whether that friction is avoidable, rather than assuming either
+"it's fine" or "we should route around it," found a hard technical fact that makes this a genuine
+tradeoff, not an implementation gap:
+
+**Confirmed directly against the real sbx v0.35.0 install:** `sbx secret set --oauth` is hard-coded
+to OpenAI only. Attempting the Anthropic equivalent —
+```console
+$ sbx secret set -g anthropic --oauth
+ERROR: anthropic OAuth cannot be started from `sbx secret set`; sign in from inside the Claude sandbox
+```
+— fails with that exact, explicit error from the CLI itself. **There is no host-drivable Anthropic
+subscription OAuth flow in this sbx release.** This is an sbx limitation, not a Waspflow design
+choice, and not fixable by better wrapper code — `lib/federation-auth-flow.mjs`'s `startAuthFlow()`
+already handles the host-URL case perfectly for Codex; there is simply no equivalent host-side entry
+point for Anthropic to drive.
+
+Given that constraint, Claude Code genuinely has two different, real auth paths, each correct for a
+different goal — implemented as two separate `HarnessSpec` exports so neither is silently chosen for
+the operator:
+
+| | `CLAUDE_CODE_SUBSCRIPTION_HARNESS` (default) | `CLAUDE_CODE_API_KEY_HARNESS` (opt-in) |
+| --- | --- | --- |
+| **Billing** | Draws the operator's Claude Max/Pro **subscription** allowance — this is the actual point of Federation (pooling otherwise-wasted subscription capacity, not routing spend through per-token billing) | **Usage-billed** at standard Anthropic API rates — a real, ongoing cost per token, not "the same thing but smoother" |
+| **Auth mechanism** | `/login` typed **inside** an attached, interactive sandbox session (`sbx run claude`, then `/login`) | `echo "$ANTHROPIC_API_KEY" \| sbx secret set -g anthropic` — **host-side**, driven by waspflow the same way as Codex's OAuth (detect-first via `sbx secret ls`, then `startAuthFlow`-equivalent non-interactive `sbx secret set` via stdin, per `scripts/federation-harness-auth-proof-live-run.sh`'s new `docker-stored-secret` case) |
+| **Operator friction** | The interactive-session step is **unavoidable in v0** — genuinely necessary, not a bug, given the constraint above. Kept as low-friction as this session could make it (a single clear instruction, `describeAuthRequirement()`'s honest `instruction` field, no forced-URL fiction). Disappears automatically if/when sbx adds a host-side Anthropic OAuth flow — `CLAUDE_CODE_SUBSCRIPTION_HARNESS` should be revisited to use `startAuthFlow()` like Codex's at that point. | Smooth today — no browser step, no interactive session, waspflow drives it entirely. The cost is billing, not friction. |
+| `auth_strategy` | `docker-native-oauth` / `interactive-session-flow` | `docker-stored-secret` |
+| `harness_id` | `claude-code-subscription` | `claude-code-api-key` |
+
+`CLAUDE_CODE_HARNESS` (the pre-existing default export, kept for backward compatibility with earlier
+report sections and any external caller) now resolves to `CLAUDE_CODE_SUBSCRIPTION_HARNESS` —
+matching the product's actual intent. The API-key path exists and is fully implemented
+(`scripts/federation-harness-auth-proof-live-run.sh claude-code-api-key`, requires
+`ANTHROPIC_API_KEY` on the host) for an operator who explicitly wants the smoother path and accepts
+the billing tradeoff. **This code does not choose between them on the operator's behalf beyond that
+documented default** — both are real, tested, and available; which one Federation should actually
+use by default in a shipped product is the owner's call, not this session's.
+
 ## What changed and why
 
 The prior plan built a custom Firecracker host layer as the production runtime (branch
@@ -76,7 +140,7 @@ real today, versus what is real, runnable code correctly waiting on a live sandb
 | `sbx` installer/detection stub | `bin/federation-detect-sbx`, `profiles/wf-federation-docker-v0.json`, `tests/federation-detect-sbx.sh` | Built, fixed after owner UAT found a real detection bug (probed a nonexistent `--version` flag), re-verified against a real `sbx` v0.35.0 install on this machine — see "Owner UAT findings and fixes" |
 | Graduation-gate conformance suite (A-J) | `tests/federation-docker-conformance.sh`, `docs/design/FEDERATION_V0_CONFORMANCE_MATRIX.md`, `scripts/federation-conformance-live-run.sh` | Built, 2/10 gates pass for real (H, I), 8/10 correctly SKIP pending a live sandbox (gate J's suite-recorded status is SKIP — see below for why its static half is nonetheless proven) |
 | Backend-neutral `HarnessSpec` (6 explicit auth strategies) | `lib/federation-harness-spec.mjs` | Built, unit-tested (13 tests), including an adversarial "CORE SAFETY CHECK" proving a spec cannot claim docker-builtin refresh under a strategy that structurally can't provide it |
-| 3 concrete harness classifications (Codex, Claude Code, gh-cli) | `lib/federation-harnesses.mjs`, `kits/wf-gh-cli.kit.yaml` | Built, unit-tested (6 tests), each independently classified against Docker docs/issues, not assumed identical |
+| 4 concrete harness classifications (Codex, Claude Code subscription, Claude Code api-key, gh-cli) | `lib/federation-harnesses.mjs`, `kits/wf-gh-cli/spec.yaml` | Built, unit-tested (14 tests), each independently classified against Docker docs/issues; Claude Code's two variants are a documented product tradeoff, not a silently-picked default — see "Claude Code auth" above |
 | Per-harness six-column auth proof (HarnessSpec-driven) | `scripts/federation-harness-auth-proof-live-run.sh`, gate J in the conformance suite | Built, syntax-checked, HarnessSpec resolution verified for all 3 harnesses. Gate J's static regression guard was verified adversarially (see "Auth architecture"); the suite itself records gate J as SKIP because its live half — the actual per-harness proof — cannot run here |
 | Waspflow-driven, not-terminal-bound auth flow | `lib/federation-auth-flow.mjs`, `tests/federation-auth-flow.test.mjs` | Built, unit-tested (11 tests, all stub-based — no real `--oauth` call in any automated test), 3 self-caught bugs found and fixed (a spec-override bug, a lingering-timer bug, an unreliable-SIGTERM bug) — see "Auth UX reframe" |
 | Install UX: auto-install sbx + graceful fallback | `bin/federation-install-sbx`, `install.sh`, `bin/waspflow doctor` | Built, tested end-to-end on this machine (the real "no passwordless sudo" fallback path — see "Install UX" below) |
@@ -282,8 +346,10 @@ label):
   (`ANTHROPIC_API_KEY` silently overriding subscription auth) for its own headless workers — a
   previously-encountered failure mode, not a hypothetical one, cited directly in the spec.
 - **gh-cli** — `host-env-proxy` (the extensibility proof: a non-built-in harness onboarded via a
-  Waspflow-authored kit, `kits/wf-gh-cli.kit.yaml`, using Docker's documented `credentials.sources`
-  env-var injection — not a Waspflow gateway). Deliberately chosen because `GH_TOKEN` is a
+  Waspflow-authored kit, `kits/wf-gh-cli/spec.yaml`, using Docker's documented `credentials.sources`
+  env-var injection — not a Waspflow gateway). `install` is `"wf-gh-cli"`, the kit's own manifest
+  `name` — confirmed against a real `sbx run` that this is the AGENT positional a `kind: sandbox`
+  kit requires, not a file path. Deliberately chosen because `GH_TOKEN` is a
   **static** Personal Access Token that `gh` does not self-refresh — this keeps the extensibility
   proof honest: it demonstrates a new harness CAN be onboarded through the documented kit
   mechanism, without also (mis)claiming that mechanism handles refresh. `oauth_refresh.refresh_owner:
@@ -295,31 +361,35 @@ auth mode; both have Docker-proven indefinite refresh; gh-cli correctly uses a d
 and installs via a custom kit, not a built-in template; and none of the three harnesses violate the
 `host-file-proxy`/`host-env-proxy` docker-builtin-refresh guard.
 
-### Per-harness six-column proof matrix
+### Per-harness six-column proof matrix — updated with real owner live-UAT results
 
 `scripts/federation-harness-auth-proof-live-run.sh` supersedes the prior single-purpose auth proof
 script. It is **HarnessSpec-parameterized** — it reads `lib/federation-harnesses.mjs` at runtime and
 drives whatever that spec declares, rather than hardcoding one flow shared across harnesses. Usage:
-`bash scripts/federation-harness-auth-proof-live-run.sh {codex|claude-code|gh-cli}`.
+`bash scripts/federation-harness-auth-proof-live-run.sh {codex|claude-code|claude-code-api-key|gh-cli}`.
 
-The six columns, and their honest status for each harness (all **written, executable, and
-independently unit-verified for the code paths that don't require a live sandbox** — none executed
-against a real `sbx` install, because `sbx` is not installed on this machine and the proof
-inherently requires interactive host logins):
+**The owner ran this live against the real sbx install.** Columns 1-2 (auth UX) **PASSED** for real,
+for both Codex and Claude Code — waspflow drove the Codex login and surfaced only the URL; the
+script correctly detected Claude Code's interactive-session flow and the operator did only
+`sbx run claude` → `/login`. Column 6 ("full CLI runs in VM") **FAILED** for both, due to Defect 3
+above (the `sbx run` argument-order bug) — now fixed and re-verified in this session via three real,
+`--detached`, immediately-torn-down sandboxes (Codex, Claude Code, gh-cli), each confirmed listed by
+`sbx ls`. The owner has not yet re-run the full six-column script end-to-end against the fix; that
+re-run is the next step (see "Owner handoff" below).
 
-| Column | Codex | Claude Code | gh-cli |
-| --- | --- | --- | --- |
-| Existing host login detected | **Detect-first logic unit-tested and independently reproduced against a stub (see "Auth UX reframe" above); not run against a live sandbox.** Script calls `isProviderSecretSet()` — waspflow checks, the operator is never asked. | **Not exercised.** `interactive-session-flow` cannot be detected host-side; script calls `describeAuthRequirement()` and shows its honest non-drivable instruction. | **Not exercised.** Script checks whether `GH_TOKEN` is already set on the host. |
-| Extra login required | **Detect-first + drive-it-myself logic unit-tested and reproduced against a stub; not run live.** If unset, waspflow calls `startAuthFlow()` itself and surfaces only `AUTH_URL <url>` — never the raw `sbx` command. | **Not exercised.** Operator attests completion inside an attached session; waspflow cannot verify this host-side for `interactive-session-flow`. | **Not exercised** (depends on whether `GH_TOKEN` was pre-set). |
-| Credential stays outside VM | **Not exercised.** Script's hostile-guest search (env, `ps aux`, `~/.codex/auth.json`) is written and heuristic-checked, not run against a live guest. | **Not exercised.** Same search targets `~/.claude/.credentials.json`. | **Not exercised.** Same search greps for `gh[a-z]_`-prefixed PAT patterns. |
-| Refresh works | **Not exercised, and cannot be meaningfully proven in a short run** — the script documents that proving refresh requires holding a sandbox open past a real token's expiry window (~1h for OAuth access tokens), which this session cannot do; a short run cannot distinguish "never needed refresh" from "refresh works." | Same limitation as Codex — refresh proof requires a long-duration follow-up. | **N/A** — `GH_TOKEN` is static; `oauth_refresh.supports_refresh: false` in the HarnessSpec, so this column does not apply by design, not by omission. |
-| Subscription allowance used | **Not exercised.** Script greps `codex login status` output for `auth_mode: chatgpt/chatgptAuthTokens` (pass) vs. `apiKey` (fail) — the REPORTED-mode proof, not a bare "request succeeded" check. | **Not exercised.** Script greps `/status` output for `CLAUDE_CODE_OAUTH_TOKEN` (pass) vs. `ANTHROPIC_API_KEY` (fail). | **N/A** — gh-cli has no subscription/API-key billing distinction; column does not apply. |
-| Full CLI runs in VM | **Not exercised.** Script runs `sbx run --name <n> <scratch> codex` and confirms via `sbx ls`. | **Not exercised.** Same pattern with `claude`. | **Not exercised.** Same pattern with `sbx run ... --kit kits/wf-gh-cli.kit.yaml`. |
+| Column | Codex | Claude Code (subscription) | Claude Code (api-key) | gh-cli |
+| --- | --- | --- | --- | --- |
+| Existing host login detected | **LIVE-VERIFIED (owner UAT).** `isProviderSecretSet()` correctly detected state; waspflow checked, the operator was never asked. | **LIVE-VERIFIED (owner UAT).** Correctly identified as `interactive-session-flow`, not host-detectable. | Not yet live-run. Detect-first logic (`sbx secret ls -g --service anthropic`) reproduced directly against this machine's real install in this session (correctly identifies an existing secret without triggering a new one). | Not yet live-run; unit-tested and reproduced against a stub. |
+| Extra login required | **LIVE-VERIFIED (owner UAT).** Waspflow drove `startAuthFlow()`; operator did only the browser step at the printed `AUTH_URL`. | **LIVE-VERIFIED (owner UAT).** Operator completed `/login` inside `sbx run claude`, as `describeAuthRequirement()` instructed — necessary friction per the sbx limitation documented above, not avoidable in v0 for the subscription path. | Not yet live-run. Non-interactive `sbx secret set -g anthropic` via stdin is the mechanism; no browser/interactive step is needed for this path at all. | Not yet live-run; depends on whether `GH_TOKEN` is pre-set. |
+| Full CLI runs in VM | **Was FAIL-CANDIDATE in owner UAT (Defect 3); fix applied and independently re-verified via a real, detached, torn-down `sbx run --name ... codex <path> --detached` in this session.** Owner re-run pending. | **Was FAIL-CANDIDATE in owner UAT (Defect 3, same root cause); fix applied and independently re-verified via a real `sbx run --name ... claude <path> --detached`.** Owner re-run pending. | Same fix applies (shares `run_sandbox()`); not yet live-run for this specific harness variant. | **Never previously reachable — blocked by both Defect 3 and the kit-schema-validity issue found while fixing it.** Now independently verified via a real `sbx run --name ... wf-gh-cli <path> --kit kits/wf-gh-cli --detached`, confirmed listed by `sbx ls`, torn down with `sbx rm`. |
+| Credential stays outside VM | Not yet live-run against the fixed invocation; heuristic search logic unchanged from before. | Not yet live-run against the fixed invocation. | Not yet live-run. | Not yet live-run. |
+| Refresh works | Still requires the separate long-duration follow-up (holding a sandbox open past a real OAuth token's ~1h expiry) — unaffected by this round's fixes. | Same long-duration limitation. | **N/A** — static API key, no refresh mechanism claimed. | **N/A** — static PAT. |
+| Subscription allowance used | Not yet live-run against the fixed invocation; `codex login status` `auth_mode`-parsing logic unchanged. | Not yet live-run against the fixed invocation; `/status` parsing logic unchanged. | Not yet live-run. **Note the inverted expectation**: `ANTHROPIC_API_KEY` reporting is the CORRECT result for this harness (it is deliberately usage-billed), not a failure — the script's `claude-code-api-key` case handles this distinction explicitly, unlike the `claude-code` case where the same report would be a FAIL-CANDIDATE. | **N/A** — no subscription/API-key distinction for gh-cli. |
 
-**Every cell above is "script written, not run."** This is the honest state: three real,
-executable, HarnessSpec-driven proof paths exist and were verified as far as this environment
-allows (syntax-checked, HarnessSpec resolution tested, unit tests for the classification logic
-they depend on) — none have touched a real `sbx` sandbox, because none exists here.
+Every remaining "not yet live-run" cell is real, executable, HarnessSpec-driven code — syntax-checked,
+HarnessSpec-resolution-tested, and (for the parts that don't require a live sandbox) unit-tested —
+but not yet exercised end-to-end against real `sbx` in a full six-column pass. That is the concrete
+next step for the owner, now that Defect 3 no longer blocks it.
 
 ### Gemini: still explicitly deferred, not assumed equivalent
 
@@ -561,6 +631,22 @@ orchestrating pass in this session:
     at all, since the flag flips to `'cancelled'` immediately regardless of whether the underlying
     process ever actually dies.
 
+14. **Fixed the owner-reported `sbx run` argument-order bug by first reproducing it, then verifying
+    the fix against the real CLI three separate times** (Codex, Claude Code, gh-cli), each as a
+    real, `--detached`, immediately-torn-down sandbox — not by reading `sbx run --help` once and
+    assuming the fix was correct. Discovered a SECOND, related real bug in the same investigation
+    (`kits/wf-gh-cli.kit.yaml`'s schema was invalid per `sbx kit validate` — missing
+    `schemaVersion`, wrong filename convention) that would have blocked the gh-cli fix even after
+    the argument order was corrected; fixed and re-validated against the real CLI, not assumed
+    correct from the first fetch of Docker's kit-reference docs.
+15. **Confirmed the Claude Code auth-strategy tradeoff by attempting the alternative directly**,
+    rather than accepting the owner's framing without verification: ran
+    `sbx secret set -g anthropic --oauth` against the real install and reproduced the exact error
+    (`"anthropic OAuth cannot be started from `sbx secret set`; sign in from inside the Claude
+    sandbox"`) that proves no host-drivable Anthropic OAuth exists in this sbx release — the
+    two-variant design in "Claude Code auth" above rests on this reproduced error, not assumed
+    Docker documentation.
+
 No claim in this report rests solely on a subagent's self-report. Every PASS above was reproduced
 by direct command execution in this session after all three lanes were merged together.
 
@@ -614,28 +700,29 @@ Per the decision note's constraints, this work does **not** claim:
 
 ## Owner handoff: closing the live gates
 
-**Most of what's below still requires a real `sbx` install; one now exists** (v0.35.0, installed by
-the owner mid-engagement — see "Owner UAT findings and fixes" above for the two defects that
-install surfaced and fixed). The mechanism, install UX, and every gate/proof that can run without a
-live sandbox are done and verified (see above). This is the exact, minimal set of commands for the
-owner to run to
-close the remaining gates, and where to hand the baton back.
-
-**Status: step 1 is already done.** The owner's real `sbx` v0.35.0 install (found the two defects
-fixed above) means steps 2 and 3 below are the only remaining commands:
+**`sbx` is installed and authenticated on the owner's machine** (v0.35.0 — see "Owner UAT findings
+and fixes" above for the three defects that real install surfaced and this revision fixed,
+including the `sbx run` argument-order bug that blocked every harness's gate [2/6]). This is the
+exact, minimal set of remaining commands for the owner to re-run to close the live gates, and where
+to hand the baton back.
 
 ```bash
-# 1. DONE — sbx v0.35.0 is installed and authenticated (found the two defects this
-#    revision fixes). If starting fresh on another machine:
+# 1. DONE — sbx v0.35.0 is installed and authenticated. If starting fresh on another machine:
 brew tap docker/tap && brew install docker/tap/sbx   # macOS
 # or, Linux (apt-based):
 curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh && sudo apt-get install -y docker-sbx
 sudo usermod -aG kvm $USER && newgrp kvm
 sbx login
 
-# 2. Per-harness auth proof (repeat for all three; set GH_TOKEN before the gh-cli run)
+# 2. RE-RUN the per-harness auth proof now that Defect 3 (sbx run argument order) is fixed —
+#    the prior run got PASS on columns 1-2 (auth UX) but FAIL on column 6 (full CLI runs in
+#    VM) for both Codex and Claude Code. Pick ONE Claude Code variant per the tradeoff
+#    documented above (subscription is the default/product intent; api-key is the smoother,
+#    usage-billed alternative — set ANTHROPIC_API_KEY first if choosing that one).
 bash scripts/federation-harness-auth-proof-live-run.sh codex
-bash scripts/federation-harness-auth-proof-live-run.sh claude-code
+bash scripts/federation-harness-auth-proof-live-run.sh claude-code                 # subscription (default)
+# — or —
+ANTHROPIC_API_KEY=<your key> bash scripts/federation-harness-auth-proof-live-run.sh claude-code-api-key   # usage-billed, smoother
 GH_TOKEN=<your PAT> bash scripts/federation-harness-auth-proof-live-run.sh gh-cli
 
 # 3. Graduation-gate conformance pass (gates A, B, D, E, G — set env vars per the script's own
@@ -644,14 +731,14 @@ GH_TOKEN=<your PAT> bash scripts/federation-harness-auth-proof-live-run.sh gh-cl
 bash scripts/federation-conformance-live-run.sh
 ```
 
-**Then hand back:** paste the raw output of all three (or point at where you saved it) and this
-report gets finalized with the live PASS/FAIL results replacing the current SKIPs — no gate is
-marked PASS without that reproduced evidence, so the handoff itself is what turns this from
-"mechanism-complete" into "graduation gates proven." One item cannot be closed even with `sbx`
-installed: the "refresh works" column needs a SEPARATE long-duration run holding a Codex/Claude
-Code sandbox open past a real token's expiry window (~1h) — a short pass, even with real `sbx`,
-cannot distinguish "never needed refresh" from "refresh actually works," so that one is a
-deliberately separate follow-up, not part of the three-command handoff above.
+**Then hand back:** paste the raw output (or point at where you saved it) and this report gets
+finalized with the live PASS/FAIL results replacing the current SKIPs/partial results — no gate is
+marked PASS without that reproduced evidence. Two items are explicitly deferred regardless of this
+handoff's outcome: (1) the "refresh works" column needs a SEPARATE long-duration run holding a
+Codex/Claude Code sandbox open past a real token's expiry window (~1h) — a short pass cannot
+distinguish "never needed refresh" from "refresh actually works"; (2) **which Claude Code auth
+variant Federation should default to in a shipped product** is the owner's decision, not something
+this session resolves — both are implemented, tested, and documented above.
 
 ## What's next (in priority order, after the owner handoff above)
 
