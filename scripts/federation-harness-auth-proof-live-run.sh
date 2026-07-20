@@ -53,11 +53,8 @@ fi
 # --- pull the declared HarnessSpec so this script drives the spec, not the
 #     other way around. A change to the spec (e.g. reclassifying a harness's
 #     auth_strategy) changes what this script attempts without editing bash.
-spec_json="$(node --input-type=module -e "
-import { CODEX_HARNESS, CLAUDE_CODE_HARNESS, GH_CLI_HARNESS } from '$root/lib/federation-harnesses.mjs';
-const specs = { codex: CODEX_HARNESS, 'claude-code': CLAUDE_CODE_HARNESS, 'gh-cli': GH_CLI_HARNESS };
-process.stdout.write(JSON.stringify(specs['$harness']));
-")"
+harness_spec_snippet="import { CODEX_HARNESS, CLAUDE_CODE_HARNESS, GH_CLI_HARNESS } from '$root/lib/federation-harnesses.mjs'; const specs = { codex: CODEX_HARNESS, 'claude-code': CLAUDE_CODE_HARNESS, 'gh-cli': GH_CLI_HARNESS }; const spec = specs['$harness'];"
+spec_json="$(node --input-type=module -e "$harness_spec_snippet process.stdout.write(JSON.stringify(spec));")"
 field() { node -e "process.stdout.write(String(JSON.parse(process.argv[1])$1 ?? ''))" "$spec_json"; }
 
 install="$(field '.install')"
@@ -103,19 +100,60 @@ run_sandbox() {
 }
 
 echo "=== [1/6] existing host login detected / extra login required ==="
+echo "Per the auth UX reframe: WASPFLOW runs the auth command itself and does"
+echo "detect-first — it never tells the operator to type a command. The operator"
+echo "does only the browser step when (and only when) one is actually needed."
 case "$auth_strategy" in
   docker-native-oauth)
-    echo "Checking for a pre-existing host-side credential for this service before this run."
-    echo "If '$login_command' has already been completed on this host, no extra login is needed."
-    read -r -p "Has '$login_command' already been completed on this host? [y/N] " already_done
-    if [[ "${already_done,,}" == "y" ]]; then
-      record "existing_host_login_detected" "yes (operator-confirmed)"
-      record "extra_login_required" "no"
+    flow_shape="$(field '.credential_discovery.flow_shape')"
+    if [[ "$flow_shape" == "host-url-flow" ]]; then
+      # federation-auth-flow.mjs does detect-first (isProviderSecretSet) and,
+      # only if unset, drives the login itself (startAuthFlow) — printing ONLY
+      # the structured {url} it parses out, never the raw sbx command. v0's
+      # terminal harness renders that URL as text; a future non-terminal UI
+      # would render the same {url, waitForCompletion} shape differently
+      # without any change to federation-auth-flow.mjs itself.
+      node --input-type=module -e "
+        $harness_spec_snippet
+        import { isProviderSecretSet, startAuthFlow } from '$root/lib/federation-auth-flow.mjs';
+        const { alreadySet } = await isProviderSecretSet(spec);
+        if (alreadySet) {
+          console.log('DETECT_RESULT already_set');
+          process.exit(0);
+        }
+        console.log('DETECT_RESULT needs_login');
+        const handle = startAuthFlow(spec);
+        const urlWait = setInterval(() => {
+          if (handle.url) { clearInterval(urlWait); console.log('AUTH_URL ' + handle.url); }
+        }, 50);
+        const result = await handle.waitForCompletion();
+        clearInterval(urlWait);
+        console.log('FLOW_RESULT ' + result.status + ' ' + result.detail.replace(/\\n/g, ' | '));
+        process.exit(result.status === 'complete' ? 0 : 1);
+      " > /tmp/wf-auth-flow-$$.out 2>&1
+      flow_rc=$?
+      cat /tmp/wf-auth-flow-$$.out
+      if grep -q "DETECT_RESULT already_set" /tmp/wf-auth-flow-$$.out; then
+        record "existing_host_login_detected" "yes (detected via isProviderSecretSet — no login command run)"
+        record "extra_login_required" "no"
+      elif [[ "$flow_rc" -eq 0 ]]; then
+        record "existing_host_login_detected" "no"
+        record "extra_login_required" "yes — waspflow drove the login itself; operator only completed the browser step at the printed AUTH_URL"
+      else
+        record "existing_host_login_detected" "no"
+        record "extra_login_required" "FAIL-CANDIDATE — waspflow-driven login flow did not complete; see output above"
+      fi
+      rm -f /tmp/wf-auth-flow-$$.out
     else
-      echo "Run this now, once, on the HOST: $login_command"
-      read -r -p "Press Enter once that command has completed... "
-      record "existing_host_login_detected" "no (fresh login performed this run)"
-      record "extra_login_required" "yes (one-time host login)"
+      # interactive-session-flow (Claude Code): honestly not drivable
+      # host-side — describeAuthRequirement() explains why (no URL exists to
+      # capture; /login must run inside an attached sandbox session).
+      instruction="$(node --input-type=module -e "$harness_spec_snippet import { describeAuthRequirement } from '$root/lib/federation-auth-flow.mjs'; console.log(describeAuthRequirement(spec).instruction);")"
+      echo "NOTE: '$harness' uses an interactive-session-flow login (not a host-side URL)."
+      echo "$instruction"
+      read -r -p "Once '$login_command' has been completed inside an attached sandbox session, press Enter... "
+      record "existing_host_login_detected" "n/a (interactive-session-flow; waspflow cannot detect this host-side)"
+      record "extra_login_required" "operator-attested — see describeAuthRequirement() instruction above"
     fi
     ;;
   host-env-proxy)

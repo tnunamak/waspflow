@@ -42,3 +42,16 @@ test('none of the three harnesses claim host-file-proxy/host-env-proxy docker-bu
     }
   }
 });
+
+test('Codex and Claude Code have DIFFERENT auth flow_shapes despite sharing an auth_strategy label (auth UX reframe)', () => {
+  assert.equal(CODEX_HARNESS.credential_discovery.flow_shape, 'host-url-flow');
+  assert.equal(CLAUDE_CODE_HARNESS.credential_discovery.flow_shape, 'interactive-session-flow');
+  // The two flow_shapes must stay distinct — collapsing them would force a
+  // false uniformity (a host-side URL that Claude's flow does not have).
+  assert.notEqual(CODEX_HARNESS.credential_discovery.flow_shape, CLAUDE_CODE_HARNESS.credential_discovery.flow_shape);
+});
+
+test('only host-url-flow declares a url_prompt_pattern; interactive-session-flow has none to declare', () => {
+  assert.ok(CODEX_HARNESS.credential_discovery.url_prompt_pattern);
+  assert.equal(CLAUDE_CODE_HARNESS.credential_discovery.url_prompt_pattern, undefined);
+});

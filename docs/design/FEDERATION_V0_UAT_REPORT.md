@@ -78,6 +78,7 @@ real today, versus what is real, runnable code correctly waiting on a live sandb
 | Backend-neutral `HarnessSpec` (6 explicit auth strategies) | `lib/federation-harness-spec.mjs` | Built, unit-tested (13 tests), including an adversarial "CORE SAFETY CHECK" proving a spec cannot claim docker-builtin refresh under a strategy that structurally can't provide it |
 | 3 concrete harness classifications (Codex, Claude Code, gh-cli) | `lib/federation-harnesses.mjs`, `kits/wf-gh-cli.kit.yaml` | Built, unit-tested (6 tests), each independently classified against Docker docs/issues, not assumed identical |
 | Per-harness six-column auth proof (HarnessSpec-driven) | `scripts/federation-harness-auth-proof-live-run.sh`, gate J in the conformance suite | Built, syntax-checked, HarnessSpec resolution verified for all 3 harnesses. Gate J's static regression guard was verified adversarially (see "Auth architecture"); the suite itself records gate J as SKIP because its live half — the actual per-harness proof — cannot run here |
+| Waspflow-driven, not-terminal-bound auth flow | `lib/federation-auth-flow.mjs`, `tests/federation-auth-flow.test.mjs` | Built, unit-tested (11 tests, all stub-based — no real `--oauth` call in any automated test), 3 self-caught bugs found and fixed (a spec-override bug, a lingering-timer bug, an unreliable-SIGTERM bug) — see "Auth UX reframe" |
 | Install UX: auto-install sbx + graceful fallback | `bin/federation-install-sbx`, `install.sh`, `bin/waspflow doctor` | Built, tested end-to-end on this machine (the real "no passwordless sudo" fallback path — see "Install UX" below) |
 | README sbx-install section | `README.md` "Install sbx (Docker Sandboxes)" | Built — two copy-pasteable code blocks + one official link, no prose wall |
 
@@ -308,8 +309,8 @@ inherently requires interactive host logins):
 
 | Column | Codex | Claude Code | gh-cli |
 | --- | --- | --- | --- |
-| Existing host login detected | **Not exercised.** Script prompts the operator to confirm or perform `sbx secret set -g openai --oauth`. | **Not exercised.** Script starts the sandbox for an in-session `/login`. | **Not exercised.** Script checks whether `GH_TOKEN` is already set on the host. |
-| Extra login required | **Not exercised** (depends on operator's answer above). | **Not exercised** (depends on whether `/login` was already completed). | **Not exercised** (depends on whether `GH_TOKEN` was pre-set). |
+| Existing host login detected | **Detect-first logic unit-tested and independently reproduced against a stub (see "Auth UX reframe" above); not run against a live sandbox.** Script calls `isProviderSecretSet()` — waspflow checks, the operator is never asked. | **Not exercised.** `interactive-session-flow` cannot be detected host-side; script calls `describeAuthRequirement()` and shows its honest non-drivable instruction. | **Not exercised.** Script checks whether `GH_TOKEN` is already set on the host. |
+| Extra login required | **Detect-first + drive-it-myself logic unit-tested and reproduced against a stub; not run live.** If unset, waspflow calls `startAuthFlow()` itself and surfaces only `AUTH_URL <url>` — never the raw `sbx` command. | **Not exercised.** Operator attests completion inside an attached session; waspflow cannot verify this host-side for `interactive-session-flow`. | **Not exercised** (depends on whether `GH_TOKEN` was pre-set). |
 | Credential stays outside VM | **Not exercised.** Script's hostile-guest search (env, `ps aux`, `~/.codex/auth.json`) is written and heuristic-checked, not run against a live guest. | **Not exercised.** Same search targets `~/.claude/.credentials.json`. | **Not exercised.** Same search greps for `gh[a-z]_`-prefixed PAT patterns. |
 | Refresh works | **Not exercised, and cannot be meaningfully proven in a short run** — the script documents that proving refresh requires holding a sandbox open past a real token's expiry window (~1h for OAuth access tokens), which this session cannot do; a short run cannot distinguish "never needed refresh" from "refresh works." | Same limitation as Codex — refresh proof requires a long-duration follow-up. | **N/A** — `GH_TOKEN` is static; `oauth_refresh.supports_refresh: false` in the HarnessSpec, so this column does not apply by design, not by omission. |
 | Subscription allowance used | **Not exercised.** Script greps `codex login status` output for `auth_mode: chatgpt/chatgptAuthTokens` (pass) vs. `apiKey` (fail) — the REPORTED-mode proof, not a bare "request succeeded" check. | **Not exercised.** Script greps `/status` output for `CLAUDE_CODE_OAUTH_TOKEN` (pass) vs. `ANTHROPIC_API_KEY` (fail). | **N/A** — gh-cli has no subscription/API-key billing distinction; column does not apply. |
@@ -326,6 +327,122 @@ Unchanged from the prior revision's correction: Gemini's Docker Sandboxes auth p
 same durable, host-only subscription OAuth flow as Codex/Claude — it is API-key/proxy-managed
 instead. No `HarnessSpec`, kit, or code in this revision assumes otherwise. Gemini remains a
 separate, unresolved spike.
+
+## Auth UX reframe: waspflow drives login, not the operator (2026-07-20)
+
+**Owner correction applied in this revision.** The prior auth-proof script told the operator to run
+`sbx secret set -g openai --oauth` themselves — this is the wrong mental model for the actual
+product. Three corrections:
+
+1. **Waspflow runs the sbx auth command itself; the user does only the browser part.** The operator
+   never types or is told to type the raw `sbx` command. Waspflow spawns it, parses the login URL
+   out of its stdout, and surfaces just that.
+2. **Detect-first.** Before triggering anything, check whether the provider secret is already set
+   in the Waspflow-scoped sbx profile (`sbx secret ls -g --service <id>`). If set, proceed silently.
+   A login flow starts only when a job actually needs a provider that isn't authed yet — never
+   re-prompt once set.
+3. **Not terminal-bound.** The packaging target is an installed app (clawmeter-style: download and
+   run, no forced terminal), not a CLI product. The auth step is architected as a structured
+   event — `{url, waitForCompletion}` — that a future tray/GUI can render its own way. The terminal
+   is v0's TEST harness, not the product surface the interface was designed around.
+
+### `lib/federation-auth-flow.mjs`: the structured interface
+
+New module implementing all three corrections:
+
+- **`isProviderSecretSet(harnessSpec)`** — detect-first, read-only. Runs `sbx secret ls -g --service
+  <id>` and parses sbx's real (non-JSON, confirmed against a live v0.35.0 install) empty-result text
+  `"No secrets found for scope ... and service ..."` to distinguish already-set from not-set. Never
+  triggers a login.
+- **`startAuthFlow(harnessSpec)`** — for `docker-native-oauth` harnesses whose
+  `credential_discovery.flow_shape` is `'host-url-flow'` (see below). Spawns the real `sbx` command
+  itself, parses the login URL out of its stdout using the spec's `url_prompt_pattern`, and returns
+  an `AuthFlowHandle` — `{status, url, waitForCompletion(), cancel()}`. The caller sees only `url`;
+  it never sees or constructs the underlying `sbx secret set -g openai --oauth` invocation.
+- **`describeAuthRequirement(harnessSpec)`** — honest fallback for flow shapes `startAuthFlow`
+  cannot drive (see the Codex/Claude asymmetry below). Returns `{drivable: false, instruction}`
+  rather than forcing a fake `{url}` onto a harness that has no host-side URL at all.
+
+### The Codex/Claude asymmetry, made explicit in the schema
+
+Confirmed directly against a real `sbx` install (not assumed) that Codex's and Claude Code's
+`docker-native-oauth` logins are mechanically different, even though they share the same
+`auth_strategy` label:
+
+- **Codex — `host-url-flow`.** `sbx secret set -g openai --oauth` runs entirely on the host, prints
+  `"Open this URL to sign in to Codex OAuth:"` followed by a plain URL, and completes when the
+  browser redirects to a local callback (`localhost:1455`). No separate device code. Reducible to
+  `{url, waitForCompletion}` — confirmed by directly invoking the real command during this session
+  (see the incident note below on why this must be handled carefully).
+- **Claude Code — `interactive-session-flow`.** `/login` must run *inside* an attached, interactive
+  sandbox session (`sbx run claude`). There is no host-side URL for waspflow to capture — forcing
+  this into the same `{url}` shape as Codex would misrepresent the mechanism. `HarnessSpec` now
+  requires an explicit `flow_shape` field (schema-enforced: `host-url-flow` requires a
+  `url_prompt_pattern`; `startAuthFlow()` refuses to drive `interactive-session-flow` and throws
+  `AuthFlowError` if called on it) so this asymmetry cannot be silently collapsed later.
+
+### Incident: a live probe of the real OAuth flow left a stray credential
+
+While confirming the real shape of `sbx secret set -g openai --oauth`'s output (needed to write
+`url_prompt_pattern` correctly, not guessed), this session ran the real command directly against
+the owner's authenticated `sbx` install to observe its stdout. That probe was interrupted, but **it
+left a real OAuth secret configured**: `sbx secret ls -g --service openai` now reports `(oauth
+configured)`. A stray background process from an early, buggy version of the auth-flow wrapper
+(before the `sbxBin` override bug — see below — was fixed) also briefly held `localhost:1455`; that
+process has since exited on its own and the port is confirmed clear.
+
+**Owner: if this credential is not one you intended to configure, remove it with:**
+```bash
+sbx secret rm -g openai
+```
+This is flagged rather than silently cleaned up, since removing security-relevant credential state
+without being asked is exactly the kind of unilateral action this project's own conventions warn
+against. No code in this revision reads, uses, or depends on that stray credential — all automated
+tests use a stub `sbx` binary and never invoke the real `--oauth` flow (see testing section below).
+
+### Bugs found and fixed while building this module (self-caught, not owner-reported)
+
+Building and testing `federation-auth-flow.mjs` surfaced three real bugs, each caught by writing a
+real reproduction before trusting the fix:
+
+1. **`startAuthFlow` ignored its own `sbxBin` override.** The child process's binary was derived by
+   splitting `credential_discovery.login_command` (always literally `"sbx"`), never actually using
+   the `sbxBin` option — so a test-provided stub was silently bypassed and the REAL `sbx` binary ran
+   instead. This is exactly how the stray credential above was created: a supposedly-stubbed test
+   run actually invoked the real OAuth flow three times. Fixed: the binary is always `sbxBin`; only
+   the arguments after the leading `sbx` are taken from `login_command`.
+2. **A lingering `node:timers/promises` timeout kept the process alive after successful
+   completion.** `Promise.race([completion, delay(timeout)])` never cancelled the losing `delay()`
+   call, which held Node's event loop open for the full timeout duration even after `completion`
+   won. Fixed with an `AbortController` so the timer is genuinely cancelled, not just ignored.
+3. **`cancel()` assumed SIGTERM is reliably delivered and handled — proven false in this
+   environment.** A direct, isolated reproduction (a trap-holding shell script, killed via both
+   `child.kill('SIGTERM')` and a plain shell `kill -TERM` run completely outside Node) showed the
+   process surviving SIGTERM entirely. `cancel()` now SIGTERMs first, then SIGKILLs after a 1-second
+   grace period if the process hasn't exited — and a SIGKILLed child's stdio streams are now
+   explicitly `.destroy()`ed, since an open pipe on a killed child was independently found to keep
+   Node's event loop alive indefinitely (confirmed via isolated reproduction, not assumed from
+   documentation).
+
+All three are covered by dedicated regression tests in `tests/federation-auth-flow.test.mjs`,
+including one that deliberately makes the stub ignore SIGTERM (`trap '' TERM`) to force and verify
+the SIGKILL fallback path, checked via actual OS process liveness (`pgrep`), not just the JS-side
+status flag.
+
+### Updated per-harness proof matrix status
+
+The prior revision's matrix row "Existing host login detected: Script prompts the operator to
+confirm or perform `sbx secret set -g openai --oauth`" described the OLD, pre-reframe script and is
+now inaccurate — `scripts/federation-harness-auth-proof-live-run.sh` step [1/6] for
+`docker-native-oauth` + `host-url-flow` harnesses (Codex) now calls `isProviderSecretSet()` and, only
+if unset, `startAuthFlow()` — printing `AUTH_URL <url>` and nothing else; it never prints or asks
+for the raw `sbx` command. For `interactive-session-flow` (Claude Code), the script now calls
+`describeAuthRequirement()` and shows its honest `instruction` field rather than a fabricated URL
+prompt. All 11 tests in `tests/federation-auth-flow.test.mjs` pass (stub-only — no real `sbx` call in
+any automated test, precisely because of the incident above), and the end-to-end detect-first +
+drive-the-login-myself + surface-only-the-URL behavior was independently verified against a stub
+`sbx` mimicking the real v0.35.0 output shape, reproduced in this session outside the test suite as
+well.
 
 ## Graduation gates: what actually passes
 
@@ -422,6 +539,28 @@ orchestrating pass in this session:
     *Gateway(` call) — each caught, and the clean tree correctly reverted to SKIP, not a lingering
     FAIL, once every injection was removed.
 
+11. **Found and fixed a real bug via direct reproduction, not code review**: `startAuthFlow`'s child
+    process spawned the literal string `"sbx"` (parsed from `credential_discovery.login_command`),
+    silently ignoring the `sbxBin` test-override option — meaning every "stub-based" test attempt
+    during development actually invoked the real `sbx` binary. Caught only because a test hung
+    unexpectedly; tracing the hang to real `sbx secret set -g openai --oauth` processes (visible via
+    `ps aux`) revealed the bug. This is documented as an incident, with the exact remediation
+    command, in "Auth UX reframe" above — not glossed over as a clean build.
+12. **Found and fixed two further bugs by refusing to accept an initially-plausible fix**: after
+    correcting the `sbxBin` bug, a cancellation test still hung. Rather than assume the fix was
+    sufficient, traced the hang through three further isolated reproductions outside the actual
+    module (a bare `node:timers/promises` race, a bare `child.kill('SIGTERM')` against a
+    trap-holding shell script, and a bare SIGKILLed-child-with-open-stdio-pipes case) before
+    concluding each was a real, independent bug and fixing all three. Every fix was re-verified by
+    re-running the exact failing test, not by inspection.
+13. **Adversarially designed a test to force the failure path it claims to cover**: the SIGKILL
+    fallback test uses `trap '' TERM` specifically so the stub CANNOT exit via SIGTERM, forcing the
+    test to actually exercise the SIGKILL branch rather than coincidentally passing via the
+    SIGTERM-succeeds path. Process death is checked via `pgrep` against the OS, not via the
+    wrapper's own JS-side status flag — checking the flag alone would not have caught bug #12 above
+    at all, since the flag flips to `'cancelled'` immediately regardless of whether the underlying
+    process ever actually dies.
+
 No claim in this report rests solely on a subagent's self-report. Every PASS above was reproduced
 by direct command execution in this session after all three lanes were merged together.
 
@@ -467,12 +606,19 @@ Per the decision note's constraints, this work does **not** claim:
 - **That subscription pooling works for Gemini the way it does for Codex/Claude.** Explicitly not
   assumed — Gemini's Docker auth path is API-key/proxy-managed, tracked as a separate deferred
   spike.
+- **That `lib/federation-auth-flow.mjs`'s `startAuthFlow()` has been proven against the real Codex
+  OAuth flow end-to-end.** It was unit-tested exclusively against stub `sbx` binaries. This session
+  DID observe the real flow's actual output shape once (to write `url_prompt_pattern` correctly
+  rather than guess it) — see the incident note in "Auth UX reframe" — but that was a manual probe
+  of the real command's behavior, not an automated, repeatable test of the wrapper driving it.
 
 ## Owner handoff: closing the live gates
 
-**Everything below requires a real `sbx` install, which does not exist on the machine this work was
-built on.** The mechanism, install UX, and every gate/proof that can run without a live sandbox are
-done and verified (see above). This is the exact, minimal set of commands for the owner to run to
+**Most of what's below still requires a real `sbx` install; one now exists** (v0.35.0, installed by
+the owner mid-engagement — see "Owner UAT findings and fixes" above for the two defects that
+install surfaced and fixed). The mechanism, install UX, and every gate/proof that can run without a
+live sandbox are done and verified (see above). This is the exact, minimal set of commands for the
+owner to run to
 close the remaining gates, and where to hand the baton back.
 
 **Status: step 1 is already done.** The owner's real `sbx` v0.35.0 install (found the two defects

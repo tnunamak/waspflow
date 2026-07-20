@@ -11,7 +11,11 @@ const base = (overrides = {}) => ({
   provider_domains: ['api.openai.com'],
   auth_header: { header: 'Authorization', format: 'Bearer %s' },
   auth_strategy: 'docker-native-oauth',
-  credential_discovery: { login_command: 'sbx secret set -g openai --oauth' },
+  credential_discovery: {
+    login_command: 'sbx secret set -g openai --oauth',
+    flow_shape: 'host-url-flow',
+    url_prompt_pattern: 'Open this URL to sign in',
+  },
   oauth_refresh: { supports_refresh: true, refresh_owner: 'docker-builtin', evidence: 'docker/sbx-releases#300' },
   login_status_probe: { command: 'codex login status', reports_auth_mode: true, mode_field_hint: 'auth_mode' },
   cancellation: { cancel_signal: 'sbx stop', on_cancel: 'sandbox stopped, process killed' },
@@ -25,6 +29,31 @@ test('accepts a well-formed docker-native-oauth spec (Codex/Claude shape)', () =
 
 test('rejects an unknown auth_strategy', () => {
   assert.throws(() => validateHarnessSpec(base({ auth_strategy: 'made-up-strategy' })), HarnessSpecError);
+});
+
+test('docker-native-oauth requires an explicit flow_shape (auth UX reframe: waspflow must know which structured interaction to drive)', () => {
+  const spec = base();
+  delete spec.credential_discovery.flow_shape;
+  assert.throws(() => validateHarnessSpec(spec), /flow_shape/);
+});
+
+test('docker-native-oauth rejects an unrecognized flow_shape', () => {
+  const spec = base();
+  spec.credential_discovery.flow_shape = 'device-code-flow'; // not a real, confirmed shape
+  assert.throws(() => validateHarnessSpec(spec), /flow_shape/);
+});
+
+test('host-url-flow requires a url_prompt_pattern to parse the URL out of stdout', () => {
+  const spec = base();
+  delete spec.credential_discovery.url_prompt_pattern;
+  assert.throws(() => validateHarnessSpec(spec), /url_prompt_pattern/);
+});
+
+test('interactive-session-flow does not require url_prompt_pattern (there is no host-side URL to parse)', () => {
+  const spec = base({
+    credential_discovery: { login_command: '/login', flow_shape: 'interactive-session-flow' },
+  });
+  assert.deepEqual(validateHarnessSpec(spec), spec);
 });
 
 test('every documented AUTH_STRATEGIES value is exactly 6, matching the correction', () => {
