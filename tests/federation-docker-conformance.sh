@@ -295,10 +295,17 @@ gate_h_version_pinned_conformance() {
   cleanup_stub() { rm -rf "$stub_dir"; PATH="$orig_path"; }
   trap cleanup_stub RETURN
 
+  # v0's pinned profile is a FLOOR only (no ceiling — the note warns against
+  # inventing a fake upper bound with false confidence; see
+  # profiles/wf-federation-docker-v0.json's max_version: null). A below-floor
+  # stub is therefore the only version class v0 can honestly claim to reject
+  # today; a high/bogus version is accepted BY DESIGN until a ceiling is
+  # reviewed and pinned. Testing rejection of a high version here would
+  # assert a requirement v0 doesn't implement yet.
   cat >"$stub_dir/sbx" <<'STUB'
 #!/usr/bin/env bash
 if [[ "$1" == "version" || "$1" == "--version" ]]; then
-  echo "sbx version 99.99.99-bogus-out-of-range"
+  echo "sbx version 0.1.0-below-pinned-floor"
   exit 0
 fi
 echo "stub sbx: unsupported invocation: $*" >&2
@@ -309,10 +316,10 @@ STUB
 
   if [[ "$mechanism" == "bin" ]]; then
     if "$root/bin/federation-detect-sbx" >/dev/null 2>&1; then
-      record "$name" FAIL "bin/federation-detect-sbx accepted a bogus out-of-range stub version (99.99.99-bogus-out-of-range) instead of refusing/warning"
+      record "$name" FAIL "bin/federation-detect-sbx accepted a stub sbx version (0.1.0) below the pinned floor instead of refusing it"
       return
     fi
-    record "$name" PASS "bin/federation-detect-sbx correctly refused a stubbed out-of-range sbx version"
+    record "$name" PASS "bin/federation-detect-sbx correctly refused a stubbed below-floor sbx version (note: v0 pins a floor only — no ceiling is enforced yet, see profiles/wf-federation-docker-v0.json)"
     return
   fi
 
