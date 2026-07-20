@@ -76,13 +76,22 @@ gate_b_locked_down_policy() {
     record "$name" SKIP "WASPFLOW_FEDERATION_CONFORMANCE_SANDBOX not set — gate B requires a deny-all-initialized live sandbox to test allow/deny destinations against"
     return
   fi
+  # CORRECTED after live UAT: `sbx policy inspect <name>` expects a POLICY OR
+  # RULE identifier ("sbx policy inspect \"Developer access\""), not a
+  # sandbox name — confirmed directly: it fails with "policy or rule not
+  # found" for a real sandbox. `sbx policy ls <SANDBOX>` is the correct
+  # command for the sandbox-scoped effective policy summary.
   local effective_policy
-  if ! effective_policy="$(sbx policy inspect "$handle" 2>&1)"; then
-    record "$name" FAIL "sbx policy inspect \"$handle\" failed — cannot verify the effective policy at all"
+  if ! effective_policy="$(sbx policy ls "$handle" 2>&1)"; then
+    record "$name" FAIL "sbx policy ls \"$handle\" failed — cannot verify the effective policy at all"
     return
   fi
-  if ! grep -qi 'deny-all\|deny_all' <<<"$effective_policy"; then
-    record "$name" FAIL "effective policy for $handle does not report a deny-all base preset"
+  if grep -qi 'allow all hosts' <<<"$effective_policy"; then
+    record "$name" FAIL "effective policy for $handle reports 'allow all hosts' (the local machine's current sbx policy preset is permissive, not deny-all) — see output: $effective_policy"
+    return
+  fi
+  if ! grep -qi 'deny' <<<"$effective_policy"; then
+    record "$name" FAIL "effective policy for $handle does not report any deny rule — cannot confirm a deny-all base preset"
     return
   fi
   local denied=0 total=0
@@ -119,9 +128,20 @@ gate_c_credential_negative_guest() {
     record "$name" SKIP "WASPFLOW_FEDERATION_CONFORMANCE_SANDBOX not set — gate C additionally requires personal Docker Sandboxes to be configured on the same machine with realistic developer credentials first (per the note: testing only a clean machine is insufficient)"
     return
   fi
+  # CORRECTED after live UAT found a real bug in the original checks below
+  # (reproduced against a real sandbox, not assumed): `ssh-add -l`'s FAILURE
+  # message is "error fetching identities: communication with agent failed"
+  # — the naive `grep -qi identit` matched the word "identities" inside that
+  # ERROR text, producing a false SSH_SIGN_POSSIBLE positive even when
+  # ssh-add exited 1 (no real signing capability). Fixed to check the actual
+  # exit code. Also corrected: SSH_AUTH_SOCK being a visible socket FILE is
+  # documented, expected Docker behavior per the decision note itself
+  # ("Docker also forwards the host SSH agent whenever SSH_AUTH_SOCK is
+  # set... it can request signatures" — i.e. visibility is not the
+  # violation, a WORKING signature request is) — dropped as a leak signal on
+  # its own; ssh-add's actual success/failure is the real test.
   local checks=(
-    'test -S "$SSH_AUTH_SOCK" 2>/dev/null && echo SSH_SOCK_VISIBLE || echo ssh_socket_absent'
-    'ssh-add -l 2>&1 | grep -qi identit && echo SSH_SIGN_POSSIBLE || echo ssh_sign_blocked'
+    'ssh-add -l >/dev/null 2>&1 && echo SSH_SIGN_POSSIBLE || echo ssh_sign_blocked'
     'cat ~/.docker/config.json 2>/dev/null | grep -qi auth && echo REGISTRY_CRED_READABLE || echo registry_cred_absent'
     'env | grep -Ei "ANTHROPIC_API_KEY|OPENAI_API_KEY|GITHUB_TOKEN|AWS_SECRET" && echo MODEL_OR_CLOUD_SECRET_PRESENT || echo no_model_or_cloud_secret'
   )
@@ -129,7 +149,7 @@ gate_c_credential_negative_guest() {
   for check in "${checks[@]}"; do
     local out
     out="$(sbx exec "$handle" -- sh -c "$check" 2>&1)" || true
-    if grep -Eq 'SSH_SOCK_VISIBLE|SSH_SIGN_POSSIBLE|REGISTRY_CRED_READABLE|MODEL_OR_CLOUD_SECRET_PRESENT' <<<"$out"; then
+    if grep -Eq 'SSH_SIGN_POSSIBLE|REGISTRY_CRED_READABLE|MODEL_OR_CLOUD_SECRET_PRESENT' <<<"$out"; then
       leaked=$((leaked + 1))
     fi
   done
@@ -253,12 +273,18 @@ gate_g_reliable_teardown() {
     record "$name" SKIP "WASPFLOW_FEDERATION_CONFORMANCE_SANDBOX not set — gate G requires a live sandbox to destroy and independently re-list, plus a daemon restart to test orphan reconciliation"
     return
   fi
-  if ! sbx destroy "$handle" >/dev/null 2>&1; then
-    record "$name" FAIL "sbx destroy \"$handle\" reported failure"
+  # CORRECTED after live UAT: `sbx destroy` and `sbx list` are not real
+  # subcommands (confirmed via `sbx --help` — the removal command is `rm`,
+  # the listing command is `ls`); the earlier guessed names always failed.
+  # `rm` requires `--force` non-interactively ("stdin is not a terminal; use
+  # --force to skip confirmation" — confirmed directly), so a bare `sbx rm`
+  # would also always fail here even with the right subcommand name.
+  if ! sbx rm --force "$handle" >/dev/null 2>&1; then
+    record "$name" FAIL "sbx rm --force \"$handle\" reported failure"
     return
   fi
-  if sbx list 2>&1 | grep -Fq "$handle"; then
-    record "$name" FAIL "sandbox $handle still appears in sbx list after destroy — removal not confirmed independently of exit code"
+  if sbx ls 2>&1 | grep -Fq "$handle"; then
+    record "$name" FAIL "sandbox $handle still appears in sbx ls after rm — removal not confirmed independently of exit code"
     return
   fi
   record "$name" FAIL "destroy + independent re-list confirmed removal for this one sandbox, but scratch-data removal, token revocation, cleanup-receipt recording, and a startup orphan reaper are not implemented or exercised — treat as unproven, not passing"

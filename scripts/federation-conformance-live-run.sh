@@ -77,7 +77,7 @@ fi
 echo
 echo "=== Gate G: daemon-restart / reboot survival ==="
 echo "Manual step required: restart the sbx daemon (or reboot this host), then run:"
-echo "  sbx list | grep -F \"$WASPFLOW_FEDERATION_CONFORMANCE_SANDBOX\""
+echo "  sbx ls | grep -F \"$WASPFLOW_FEDERATION_CONFORMANCE_SANDBOX\""
 echo "A Waspflow orphan reaper on Waspflow startup should reconcile any sandbox found"
 echo "here against active jobs and force-remove orphans. That reaper does not exist"
 echo "in this checkout yet — this is a documented gap, not a passing gate."
