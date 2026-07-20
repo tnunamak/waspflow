@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# Create and remove the narrow host-side network policy for one Federation VM.
+set -euo pipefail
+
+state_dir="${WASPFLOW_FIREWALL_STATE_DIR:-/run/waspflow-federation-firewall}"
+
+usage() {
+  echo "usage: $0 up <tap-name> <vm-ip-cidr> <host-tap-ip> | down <tap-name>" >&2
+  exit 2
+}
+
+require_privileges() {
+  local cap_eff
+  cap_eff="$(awk '/^CapEff:/ { print $2 }' /proc/self/status)"
+  if (( (16#$cap_eff & 0x1000) == 0 )); then
+    echo "federation-firewall-helper: root with CAP_NET_ADMIN is required" >&2
+    exit 1
+  fi
+}
+
+valid_tap_name() {
+  [[ "$1" =~ ^[[:alnum:]_.-]{1,15}$ ]]
+}
+
+state_file() {
+  printf '%s/%s.env\n' "$state_dir" "$1"
+}
+
+chain_name() {
+  local suffix=${1//-/_}
+  printf 'WFFW_%s\n' "$suffix"
+}
+
+iptables_rule() {
+  iptables -w "$@"
+}
+
+remove_chain() {
+  local chain=$1 table=${2:-filter} tap=$3
+
+  # Remove every jump we install before deleting the chain. Repeating -D makes
+  # cleanup robust if a prior run was interrupted after one duplicate jump.
+  case "$table" in
+    filter)
+      while iptables_rule -D FORWARD -i "$tap" -j "$chain" 2>/dev/null; do :; done
+      while iptables_rule -D FORWARD -o "$tap" -j "$chain" 2>/dev/null; do :; done
+      while iptables_rule -D INPUT -i "$tap" -j "$chain" 2>/dev/null; do :; done
+      ;;
+  esac
+  iptables_rule -t "$table" -F "$chain" 2>/dev/null || true
+  iptables_rule -t "$table" -X "$chain" 2>/dev/null || true
+}
+
+read_state() {
+  local file=$1 key value
+  vm_ip_cidr=""
+  egress_if=""
+  ip_forward_before=""
+  [[ -f "$file" ]] || return 0
+
+  while IFS='=' read -r key value; do
+    case "$key" in
+      vm_ip_cidr) vm_ip_cidr=$value ;;
+      egress_if) egress_if=$value ;;
+      ip_forward_before) ip_forward_before=$value ;;
+    esac
+  done <"$file"
+}
+
+down() {
+  local tap=$1 file forward_chain input_chain
+  file="$(state_file "$tap")"
+  forward_chain="$(chain_name "$tap")"
+  input_chain="${forward_chain}_IN"
+  read_state "$file"
+
+  if [[ -n "$vm_ip_cidr" && -n "$egress_if" ]]; then
+    while iptables_rule -t nat -D POSTROUTING -s "$vm_ip_cidr" -o "$egress_if" -j MASQUERADE 2>/dev/null; do :; done
+  fi
+  remove_chain "$forward_chain" filter "$tap"
+  remove_chain "$input_chain" filter "$tap"
+
+  if [[ "$ip_forward_before" == 0 ]]; then
+    printf '0\n' >/proc/sys/net/ipv4/ip_forward 2>/dev/null || true
+  fi
+  rm -f -- "$file"
+  ip link delete dev "$tap" 2>/dev/null || true
+}
+
+up() {
+  local tap=$1 vm_ip_cidr=$2 host_tap_ip=$3 prefix host_ip host_cidr
+  local egress_if forward_chain input_chain file ip_forward_before
+
+  [[ "$vm_ip_cidr" =~ ^[0-9.]+/[0-9]{1,2}$ ]] || {
+    echo "federation-firewall-helper: vm IP must be an IPv4 CIDR" >&2
+    exit 2
+  }
+  prefix=${vm_ip_cidr#*/}
+  host_ip=${host_tap_ip%%/*}
+  host_cidr=$host_tap_ip
+  [[ "$host_tap_ip" == */* ]] || host_cidr="$host_ip/$prefix"
+
+  egress_if="$(ip -4 route show default | awk '/^default/ { for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit } }')"
+  [[ -n "$egress_if" ]] || {
+    echo "federation-firewall-helper: no IPv4 default-route interface" >&2
+    exit 1
+  }
+
+  forward_chain="$(chain_name "$tap")"
+  input_chain="${forward_chain}_IN"
+  file="$(state_file "$tap")"
+  mkdir -p -m 700 "$state_dir"
+  # A state file means an earlier policy instance owns this name. Remove it
+  # before reuse, but preserve a fresh caller-provided veth test interface.
+  if [[ -f "$file" ]]; then
+    down "$tap"
+  else
+    remove_chain "$forward_chain" filter "$tap"
+    remove_chain "$input_chain" filter "$tap"
+  fi
+  trap 'status=$?; down "$tap"; exit "$status"' ERR
+
+  # A pre-created interface is the test seam for a veth namespace fixture. In
+  # production the name is absent and this creates the Firecracker TAP.
+  if ! ip link show dev "$tap" >/dev/null 2>&1; then
+    ip tuntap add dev "$tap" mode tap
+  fi
+  ip link set dev "$tap" up
+  ip -4 addr add "$host_cidr" dev "$tap"
+
+  ip_forward_before="$(< /proc/sys/net/ipv4/ip_forward)"
+  umask 077
+  printf 'vm_ip_cidr=%s\negress_if=%s\nip_forward_before=%s\n' \
+    "$vm_ip_cidr" "$egress_if" "$ip_forward_before" >"$file"
+  printf '1\n' >/proc/sys/net/ipv4/ip_forward
+
+  iptables_rule -N "$forward_chain"
+  iptables_rule -A "$forward_chain" -i "$tap" -s "$vm_ip_cidr" -d 10.0.0.0/8 -j DROP
+  iptables_rule -A "$forward_chain" -i "$tap" -s "$vm_ip_cidr" -d 172.16.0.0/12 -j DROP
+  iptables_rule -A "$forward_chain" -i "$tap" -s "$vm_ip_cidr" -d 192.168.0.0/16 -j DROP
+  iptables_rule -A "$forward_chain" -i "$tap" -s "$vm_ip_cidr" -d 169.254.0.0/16 -j DROP
+  iptables_rule -A "$forward_chain" -i "$tap" -s "$vm_ip_cidr" -o "$egress_if" -j ACCEPT
+  iptables_rule -A "$forward_chain" -i "$tap" -s "$vm_ip_cidr" -j DROP
+  iptables_rule -A "$forward_chain" -o "$tap" -d "$vm_ip_cidr" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  iptables_rule -A "$forward_chain" -o "$tap" -d "$vm_ip_cidr" -j DROP
+  iptables_rule -I FORWARD 1 -i "$tap" -j "$forward_chain"
+  iptables_rule -I FORWARD 1 -o "$tap" -j "$forward_chain"
+
+  # Traffic to any host address is routed to INPUT, not FORWARD. This separate
+  # scoped chain therefore covers the host TAP address and alternate interfaces.
+  iptables_rule -N "$input_chain"
+  iptables_rule -A "$input_chain" -s "$vm_ip_cidr" -j DROP
+  iptables_rule -A "$input_chain" -j DROP
+  iptables_rule -I INPUT 1 -i "$tap" -j "$input_chain"
+
+  iptables_rule -t nat -A POSTROUTING -s "$vm_ip_cidr" -o "$egress_if" -j MASQUERADE
+  trap - ERR
+}
+
+main() {
+  local command=${1:-}
+  case "$command" in
+    up)
+      [[ $# == 4 ]] || usage
+      valid_tap_name "$2" || { echo "federation-firewall-helper: invalid tap name" >&2; exit 2; }
+      require_privileges
+      up "$2" "$3" "$4"
+      ;;
+    down)
+      [[ $# == 2 ]] || usage
+      valid_tap_name "$2" || { echo "federation-firewall-helper: invalid tap name" >&2; exit 2; }
+      require_privileges
+      down "$2"
+      ;;
+    *) usage ;;
+  esac
+}
+
+main "$@"
