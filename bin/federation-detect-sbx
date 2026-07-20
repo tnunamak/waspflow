@@ -1,0 +1,94 @@
+#!/usr/bin/env node
+// Detects whether Docker's `sbx` CLI is installed and runnable, and whether
+// its version meets the floor pinned in profiles/wf-federation-docker-v0.json
+// (decision note 2026-07-20, §H "Version-pinned conformance testing").
+//
+// This tool never downloads or bundles `sbx` — the note is explicit that
+// Waspflow does not yet have redistribution rights (§"Commercial use is
+// allowed; redistribution is not established"). Absent `sbx` is reported with
+// a pointer to Docker's own installer.
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join, dirname } from 'node:path';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const PROFILE_PATH = join(ROOT, 'profiles', 'wf-federation-docker-v0.json');
+const INSTALL_DOCS_URL = 'https://docs.docker.com/ai/sandboxes/get-started/';
+
+const die = (message) => { process.stderr.write(`federation-detect-sbx: ${message}\n`); process.exitCode = 1; };
+const ok = (message) => { process.stdout.write(`federation-detect-sbx: ${message}\n`); };
+
+function loadProfile() {
+  try {
+    return JSON.parse(readFileSync(PROFILE_PATH, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function parseVersion(raw) {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(raw ?? '');
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function compareVersions(a, b) {
+  for (let i = 0; i < 3; i += 1) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return 0;
+}
+
+function detect() {
+  let result;
+  try {
+    result = spawnSync('sbx', ['--version'], { encoding: 'utf8' });
+  } catch {
+    result = null;
+  }
+  if (!result || result.error || result.status !== 0) {
+    return { available: false };
+  }
+  const raw = `${result.stdout ?? ''}${result.stderr ?? ''}`.trim();
+  const version = parseVersion(raw);
+  return { available: true, raw, version };
+}
+
+function main() {
+  const profile = loadProfile();
+  const detection = detect();
+
+  if (!detection.available) {
+    die(`sbx not found on PATH. Install Docker Sandboxes from ${INSTALL_DOCS_URL} (do not bundle/redistribute — see decision note).`);
+    return;
+  }
+
+  if (!detection.version) {
+    die(`sbx is on PATH but its version could not be parsed from: ${JSON.stringify(detection.raw)}`);
+    return;
+  }
+
+  const versionString = detection.version.join('.');
+  const minVersion = profile?.sbx?.min_version ? parseVersion(profile.sbx.min_version) : null;
+  if (minVersion && compareVersions(detection.version, minVersion) < 0) {
+    die(`sbx detected: version ${versionString}, which is below the pinned floor ${profile.sbx.min_version} in ${PROFILE_PATH}. Upgrade sbx or update the pinned floor after review.`);
+    return;
+  }
+  if (profile?.sbx?.max_version) {
+    const maxVersion = parseVersion(profile.sbx.max_version);
+    if (maxVersion && compareVersions(detection.version, maxVersion) > 0) {
+      die(`sbx detected: version ${versionString}, which is above the pinned ceiling ${profile.sbx.max_version} in ${PROFILE_PATH}. This release has not passed the adversarial conformance suite.`);
+      return;
+    }
+  }
+
+  ok(`sbx detected: version ${versionString}`);
+  if (!profile) {
+    process.stderr.write(`federation-detect-sbx: warning: ${PROFILE_PATH} not found, no version range enforced\n`);
+  } else if (!profile.sbx?.max_version) {
+    process.stderr.write(`federation-detect-sbx: warning: no upper version bound pinned yet; range needs owner review before real use (see ${PROFILE_PATH})\n`);
+  }
+}
+
+main();
