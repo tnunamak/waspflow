@@ -550,4 +550,16 @@ async function main() {
   }
 }
 
-main().catch((error) => fail(error && error.stack ? error.stack : String(error)));
+// Expected, user-actionable errors (e.g. FederationConfigError already carries
+// a "Run 'waspflow federation join ...' first" message) render as a clean
+// guided line — a non-technical contributor who runs `contribute` before `join`
+// gets guidance, not a stack trace. Only genuinely unexpected errors show the
+// stack for debugging.
+function isExpectedError(error) {
+  return !!error && typeof error.name === 'string' && /^Federation\w*Error$/.test(error.name);
+}
+
+main().catch((error) => {
+  if (isExpectedError(error)) fail(error.message);
+  else fail(error && error.stack ? error.stack : String(error));
+});

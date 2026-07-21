@@ -168,6 +168,12 @@ test('contribute: without join, fails with a "run join first" message, not a raw
   await withMemberHome(async (home) => {
     await assert.rejects(runCli(['contribute', '--task-digest', 'a'.repeat(64)], { home }), (error) => {
       assert.match(error.stderr, /Run 'waspflow federation join/);
+      // The Oshin bar: a first-time contributor who runs `contribute` before
+      // `join` must get the guided one-liner, NOT a raw stack trace. Asserting
+      // the message alone is not enough — it was present inside the stack too,
+      // so this must assert the stack is absent.
+      assert.doesNotMatch(error.stderr, /\bat \w+ \(|\.mjs:\d+:\d+\)|FederationConfigError:/,
+        `contribute-without-join leaked a stack trace instead of a guided message:\n${error.stderr}`);
       return true;
     });
   });
