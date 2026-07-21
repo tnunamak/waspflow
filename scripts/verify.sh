@@ -320,6 +320,73 @@ git commit -q -m init
   rm -rf "$prompt_home" "$prompt_sessions"
 )
 
+# gemini.sh provider adapter: the 9-function load_provider contract, spawn
+# argv shape (real flags confirmed against gemini-cli 0.50.0/0.51.0 --help:
+# --session-id, --approval-mode yolo, --skip-trust; NO --effort, which does
+# not exist for this CLI and must hard-fail rather than silently drop), and
+# idle/discovery logic against a fake chat transcript (this machine's Google
+# account is ineligible for the CLI's tier as of 0.50.0/0.51.0, so this test
+# cannot run a real gemini process — see FEDERATION_V0_UAT_REPORT.md).
+(
+  gemini_home="$(mktemp -d "$scratch/waspflow-gemini-home-XXXXXX")"
+  gemini_tmp="$(mktemp -d "$scratch/waspflow-gemini-tmp-XXXXXX")"
+  gemini_cwd="$(mktemp -d "$scratch/waspflow-gemini-cwd-XXXXXX")"
+  export WASPFLOW_HOME="$gemini_home" GEMINI_TMP_DIR="$gemini_tmp"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  load_provider gemini || { echo "gemini: load_provider contract incomplete" >&2; exit 1; }
+
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/gemini.sh"
+  mcp_policy_load_lane() { MCP_ARGV=(); MCP_ENV=(); }
+  spawn_argv_file="$gemini_home/spawn-argv"
+  tmux_create_owned_lane_window() {
+    local lane="$1" _cwd="$2" command="$3"
+    printf '%s' "$command" >"$spawn_argv_file"
+    printf '%s:0\n' "$lane"
+  }
+  _gemini_verify_started() { :; }
+  gemini_sid="99999999-9999-9999-9999-999999999999"
+  lane_set gemini-spawn-contract cwd "$gemini_cwd" mcp_argv '[]' mcp_env '{}'
+  gemini_spawn gemini-spawn-contract "$gemini_cwd" "" "$gemini_sid" "$gemini_home/transcript" "print WF_TASK_OK"
+  spawn_argv="$(cat "$spawn_argv_file")"
+  [[ "$spawn_argv" == *"--session-id"*"$gemini_sid"* ]] \
+    || { echo "gemini spawn: --session-id with the minted uuid missing from argv" >&2; exit 1; }
+  [[ "$spawn_argv" == *"--approval-mode"*"yolo"* ]] \
+    || { echo "gemini spawn: --approval-mode yolo missing from argv" >&2; exit 1; }
+  [[ "$spawn_argv" == *"--skip-trust"* ]] \
+    || { echo "gemini spawn: --skip-trust missing from argv (would block on the first-run trust gate)" >&2; exit 1; }
+
+  # Effort is not a real gemini-cli flag (confirmed via --help): requesting one
+  # must hard-fail, never silently drop, matching codex's xhigh/max discipline.
+  lane_set gemini-effort-contract cwd "$gemini_cwd" mcp_argv '[]' mcp_env '{}' effort "high"
+  set +e
+  ( gemini_spawn gemini-effort-contract "$gemini_cwd" "" "$gemini_sid" "$gemini_home/transcript" "prompt" ) 2>/tmp/waspflow-gemini-effort.txt
+  effort_rc=$?
+  set -e
+  [[ "$effort_rc" -ne 0 ]] \
+    || { echo "gemini spawn: a requested effort was silently accepted (no --effort flag exists on this CLI)" >&2; exit 1; }
+
+  # Discovery/idle logic against a fake transcript (the real sessionId<->file
+  # correlation this machine actually observed: first JSONL line carries
+  # sessionId; directory is keyed by the launch cwd's basename).
+  chats_dir="$gemini_tmp/$(basename "$gemini_cwd")/chats"
+  mkdir -p "$chats_dir"
+  chat_file="$chats_dir/session-2026-07-21T01-14-abcd1234.jsonl"
+  jq -cn --arg sid "$gemini_sid" '{sessionId:$sid,projectHash:"deadbeef",startTime:"2026-07-21T01:14:04.216Z"}' >"$chat_file"
+  lane_set gemini-discover-contract cwd "$gemini_cwd" session_id "$gemini_sid"
+  found="$(_gemini_find_session_file "$gemini_cwd" "$gemini_sid")"
+  [[ "$found" == "$chat_file" ]] \
+    || { echo "gemini discovery: session file lookup did not match by sessionId content" >&2; exit 1; }
+  gemini_session_resumable gemini-discover-contract \
+    || { echo "gemini: session_resumable false for an existing nonempty chat file" >&2; exit 1; }
+  GEMINI_IDLE_QUIET_SECS=1
+  gemini_is_idle gemini-discover-contract \
+    || { echo "gemini: is_idle false for a chat file that has stopped growing" >&2; exit 1; }
+
+  rm -rf "$gemini_home" "$gemini_tmp" "$gemini_cwd"
+)
+
 # A lane pane inherits tmux's long-lived server environment, not necessarily the
 # spawning shell. Prove the child-launch boundary overrides an inherited pager:
 # this pager fixture never returns, the same operational failure as an
@@ -1371,7 +1438,7 @@ deadp_spawn() {
   return 1
 }   # window up, task never confirmed submitted
 PROV
-  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok)/WASPFLOW_PROVIDERS=(claude codex grok deadp)/' "$deadlib/core.sh"
+  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok gemini)/WASPFLOW_PROVIDERS=(claude codex grok gemini deadp)/' "$deadlib/core.sh"
   dead_home="$(mktemp -d "$scratch/waspflow-deadhome-XXXXXX")"
   dead_work="$(mktemp -d "$scratch/waspflow-deadwork-XXXXXX")"
   ( cd "$dead_work" && git init -q )
@@ -1775,7 +1842,7 @@ mcpp_spawn() {
   tmux_create_owned_lane_window "$lane" "$cwd" "exec sleep 60" >/dev/null
 }
 PROV
-  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok)/WASPFLOW_PROVIDERS=(claude codex grok mcpp)/' "$mcplib/core.sh"
+  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok gemini)/WASPFLOW_PROVIDERS=(claude codex grok gemini mcpp)/' "$mcplib/core.sh"
   mcphome="$(mktemp -d "$scratch/waspflow-mcp-home-XXXXXX")"
   mcpdir="$(mktemp -d "$scratch/waspflow-mcp-cwd-XXXXXX")"; (cd "$mcpdir" && git init -q)
   set +e
@@ -2224,7 +2291,7 @@ scopep_revise() {
     -- "$pid_file" "$pid_file" "$out_file" "$report"
 }
 PROV
-  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok)/WASPFLOW_PROVIDERS=(claude codex grok scopep)/' "$scopelib/core.sh"
+  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok gemini)/WASPFLOW_PROVIDERS=(claude codex grok gemini scopep)/' "$scopelib/core.sh"
   scopehome="$(mktemp -d "$scratch/waspflow-scope-home-XXXXXX")"
   scopework="$(mktemp -d "$scratch/waspflow-scope-work-XXXXXX")"; ( cd "$scopework" && git init -q )
   scopesession="waspflow-scope-$$"

@@ -23,6 +23,12 @@ billing_report_auth() {
   else
     echo "  [ok]   grok auth: no XAI_API_KEY in environment; billing follows configured Grok CLI auth (OAuth cache or login)"
   fi
+
+  if [[ -n "${GEMINI_API_KEY:-}" ]]; then
+    echo "  [warn] gemini auth: GEMINI_API_KEY is set -> headless Gemini may use API pay-as-you-go billing instead of OAuth/subscription-backed CLI auth. Verify billing before fleet use."
+  else
+    echo "  [ok]   gemini auth: no GEMINI_API_KEY in environment; billing follows configured Gemini CLI auth (OAuth cache or login)"
+  fi
 }
 
 billing_preflight_provider() {
@@ -31,6 +37,7 @@ billing_preflight_provider() {
     claude) billing_preflight_claude ;;
     codex) billing_preflight_codex ;;
     grok) billing_preflight_grok ;;
+    gemini) billing_preflight_gemini ;;
     *) return 0 ;;
   esac
 }
@@ -61,6 +68,12 @@ billing_preflight_codex() {
 billing_preflight_grok() {
   [[ -n "${XAI_API_KEY:-}" ]] || return 0
   warn "grok billing notice: XAI_API_KEY is set; verify whether Grok will use API pay-as-you-go billing before fleet use."
+  return 0
+}
+
+billing_preflight_gemini() {
+  [[ -n "${GEMINI_API_KEY:-}" ]] || return 0
+  warn "gemini billing notice: GEMINI_API_KEY is set; verify whether Gemini will use API pay-as-you-go billing before fleet use."
   return 0
 }
 
@@ -99,6 +112,10 @@ billing_path_v1() {
     grok)
       if [[ -n "${XAI_API_KEY:-}" ]]; then path="api_key_env"; evidence="env:XAI_API_KEY"
       else path="oauth_env_heuristic"; evidence="absence_of_XAI_API_KEY"; fi
+      ;;
+    gemini)
+      if [[ -n "${GEMINI_API_KEY:-}" ]]; then path="api_key_env"; evidence="env:GEMINI_API_KEY"
+      else path="oauth_env_heuristic"; evidence="absence_of_GEMINI_API_KEY"; fi
       ;;
   esac
   jq -cn --arg path "$path" --arg evidence "$evidence" --arg detail "$detail" \

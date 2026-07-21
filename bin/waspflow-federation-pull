@@ -1,0 +1,273 @@
+#!/usr/bin/env node
+/*
+ * Federation v0 executor-side CLI (slice 4 of "full loop"): "Ocean's client
+ * pulls a task and runs it sandboxed against HER subscription."
+ *
+ * One-shot only, matching the v0 scope discipline already established by
+ * lib/federation-coordinator.mjs and lib/federation-docker-backend.mjs: no
+ * task-discovery/listing endpoint exists on the coordinator (the operator is
+ * told the digest out-of-band by the requester), no polling loop, no
+ * multi-task concurrency. A future `waspflow federation daemon` can wrap
+ * this in a loop; this script does exactly one claim -> run -> submit cycle
+ * and exits.
+ *
+ * Flow:
+ *   1. claim         POST /tasks/:digest/claim  -> { task_envelope, lease_token, claim_generation }
+ *   2. verify         independently re-verify task_envelope against a local roster file
+ *                     (defense in depth — never trust "the coordinator already checked it")
+ *   3. fetch           GET /artifacts/:digest for source + prompt artifacts (content-addressed,
+ *                     verified-on-fetch against the digest the task envelope declares)
+ *   5. build job spec   ValidatedJobSpec: image = sbx agent name, entrypoint = HarnessSpec
+ *                     entrypoint + shell-quoted task prompt
+ *   4+6. materialize+run  runJob() drives probeCapabilities -> prepare -> materializeSource
+ *                     (extracts the fetched source artifact into the sandbox's real,
+ *                     guest-mounted scratch dir, once prepare() has returned it — see
+ *                     lib/federation-pull-internals.mjs's runJob doc for why this can't
+ *                     go through ValidatedJobSpec.inputs) -> start -> collectDeclaredOutputs
+ *                     -> destroy (destroy always runs, even on failure)
+ *   7. sign result       signEnvelope(...) -> RESULT envelope
+ *   8. submit          POST /tasks/:digest/submit
+ *
+ * Artifact transport: this was built against the assumption that the
+ * coordinator would grow PUT/GET /artifacts/:digest (content-addressed, gated
+ * by the same collective bearer token as every other endpoint) — confirmed
+ * present in lib/federation-coordinator.mjs at the time this was written
+ * (slice 3, "full loop", already landed it), so fetchArtifact() below talks
+ * to the real endpoint, not a guessed one.
+ */
+'use strict';
+
+const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { execFile: execFileCb } = require('node:child_process');
+const { promisify } = require('node:util');
+const execFile = promisify(execFileCb);
+
+function fail(message) {
+  process.stderr.write(`waspflow-federation-pull: ${message}\n`);
+  process.exit(1);
+}
+
+function usage() {
+  process.stderr.write(`usage: waspflow-federation-pull \\
+    --coordinator-url <url> \\
+    --task-digest <bare-hex-sha256> \\
+    --executor-key <key_id> \\
+    --private-key-file <ed25519-pem> \\
+    --roster-file <json: key_id -> public key PEM> \\
+    [--collective-token <token> | env WASPFLOW_FEDERATION_COLLECTIVE_TOKEN] \\
+    [--lease-seconds <n>]     default 3600 \\
+    [--harness <claude-code-subscription|codex|gh-cli>]  default claude-code-subscription\n\n` +
+    'Sandbox scratch space is controlled by DockerSbxBackend\'s own\n' +
+    'WASPFLOW_FEDERATION_SCRATCH_ROOT env var (see lib/federation-docker-backend.mjs),\n' +
+    'not a flag on this script.\n');
+  process.exit(2);
+}
+
+function parseArgs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (!arg.startsWith('--')) fail(`unexpected argument: ${arg}`);
+    const key = arg.slice(2);
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith('--')) fail(`--${key} requires a value`);
+    out[key] = value;
+    i++;
+  }
+  return out;
+}
+
+// --- shell-quoting for the entrypoint's `sh -c ENTRYPOINT "$PROMPT"`-shaped
+// command line. DockerSbxBackend.start() drives `sbx exec SANDBOX -- sh -c
+// ENTRYPOINT` verbatim (see lib/federation-docker-backend.mjs), so the task
+// prompt must be embedded as a single, safely-quoted shell word appended to
+// the harness's entrypoint string — a prompt containing `$`, backticks, `"`,
+// or `'` must never be able to inject a second command.
+function shellQuoteSingle(value) {
+  // POSIX single-quote escaping: end the quote, emit an escaped single quote,
+  // reopen the quote. Inside single quotes nothing is special except `'`
+  // itself, so this is safe for $, `, ", \, newlines, everything.
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (!args['coordinator-url']) usage();
+  if (!args['task-digest']) usage();
+  if (!args['executor-key']) usage();
+  if (!args['private-key-file']) usage();
+  if (!args['roster-file']) usage();
+
+  const coordinatorUrl = args['coordinator-url'].replace(/\/+$/, '');
+  const taskDigest = args['task-digest'];
+  if (!/^[0-9a-f]{64}$/.test(taskDigest)) fail('--task-digest must be a bare 64-hex-char sha256 digest (not sha256:-prefixed — that prefix belongs inside signed payload fields, never in a coordinator URL path)');
+  const executorKey = args['executor-key'];
+  const leaseSeconds = args['lease-seconds'] ? Number(args['lease-seconds']) : 3600;
+  if (!Number.isFinite(leaseSeconds) || leaseSeconds <= 0) fail('--lease-seconds must be a positive number');
+  const token = args['collective-token'] || process.env.WASPFLOW_FEDERATION_COLLECTIVE_TOKEN;
+  if (!token) fail('--collective-token or WASPFLOW_FEDERATION_COLLECTIVE_TOKEN is required');
+  const harnessName = args['harness'] || 'claude-code-subscription';
+
+  let privateKeyPem;
+  try { privateKeyPem = fs.readFileSync(args['private-key-file'], 'utf8'); }
+  catch (error) { fail(`could not read --private-key-file: ${error.message}`); }
+
+  let rosterJson;
+  try { rosterJson = JSON.parse(fs.readFileSync(args['roster-file'], 'utf8')); }
+  catch (error) { fail(`could not read/parse --roster-file: ${error.message}`); }
+  if (!rosterJson || typeof rosterJson !== 'object' || Array.isArray(rosterJson)) fail('--roster-file must contain a JSON object of key_id -> PEM string');
+
+  const {
+    fetchArtifact,
+    claimTask,
+    submitResult,
+    buildValidatedJobSpec,
+    runJob,
+    resolveHarness,
+    rfc3339Now,
+  } = await loadInternals();
+
+  const {
+    verifyEnvelope,
+    signEnvelope,
+  } = await import('../lib/federation-envelope.mjs');
+
+  // --- 1. claim -----------------------------------------------------------
+  const claimResult = await claimTask({ coordinatorUrl, token, taskDigest, executorKey, leaseSeconds });
+  process.stderr.write(`claimed task ${taskDigest} (generation ${claimResult.claim_generation}, lease expires ${new Date(claimResult.lease_expiry).toISOString()})\n`);
+
+  // --- 2. verify the claimed task envelope ourselves -----------------------
+  const signerKeyId = claimResult.task_envelope && claimResult.task_envelope.signature && claimResult.task_envelope.signature.key_id;
+  const signerPem = signerKeyId && rosterJson[signerKeyId];
+  if (!signerPem) fail(`claimed task_envelope's signer key_id "${signerKeyId}" is not in --roster-file — refusing to run unverifiable, untrusted code/prompts`);
+  let verification;
+  try {
+    verification = verifyEnvelope(claimResult.task_envelope, signerPem);
+  } catch (error) {
+    fail(`local re-verification of the claimed task envelope failed (defense in depth — not trusting the coordinator's own check): ${error.message}`);
+  }
+  if (verification.kind !== 'task') fail('claimed envelope is not a task payload');
+  if (verification.digest !== taskDigest) fail(`claimed task envelope digest (${verification.digest}) does not match the requested --task-digest (${taskDigest})`);
+  process.stderr.write(`independently re-verified task envelope signature (signer ${signerKeyId})\n`);
+
+  const taskPayload = claimResult.task_envelope.payload;
+
+  // --- 3. fetch artifacts ---------------------------------------------------
+  const sourceBytes = await fetchArtifact(coordinatorUrl, token, taskPayload.source.base_artifact.sha256);
+  const promptBytes = await fetchArtifact(coordinatorUrl, token, taskPayload.prompt.artifact.sha256);
+  const taskPrompt = promptBytes.toString('utf8');
+  process.stderr.write(`fetched source artifact (${sourceBytes.length} bytes) and prompt artifact (${promptBytes.length} bytes)\n`);
+
+  // --- 5. build + validate the job spec ------------------------------------
+  const harness = resolveHarness(harnessName);
+  const entrypointWithPrompt = `${harness.entrypoint} ${shellQuoteSingle(taskPrompt)}`;
+  const jobSpec = buildValidatedJobSpec({ taskDigest, harness, entrypointWithPrompt });
+  process.stderr.write(`built ValidatedJobSpec (image=${jobSpec.image}, job_id=${jobSpec.job_id})\n`);
+
+  // --- 4 (materialize) + 6 (run) ---------------------------------------------
+  // Source materialization happens INSIDE runJob's materializeSource
+  // callback, invoked once prepare() has returned the sandbox's real,
+  // guest-mounted scratch_dir (see lib/federation-pull-internals.mjs's
+  // runJob doc for why: ValidatedJobSpec.inputs/_copyIn can't be used here —
+  // it's unusable by any real caller in the current backend, a pre-existing
+  // gap this routes around rather than silently papering over).
+  const materializeSource = (scratchDir) => materializeSourceArtifact(sourceBytes, taskPayload.source.base_artifact.media_type, scratchDir);
+  const { collected, cleanupReceipt } = await runJob({ jobSpec, materializeSource });
+  process.stderr.write(`run complete; collected ${collected.length} declared output(s); destroy removed=${cleanupReceipt.removed}\n`);
+  if (collected.length === 0) fail('run produced no collected output — nothing to submit as a candidate artifact');
+
+  // --- 7. build + sign the result envelope ----------------------------------
+  const candidateFile = collected[0];
+  const candidateBytes = candidateFile.bytes_content;
+  const resultPayload = {
+    schema: 'waspflow.federation.result.v0',
+    task_digest: `sha256:${taskDigest}`,
+    executor_key: executorKey,
+    submitted_at: rfc3339Now(),
+    candidate: {
+      artifact: { sha256: candidateFile.sha256, bytes: candidateFile.bytes, media_type: 'application/gzip' },
+      // v0-simple: the candidate artifact IS the whole resulting tree
+      // (tarred), so its own digest already represents the tree — see
+      // module doc / final report for why a second, separate tree digest
+      // would be redundant computation for the same claim in v0.
+      tree_digest: `sha256:${candidateFile.sha256}`,
+    },
+    oracle_ref: null,
+    result_verdict: null,
+    settlement: null,
+  };
+  const resultEnvelope = signEnvelope(resultPayload, privateKeyPem, executorKey);
+
+  // Upload the candidate artifact bytes so the requester can fetch them the
+  // same way this script fetched source/prompt — content-addressed,
+  // verify-on-fetch.
+  await putArtifact(coordinatorUrl, token, candidateFile.sha256, candidateBytes);
+  process.stderr.write(`uploaded candidate artifact ${candidateFile.sha256} (${candidateBytes.length} bytes)\n`);
+
+  // --- 8. submit -------------------------------------------------------------
+  const submitResponse = await submitResult({
+    coordinatorUrl, token, taskDigest,
+    envelope: resultEnvelope,
+    claimGeneration: claimResult.claim_generation,
+    leaseToken: claimResult.lease_token,
+  });
+  process.stdout.write(JSON.stringify(submitResponse, null, 2) + '\n');
+  if (submitResponse.status !== 'settled') process.exit(1);
+}
+
+// Extracts a tar/tar.gz source artifact into destDir — the sandbox's real,
+// guest-mounted scratch_dir (see runJob's materializeSource callback in
+// lib/federation-pull-internals.mjs), so this must extract IN PLACE, not
+// nest a subdirectory the guest wouldn't see as its working directory root.
+// media_type drives whether we decompress; anything else is treated as an
+// opaque single file written into destDir under a fixed name (v0-honest:
+// task payloads in this repo's fixtures only ever exercise tarballs so far,
+// but this keeps the function from silently mishandling an unexpected media
+// type).
+async function materializeSourceArtifact(bytes, mediaType, destDir) {
+  const isTar = /tar/.test(mediaType || '');
+  const isGzip = /gzip|gz/.test(mediaType || '');
+  if (isTar) {
+    // Write the intermediate tar file to a disposable temp dir, never inside
+    // destDir itself — destDir's contents ARE the guest's workspace, so a
+    // stray source.tar left behind (if cleanup raced with sbx run reading
+    // the mount) would leak into the sandbox as an extra file.
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'wf-pull-source-'));
+    const tmpTar = path.join(tmpDir, 'source.tar');
+    try {
+      await fsp.writeFile(tmpTar, bytes);
+      const tarArgs = isGzip ? ['xzf', tmpTar, '-C', destDir] : ['xf', tmpTar, '-C', destDir];
+      await execFile('tar', tarArgs);
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    }
+  } else {
+    await fsp.writeFile(path.join(destDir, 'source'), bytes);
+  }
+}
+
+async function putArtifact(coordinatorUrl, token, digest, bytes) {
+  const res = await fetch(`${coordinatorUrl}/artifacts/${digest}`, {
+    method: 'PUT',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/octet-stream' },
+    body: bytes,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`PUT /artifacts/${digest} failed: ${res.status} ${body}`);
+  }
+  return res.json();
+}
+
+// Isolated internals module loader — keeps the CommonJS top-level `main()`
+// free of top-level `await import(...)` sprinkled everywhere, and gives
+// tests one place to import the pure functions directly instead of
+// shelling out to this bin script for unit-level coverage.
+async function loadInternals() {
+  return import('../lib/federation-pull-internals.mjs');
+}
+
+main().catch((error) => fail(error && error.stack ? error.stack : String(error)));

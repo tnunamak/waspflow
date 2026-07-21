@@ -1,0 +1,184 @@
+#!/usr/bin/env node
+/*
+ * Requester-side Federation v0 CLI: "Tim submits a task and receives the
+ * result branch." Builds+signs a task envelope, uploads its source/prompt
+ * artifact bytes to the coordinator's content-addressed store, publishes
+ * the envelope, polls for settlement, and (optionally) materializes the
+ * settled candidate artifact to a local directory.
+ *
+ * This is a thin arg-parsing shell around lib/federation-submit.mjs and
+ * lib/federation-envelope.mjs — matching how bin/waspflow-federation-
+ * coordinator wraps lib/federation-coordinator.mjs. All real logic (packaging,
+ * signing, HTTP, polling, extraction) lives in the library so it's testable
+ * without a subprocess.
+ *
+ * Usage:
+ *   waspflow-federation-submit \
+ *     --coordinator-url http://localhost:8787 \
+ *     --collective-token <token>            (or WASPFLOW_FEDERATION_COLLECTIVE_TOKEN) \
+ *     --collective <name> \
+ *     --author-key-id tim-author \
+ *     --private-key-file ~/.waspflow/federation/tim-author.pem \
+ *     --display-id fix-flaky-retry \
+ *     --source ./my-repo-checkout \
+ *     --prompt-file ./task-prompt.md \
+ *     [--network disabled] [--expires-in 3600] \
+ *     [--poll-interval 5] [--timeout 3600] \
+ *     [--output-dir ./result] \
+ *     [--roster-file <json: key_id -> public key PEM>]
+ *
+ * --roster-file, when given, independently re-verifies the settled result
+ * envelope's signature against the claimed executor key_id before
+ * extracting candidate bytes (defense in depth — mirrors the executor
+ * slice's own re-verification of the task envelope it claims). Strongly
+ * recommended whenever --output-dir is also given; without it, extraction
+ * trusts the coordinator's digest-verified-but-signature-unchecked bytes.
+ *
+ * See lib/federation-submit.mjs's top-of-file comment for the wire-format
+ * decisions this script depends on (artifact endpoints, media types,
+ * candidate packaging format).
+ */
+'use strict';
+
+const fs = require('node:fs');
+
+function fail(message) {
+  process.stderr.write(`waspflow-federation-submit: ${message}\n`);
+  process.exit(1);
+}
+
+function parseArgs(argv) {
+  const flags = {
+    'coordinator-url': null,
+    'collective-token': null,
+    'collective': null,
+    'author-key-id': null,
+    'private-key-file': null,
+    'display-id': null,
+    'source': null,
+    'prompt': null,
+    'prompt-file': null,
+    'network': 'disabled',
+    'expires-in': '3600',
+    'poll-interval': '5',
+    'timeout': '3600',
+    'output-dir': null,
+    'roster-file': null,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (!arg.startsWith('--')) fail(`unexpected argument: ${arg}`);
+    const name = arg.slice(2);
+    if (!(name in flags)) fail(`unknown flag: --${name}`);
+    const value = argv[++i];
+    if (value === undefined) fail(`--${name} requires a value`);
+    flags[name] = value;
+  }
+  return flags;
+}
+
+async function main() {
+  const lib = await import('../lib/federation-submit.mjs');
+  const { signTaskEnvelope, buildTaskPayload, packageSourceDirectory, packagePromptText, uploadArtifact, publishTask, pollUntilSettled, materializeCandidate } = lib;
+
+  const flags = parseArgs(process.argv.slice(2));
+
+  const coordinatorUrl = flags['coordinator-url'];
+  if (!coordinatorUrl) fail('--coordinator-url is required');
+
+  const token = flags['collective-token'] || process.env.WASPFLOW_FEDERATION_COLLECTIVE_TOKEN;
+  if (!token) fail('--collective-token or WASPFLOW_FEDERATION_COLLECTIVE_TOKEN is required');
+
+  const collective = flags['collective'];
+  if (!collective) fail('--collective is required');
+
+  const authorKeyId = flags['author-key-id'];
+  if (!authorKeyId) fail('--author-key-id is required');
+
+  const privateKeyFile = flags['private-key-file'];
+  if (!privateKeyFile) fail('--private-key-file is required');
+  let privateKeyPem;
+  try {
+    privateKeyPem = fs.readFileSync(privateKeyFile, 'utf8');
+  } catch (error) {
+    fail(`could not read --private-key-file (${privateKeyFile}): ${error.message}`);
+  }
+
+  const displayId = flags['display-id'];
+  if (!displayId) fail('--display-id is required');
+
+  const sourceDir = flags['source'];
+  if (!sourceDir) fail('--source is required');
+
+  let promptText = flags['prompt'];
+  if (!promptText && flags['prompt-file']) {
+    try {
+      promptText = fs.readFileSync(flags['prompt-file'], 'utf8');
+    } catch (error) {
+      fail(`could not read --prompt-file (${flags['prompt-file']}): ${error.message}`);
+    }
+  }
+  if (!promptText) fail('--prompt or --prompt-file is required');
+
+  const network = flags['network'];
+  const expiresInSeconds = Number(flags['expires-in']);
+  if (!Number.isFinite(expiresInSeconds) || expiresInSeconds <= 0) fail('--expires-in must be a positive number of seconds');
+  const pollIntervalSeconds = Number(flags['poll-interval']);
+  if (!Number.isFinite(pollIntervalSeconds) || pollIntervalSeconds <= 0) fail('--poll-interval must be a positive number of seconds');
+  const timeoutSeconds = Number(flags['timeout']);
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) fail('--timeout must be a positive number of seconds');
+  const outputDir = flags['output-dir'];
+
+  let roster = null;
+  if (flags['roster-file']) {
+    let rosterJson;
+    try { rosterJson = JSON.parse(fs.readFileSync(flags['roster-file'], 'utf8')); }
+    catch (error) { fail(`could not read/parse --roster-file: ${error.message}`); }
+    if (!rosterJson || typeof rosterJson !== 'object' || Array.isArray(rosterJson)) fail('--roster-file must contain a JSON object of key_id -> PEM string');
+    roster = rosterJson;
+  } else if (outputDir) {
+    process.stderr.write('waspflow-federation-submit: WARNING: --output-dir given without --roster-file — extracting candidate bytes without independently verifying the executor signature that produced them.\n');
+  }
+
+  process.stdout.write(`waspflow-federation-submit: packaging source from ${sourceDir}...\n`);
+  const source = await packageSourceDirectory(sourceDir);
+  process.stdout.write(`waspflow-federation-submit: source artifact sha256:${source.sha256} (${source.bytes} bytes, via ${source.method})\n`);
+
+  const prompt = packagePromptText(promptText);
+  process.stdout.write(`waspflow-federation-submit: prompt artifact sha256:${prompt.sha256} (${prompt.bytes} bytes)\n`);
+
+  const payload = buildTaskPayload({ collective, displayId, authorKeyId, source, prompt, network, expiresInSeconds });
+  const envelope = signTaskEnvelope(payload, privateKeyPem, authorKeyId);
+
+  process.stdout.write('waspflow-federation-submit: uploading source artifact...\n');
+  await uploadArtifact(coordinatorUrl, token, source);
+  process.stdout.write('waspflow-federation-submit: uploading prompt artifact...\n');
+  await uploadArtifact(coordinatorUrl, token, prompt);
+
+  process.stdout.write('waspflow-federation-submit: publishing task envelope...\n');
+  const published = await publishTask(coordinatorUrl, token, envelope);
+  process.stdout.write(`waspflow-federation-submit: task_digest=${published.task_digest} status=${published.status}\n`);
+  process.stdout.write(`waspflow-federation-submit: track with: curl ${coordinatorUrl}/tasks/${published.task_digest}\n`);
+
+  process.stdout.write(`waspflow-federation-submit: polling for settlement (every ${pollIntervalSeconds}s, timeout ${timeoutSeconds}s)...\n`);
+  const settled = await pollUntilSettled(coordinatorUrl, published.task_digest, {
+    intervalMs: pollIntervalSeconds * 1000,
+    timeoutMs: timeoutSeconds * 1000,
+    onTick: (status) => process.stdout.write(`waspflow-federation-submit: status=${status.status}\n`),
+  });
+
+  const candidate = settled.result_envelope.payload.candidate;
+  process.stdout.write(`waspflow-federation-submit: settled. candidate artifact sha256:${candidate.artifact.sha256} (${candidate.artifact.bytes} bytes, ${candidate.artifact.media_type})\n`);
+  process.stdout.write(`waspflow-federation-submit: candidate tree_digest ${candidate.tree_digest}\n`);
+
+  if (outputDir) {
+    process.stdout.write(`waspflow-federation-submit: downloading and extracting candidate artifact into ${outputDir}...\n`);
+    const materialized = await materializeCandidate(coordinatorUrl, token, settled, outputDir, { roster });
+    process.stdout.write(`waspflow-federation-submit: extracted result tree to ${outputDir} (verified sha256:${materialized.sha256})\n`);
+  } else {
+    process.stdout.write('waspflow-federation-submit: no --output-dir given; not downloading candidate bytes. ' +
+      `Fetch and verify with: curl ${coordinatorUrl}/artifacts/${candidate.artifact.sha256} | sha256sum\n`);
+  }
+}
+
+main().catch((error) => fail(error && error.message ? error.message : String(error)));

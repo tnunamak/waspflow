@@ -180,6 +180,46 @@ test('collectDeclaredOutputs rejects a copied-out symlink instead of following i
   }
 });
 
+test('collectDeclaredOutputs and _copyIn use an ABSOLUTE guest path, not a bare relative one', async () => {
+  // `sbx cp` rejects a relative container path outright ("container path
+  // must be absolute (use SANDBOX:/path)") — confirmed live. The guest's
+  // absolute workspace mirrors handle.scratch_dir (confirmed live: `sbx exec
+  // <sandbox> -- pwd` inside a freshly-created sandbox returns the exact
+  // host scratch_dir path), so both copy directions must resolve a declared
+  // relative path against scratch_dir before handing it to `sbx cp`.
+  const scratchDir = await mkdtemp(path.join(os.tmpdir(), 'wf-collect-abspath-'));
+
+  const stubDir = await writeStub('cp-record', `
+    echo "$@" >>"$WF_STUB_LOG"
+    exit 0
+  `);
+  const logPath = path.join(stubDir, 'invocation.log');
+  const previousBin = process.env.WASPFLOW_SBX_BIN;
+  process.env.WASPFLOW_SBX_BIN = path.join(stubDir, 'sbx');
+  process.env.WF_STUB_LOG = logPath;
+  try {
+    const backend = new DockerSbxBackend();
+    const handle = { backend_id: BACKEND_ID, job_id: 'job-abspath', sandbox_id: 'wf-abspath', scratch_dir: scratchDir };
+    await backend._copyIn(handle, { artifact_id: 'art-1', dest: 'inputs/task.md' });
+    // collectDeclaredOutputs still fails post-copy (the stub is a no-op, so
+    // no bytes actually land locally) — that failure is expected and
+    // irrelevant here; only the `sbx cp` argv it issued before failing
+    // matters for this test.
+    await assert.rejects(() => backend.collectDeclaredOutputs(handle, ['result.txt']));
+
+    const invocation = await import('node:fs/promises').then((m) => m.readFile(logPath, 'utf8'));
+    const lines = invocation.trim().split('\n');
+    assert.ok(lines[0].includes(`wf-abspath:${path.join(scratchDir, 'inputs/task.md')}`), `_copyIn must target an absolute guest path, got: ${lines[0]}`);
+    assert.ok(lines[1].includes(`wf-abspath:${path.join(scratchDir, 'result.txt')}`), `collectDeclaredOutputs must source from an absolute guest path, got: ${lines[1]}`);
+  } finally {
+    if (previousBin === undefined) delete process.env.WASPFLOW_SBX_BIN;
+    else process.env.WASPFLOW_SBX_BIN = previousBin;
+    delete process.env.WF_STUB_LOG;
+    await rm(stubDir, { recursive: true, force: true });
+    await rm(scratchDir, { recursive: true, force: true });
+  }
+});
+
 // --- live-sbx-dependent behavior: stub executable or skip -------------------
 
 async function sbxOnPath() {
@@ -232,7 +272,12 @@ test('probeCapabilities reports available:true and forwards version via a stub s
   }
 });
 
-test('prepare() invokes `sbx run` with the scratch dir as workspace, never a real repo path', async () => {
+test('prepare() invokes `sbx run` with the AGENT before the scratch-dir PATH, --detached, never a real repo path', async () => {
+  // Real sbx v0.35.0 shape: `sbx run [flags] [AGENT] [PATH...]` — the agent
+  // positional comes BEFORE the workspace path. A prior revision of this
+  // backend had these reversed (path before agent), which live UAT caught
+  // as a real "not a sandbox or known agent" failure — see
+  // docs/design/FEDERATION_V0_UAT_REPORT.md "Owner UAT findings and fixes".
   const stubDir = await writeStub('run-record', `
     echo "$@" >"$WF_STUB_LOG"
     exit 0
@@ -243,12 +288,47 @@ test('prepare() invokes `sbx run` with the scratch dir as workspace, never a rea
   process.env.WF_STUB_LOG = logPath;
   try {
     const backend = new DockerSbxBackend();
-    const handle = await backend.prepare(validJob({ job_id: 'job-record' }));
+    const job = validJob({ job_id: 'job-record' });
+    const handle = await backend.prepare(job);
     const invocation = await import('node:fs/promises').then((m) => m.readFile(logPath, 'utf8'));
     assert.match(invocation, /^run --name wf-[0-9a-f]{16} /);
+    const afterName = invocation.replace(/^run --name wf-[0-9a-f]{16} /, '');
+    assert.ok(afterName.startsWith(job.image), `agent/image must come before the workspace path, got: ${afterName}`);
+    const imageIndex = invocation.indexOf(job.image);
+    const scratchIndex = invocation.indexOf(handle.scratch_dir);
+    assert.ok(imageIndex >= 0 && scratchIndex > imageIndex, 'sbx run must place the agent/image before the scratch-dir workspace path');
+    assert.ok(invocation.includes('--detached'), 'sbx run must be --detached: prepare() only creates the sandbox, start() drives the task separately');
     assert.ok(invocation.includes(handle.scratch_dir), 'sbx run must receive the disposable scratch dir as workspace');
     assert.ok(!invocation.includes(process.cwd()), 'sbx run must never receive the repo checkout as workspace');
     await rm(handle.scratch_dir, { recursive: true, force: true });
+  } finally {
+    if (previousBin === undefined) delete process.env.WASPFLOW_SBX_BIN;
+    else process.env.WASPFLOW_SBX_BIN = previousBin;
+    delete process.env.WF_STUB_LOG;
+    await rm(stubDir, { recursive: true, force: true });
+  }
+});
+
+test('start() drives the entrypoint via `sbx exec SANDBOX -- sh -c ENTRYPOINT`, splitting a multi-word HarnessSpec command', async () => {
+  // entrypoint is a full command STRING (e.g. 'codex exec --dangerously-
+  // bypass-approvals-and-sandbox'), not a single guest binary name — a prior
+  // revision passed it as one literal execFile argv element, which real
+  // agents like Codex would receive as a single nonexistent binary name
+  // rather than a parsed command line.
+  const stubDir = await writeStub('exec-record', `
+    echo "$@" >"$WF_STUB_LOG"
+    exit 0
+  `);
+  const logPath = path.join(stubDir, 'invocation.log');
+  const previousBin = process.env.WASPFLOW_SBX_BIN;
+  process.env.WASPFLOW_SBX_BIN = path.join(stubDir, 'sbx');
+  process.env.WF_STUB_LOG = logPath;
+  try {
+    const backend = new DockerSbxBackend();
+    const handle = { backend_id: BACKEND_ID, job_id: 'job-start', sandbox_id: 'wf-startexec', scratch_dir: '/tmp/unused', _entrypoint: 'codex exec --dangerously-bypass-approvals-and-sandbox' };
+    await backend.start(handle);
+    const invocation = await import('node:fs/promises').then((m) => m.readFile(logPath, 'utf8'));
+    assert.equal(invocation.trim(), `exec wf-startexec -- sh -c ${handle._entrypoint}`);
   } finally {
     if (previousBin === undefined) delete process.env.WASPFLOW_SBX_BIN;
     else process.env.WASPFLOW_SBX_BIN = previousBin;
