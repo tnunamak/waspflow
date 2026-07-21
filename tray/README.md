@@ -12,6 +12,9 @@ Start the daemon first (or use **Start Federation daemon** from the tray):
 waspflow federation daemon
 ```
 
+On Windows, when running from a checkout rather than an installed command,
+start it with `node bin\waspflow-federation daemon` from the repository root.
+
 In another terminal, build and run the helper:
 
 ```sh

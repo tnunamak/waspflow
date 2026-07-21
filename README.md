@@ -49,11 +49,20 @@ curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh
 sudo apt-get install -y docker-sbx
 sudo usermod -aG kvm $USER && newgrp kvm
 sbx login
+
+# Windows
+# Use the signed Federation installer. It installs prerequisites, enables
+# Windows Hypervisor Platform with UAC consent, and guides any required restart.
 ```
 
 Full docs: https://docs.docker.com/ai/sandboxes/get-started/
 
 Then run the full, read-only preflight: `waspflow federation doctor`.
+
+On Windows, the signed Federation installer owns prerequisites and restart
+handling. Doctor is a backstop after installation; it directs repair through
+the installer or presents an in-product unsupported-device state rather than
+asking contributors to administer Windows manually.
 
 It checks the package-backed `sbx` install, Docker CE/containerd v2, daemon,
 policy, KVM access, and Docker login before Federation can claim a task. Use

@@ -53,6 +53,17 @@ The local daemon recognizes that event and changes `/status` to:
 
 The bundled web UI maps `setup_required` to a dedicated “Your sandbox isn't ready yet” screen and lists each failed check with its copy-paste fix.
 
+## Windows packaging contract
+
+Windows preflight is a post-install backstop, not a contributor setup guide.
+The signed installer runs elevated after normal UAC consent, enables
+HypervisorPlatform with `Enable-WindowsOptionalFeature -Online -FeatureName
+HypervisorPlatform -All -NoRestart`, and schedules or prompts the required
+reboot. A failed HypervisorPlatform check leads with the installer Repair
+action; raw PowerShell is only an administrator last resort. Other Windows
+checks route to an in-product sign-in action, installer repair, or a kind
+unsupported-device state — never a contributor-facing manual command.
+
 ## Verification
 
 - `tests/federation-sbx-preflight.test.mjs` unit-tests every check from stubbed command output, including the exact `transfer.v1`, policy, KVM, and Docker-login diagnostics plus doctor JSON failure output.
