@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+# Skeleton only: replace the URL, SHA256, installer type, and switches when the
+# signed Windows installer exists. All-zero SHA256 must never be submitted.
+PackageIdentifier: tnunamak.WaspflowFederation
+PackageVersion: 0.0.0
+InstallerType: inno
+Commands:
+- waspflow
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/tnunamak/waspflow/releases/download/v0.0.0/WaspflowFederationSetup.exe
+  InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+  Scope: user
+InstallerSwitches:
+  Silent: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+  SilentWithProgress: /SILENT /SUPPRESSMSGBOXES /NORESTART
+ManifestType: installer
+ManifestVersion: 1.12.0

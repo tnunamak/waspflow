@@ -1,0 +1,43 @@
+name: waspflow-federation
+arch: amd64
+platform: linux
+version: ${PACKAGE_VERSION}
+release: "1"
+section: utils
+priority: optional
+maintainer: Tim Nunamaker <tim@nunamak.com>
+description: Local Federation daemon, browser UI, and native tray helper for Waspflow
+vendor: tnunamak
+homepage: https://github.com/tnunamak/waspflow
+license: MIT
+
+# The build script makes this staging tree so package contents can be inspected
+# before nFPM creates either archive.
+contents:
+  - src: ./stage/usr/lib/waspflow
+    dst: /usr/lib/waspflow
+    type: tree
+  - src: ./stage/usr/bin/waspflow-federation
+    dst: /usr/bin/waspflow-federation
+  - src: ./stage/usr/bin/waspflow
+    dst: /usr/bin/waspflow
+  - src: ./assets/waspflow-federation-daemon.service
+    dst: /usr/lib/systemd/user/waspflow-federation-daemon.service
+  - src: ./assets/waspflow-federation-tray.desktop
+    dst: /etc/xdg/autostart/waspflow-federation-tray.desktop
+
+# docker-sbx remains optional: doctor presents the actionable backend checks.
+overrides:
+  deb:
+    depends:
+      - nodejs (>= 20)
+    recommends:
+      - docker-sbx
+  rpm:
+    depends:
+      - nodejs >= 20
+    recommends:
+      - docker-sbx
+
+scripts:
+  postinstall: ./scripts/postinstall.sh
