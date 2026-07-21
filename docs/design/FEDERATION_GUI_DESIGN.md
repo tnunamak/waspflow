@@ -244,13 +244,13 @@ reality clawmeter carries too.
    `node:http` idiom from `lib/federation-coordinator.mjs` (do NOT reuse the coordinator itself — different
    process, different trust domain). A `GET /status` endpoint the tray polls; `POST` control for
    pause/resume/contribute.
-2. **Web UI: join + status** (browser, plain HTML/JS or a light framework — keep it small): the join
+2. [x] **Web UI: join + status** (browser, plain HTML/JS — no build step): the join
    screen (one paste field: deep link / `join` command / raw token, auto-detected → confirm coordinator →
    join), and the steady status view (contributing / paused / idle). Talks only to the local daemon's API.
-3. **Web UI: contribute + auth-handoff**: drive `contribute` via the daemon, stream progress, render
+3. [x] **Web UI: contribute + auth-handoff**: drive `contribute` via the daemon, stream progress, render
    `awaiting_browser` (open URL, poll, auto-clear) and `auth_required_manual` (honest numbered instruction
    card); pause/resume control.
-4. **Web UI: trust/safety panel** (Docker-Sandboxes 3-part copy + `trusted{key_id}` badge) + **requester
+4. [x] **Web UI: trust/safety panel** (Docker-Sandboxes 3-part copy + `trusted{key_id}` badge) + **requester
    submit view** (3-field form + lifecycle stepper + decoupled result-ready affordance).
 5. **Thin native tray** (Go + `fyne.io/systray`, clawmeter's stack — NO webview): 3-state icon
    (contributing/paused/action-needed) by polling the daemon's `GET /status`; menu → "Open Waspflow

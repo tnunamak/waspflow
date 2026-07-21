@@ -129,8 +129,13 @@ test('daemon rejects rebinding Host headers and absent or invalid session tokens
     assert.equal(bareRoot.status, 401);
     const root = await request(base, '/', { token: 'test-session-token' });
     assert.equal(root.status, 200);
-    assert.match(root.text, /Waspflow Federation web UI/);
+    assert.match(root.text, /Loading Waspflow Federation/);
     assert.equal(root.headers['access-control-allow-origin'], undefined);
+
+    const app = await request(base, '/app.mjs', { token: 'test-session-token' });
+    assert.equal(app.status, 200);
+    assert.match(app.headers['content-type'], /^text\/javascript/);
+    assert.match(app.text, /viewForStatus/);
   });
 });
 
@@ -167,6 +172,45 @@ test('POST /join accepts an invite and shells out to the guided join verb', asyn
     }) + '\n'));
     children[0].child.emit('close', 0);
     assert.equal(statusBody(await request(base, '/status', { token: 'test-session-token' })).state, 'idle');
+  });
+});
+
+test('POST /submit supervises the guided submit verb and GET /submit/status proxies its JSON lifecycle', async () => {
+  await withDaemon(async ({ base, children, setConfig }) => {
+    setConfig({ coordinator_url: 'http://coordinator.example' });
+    const response = await request(base, '/submit', {
+      method: 'POST',
+      token: 'test-session-token',
+      body: { source: '/work/project', prompt: 'Fix the test failure.', display_id: 'oshin' },
+    });
+    assert.equal(response.status, 202);
+    assert.deepEqual(children[0].args[1], [
+      '/real/path/to/bin/waspflow-federation', 'submit', '--display-id', 'oshin',
+      '--source', '/work/project', '--prompt', 'Fix the test failure.',
+    ]);
+
+    const digest = `sha256:${'a'.repeat(64)}`;
+    children[0].child.stdout.emit('data', Buffer.from(`waspflow-federation-submit: task_digest=${digest} status=QUEUED\n`));
+    const daemonStatus = statusBody(await request(base, '/status', { token: 'test-session-token' }));
+    assert.equal(daemonStatus.submission.task_digest, digest);
+    assert.equal(daemonStatus.submission.state, 'queued');
+
+    const taskStatusPromise = request(base, `/submit/status?task_digest=${digest}`, { token: 'test-session-token' });
+    for (let attempt = 0; children.length < 2 && attempt < 10; attempt++) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(children.length, 2, 'status request should spawn the guided status verb');
+    children[1].child.stdout.emit('data', Buffer.from(JSON.stringify({
+      schema_version: 1,
+      type: 'task_status',
+      status: 'CLAIMED',
+      task_digest: digest,
+    }) + '\n'));
+    children[1].child.emit('close', 0);
+    const taskStatus = await taskStatusPromise;
+    assert.equal(taskStatus.status, 200);
+    assert.equal(JSON.parse(taskStatus.text).status, 'CLAIMED');
+    assert.equal(statusBody(await request(base, '/status', { token: 'test-session-token' })).submission.state, 'claimed');
   });
 });
 
