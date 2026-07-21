@@ -17,10 +17,17 @@
  *                                               one flat roster — see lib/federation-coordinator.mjs's roster
  *                                               comment for why). Shape:
  *                                                 { "tim-author": "-----BEGIN PUBLIC KEY-----\n...", "ocean-executor": "..." }
- *                                               Onboarding a new member is a manual step: Tim hand-appends their
- *                                               key_id/PEM entry to this file and restarts the coordinator.
- *                                               Removing a line + restart is the only revocation mechanism v0
- *                                               supports — no dynamic registration endpoint, no live revocation.
+ *                                               HOT-RELOADED: this file is watched, and a valid edit replaces the
+ *                                               live roster IN PLACE with no restart required, so onboarding a new
+ *                                               member (`waspflow federation join` prints a one-line snippet to
+ *                                               append here) takes effect the moment Tim saves the file. This does
+ *                                               NOT add a network-reachable registration surface — the file is
+ *                                               still hand-edited, local, and requires host filesystem access to
+ *                                               change; only the "restart required" friction is removed. A
+ *                                               malformed edit is REJECTED and logged, leaving the previous good
+ *                                               roster live (never silently drops to zero members or crashes the
+ *                                               server on a bad save). Removing a line + saving is still the only
+ *                                               revocation mechanism v0 supports (now live, not restart-gated).
  */
 'use strict';
 
@@ -33,6 +40,39 @@ function fail(message) {
   process.exit(1);
 }
 
+function parseRosterFile(rosterFile) {
+  const rosterJson = JSON.parse(fs.readFileSync(rosterFile, 'utf8'));
+  if (!rosterJson || typeof rosterJson !== 'object' || Array.isArray(rosterJson)) {
+    throw new Error(`must contain a JSON object of key_id -> PEM string`);
+  }
+  const entries = Object.entries(rosterJson);
+  if (entries.length === 0) throw new Error('has no roster entries');
+  for (const [keyId, pem] of entries) {
+    if (typeof pem !== 'string' || !pem) throw new Error(`roster entry "${keyId}" must map to a PEM string`);
+  }
+  return entries;
+}
+
+// Reloads `rosterFile` into `liveRoster` IN PLACE (same Map instance the
+// coordinator's request handlers already read from), so a change takes
+// effect on the very next request with no restart. A bad edit is rejected
+// and logged rather than applied — the previous good roster keeps serving.
+function watchRosterFile(rosterFile, liveRoster) {
+  fs.watch(rosterFile, { persistent: true }, (eventType) => {
+    if (eventType !== 'change' && eventType !== 'rename') return;
+    let entries;
+    try {
+      entries = parseRosterFile(rosterFile);
+    } catch (error) {
+      process.stderr.write(`waspflow-federation-coordinator: roster file reload rejected (keeping previous roster): ${error.message}\n`);
+      return;
+    }
+    liveRoster.clear();
+    for (const [keyId, pem] of entries) liveRoster.set(keyId, pem);
+    process.stderr.write(`waspflow-federation-coordinator: roster reloaded (${liveRoster.size} member(s))\n`);
+  });
+}
+
 async function main() {
   const { startCoordinator } = await import('../lib/federation-coordinator.mjs');
 
@@ -41,21 +81,14 @@ async function main() {
 
   const rosterFile = process.env.WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE;
   if (!rosterFile) fail('WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE is required (JSON file mapping key_id -> public key PEM)');
-  let rosterJson;
+  let entries;
   try {
-    rosterJson = JSON.parse(fs.readFileSync(rosterFile, 'utf8'));
+    entries = parseRosterFile(rosterFile);
   } catch (error) {
     fail(`could not read/parse WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE (${rosterFile}): ${error.message}`);
   }
-  if (!rosterJson || typeof rosterJson !== 'object' || Array.isArray(rosterJson)) {
-    fail(`WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE (${rosterFile}) must contain a JSON object of key_id -> PEM string`);
-  }
-  const entries = Object.entries(rosterJson);
-  if (entries.length === 0) fail(`WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE (${rosterFile}) has no roster entries`);
-  for (const [keyId, pem] of entries) {
-    if (typeof pem !== 'string' || !pem) fail(`roster entry "${keyId}" must map to a PEM string`);
-  }
   const roster = new Map(entries);
+  watchRosterFile(rosterFile, roster);
 
   const port = Number(process.env.WASPFLOW_FEDERATION_COORDINATOR_PORT || 8787);
   if (!Number.isInteger(port) || port < 0 || port > 65535) fail('WASPFLOW_FEDERATION_COORDINATOR_PORT must be a valid port number');

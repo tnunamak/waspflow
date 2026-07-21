@@ -344,3 +344,68 @@ test('submit requires bearer token', async () => {
     assert.equal(res.status, 401);
   });
 });
+
+// --- GET /tasks/next: task discovery for the guided contributor flow -----
+
+async function next(base, headers = authed()) {
+  return fetch(`${base}/tasks/next`, { headers });
+}
+
+test('GET /tasks/next returns null when no task is queued', async () => {
+  await withServer(async ({ base }) => {
+    const res = await next(base);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { task_digest: null });
+  });
+});
+
+test('GET /tasks/next requires the bearer token — unlike GET /tasks/:digest, this is a discovery surface across all tasks', async () => {
+  await withServer(async ({ base }) => {
+    const res = await next(base, {});
+    assert.equal(res.status, 401);
+  });
+});
+
+test('GET /tasks/next returns the oldest QUEUED task, skips CLAIMED/SETTLED ones', async () => {
+  await withServer(async ({ base }) => {
+    const first = await (await publish(base, signTask({ display_id: 'first' }))).json();
+    // A tiny real delay so published_at timestamps are genuinely ordered,
+    // not just equal-and-coincidentally-sorted.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = await (await publish(base, signTask({ display_id: 'second' }))).json();
+
+    // First one is claimed (no longer eligible) — next should skip it.
+    await claim(base, first.task_digest, { executor_key: 'ed25519:executor-1', lease_seconds: 3600 });
+
+    const res = await next(base);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.task_digest, second.task_digest, 'must return the still-QUEUED task, not the CLAIMED one');
+  });
+});
+
+test('GET /tasks/next returns a task again once its claim lease expires (lazy requeue applies here too)', async () => {
+  await withServer(async ({ base }) => {
+    const published = await (await publish(base, signTask())).json();
+    await claim(base, published.task_digest, { executor_key: 'ed25519:executor-1', lease_seconds: 0.001 });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const res = await next(base);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.task_digest, published.task_digest, 'an expired-lease task must become claimable (and discoverable) again');
+  });
+});
+
+test('GET /tasks/next never returns a SETTLED task', async () => {
+  await withServer(async ({ base }) => {
+    const published = await (await publish(base, signTask())).json();
+    const claimBody = await (await claim(base, published.task_digest, { executor_key: 'ed25519:executor-1', lease_seconds: 3600 })).json();
+    const resultEnv = signResult(published.task_digest);
+    await submit(base, published.task_digest, { envelope: resultEnv, claim_generation: claimBody.claim_generation, lease_token: claimBody.lease_token });
+
+    const res = await next(base);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { task_digest: null });
+  });
+});
