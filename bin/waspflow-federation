@@ -95,9 +95,17 @@ async function fetchCoordinator(url, opts) {
   }
 }
 
-function printResult(json, humanLines, structured) {
+// `type` is merged in LAST (after any spread of upstream data in
+// `structured`) so it can never be shadowed — e.g. `contributed` spreads the
+// pull bin's own `{status: 'settled', ...}` response, and `task_status`
+// spreads the coordinator's task record's own `status` field. Both would
+// silently overwrite a `status`-based discriminator; `type` is immune by
+// construction. See lib/federation-events.mjs for the full event vocabulary
+// this must stay in sync with (tests/federation-events-contract.test.mjs
+// enforces it).
+function printResult(json, humanLines, structured, type) {
   if (json) {
-    process.stdout.write(JSON.stringify(structured) + '\n');
+    process.stdout.write(JSON.stringify({ ...structured, schema_version: 1, type }) + '\n');
   } else {
     for (const line of humanLines) process.stdout.write(line + '\n');
   }
@@ -138,7 +146,7 @@ async function cmdJoin(argv) {
     printResult(flags.json, [
       `already joined as ${existing.key_id}`,
       `coordinator: ${existing.coordinator_url}`,
-    ], { status: 'already_joined', key_id: existing.key_id, coordinator_url: existing.coordinator_url, config_path: configPath() });
+    ], { status: 'already_joined', key_id: existing.key_id, coordinator_url: existing.coordinator_url, config_path: configPath() }, 'already_joined');
     return;
   }
 
@@ -205,7 +213,7 @@ async function cmdJoin(argv) {
     peers_auto_fetched: peerCount,
     roster_snippet: { [keyId]: publicKeyPem },
     next_step: 'send roster_snippet to the coordinator operator, then run: waspflow federation contribute',
-  });
+  }, 'joined');
 }
 
 // --- auth pre-flight ---------------------------------------------------------
@@ -246,7 +254,7 @@ async function ensureHarnessAuthed(harnessName, { json } = {}) {
     printResult(json, [
       `${harnessName} needs a one-time login this CLI can't drive for you:`,
       requirement.instruction,
-    ], { status: 'auth_required_manual', harness: harnessName, flow_shape: requirement.flow_shape, instruction: requirement.instruction });
+    ], { status: 'auth_required_manual', harness: harnessName, flow_shape: requirement.flow_shape, instruction: requirement.instruction }, 'auth_required_manual');
     fail(`${harnessName}: complete the login above, then re-run 'waspflow federation contribute'`);
   }
 
@@ -261,7 +269,7 @@ async function ensureHarnessAuthed(harnessName, { json } = {}) {
       `${harnessName}: open this URL to finish logging in:`,
       handle.url,
       'waiting for you to complete it in the browser...',
-    ], { status: 'awaiting_browser', harness: harnessName, url: handle.url });
+    ], { status: 'awaiting_browser', harness: harnessName, url: handle.url }, 'awaiting_browser');
     const finalResult = await handle.waitForCompletion();
     if (finalResult.status !== 'complete') fail(`${harnessName}: login failed — ${finalResult.detail}`);
   }
@@ -301,7 +309,7 @@ async function cmdContribute(argv) {
     const body = await res.json();
     if (!body.task_digest) {
       printResult(flags.json, ['no task is currently available — nothing to contribute right now.'],
-        { status: 'no_task_available' });
+        { status: 'no_task_available' }, 'no_task_available');
       return;
     }
     taskDigest = body.task_digest;
@@ -342,7 +350,7 @@ async function cmdContribute(argv) {
   }
   if (flags.json) {
     const submitResponse = JSON.parse(result.stdout);
-    printResult(true, [], { status: 'contributed', task_digest: taskDigest, ...submitResponse });
+    printResult(true, [], { status: 'contributed', task_digest: taskDigest, ...submitResponse }, 'contributed');
   } else {
     log(`done — task ${taskDigest} submitted.`);
   }
@@ -439,7 +447,7 @@ async function cmdTrust(argv) {
   saveConfig(config);
 
   log(`trusted '${keyId}' — saved to your local roster cache.`);
-  printResult(flags.json, [`trusted '${keyId}'`], { status: 'trusted', key_id: keyId });
+  printResult(flags.json, [`trusted '${keyId}'`], { status: 'trusted', key_id: keyId }, 'trusted');
 }
 
 // --- submit ------------------------------------------------------------------
@@ -515,7 +523,7 @@ async function cmdStatus(argv) {
     printResult(flags.json, [
       'not joined yet.',
       "run: waspflow federation join <coordinator-url> <invite-token>",
-    ], { status: 'not_joined' });
+    ], { status: 'not_joined' }, 'not_joined');
     return;
   }
 
@@ -525,7 +533,7 @@ async function cmdStatus(argv) {
     if (!res.ok) fail(`task lookup failed: ${res.status} ${body.error || ''}`);
     printResult(flags.json, [
       `task ${flags['task-digest']}: ${body.status}`,
-    ], { status: 'task_status', ...body });
+    ], { status: 'task_status', ...body }, 'task_status');
     return;
   }
 
@@ -533,7 +541,7 @@ async function cmdStatus(argv) {
     `joined as '${config.key_id}'`,
     `coordinator: ${config.coordinator_url}`,
     `config: ${configPath()}`,
-  ], { status: 'joined', key_id: config.key_id, coordinator_url: config.coordinator_url, config_path: configPath() });
+  ], { status: 'joined', key_id: config.key_id, coordinator_url: config.coordinator_url, config_path: configPath() }, 'member_status');
 }
 
 async function main() {
