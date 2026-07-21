@@ -252,7 +252,7 @@ reality clawmeter carries too.
    card); pause/resume control.
 4. **Web UI: trust/safety panel** (Docker-Sandboxes 3-part copy + `trusted{key_id}` badge) + **requester
    submit view** (3-field form + lifecycle stepper + decoupled result-ready affordance).
-5. **Thin native tray** (Go + `fyne.io/systray`, clawmeter's stack — NO webview): 3-state icon
+5. [x] **Thin native tray** (Go + `fyne.io/systray`, clawmeter's stack — NO webview): 3-state icon
    (contributing/paused/action-needed) by polling the daemon's `GET /status`; menu → "Open Waspflow
    Federation" (`xdg-open`/`open`/`start` the localhost URL); auto-open the browser on
    `awaiting_browser`/`auth_required_manual`. Shares zero logic with the daemon — poll + open-URL only.
