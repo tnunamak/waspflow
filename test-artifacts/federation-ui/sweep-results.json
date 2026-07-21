@@ -1,0 +1,40 @@
+{
+  "targetUrl": "http://127.0.0.1:8902/?token=1LI6CwJ5PoN3tWmJmju4yJAtArwT09O6gM0XqTiWhXA",
+  "consoleErrors": [],
+  "ignoredConsoleErrors": [
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+  ],
+  "results": [
+    {
+      "name": "Page loads with the Federation heading",
+      "status": "PASS"
+    },
+    {
+      "name": "Idle contributor view and ledger copy",
+      "status": "FAIL",
+      "detail": "locator.waitFor: Timeout 5000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('[data-state=\"idle\"]').first() to be visible\u001b[22m\n"
+    },
+    {
+      "name": "Task choice card has a next-available button and selectable tasks",
+      "status": "FAIL",
+      "detail": "locator.waitFor: Timeout 5000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('h2').getByText('Choose a task').first() to be visible\u001b[22m\n"
+    },
+    {
+      "name": "Safety accordion stays expanded across two poll cycles",
+      "status": "PASS"
+    },
+    {
+      "name": "Advanced-submit accordion stays expanded across two poll cycles",
+      "status": "PASS"
+    },
+    {
+      "name": "Contribution controls are present and enabled without mutating the rig",
+      "status": "FAIL",
+      "detail": "locator.waitFor: Timeout 5000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button', { name: 'Start contributing' }) to be visible\u001b[22m\n"
+    },
+    {
+      "name": "No console errors other than the known favicon 401",
+      "status": "PASS"
+    }
+  ]
+}
