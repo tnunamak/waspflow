@@ -37,6 +37,8 @@ async function withDaemon(fn) {
   const directory = await mkdtemp(join(tmpdir(), 'wf-federation-daemon-'));
   let config = null;
   const children = [];
+  const coordinatorCalls = [];
+  let taskListResponse = { status: 200, body: [] };
   const daemon = await startFederationDaemon({
     token: 'test-session-token',
     infoPath: join(directory, 'daemon.json'),
@@ -47,10 +49,24 @@ async function withDaemon(fn) {
       children.push({ args, child });
       return child;
     },
+    fetchImpl: async (url, options) => {
+      coordinatorCalls.push({ url, options });
+      return new Response(JSON.stringify(taskListResponse.body), {
+        status: taskListResponse.status,
+        headers: { 'content-type': 'application/json' },
+      });
+    },
   });
   const base = `http://127.0.0.1:${daemon.info.port}`;
   try {
-    await fn({ base, daemon, children, setConfig: (value) => { config = value; } });
+    await fn({
+      base,
+      daemon,
+      children,
+      coordinatorCalls,
+      setConfig: (value) => { config = value; },
+      setTaskListResponse: (value) => { taskListResponse = value; },
+    });
   } finally {
     await daemon.close();
     await rm(directory, { recursive: true, force: true });
@@ -149,6 +165,44 @@ test('POST /contribute/start is idempotent and spawns the guided contribute verb
     assert.equal(JSON.parse(second.text).started, false);
     assert.equal(children.length, 1);
     assert.deepEqual(children[0].args[1], ['/real/path/to/bin/waspflow-federation', 'contribute', '--json']);
+  });
+});
+
+test('GET /tasks passes through claimable tasks and POST /contribute/start delegates a chosen digest to the existing pull path', async () => {
+  await withDaemon(async ({ base, children, coordinatorCalls, setConfig, setTaskListResponse }) => {
+    const digest = 'a'.repeat(64);
+    const tasks = [{
+      task_digest: digest,
+      display_id: 'Fix the login test',
+      published_at: '2026-07-21T21:00:00.000Z',
+      network: 'enabled',
+      source: { base_artifact: { sha256: 'b'.repeat(64), bytes: 12, media_type: 'application/x-tar' } },
+      prompt: { artifact: { sha256: 'c'.repeat(64), bytes: 8, media_type: 'text/plain' } },
+    }];
+    setConfig({ coordinator_url: 'http://coordinator.example', collective_token: 'collective-token' });
+    setTaskListResponse({ status: 200, body: tasks });
+
+    const listed = await request(base, '/tasks', { token: 'test-session-token' });
+    assert.equal(listed.status, 200);
+    assert.deepEqual(JSON.parse(listed.text), tasks);
+    assert.deepEqual(coordinatorCalls, [{
+      url: 'http://coordinator.example/tasks',
+      options: { headers: { authorization: 'Bearer collective-token' } },
+    }]);
+
+    const started = await request(base, '/contribute/start', {
+      method: 'POST',
+      token: 'test-session-token',
+      body: { task_digest: digest },
+    });
+    assert.equal(started.status, 202);
+    assert.deepEqual(children[0].args[1], [
+      '/real/path/to/bin/waspflow-federation', 'contribute', '--task-digest', digest, '--json',
+    ]);
+    assert.deepEqual(JSON.parse(started.text).contribution, { selection: 'chosen', task_digest: digest });
+    assert.deepEqual(statusBody(await request(base, '/status', { token: 'test-session-token' })).contribution, {
+      selection: 'chosen', task_digest: digest,
+    });
   });
 });
 

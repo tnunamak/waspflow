@@ -347,9 +347,67 @@ test('submit requires bearer token', async () => {
 
 // --- GET /tasks/next: task discovery for the guided contributor flow -----
 
+async function list(base, headers = authed()) {
+  return fetch(`${base}/tasks`, { headers });
+}
+
 async function next(base, headers = authed()) {
   return fetch(`${base}/tasks/next`, { headers });
 }
+
+test('GET /tasks returns an empty claimable-task list when the queue is empty', async () => {
+  await withServer(async ({ base }) => {
+    const res = await list(base);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), []);
+  });
+});
+
+test('GET /tasks requires the bearer token because it discovers tasks across the collective', async () => {
+  await withServer(async ({ base }) => {
+    const res = await list(base, {});
+    assert.equal(res.status, 401);
+  });
+});
+
+test('GET /tasks returns every claimable task, lazily requeues expired claims, and excludes live claims and settled tasks', async () => {
+  await withServer(async ({ base }) => {
+    const queuedEnvelope = signTask({ display_id: 'queued' });
+    const expiredEnvelope = signTask({ display_id: 'expired' });
+    const liveEnvelope = signTask({ display_id: 'live-claim' });
+    const settledEnvelope = signTask({ display_id: 'settled' });
+    const queued = await (await publish(base, queuedEnvelope)).json();
+    const expired = await (await publish(base, expiredEnvelope)).json();
+    const live = await (await publish(base, liveEnvelope)).json();
+    const settled = await (await publish(base, settledEnvelope)).json();
+
+    await claim(base, expired.task_digest, { executor_key: 'ed25519:executor-1', lease_seconds: 0.001 });
+    await claim(base, live.task_digest, { executor_key: 'ed25519:executor-1', lease_seconds: 3600 });
+    const settledClaim = await (await claim(base, settled.task_digest, { executor_key: 'ed25519:executor-1', lease_seconds: 3600 })).json();
+    await submit(base, settled.task_digest, {
+      envelope: signResult(settled.task_digest),
+      claim_generation: settledClaim.claim_generation,
+      lease_token: settledClaim.lease_token,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const res = await list(base);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.map((task) => task.display_id).sort(), ['expired', 'queued']);
+    assert.deepEqual(body.map((task) => task.task_digest).sort(), [expired.task_digest, queued.task_digest].sort());
+
+    const queuedTask = body.find((task) => task.task_digest === queued.task_digest);
+    assert.deepEqual(Object.keys(queuedTask).sort(), ['display_id', 'network', 'prompt', 'published_at', 'source', 'task_digest']);
+    assert.equal(queuedTask.network, queuedEnvelope.payload.network);
+    assert.deepEqual(queuedTask.source, queuedEnvelope.payload.source);
+    assert.deepEqual(queuedTask.prompt, queuedEnvelope.payload.prompt);
+    assert.match(queuedTask.published_at, /^\d{4}-\d{2}-\d{2}T/);
+
+    const expiredState = await (await get(base, expired.task_digest)).json();
+    assert.equal(expiredState.status, 'QUEUED', 'listing must persist the same lazy-expiry transition as other reads');
+  });
+});
 
 test('GET /tasks/next returns null when no task is queued', async () => {
   await withServer(async ({ base }) => {
