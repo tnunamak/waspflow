@@ -42,10 +42,20 @@ function header() {
   return element('header', {}, element('h1', { text: 'Waspflow Federation' }));
 }
 
-function safetyPanel(status) {
+// Accordion that remembers its open/closed state across re-renders. The status
+// poll rebuilds the DOM when state changes; a bare <details> would collapse back
+// every time. `openState[key]` (app-level, survives re-render) is the source of
+// truth: we set `open` from it and update it on toggle.
+function accordion(key, openState, summaryText, ...children) {
+  const details = element('details', openState[key] ? { open: '' } : {},
+    element('summary', { text: summaryText }), ...children);
+  details.addEventListener('toggle', () => { openState[key] = details.open; });
+  return details;
+}
+
+function safetyPanel(status, openState) {
   const coordinator = status.coordinator_url ? element('p', {}, element('span', { className: 'badge', text: 'Coordinator: trusted' }), document.createTextNode(` ${status.coordinator_url}`)) : null;
-  return element('details', {},
-    element('summary', { text: 'How this works / Is this safe?' }),
+  return accordion('safety', openState, 'How this works / Is this safe?',
     coordinator,
     element('p', { text: 'Tasks run inside an isolated Docker sandbox on your machine. The sandbox can use your Claude or Codex subscription to do the work, but it cannot see anything else on your computer.' }),
     element('p', { text: 'Shared in: only the task files and instructions you choose. Not touched: your other projects, accounts, and personal files.' }),
@@ -71,7 +81,7 @@ function lifecycle(status, task) {
   return element('section', { className: 'card' }, ...content);
 }
 
-function requesterPanel(status, task, submitTask) {
+function requesterPanel(status, task, submitTask, openState) {
   const source = element('input', { id: 'source', name: 'source', placeholder: '/path/to/folder', required: '' });
   const prompt = element('textarea', { id: 'prompt', name: 'prompt', placeholder: 'Describe the work you want done.', required: '' });
   const displayId = element('input', { id: 'display-id', name: 'display-id', placeholder: 'contributor display id', required: '' });
@@ -84,7 +94,7 @@ function requesterPanel(status, task, submitTask) {
   element('label', { for: 'prompt', text: 'What should be done?' }), prompt,
   element('label', { for: 'display-id', text: 'Contributor display id' }), displayId,
   element('div', { className: 'actions' }, element('button', { type: 'submit', text: 'Submit task' })));
-  return element('details', {}, element('summary', { text: 'Submit a task (advanced)' }), form, lifecycle(status, task));
+  return accordion('submit', openState, 'Submit a task (advanced)', form, lifecycle(status, task));
 }
 
 function instructions(text) {
@@ -99,6 +109,7 @@ function createApplication(root) {
   let pollBusy = false;
   let message = '';
   let lastRenderSignature = null;
+  const openState = {};
 
   async function request(path, options = {}) {
     if (!token) throw new Error('This link is missing its Waspflow session token. Open Federation again from Waspflow.');
@@ -171,8 +182,8 @@ function createApplication(root) {
       ));
     }
     if (latestStatus && latestStatus.state !== 'not_joined') {
-      content.push(safetyPanel(latestStatus));
-      content.push(requesterPanel(latestStatus, latestTask, (body) => control('/submit', body)));
+      content.push(safetyPanel(latestStatus, openState));
+      content.push(requesterPanel(latestStatus, latestTask, (body) => control('/submit', body), openState));
     }
     // Only touch the DOM when the view actually changed. The 1.5s status poll
     // calls render() constantly; rebuilding the DOM every time destroyed the
