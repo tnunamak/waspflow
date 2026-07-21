@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { _internal, DockerSbxBackend, probeSbxPreflight } from '../lib/federation-docker-backend.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -67,9 +68,47 @@ function identityCommandStub({ daemonReady = true, policyReady = true, dockerLog
 
 test('preflight classifies a fully ready Ubuntu sbx installation', () => {
   const checks = byName(healthyInputs());
-  assert.equal(Object.keys(checks).length, 6);
+  assert.equal(Object.keys(checks).length, 7);
   assert.ok(Object.values(checks).every((item) => item.ok));
   assert.ok(Object.values(checks).every((item) => typeof item.detail === 'string' && typeof item.fix === 'string'));
+});
+
+test('sbxHome uses the short default and honors WASPFLOW_FEDERATION_SBX_HOME', () => {
+  const previous = process.env.WASPFLOW_FEDERATION_SBX_HOME;
+  delete process.env.WASPFLOW_FEDERATION_SBX_HOME;
+  try {
+    assert.equal(_internal.sbxHome(), join(homedir(), '.wfsbx'));
+    process.env.WASPFLOW_FEDERATION_SBX_HOME = '/tmp/wf-sbx-override';
+    assert.equal(_internal.sbxHome(), '/tmp/wf-sbx-override');
+  } finally {
+    if (previous === undefined) delete process.env.WASPFLOW_FEDERATION_SBX_HOME;
+    else process.env.WASPFLOW_FEDERATION_SBX_HOME = previous;
+  }
+});
+
+test('sbx home migration preserves a fitting legacy home but replaces an overlong one without moving it', () => {
+  const fittingHome = '/home/a';
+  const fittingLegacy = join(fittingHome, '.waspflow', 'sbx-home');
+  assert.equal(_internal.selectSbxHome({ home: fittingHome, pathExists: (candidate) => candidate === fittingLegacy }).home, fittingLegacy);
+
+  const longHome = '/home/this-user-name-makes-the-old-sandbox-home-too-long';
+  const longLegacy = join(longHome, '.waspflow', 'sbx-home');
+  const selection = _internal.selectSbxHome({ home: longHome, pathExists: (candidate) => candidate === longLegacy });
+  assert.equal(selection.home, join(longHome, '.wfsbx'));
+  assert.equal(selection.migration, 'legacy_home_too_long');
+  assert.equal(_internal.selectSbxHome({ home: longHome, override: '/tmp/explicit-sbx-home', pathExists: () => true }).home, '/tmp/explicit-sbx-home');
+});
+
+test('socket path length preflight passes and fails at the Unix limit', () => {
+  const fittingHome = `/t/${'a'.repeat(26)}`;
+  const tooLongHome = `/t/${'a'.repeat(27)}`;
+  const pass = _internal.socketPathLengthCheck(fittingHome);
+  const fail = _internal.socketPathLengthCheck(tooLongHome);
+  assert.equal(_internal.containerdSocketPathForSbxHome(fittingHome).length, 104);
+  assert.equal(pass.ok, true);
+  assert.equal(fail.ok, false);
+  assert.equal(fail.detail, 'The sandbox files live at a path that is too long for the system.');
+  assert.equal(fail.fix, 'Set WASPFLOW_FEDERATION_SBX_HOME to a shorter directory.');
 });
 
 test('every preflight detail is one plain sentence while raw command output stays in diagnostics', () => {
@@ -183,7 +222,7 @@ test('probeSbxPreflight builds its JSON-ready report from stubbed command output
   });
   assert.equal(report.schema_version, 1);
   assert.equal(report.ok, true);
-  assert.equal(report.checks.length, 6);
+  assert.equal(report.checks.length, 7);
 });
 
 test('Windows preflight uses where, checks HypervisorPlatform, and skips Linux-only checks', async () => {
@@ -199,7 +238,7 @@ test('Windows preflight uses where, checks HypervisorPlatform, and skips Linux-o
     },
   });
   assert.equal(report.ok, true);
-  assert.deepEqual(report.checks.map((item) => item.name), ['sbx_install', 'hypervisor_platform', 'docker_login', 'windows_file_permissions']);
+  assert.deepEqual(report.checks.map((item) => item.name), ['sbx_install', 'hypervisor_platform', 'docker_login', 'windows_file_permissions', 'socket_path_length']);
   assert.ok(calls.some(([command, args]) => command === 'where' && args[0] === 'sbx'));
   assert.ok(calls.some(([command, args]) => command === 'powershell.exe' && args.some((arg) => arg.includes('Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform'))));
   assert.ok(!calls.some(([command]) => ['dpkg-query', 'docker', 'containerd', 'test'].includes(command)));

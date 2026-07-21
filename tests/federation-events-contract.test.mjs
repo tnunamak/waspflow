@@ -152,7 +152,7 @@ test('no_task_available: contribute --json with an empty queue validates against
       // preflight is skipped — this scenario is about task discovery
       // returning nothing, not auth (same stub pattern as
       // tests/waspflow-federation-cli.test.mjs).
-      const stubHome = await mkdtemp(join(tmpdir(), 'wf-fed-events-sbxstub-'));
+      const stubHome = await mkdtemp('/tmp/x');
       const stubBinDir = await mkdtemp(join(tmpdir(), 'wf-fed-events-stubbin-'));
       const stubPath = join(stubBinDir, 'sbx');
       await writeFile(stubPath, `#!/bin/sh
