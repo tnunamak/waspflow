@@ -93,9 +93,21 @@ async function publishRealTask(coordinatorUrl, { privateKeyPem, keyId }) {
 async function stubSbx() {
   const stubBinDir = await mkdtemp(join(tmpdir(), 'wf-fed-cli-stubbin-'));
   const stubPath = join(stubBinDir, 'sbx');
-  await writeFile(stubPath, '#!/bin/sh\nif [ "$1" = "secret" ] && [ "$2" = "ls" ]; then echo "openai  oauth  (global)"; exit 0; fi\nexit 1\n');
-  await chmod(stubPath, 0o755);
-  return { stubBinDir, stubPath };
+  await writeFile(stubPath, `#!/bin/sh
+case "$1 $2" in
+  "version ") echo "sbx version: v0.35.0 abc123" ;;
+  "diagnose ") printf 'Daemon healthy\\nDocker authentication healthy\\n' ;;
+  "policy ls") echo "Policy rules" ;;
+  "secret ls") echo "openai  oauth  (global)" ;;
+  *) exit 1 ;;
+esac
+`);
+  await writeFile(join(stubBinDir, 'dpkg-query'), '#!/bin/sh\nprintf "docker-sbx\\tinstalled\\t0.35.0\\ndocker-ce\\tinstalled\\t28.0.0\\ncontainerd.io\\tinstalled\\t2.1.0\\n"\n');
+  await writeFile(join(stubBinDir, 'docker'), '#!/bin/sh\necho "28.0.0"\n');
+  await writeFile(join(stubBinDir, 'containerd'), '#!/bin/sh\necho "containerd github.com/containerd/containerd v2.1.0"\n');
+  await writeFile(join(stubBinDir, 'test'), '#!/bin/sh\nexit 0\n');
+  await Promise.all(['sbx', 'dpkg-query', 'docker', 'containerd', 'test'].map((name) => chmod(join(stubBinDir, name), 0o755)));
+  return { stubBinDir, stubPath, commandPath: `${stubBinDir}:${process.env.PATH}` };
 }
 
 async function withMemberHome(fn) {
@@ -107,10 +119,10 @@ async function withMemberHome(fn) {
   }
 }
 
-function runCli(args, { home, cwd = process.cwd() } = {}) {
+function runCli(args, { home, cwd = process.cwd(), env = {} } = {}) {
   return execFileAsync(process.execPath, [CLI, ...args], {
     cwd,
-    env: { ...process.env, WASPFLOW_FEDERATION_HOME: home },
+    env: { ...process.env, WASPFLOW_FEDERATION_HOME: home, ...env },
   });
 }
 
@@ -214,11 +226,7 @@ test('contribute: no --task-digest and no queued task -> reports "no task availa
       // this test is about task-discovery-returns-nothing, not auth, and
       // must not depend on (or risk triggering) a real sbx install.
       const stubHome = await mkdtemp(join(tmpdir(), 'wf-fed-cli-sbxstub-'));
-      const stubBinDir = await mkdtemp(join(tmpdir(), 'wf-fed-cli-stubbin-'));
-      const { writeFile, chmod } = await import('node:fs/promises');
-      const stubPath = join(stubBinDir, 'sbx');
-      await writeFile(stubPath, '#!/bin/sh\necho "openai  oauth  (global)"\nexit 0\n');
-      await chmod(stubPath, 0o755);
+      const { stubBinDir, stubPath, commandPath } = await stubSbx();
 
       const { stdout } = await execFileAsync(process.execPath, [CLI, 'contribute', '--json'], {
         env: {
@@ -226,6 +234,7 @@ test('contribute: no --task-digest and no queued task -> reports "no task availa
           WASPFLOW_FEDERATION_HOME: home,
           WASPFLOW_FEDERATION_SBX_HOME: stubHome,
           WASPFLOW_SBX_BIN: stubPath,
+          PATH: commandPath,
         },
       });
       assert.deepEqual(JSON.parse(stdout), { status: 'no_task_available', schema_version: 1, type: 'no_task_available' });
@@ -268,7 +277,7 @@ test('contribute: succeeds past the signature-verification step with ZERO manual
       const published = await publishRealTask(coordinatorUrl, { privateKeyPem: preRegisteredAuthorPrivateKeyPem, keyId: PRE_REGISTERED_AUTHOR_KEY_ID });
       assert.equal(published.status, 'queued');
 
-      const { stubBinDir, stubPath } = await stubSbx();
+      const { stubBinDir, stubPath, commandPath } = await stubSbx();
       const stubHome = await mkdtemp(join(tmpdir(), 'wf-fed-cli-sbxstub-'));
       try {
         // This will fail overall (the stub sbx can't actually run a
@@ -279,7 +288,7 @@ test('contribute: succeeds past the signature-verification step with ZERO manual
         // (not a manual `trust` call, which was never made) is what let
         // independent re-verification succeed.
         await assert.rejects(execFileAsync(process.execPath, [CLI, 'contribute'], {
-          env: { ...process.env, WASPFLOW_FEDERATION_HOME: home, WASPFLOW_FEDERATION_SBX_HOME: stubHome, WASPFLOW_SBX_BIN: stubPath },
+          env: { ...process.env, WASPFLOW_FEDERATION_HOME: home, WASPFLOW_FEDERATION_SBX_HOME: stubHome, WASPFLOW_SBX_BIN: stubPath, PATH: commandPath },
         }), (error) => {
           assert.match(error.stderr, /independently re-verified task envelope signature/);
           assert.doesNotMatch(error.stderr, /is not in --roster-file/);
@@ -333,10 +342,20 @@ test('contribute: refuses a task from a signer this member has not trusted (loca
         // never published/vouched for cannot be contributed at all, whether
         // via absent digest or (per the manual E2E proof already in the UX
         // report) an untrusted signer on a task it HAS published.
-        await assert.rejects(runCli(['contribute', '--task-digest', published.task_digest], { home }), (error) => {
-          assert.match(error.stderr, /unknown task|not in --roster-file|haven't trusted/);
-          return true;
-        });
+        const { stubBinDir, stubPath, commandPath } = await stubSbx();
+        const stubHome = await mkdtemp(join(tmpdir(), 'wf-fed-cli-sbxstub-'));
+        try {
+          await assert.rejects(runCli(['contribute', '--task-digest', published.task_digest], {
+            home,
+            env: { WASPFLOW_FEDERATION_SBX_HOME: stubHome, WASPFLOW_SBX_BIN: stubPath, PATH: commandPath },
+          }), (error) => {
+            assert.match(error.stderr, /unknown task|not in --roster-file|haven't trusted/);
+            return true;
+          });
+        } finally {
+          await rm(stubHome, { recursive: true, force: true });
+          await rm(stubBinDir, { recursive: true, force: true });
+        }
       }, { roster: new Map([[STRANGER_KEY_ID, strangerPublicKeyPem]]) });
     });
   }, { roster });

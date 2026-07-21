@@ -4,6 +4,7 @@ const lifecycleSteps = ['queued', 'claimed', 'running', 'settled'];
 export function viewForStatus(status) {
   if (!status || status.state === 'not_joined') return { name: 'join' };
   if (status.state === 'action_needed') return { name: 'action', action: status.action || {} };
+  if (status.state === 'setup_required') return { name: 'setup', checks: status.action?.checks || [] };
   const names = { contributing: 'Contributing', paused: 'Paused', idle: 'Idle' };
   return {
     name: 'status',
@@ -102,6 +103,17 @@ function instructions(text) {
   return element('ol', { className: 'manual-steps' }, ...lines.map((line) => element('li', { text: line.replace(/^\s*\d+[.)]\s*/, '') })));
 }
 
+function setupInstructions(checks) {
+  if (!Array.isArray(checks) || checks.length === 0) {
+    return element('p', { className: 'detail', text: 'Run waspflow federation doctor in a terminal for the exact checks and fixes.' });
+  }
+  return element('ol', { className: 'manual-steps' }, ...checks.map((item) => element('li', {},
+    element('strong', { text: `${item.name}: ` }),
+    document.createTextNode(`${item.detail || 'setup check failed.'} `),
+    element('code', { text: item.fix || 'Run waspflow federation doctor for the fix.' }),
+  )));
+}
+
 function createApplication(root) {
   const token = new URLSearchParams(window.location.search).get('token');
   let latestStatus = null;
@@ -169,6 +181,14 @@ function createApplication(root) {
         element('h2', { text: browserAction ? 'Sign in to continue' : 'One-time sign-in step' }),
         element('p', { text: browserAction ? 'Finish signing in in the browser window. This page will update automatically when it is done.' : 'Your agent needs one manual sign-in step. This is needed because the sign-in happens inside the agent, not in Waspflow.' }),
         browserAction ? element('div', { className: 'actions' }, button('Open sign-in', () => window.open(view.action.url, '_blank', 'noopener'))) : instructions(view.action.instruction),
+        element('p', { className: 'detail', text: latestStatus?.detail || '' }),
+      ));
+    } else if (view.name === 'setup') {
+      content.push(element('section', { className: 'card' },
+        element('p', { className: 'eyebrow', text: 'Sandbox setup required' }),
+        element('h2', { text: "Your sandbox isn't ready yet" }),
+        element('p', { text: 'Fix these checks, then run Federation doctor again before contributing.' }),
+        setupInstructions(view.checks),
         element('p', { className: 'detail', text: latestStatus?.detail || '' }),
       ));
     } else {
