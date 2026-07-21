@@ -48,13 +48,17 @@ const ROOT = path.join(__dirname, '..');
 // positional arg is a multi-line PEM string that itself starts with
 // "-----BEGIN PUBLIC KEY-----", which begins with "--"; a naive
 // starts-with('--') scan would misparse that PEM as an unknown flag.
-function parseFlags(argv, known) {
+function parseFlags(argv, known, booleanFlags = []) {
   const flags = {};
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--json') { flags.json = true; continue; }
     const name = arg.startsWith('--') ? arg.slice(2) : null;
+    if (name !== null && booleanFlags.includes(name)) {
+      flags[name] = true;
+      continue;
+    }
     if (name !== null && known.includes(name)) {
       const value = argv[++i];
       if (value === undefined) fail(`--${name} requires a value`);
@@ -64,6 +68,60 @@ function parseFlags(argv, known) {
     positional.push(arg);
   }
   return { flags, positional };
+}
+
+// --- sandbox install preflight ---------------------------------------------
+//
+// This is intentionally the same backend preflight used immediately before a
+// contribution. A green `sbx version` alone is not enough: the real runtime
+// also needs Docker CE/containerd v2, a healthy daemon, policy, KVM access,
+// and Docker login. Keeping the probe in the backend prevents the doctor and
+// contribution paths from silently disagreeing.
+function preflightHumanLines(preflight) {
+  const lines = ['Sandbox install preflight'];
+  for (const item of preflight.checks) {
+    lines.push(`${item.ok ? 'PASS' : 'FAIL'} ${item.name}: ${item.detail}`);
+    if (!item.ok) lines.push(`  Fix: ${item.fix}`);
+  }
+  if (preflight.ok) lines.push('Your sandbox is ready for Federation contributions.');
+  else lines.push('Your sandbox is not ready yet. Fix the failed checks, then re-run: waspflow federation doctor');
+  return lines;
+}
+
+async function sandboxPreflight({ json, fixPolicy = false, report = true } = {}) {
+  const { DockerSbxBackend, initializeDefaultSbxPolicy } = await import('../lib/federation-docker-backend.mjs');
+  const backend = new DockerSbxBackend();
+  let capabilities = await backend.probeCapabilities();
+  let preflight = capabilities.preflight;
+  let policyFix = null;
+
+  if (fixPolicy && preflight?.checks.some((item) => item.name === 'network_policy' && !item.ok)) {
+    log('initializing the global sandbox network policy with the balanced preset...');
+    policyFix = await initializeDefaultSbxPolicy();
+    if (policyFix.code === 0) capabilities = await backend.probeCapabilities();
+    preflight = capabilities.preflight;
+  }
+
+  const result = {
+    status: preflight.ok ? 'ready' : 'setup_required',
+    backend_id: preflight.backend_id,
+    checks: preflight.checks,
+  };
+  if (policyFix) result.policy_fix = { ok: policyFix.code === 0, detail: `${policyFix.stdout || ''}${policyFix.stderr || ''}`.trim() };
+  if (report && json) {
+    printResult(true, [], result, 'sandbox_preflight');
+  } else if (report) {
+    for (const line of preflightHumanLines(preflight)) process.stdout.write(`${line}\n`);
+    if (policyFix && policyFix.code !== 0) process.stdout.write(`Policy initialization failed: ${result.policy_fix.detail || 'no diagnostic output'}\n`);
+  }
+  return { ok: preflight.ok, preflight };
+}
+
+async function cmdDoctor(argv) {
+  const { flags, positional } = parseFlags(argv, [], ['fix-policy']);
+  if (positional.length > 0) fail('usage: waspflow federation doctor [--fix-policy] [--json]');
+  const result = await sandboxPreflight({ json: flags.json, fixPolicy: flags['fix-policy'] });
+  if (!result.ok) process.exitCode = 1;
 }
 
 // Runs a child bin, streaming its stderr live (progress lines from the
@@ -246,6 +304,21 @@ async function cmdContribute(argv) {
   const { flags } = parseFlags(argv, ['task-digest', 'harness', 'lease-seconds']);
   const { requireConfig } = await import('../lib/federation-config.mjs');
   let config = requireConfig();
+  // The sandbox preflight is deliberately before roster refresh, task claim,
+  // or harness login. A new machine therefore receives actionable setup
+  // state instead of an opaque backend 500 after it has claimed work.
+  const sandbox = await sandboxPreflight({ json: flags.json, report: false });
+  if (!sandbox.ok) {
+    // Contribution owns the machine-readable failure event. Successful
+    // preflights stay silent so every existing successful contribute path
+    // still emits exactly one final JSON event.
+    const preflight = sandbox.preflight;
+    printResult(flags.json, preflightHumanLines(preflight), {
+      status: 'setup_required', backend_id: preflight.backend_id, checks: preflight.checks,
+    }, 'sandbox_preflight');
+    process.exitCode = 1;
+    return;
+  }
   config = await refreshRosterCache(config);
 
   const harness = flags.harness || 'claude-code-subscription';
@@ -503,6 +576,7 @@ async function cmdStatus(argv) {
 async function main() {
   const [verb, ...rest] = process.argv.slice(2);
   switch (verb) {
+    case 'doctor': return cmdDoctor(rest);
     case 'join': return cmdJoin(rest);
     case 'contribute': return cmdContribute(rest);
     case 'submit': return cmdSubmit(rest);
@@ -519,7 +593,7 @@ async function main() {
       return;
     }
     default:
-      process.stderr.write(`usage: waspflow federation <join|contribute|submit|status|trust|daemon|ui> ...\n`);
+      process.stderr.write(`usage: waspflow federation <doctor|join|contribute|submit|status|trust|daemon|ui> ...\n`);
       process.exit(verb ? 1 : 0);
   }
 }

@@ -322,6 +322,11 @@ test('full plumbing round trip: publish -> claim -> run (stub backend) -> submit
     try {
       const { DockerSbxBackend } = await import('../lib/federation-docker-backend.mjs');
       const backend = new DockerSbxBackend();
+      // This plumbing test deliberately stubs sbx mechanics; the install
+      // preflight itself is exhaustively exercised in
+      // federation-sbx-preflight.test.mjs. Do not make a fake binary appear
+      // install-ready by accident while testing artifact flow.
+      backend.probeCapabilities = async () => ({ available: true, backend_id: 'docker-sbx' });
       // collectDeclaredOutputs relies on `sbx cp` actually placing bytes at
       // outDir/declaredPath; the bare stub above no-ops that copy. Rather
       // than teach the bash stub to fabricate a tar file (duplicating
@@ -427,6 +432,13 @@ test('live sbx integration: real claim -> real prepare/start/destroy -> real sub
   if (!(await sbxOnPath())) {
     console.log('SKIP: sbx not installed — skipping live sbx integration test');
     t.skip('sbx not installed');
+    return;
+  }
+  const { DockerSbxBackend } = await import('../lib/federation-docker-backend.mjs');
+  const preflight = await new DockerSbxBackend().probeCapabilities();
+  if (!preflight.available) {
+    console.log(`SKIP: live sbx preflight is not ready — ${(preflight.missing_prerequisites || []).join('; ')}`);
+    t.skip('live sbx preflight is not ready');
     return;
   }
 

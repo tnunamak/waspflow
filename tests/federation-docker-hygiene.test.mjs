@@ -98,7 +98,14 @@ test('the real sbx child-process invocation carries the Waspflow-owned HOME over
   // received, so this proves the override reaches a real child process.
   const stubDir = await mkdtemp(join(tmpdir(), 'wf-sbx-stub-'));
   const stubPath = join(stubDir, 'sbx');
-  await writeFile(stubPath, '#!/bin/sh\nprintf "sbx version 0.35.0 (HOME=%s)\\n" "$HOME"\n');
+  await writeFile(stubPath, `#!/bin/sh
+case "$1 $2" in
+  "version ") printf "sbx version 0.35.0 (HOME=%s)\\n" "$HOME" ;;
+  "diagnose ") echo "Daemon healthy" ;;
+  "policy ls") echo "Policy rules" ;;
+  *) exit 1 ;;
+esac
+`);
   await chmod(stubPath, 0o755);
 
   const wfSbxHome = join(tmpdir(), 'waspflow-federation-sbx-home-hygiene-test-2');
@@ -108,7 +115,7 @@ test('the real sbx child-process invocation carries the Waspflow-owned HOME over
   process.env.WASPFLOW_FEDERATION_SBX_HOME = wfSbxHome;
   try {
     const backendInstance = new backend.DockerSbxBackend();
-    const report = await backendInstance.probeCapabilities();
+    const report = await backendInstance.probeCapabilities({ platformName: 'darwin' });
     assert.equal(report.available, true, 'the stub sbx must be detected as available');
     assert.match(report.version, new RegExp(`HOME=${wfSbxHome.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'the child process must see the Waspflow-owned sbx home, not the real HOME, and it must differ from the real user HOME');
     assert.doesNotMatch(report.version, new RegExp(`HOME=${homedir().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`));

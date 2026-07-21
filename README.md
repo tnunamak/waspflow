@@ -53,7 +53,14 @@ sbx login
 
 Full docs: https://docs.docker.com/ai/sandboxes/get-started/
 
-Then confirm: `bin/federation-detect-sbx`
+Then run the full, read-only preflight: `waspflow federation doctor`.
+
+It checks the package-backed `sbx` install, Docker CE/containerd v2, daemon,
+policy, KVM access, and Docker login before Federation can claim a task. Use
+`waspflow federation doctor --fix-policy` only when it offers that safe,
+explicit policy initialization; all other fixes are printed for you to run.
+
+`bin/federation-detect-sbx` remains the fast version-only detector.
 
 This powers Federation Preview — running a job contained in a Docker sandbox
 instead of on your bare host. Skip this if you're not using Federation.

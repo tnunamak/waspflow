@@ -128,6 +128,23 @@ test('GET /status exposes every daemon state and auth handoff payloads', async (
     const manualAction = statusBody(await request(base, '/status', { token }));
     assert.equal(manualAction.state, 'action_needed');
     assert.deepEqual(manualAction.action, { kind: 'auth_required_manual', instruction: 'Run the supplied login command.' });
+
+    await request(base, '/contribute/start', { method: 'POST', token });
+    children[3].child.stdout.emit('data', Buffer.from(JSON.stringify({
+      schema_version: 1,
+      type: 'sandbox_preflight',
+      status: 'setup_required',
+      backend_id: 'docker-sbx',
+      checks: [
+        { name: 'network_policy', ok: false, detail: 'global network policy has not been initialized.', fix: 'sbx policy init balanced' },
+        { name: 'docker_login', ok: true, detail: 'authenticated', fix: '' },
+      ],
+    }) + '\n'));
+    children[3].child.emit('close', 1);
+    const setupRequired = statusBody(await request(base, '/status', { token }));
+    assert.equal(setupRequired.state, 'setup_required');
+    assert.equal(setupRequired.action.kind, 'sandbox_preflight');
+    assert.deepEqual(setupRequired.action.checks, [{ name: 'network_policy', ok: false, detail: 'global network policy has not been initialized.', fix: 'sbx policy init balanced' }]);
   });
 });
 

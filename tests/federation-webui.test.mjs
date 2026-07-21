@@ -26,6 +26,10 @@ test('web UI maps daemon states to the join, status, and auth views', () => {
     viewForStatus({ state: 'action_needed', action: { kind: 'awaiting_browser', url: 'https://auth.example' } }),
     { name: 'action', action: { kind: 'awaiting_browser', url: 'https://auth.example' } },
   );
+  assert.deepEqual(
+    viewForStatus({ state: 'setup_required', action: { kind: 'sandbox_preflight', checks: [{ name: 'docker_login', ok: false }] } }),
+    { name: 'setup', checks: [{ name: 'docker_login', ok: false }] },
+  );
 });
 
 test('web UI maps the coordinator lifecycle to the complete requester stepper', () => {

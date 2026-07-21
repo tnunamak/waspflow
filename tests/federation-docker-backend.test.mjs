@@ -224,7 +224,7 @@ test('collectDeclaredOutputs and _copyIn use an ABSOLUTE guest path, not a bare 
 
 async function sbxOnPath() {
   try {
-    await execFile('sbx', ['--version']);
+    await execFile('sbx', ['version']);
     return true;
   } catch (error) {
     return error && error.code !== 'ENOENT';
@@ -256,20 +256,20 @@ test('probeCapabilities reports unavailable (never throws) when sbx is missing',
 });
 
 test('probeCapabilities reports available:true and forwards version via a stub sbx', async () => {
-  const stubDir = await writeStub('version', 'echo "sbx version 0.35.0"');
-  const previousBin = process.env.WASPFLOW_SBX_BIN;
-  process.env.WASPFLOW_SBX_BIN = path.join(stubDir, 'sbx');
-  try {
-    const backend = new DockerSbxBackend();
-    const report = await backend.probeCapabilities();
-    assert.equal(report.available, true);
-    assert.equal(report.backend_id, BACKEND_ID);
-    assert.match(report.version, /0\.35\.0/);
-  } finally {
-    if (previousBin === undefined) delete process.env.WASPFLOW_SBX_BIN;
-    else process.env.WASPFLOW_SBX_BIN = previousBin;
-    await rm(stubDir, { recursive: true, force: true });
-  }
+  const backend = new DockerSbxBackend();
+  const report = await backend.probeCapabilities({
+    platformName: 'darwin',
+    runCommand: async (_command, args) => {
+      if (args[0] === 'version') return { code: 0, stdout: 'sbx version 0.35.0' };
+      if (args[0] === 'diagnose') return { code: 0, stdout: 'Daemon healthy\nDocker authentication healthy' };
+      if (args[0] === 'policy') return { code: 0, stdout: 'Policy rules' };
+      throw new Error(`unexpected command: ${args.join(' ')}`);
+    },
+  });
+  assert.equal(report.available, true);
+  assert.equal(report.backend_id, BACKEND_ID);
+  assert.match(report.version, /0\.35\.0/);
+  assert.equal(report.preflight.ok, true);
 });
 
 test('prepare() invokes `sbx run` with the AGENT before the scratch-dir PATH, --detached, never a real repo path', async () => {
@@ -408,5 +408,6 @@ test('live sbx integration (real binary)', async (t) => {
   }
   const backend = new DockerSbxBackend();
   const report = await backend.probeCapabilities();
-  assert.equal(report.available, true);
+  assert.equal(typeof report.available, 'boolean');
+  assert.equal(report.preflight.checks.length, 6);
 });

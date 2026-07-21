@@ -155,8 +155,20 @@ test('no_task_available: contribute --json with an empty queue validates against
       const stubHome = await mkdtemp(join(tmpdir(), 'wf-fed-events-sbxstub-'));
       const stubBinDir = await mkdtemp(join(tmpdir(), 'wf-fed-events-stubbin-'));
       const stubPath = join(stubBinDir, 'sbx');
-      await writeFile(stubPath, '#!/bin/sh\necho "openai  oauth  (global)"\nexit 0\n');
-      await chmod(stubPath, 0o755);
+      await writeFile(stubPath, `#!/bin/sh
+case "$1 $2" in
+  "version ") echo "sbx version: v0.35.0 abc123" ;;
+  "diagnose ") printf 'Daemon healthy\\nDocker authentication healthy\\n' ;;
+  "policy ls") echo "Policy rules" ;;
+  "secret ls") echo "openai  oauth  (global)" ;;
+  *) exit 1 ;;
+esac
+`);
+      await writeFile(join(stubBinDir, 'dpkg-query'), '#!/bin/sh\nprintf "docker-sbx\\tinstalled\\t0.35.0\\ndocker-ce\\tinstalled\\t28.0.0\\ncontainerd.io\\tinstalled\\t2.1.0\\n"\n');
+      await writeFile(join(stubBinDir, 'docker'), '#!/bin/sh\necho "28.0.0"\n');
+      await writeFile(join(stubBinDir, 'containerd'), '#!/bin/sh\necho "containerd github.com/containerd/containerd v2.1.0"\n');
+      await writeFile(join(stubBinDir, 'test'), '#!/bin/sh\nexit 0\n');
+      await Promise.all(['sbx', 'dpkg-query', 'docker', 'containerd', 'test'].map((name) => chmod(join(stubBinDir, name), 0o755)));
 
       try {
         const { stdout } = await execFileAsync(process.execPath, [CLI, 'contribute', '--json'], {
@@ -165,6 +177,7 @@ test('no_task_available: contribute --json with an empty queue validates against
             WASPFLOW_FEDERATION_HOME: home,
             WASPFLOW_FEDERATION_SBX_HOME: stubHome,
             WASPFLOW_SBX_BIN: stubPath,
+            PATH: `${stubBinDir}:${process.env.PATH}`,
           },
         });
         assertValidEvent(stdout, 'no_task_available');
