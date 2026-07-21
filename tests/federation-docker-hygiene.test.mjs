@@ -108,7 +108,7 @@ esac
 `);
   await chmod(stubPath, 0o755);
 
-  const wfSbxHome = join(tmpdir(), 'waspflow-federation-sbx-home-hygiene-test-2');
+  const wfSbxHome = '/tmp/wf-sbx-hygiene-test';
   const previousBin = process.env.WASPFLOW_SBX_BIN;
   const previousHome = process.env.WASPFLOW_FEDERATION_SBX_HOME;
   process.env.WASPFLOW_SBX_BIN = stubPath;

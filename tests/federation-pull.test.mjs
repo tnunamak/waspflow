@@ -410,7 +410,7 @@ async function sbxOnPath() {
 
 // KNOWN, DIAGNOSED FAILURE MODE as of this writing (not a flake, not a bug in
 // this slice's code): under the isolated WASPFLOW_FEDERATION_SBX_HOME
-// identity DockerSbxBackend uses (~/.waspflow/sbx-home by default), a fresh
+// identity DockerSbxBackend uses (~/.wfsbx by default), a fresh
 // sandbox's kit-assigned network policy allows only claude.com,
 // downloads.claude.ai, and mcp-proxy.anthropic.com — NOT api.anthropic.com,
 // which `claude --print` needs to authenticate. Confirmed by direct

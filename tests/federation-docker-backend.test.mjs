@@ -409,5 +409,5 @@ test('live sbx integration (real binary)', async (t) => {
   const backend = new DockerSbxBackend();
   const report = await backend.probeCapabilities();
   assert.equal(typeof report.available, 'boolean');
-  assert.equal(report.preflight.checks.length, 6);
+  assert.equal(report.preflight.checks.length, 7);
 });

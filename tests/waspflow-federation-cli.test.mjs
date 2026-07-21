@@ -257,7 +257,7 @@ test('contribute: no --task-digest and no queued task -> reports "no task availa
       // isolated, empty HOME with a stub `sbx` reporting "already set" —
       // this test is about task-discovery-returns-nothing, not auth, and
       // must not depend on (or risk triggering) a real sbx install.
-      const stubHome = await mkdtemp(join(tmpdir(), 'wf-fed-cli-sbxstub-'));
+      const stubHome = await mkdtemp('/tmp/x');
       const { stubBinDir, stubPath, commandPath } = await stubSbx();
 
       const { stdout } = await execFileAsync(process.execPath, [CLI, 'contribute', '--json'], {
@@ -310,7 +310,7 @@ test('contribute: succeeds past the signature-verification step with ZERO manual
       assert.equal(published.status, 'queued');
 
       const { stubBinDir, stubPath, commandPath } = await stubSbx();
-      const stubHome = await mkdtemp(join(tmpdir(), 'wf-fed-cli-sbxstub-'));
+      const stubHome = await mkdtemp('/tmp/x');
       try {
         // This will fail overall (the stub sbx can't actually run a
         // sandboxed job — that needs a real sbx install, out of scope for
@@ -375,7 +375,7 @@ test('contribute: refuses a task from a signer this member has not trusted (loca
         // via absent digest or (per the manual E2E proof already in the UX
         // report) an untrusted signer on a task it HAS published.
         const { stubBinDir, stubPath, commandPath } = await stubSbx();
-        const stubHome = await mkdtemp(join(tmpdir(), 'wf-fed-cli-sbxstub-'));
+        const stubHome = await mkdtemp('/tmp/x');
         try {
           await assert.rejects(runCli(['contribute', '--task-digest', published.task_digest], {
             home,
