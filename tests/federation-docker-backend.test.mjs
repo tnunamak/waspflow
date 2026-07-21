@@ -180,6 +180,46 @@ test('collectDeclaredOutputs rejects a copied-out symlink instead of following i
   }
 });
 
+test('collectDeclaredOutputs and _copyIn use an ABSOLUTE guest path, not a bare relative one', async () => {
+  // `sbx cp` rejects a relative container path outright ("container path
+  // must be absolute (use SANDBOX:/path)") — confirmed live. The guest's
+  // absolute workspace mirrors handle.scratch_dir (confirmed live: `sbx exec
+  // <sandbox> -- pwd` inside a freshly-created sandbox returns the exact
+  // host scratch_dir path), so both copy directions must resolve a declared
+  // relative path against scratch_dir before handing it to `sbx cp`.
+  const scratchDir = await mkdtemp(path.join(os.tmpdir(), 'wf-collect-abspath-'));
+
+  const stubDir = await writeStub('cp-record', `
+    echo "$@" >>"$WF_STUB_LOG"
+    exit 0
+  `);
+  const logPath = path.join(stubDir, 'invocation.log');
+  const previousBin = process.env.WASPFLOW_SBX_BIN;
+  process.env.WASPFLOW_SBX_BIN = path.join(stubDir, 'sbx');
+  process.env.WF_STUB_LOG = logPath;
+  try {
+    const backend = new DockerSbxBackend();
+    const handle = { backend_id: BACKEND_ID, job_id: 'job-abspath', sandbox_id: 'wf-abspath', scratch_dir: scratchDir };
+    await backend._copyIn(handle, { artifact_id: 'art-1', dest: 'inputs/task.md' });
+    // collectDeclaredOutputs still fails post-copy (the stub is a no-op, so
+    // no bytes actually land locally) — that failure is expected and
+    // irrelevant here; only the `sbx cp` argv it issued before failing
+    // matters for this test.
+    await assert.rejects(() => backend.collectDeclaredOutputs(handle, ['result.txt']));
+
+    const invocation = await import('node:fs/promises').then((m) => m.readFile(logPath, 'utf8'));
+    const lines = invocation.trim().split('\n');
+    assert.ok(lines[0].includes(`wf-abspath:${path.join(scratchDir, 'inputs/task.md')}`), `_copyIn must target an absolute guest path, got: ${lines[0]}`);
+    assert.ok(lines[1].includes(`wf-abspath:${path.join(scratchDir, 'result.txt')}`), `collectDeclaredOutputs must source from an absolute guest path, got: ${lines[1]}`);
+  } finally {
+    if (previousBin === undefined) delete process.env.WASPFLOW_SBX_BIN;
+    else process.env.WASPFLOW_SBX_BIN = previousBin;
+    delete process.env.WF_STUB_LOG;
+    await rm(stubDir, { recursive: true, force: true });
+    await rm(scratchDir, { recursive: true, force: true });
+  }
+});
+
 // --- live-sbx-dependent behavior: stub executable or skip -------------------
 
 async function sbxOnPath() {
