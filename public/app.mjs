@@ -98,6 +98,7 @@ function createApplication(root) {
   let latestTask = null;
   let pollBusy = false;
   let message = '';
+  let lastRenderSignature = null;
 
   async function request(path, options = {}) {
     if (!token) throw new Error('This link is missing its Waspflow session token. Open Federation again from Waspflow.');
@@ -173,6 +174,23 @@ function createApplication(root) {
       content.push(safetyPanel(latestStatus));
       content.push(requesterPanel(latestStatus, latestTask, (body) => control('/submit', body)));
     }
+    // Only touch the DOM when the view actually changed. The 1.5s status poll
+    // calls render() constantly; rebuilding the DOM every time destroyed the
+    // join textarea (and anything the user was typing) mid-interaction — which
+    // made the invite field clear itself and the Join click hit an empty field.
+    // Guard on a signature of what drives the view so idle polls are no-ops.
+    const signature = JSON.stringify({
+      view: view.name,
+      control: view.control || null,
+      action: view.action || null,
+      state: latestStatus?.state || null,
+      detail: latestStatus?.detail || null,
+      coordinator: latestStatus?.coordinator_url || null,
+      task: latestTask?.status || null,
+      message,
+    });
+    if (signature === lastRenderSignature) return;
+    lastRenderSignature = signature;
     root.replaceChildren(...content);
   }
 
