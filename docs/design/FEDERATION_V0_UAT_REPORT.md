@@ -979,7 +979,44 @@ report.
   brief's own scoping ("no dynamic registration endpoint, no revocation logic beyond removing the
   line").
 
-## User guide: install, configure, submit, pull, get result
+## User guide: guided CLI (2026-07-21 UX pass, updated same day — GET /roster auto-fetch — see FEDERATION_V0_UX_REPORT.md)
+
+**This section supersedes the raw-bin, flag-driven guide below.** The loop proven throughout this
+report (coordinator, signed envelopes, independent re-verification, real sandboxed execution) is
+unchanged except for one owner-approved, read-only addition (`GET /roster` — see the UX report) — this
+is a consumable CLI layer on top of it, `waspflow federation {join,contribute,submit,status,trust}`,
+built so a non-technical contributor (the "Oshin" persona: no PEM keypairs, rosters, digests, or
+multi-flag invocations) can actually run it. Full detail, exact commands, and what's still manual:
+`docs/design/FEDERATION_V0_UX_REPORT.md`.
+
+**Contributor (executor role) — two commands, no flags, no manual trust step:**
+```bash
+waspflow federation join <coordinator-url> <invite-token>   # once: auto keypair + saved config + auto-fetched roster
+waspflow federation contribute                                # pulls the next task, runs it sandboxed, submits
+```
+
+**Owner/requester (author role) — same two-command shape:**
+```bash
+waspflow federation join <coordinator-url> <invite-token>     # once, same as above
+waspflow federation submit --display-id <name> --source <dir> --prompt-file <task.md> --output-dir <result>
+waspflow federation status --task-digest <digest>              # check without re-submitting
+```
+
+`waspflow federation trust <peer-key-id> <peer-pubkey-pem-or-@file>` still exists as the
+**advanced/fallback** path (offline, air-gapped, or an older coordinator without `GET /roster`) — it
+is no longer required on the default journey for either role, live-verified with `trust` never
+invoked (see the UX report's "Independent verification").
+
+**Coordinator operator** still runs the unchanged `bin/waspflow-federation-coordinator` (below) and
+maintains the roster file by hand — `join` prints exactly the JSON line to paste into it for a
+BRAND-NEW member (membership approval stays a deliberate human decision); once approved, that
+member's public key is served to everyone else automatically via `GET /roster`, so no further
+key-relay is needed for them.
+
+### Advanced: raw, flag-driven bins (unchanged, still fully supported)
+
+The guided verbs above are thin wrappers over these — kept working for power users, CI, and anyone
+who wants explicit control over every flag:
 
 1. **Install** (once per machine): `sbx` (Docker Sandboxes) must be installed and authenticated —
    see "Install sbx" in the README, or `bin/federation-install-sbx`. Global credentials for each
@@ -1015,8 +1052,9 @@ report.
      --display-id <task-name> --source ./my-repo --prompt-file ./task.md \
      --network disabled --timeout 3600
    ```
-   Prints the `task_digest` — share this with whoever will execute it (no discovery endpoint in v0).
-5. **Pull and run a task** (Ocean, or any executor-role collective member):
+   Prints the `task_digest` — share this with whoever will execute it (no discovery endpoint used by
+   this raw path; the guided `contribute` verb above uses `GET /tasks/next` instead).
+5. **Pull and run a task** (Oshin, or any executor-role collective member):
    ```bash
    node bin/waspflow-federation-pull \
      --coordinator-url http://<coordinator-host>:8787 \
@@ -1025,7 +1063,7 @@ report.
      --executor-key ocean-executor --private-key-file ./ocean-executor.pem \
      --roster-file ./roster.json --harness claude-code-subscription
    ```
-   Runs the task against Ocean's own configured harness credentials, sandboxed via `sbx`.
+   Runs the task against Oshin's own configured harness credentials, sandboxed via `sbx`.
 6. **Get the result** (Tim): re-run `waspflow-federation-submit`'s poll, or fetch directly:
    ```bash
    curl http://<coordinator-host>:8787/tasks/<digest>   # status + result envelope once SETTLED

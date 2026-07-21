@@ -1,0 +1,565 @@
+#!/usr/bin/env node
+/*
+ * Guided Federation v0 CLI: `waspflow federation {join,contribute,submit,status}`.
+ *
+ * This is the CONSUMABLE layer the owner asked for on top of the proven,
+ * already-shipped federation loop (bin/waspflow-federation-{coordinator,
+ * submit,pull} + lib/federation-{coordinator,submit,pull-internals,envelope,
+ * docker-backend,harness-spec,harnesses,auth-flow}.mjs). It does not
+ * reimplement any of that — every verb below either calls straight into the
+ * existing libs, or shells out to the existing bins with flags filled in
+ * from the managed config, so this file cannot silently drift from the
+ * loop those bins/tests already prove correct.
+ *
+ * Managed config (see lib/federation-config.mjs): ~/.waspflow/federation/
+ * config.json holds coordinator_url, collective_token, key_id,
+ * private_key_path, and a cached roster. `join` writes it once; every other
+ * verb reads it and needs no url/token/key/roster flags at all — a
+ * non-technical contributor never sees a PEM path or a task digest unless
+ * they explicitly ask for the advanced --task-digest override.
+ *
+ * Structured output: every verb that matters to a future non-terminal UI
+ * (tray/GUI) prints exactly one final JSON line to stdout when --json is
+ * given, on top of human-readable progress lines on stderr — so today's
+ * CLI and tomorrow's GUI can share the same event shape rather than the
+ * GUI screen-scraping terminal prose. This mirrors the structured-handle
+ * discipline lib/federation-auth-flow.mjs already established for auth.
+ */
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { spawn } = require('node:child_process');
+
+function fail(message) {
+  process.stderr.write(`waspflow federation: ${message}\n`);
+  process.exit(1);
+}
+
+function log(message) {
+  process.stderr.write(`waspflow federation: ${message}\n`);
+}
+
+const ROOT = path.join(__dirname, '..');
+
+// Only an arg that EXACTLY matches a known `--flag-name` (or `--json`) is
+// treated as a flag — never "anything starting with --". `trust`'s pubkey
+// positional arg is a multi-line PEM string that itself starts with
+// "-----BEGIN PUBLIC KEY-----", which begins with "--"; a naive
+// starts-with('--') scan would misparse that PEM as an unknown flag.
+function parseFlags(argv, known) {
+  const flags = {};
+  const positional = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--json') { flags.json = true; continue; }
+    const name = arg.startsWith('--') ? arg.slice(2) : null;
+    if (name !== null && known.includes(name)) {
+      const value = argv[++i];
+      if (value === undefined) fail(`--${name} requires a value`);
+      flags[name] = value;
+      continue;
+    }
+    positional.push(arg);
+  }
+  return { flags, positional };
+}
+
+// Runs a child bin, streaming its stderr live (progress lines from the
+// existing bins already go to stderr, so a long sandboxed run isn't silent)
+// while still buffering both streams so callers can translate a known
+// failure into this CLI's own vocabulary and parse the final stdout JSON.
+function runChildStreaming(execPath, args) {
+  return new Promise((resolve) => {
+    const child = spawn(execPath, args, { stdio: ['inherit', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; process.stderr.write(chunk); });
+    child.on('exit', (code) => resolve({ status: code, stdout, stderr }));
+  });
+}
+
+// Wraps `fetch` against the coordinator with a clear, actionable message on
+// network-level failure (down/unreachable/wrong URL/DNS) instead of letting
+// a raw `TypeError: fetch failed` stack trace reach a non-technical user —
+// this is exactly the class of error a mistyped --coordinator-url or a
+// coordinator that isn't running yet produces.
+async function fetchCoordinator(url, opts) {
+  try {
+    return await fetch(url, opts);
+  } catch (error) {
+    fail(`could not reach the coordinator at ${url}: ${error.message}\n` +
+      `Check the coordinator URL (see: waspflow federation status) and that the coordinator is running.`);
+  }
+}
+
+function printResult(json, humanLines, structured) {
+  if (json) {
+    process.stdout.write(JSON.stringify(structured) + '\n');
+  } else {
+    for (const line of humanLines) process.stdout.write(line + '\n');
+  }
+}
+
+// --- join -------------------------------------------------------------------
+//
+// Auto-generates a keypair, persists coordinator-url/collective-token/
+// key-id/key-path so every later verb needs none of them again, auto-fetches
+// the coordinator's public-key directory into the local roster cache
+// (GET /roster — owner decision, 2026-07-21, see lib/federation-coordinator.mjs's
+// top-of-file doc), and prints this member's OWN public-key snippet for the
+// human to send to whoever runs the coordinator.
+//
+// Does NOT register the key over the network — there is deliberately no
+// POST/register endpoint (see lib/federation-coordinator.mjs's doc). Adding
+// one would be a real trust-model change (an unauthenticated-by-definition
+// "add me to the collective" surface), which is not what GET /roster is:
+// that endpoint only serves already-approved members' already-public keys,
+// it does not let anyone add themselves. So MEMBERSHIP — the coordinator
+// operator deciding to add a brand-new key_id to their roster file — remains
+// a real, human, out-of-band decision; `join` gets the operator that one
+// remaining snippet as fast as possible. Once a member is added, GET /roster
+// means every OTHER already-approved member's public key auto-populates
+// here and at the start of contribute/submit — no pasting required for them.
+async function cmdJoin(argv) {
+  const { flags, positional } = parseFlags(argv, ['key-id']);
+  const [coordinatorUrl, inviteToken] = positional;
+  if (!coordinatorUrl || !inviteToken) {
+    fail('usage: waspflow federation join <coordinator-url> <invite-token> [--key-id <name>] [--json]');
+  }
+
+  const { loadConfig, saveConfig, generateAndStoreKeypair, configPath } = await import('../lib/federation-config.mjs');
+
+  const existing = loadConfig();
+  if (existing && existing.coordinator_url === coordinatorUrl) {
+    log(`already joined ${coordinatorUrl} as '${existing.key_id}' — config at ${configPath()}`);
+    printResult(flags.json, [
+      `already joined as ${existing.key_id}`,
+      `coordinator: ${existing.coordinator_url}`,
+    ], { status: 'already_joined', key_id: existing.key_id, coordinator_url: existing.coordinator_url, config_path: configPath() });
+    return;
+  }
+
+  // Check the coordinator is actually reachable and the invite token is
+  // accepted BEFORE generating a keypair and saving config — a mistyped URL
+  // or token should surface here, not silently later the first time
+  // contribute/submit tries to talk to the coordinator.
+  log(`checking coordinator ${coordinatorUrl}...`);
+  const probe = await fetchCoordinator(`${coordinatorUrl}/tasks/next`, {
+    headers: { authorization: `Bearer ${inviteToken}` },
+  });
+  if (probe.status === 401) fail(`the coordinator rejected the invite token — check it's correct and try again.`);
+  if (!probe.ok) fail(`coordinator responded with an unexpected error (${probe.status}) — check the coordinator URL.`);
+
+  const keyId = flags['key-id'] || os.userInfo().username || 'member';
+  log(`generating a new ed25519 keypair for '${keyId}'...`);
+  const { privateKeyPath, publicKeyPem } = generateAndStoreKeypair(keyId);
+
+  // The invite token IS the collective bearer token in v0 — there is no
+  // separate invite-exchange step (no registration endpoint exists to
+  // exchange it against; see the module doc above). Naming the CLI arg
+  // "invite-token" rather than "collective-token" is deliberate UX: to the
+  // non-technical user this is "the code someone sent me to join", not a
+  // credential they need to understand as a bearer token.
+  let config = {
+    coordinator_url: coordinatorUrl,
+    collective_token: inviteToken,
+    key_id: keyId,
+    private_key_path: privateKeyPath,
+  };
+  saveConfig(config);
+
+  // Auto-fetch whoever the coordinator already has on its roster (e.g. the
+  // operator themself, or any other already-approved member) — this member
+  // never needs to `trust` those peers by hand. It cannot fetch THIS
+  // member's own key back yet, since the operator hasn't added it to the
+  // roster file at this point in the flow — that's the one snippet still
+  // printed below.
+  log('fetching the coordinator\'s current roster...');
+  config = await refreshRosterCache(config);
+
+  const snippet = JSON.stringify({ [keyId]: publicKeyPem });
+  const peerCount = Object.keys(config.roster || {}).length;
+  log(`saved config (${peerCount} peer key${peerCount === 1 ? '' : 's'} already known) — contribute/submit/status need no flags from here.`);
+  printResult(flags.json, [
+    `joined ${coordinatorUrl} as '${keyId}'`,
+    peerCount > 0
+      ? `${peerCount} existing collective member${peerCount === 1 ? '' : 's'}' public keys auto-fetched — no manual trust needed for them.`
+      : `no other collective members registered yet.`,
+    '',
+    'ONE MORE STEP (send this to whoever runs the coordinator, so they can',
+    'add YOU to their roster file — this is the one step waspflow cannot do',
+    'for you, since membership approval is a real, deliberate human decision):',
+    '',
+    snippet,
+    '',
+    `Once they confirm you're added (the roster hot-reloads, no restart needed),`,
+    `run: waspflow federation contribute`,
+  ], {
+    status: 'joined',
+    key_id: keyId,
+    coordinator_url: coordinatorUrl,
+    config_path: configPath(),
+    peers_auto_fetched: peerCount,
+    roster_snippet: { [keyId]: publicKeyPem },
+    next_step: 'send roster_snippet to the coordinator operator, then run: waspflow federation contribute',
+  });
+}
+
+// --- auth pre-flight ---------------------------------------------------------
+//
+// waspflow-federation-pull never checks or drives harness auth itself — it
+// assumes the executor's Federation-owned sbx identity is already logged in
+// and just fails deep inside a sandboxed run if it isn't (a confusing place
+// for a non-technical user to hit a login wall). This pre-flight is the
+// actual "detect-first, waspflow drives login, user only clicks" wiring the
+// owner asked for: it runs isProviderSecretSet/startAuthFlow/
+// describeAuthRequirement against the SAME identity DockerSbxBackend uses
+// for the real job (WASPFLOW_FEDERATION_SBX_HOME, not the operator's
+// personal sbx HOME) so the check reflects the credential the sandboxed run
+// will actually see.
+async function ensureHarnessAuthed(harnessName, { json } = {}) {
+  const { resolveHarness } = await import('../lib/federation-pull-internals.mjs');
+  const { isProviderSecretSet, startAuthFlow, describeAuthRequirement } = await import('../lib/federation-auth-flow.mjs');
+
+  const spec = resolveHarness(harnessName);
+  const federationSbxHome = process.env.WASPFLOW_FEDERATION_SBX_HOME || path.join(os.homedir(), '.waspflow', 'sbx-home');
+  fs.mkdirSync(federationSbxHome, { recursive: true });
+  const env = { ...process.env, HOME: federationSbxHome };
+
+  const { alreadySet } = await isProviderSecretSet(spec, { env });
+  if (alreadySet) {
+    log(`${harnessName}: already authenticated (detected, no login needed)`);
+    return;
+  }
+
+  const requirement = describeAuthRequirement(spec);
+  if (!requirement.drivable) {
+    // Claude Code subscription auth genuinely cannot be reduced to a
+    // {url, waitForCompletion} handle in this sbx release (see
+    // lib/federation-auth-flow.mjs's module doc and
+    // docs/design/FEDERATION_V0_UAT_REPORT.md's "Claude Code auth" section —
+    // this is an sbx limitation, not something a better wrapper fixes).
+    // Print the honest instruction rather than hanging or faking a URL.
+    printResult(json, [
+      `${harnessName} needs a one-time login this CLI can't drive for you:`,
+      requirement.instruction,
+    ], { status: 'auth_required_manual', harness: harnessName, flow_shape: requirement.flow_shape, instruction: requirement.instruction });
+    fail(`${harnessName}: complete the login above, then re-run 'waspflow federation contribute'`);
+  }
+
+  log(`${harnessName}: not yet authenticated — starting the login for you...`);
+  const handle = startAuthFlow(spec, { env });
+  const result = await handle.waitForCompletion();
+  if (result.status !== 'complete' && !handle.url) {
+    fail(`${harnessName}: login did not produce a URL in time — ${result.detail}`);
+  }
+  if (handle.url) {
+    printResult(json, [
+      `${harnessName}: open this URL to finish logging in:`,
+      handle.url,
+      'waiting for you to complete it in the browser...',
+    ], { status: 'awaiting_browser', harness: harnessName, url: handle.url });
+    const finalResult = await handle.waitForCompletion();
+    if (finalResult.status !== 'complete') fail(`${harnessName}: login failed — ${finalResult.detail}`);
+  }
+  log(`${harnessName}: login complete.`);
+}
+
+// --- contribute --------------------------------------------------------------
+//
+// The two-command contributor journey's second half. No flags required:
+// reads config for coordinator/token/identity, refreshes the local roster
+// cache from the coordinator's GET /roster (so a first-time contributor
+// never has to run `trust` on the default path — see refreshRosterCache),
+// discovers the next claimable task via GET /tasks/next (so nobody has to
+// paste a task_digest), drives the auth pre-flight above, then shells out to
+// the EXACT proven bin/waspflow-federation-pull with every flag filled in —
+// so the real claim/verify/fetch/run/submit sequence that bin already
+// implements and tests is what actually executes, unmodified.
+async function cmdContribute(argv) {
+  const { flags } = parseFlags(argv, ['task-digest', 'harness', 'lease-seconds']);
+  const { requireConfig } = await import('../lib/federation-config.mjs');
+  let config = requireConfig();
+  config = await refreshRosterCache(config);
+
+  const harness = flags.harness || 'claude-code-subscription';
+  await ensureHarnessAuthed(harness, { json: flags.json });
+
+  let taskDigest = flags['task-digest'];
+  if (!taskDigest) {
+    log('no --task-digest given — asking the coordinator for the next claimable task...');
+    const res = await fetchCoordinator(`${config.coordinator_url}/tasks/next`, {
+      headers: { authorization: `Bearer ${config.collective_token}` },
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      fail(`could not reach coordinator for a task: ${res.status} ${body.error || ''}`);
+    }
+    const body = await res.json();
+    if (!body.task_digest) {
+      printResult(flags.json, ['no task is currently available — nothing to contribute right now.'],
+        { status: 'no_task_available' });
+      return;
+    }
+    taskDigest = body.task_digest;
+    log(`claimable task found: ${taskDigest}`);
+  }
+
+  const pullArgs = [
+    '--coordinator-url', config.coordinator_url,
+    '--collective-token', config.collective_token,
+    '--task-digest', taskDigest,
+    '--executor-key', config.key_id,
+    '--private-key-file', config.private_key_path,
+    '--roster-file', rosterFileFor(config),
+    '--harness', harness,
+  ];
+  if (flags['lease-seconds']) pullArgs.push('--lease-seconds', flags['lease-seconds']);
+
+  log(`running task ${taskDigest} sandboxed (harness: ${harness})...`);
+  // stderr streams live (a sandboxed run can take a while) AND is buffered so
+  // a "not in --roster-file" failure can be translated into this CLI's own
+  // `trust` vocabulary below.
+  const result = await runChildStreaming(process.execPath, [path.join(ROOT, 'bin', 'waspflow-federation-pull'), ...pullArgs]);
+  if (result.status !== 0) {
+    // The author's key_id is only known once the underlying pull bin claims
+    // the task (it comes back inside the task envelope's own signature), so
+    // this cannot be pre-checked before spawning — but the pull bin's own
+    // "not in --roster-file" failure is common enough for a first-time
+    // contributor that it's worth translating into the guided verb's own
+    // vocabulary (trust) rather than leaving its raw wording as the only clue.
+    const match = /signer key_id "([^"]+)"/.exec(result.stderr || '');
+    if (/is not in --roster-file/.test(result.stderr) && match) {
+      fail(
+        `you haven't trusted '${match[1]}' yet, so this task's authenticity can't be verified.\n` +
+        `Ask them for their public key, then run: waspflow federation trust ${match[1]} <their-pubkey-file-or-string>`
+      );
+    }
+    fail(`contribute failed (task ${taskDigest}) — see output above`);
+  }
+  if (flags.json) {
+    const submitResponse = JSON.parse(result.stdout);
+    printResult(true, [], { status: 'contributed', task_digest: taskDigest, ...submitResponse });
+  } else {
+    log(`done — task ${taskDigest} submitted.`);
+  }
+}
+
+// Fetches the coordinator's public-key directory (GET /roster — owner
+// decision, 2026-07-21) and merges it into the local roster cache, then
+// persists it to config.json. This is what makes `trust` unnecessary on the
+// DEFAULT path: every already-approved member's public key is available
+// automatically, rather than requiring each peer to be pasted in by hand.
+// Called at the start of contribute/submit (and after a successful join) so
+// the cache is always fresh against the coordinator's current roster file
+// (which the operator may still be editing — hot-reloaded, no restart).
+// Best-effort: a coordinator that's briefly unreachable here should not hard
+// -fail contribute/submit outright — the existing local cache (from a prior
+// fetch, or from manual `trust`) may still be sufficient, and the actual
+// claim/submit step will fail on its own with a clear error if it isn't.
+async function refreshRosterCache(config) {
+  const { saveConfig } = await import('../lib/federation-config.mjs');
+  let res;
+  try {
+    res = await fetch(`${config.coordinator_url}/roster`, {
+      headers: { authorization: `Bearer ${config.collective_token}` },
+    });
+  } catch {
+    return config; // coordinator unreachable — proceed with whatever cache already exists
+  }
+  if (!res.ok) return config; // e.g. an older coordinator without GET /roster yet — degrade silently to the existing cache
+  const body = await res.json().catch(() => null);
+  if (!body || !Array.isArray(body.roster)) return config;
+
+  config.roster = config.roster || {};
+  for (const entry of body.roster) {
+    if (entry && typeof entry.key_id === 'string' && typeof entry.public_key_pem === 'string') {
+      config.roster[entry.key_id] = entry.public_key_pem;
+    }
+  }
+  saveConfig(config);
+  return config;
+}
+
+// Materializes the local roster cache into a temp file for --roster-file.
+// On the DEFAULT path this cache is auto-populated from the coordinator's
+// GET /roster (see refreshRosterCache above); `waspflow federation trust` is
+// the advanced/offline fallback for when the coordinator can't be reached
+// to auto-fetch it (air-gapped, coordinator down) — see the UX report.
+function rosterFileFor(config) {
+  const roster = config.roster || {};
+  const file = path.join(os.tmpdir(), `wf-federation-roster-${process.pid}.json`);
+  fs.writeFileSync(file, JSON.stringify(roster));
+  // Public keys only (never private material), but still disposable —
+  // clean it up on any exit path (success, fail()'s process.exit, or an
+  // uncaught error) rather than leaving it in tmpdir indefinitely.
+  process.on('exit', () => { try { fs.unlinkSync(file); } catch { /* already gone */ } });
+  return file;
+}
+
+// --- trust (advanced fallback, not the default path) -------------------------
+//
+// contribute/submit now auto-fetch every peer's public key from the
+// coordinator's GET /roster (refreshRosterCache above), so this verb is no
+// longer required on the normal path. It remains as the offline/air-gapped/
+// coordinator-unreachable fallback: adds a peer's public key to this
+// member's LOCAL roster cache in config.json by hand, entirely without
+// talking to the coordinator, so contribute/submit can still independently
+// re-verify a peer's signature even when GET /roster can't be reached (or
+// against an older coordinator that predates it). Never talks to the
+// coordinator or any network endpoint — the coordinator's own roster is a
+// separate, hand-edited file the OPERATOR maintains
+// (lib/federation-coordinator.mjs) — this is this MEMBER's local cache,
+// which may legitimately be a subset or superset of it.
+async function cmdTrust(argv) {
+  const { flags, positional } = parseFlags(argv, ['pubkey-file']);
+  const [keyId, pubkeyArg] = positional;
+  if (!keyId) fail('usage: waspflow federation trust <key-id> <pubkey-pem-string-or-@file> [--json]');
+
+  const { requireConfig, saveConfig } = await import('../lib/federation-config.mjs');
+  const config = requireConfig();
+
+  let pubkeyPem;
+  if (pubkeyArg && pubkeyArg.startsWith('@')) {
+    pubkeyPem = fs.readFileSync(pubkeyArg.slice(1), 'utf8');
+  } else if (flags['pubkey-file']) {
+    pubkeyPem = fs.readFileSync(flags['pubkey-file'], 'utf8');
+  } else if (pubkeyArg) {
+    pubkeyPem = pubkeyArg;
+  } else {
+    fail('usage: waspflow federation trust <key-id> <pubkey-pem-string-or-@file> [--json]');
+  }
+  if (!pubkeyPem.includes('BEGIN PUBLIC KEY')) fail('that does not look like a PEM public key (expected "-----BEGIN PUBLIC KEY-----")');
+
+  config.roster = config.roster || {};
+  config.roster[keyId] = pubkeyPem;
+  saveConfig(config);
+
+  log(`trusted '${keyId}' — saved to your local roster cache.`);
+  printResult(flags.json, [`trusted '${keyId}'`], { status: 'trusted', key_id: keyId });
+}
+
+// --- submit ------------------------------------------------------------------
+//
+// The requester-side guided verb. No coordinator/token/key flags — those
+// come from config (join must have been run once by the requester too, same
+// as any collective member). Refreshes the roster cache the same way
+// contribute does, so `--output-dir`'s independent result-signature
+// re-verification also works without a manual `trust` on the default path.
+// Shells out to the proven bin/waspflow-federation-submit with everything
+// filled in.
+async function cmdSubmit(argv) {
+  const { flags } = parseFlags(argv, [
+    'display-id', 'source', 'prompt', 'prompt-file', 'network', 'expires-in',
+    'poll-interval', 'timeout', 'output-dir',
+  ]);
+  const { requireConfig } = await import('../lib/federation-config.mjs');
+  let config = requireConfig();
+  config = await refreshRosterCache(config);
+
+  if (!flags['display-id']) fail('submit: --display-id is required');
+  if (!flags.source) fail('submit: --source is required');
+  if (!flags.prompt && !flags['prompt-file']) fail('submit: --prompt or --prompt-file is required');
+
+  const submitArgs = [
+    '--coordinator-url', config.coordinator_url,
+    '--collective-token', config.collective_token,
+    '--collective', config.coordinator_url,
+    '--author-key-id', config.key_id,
+    '--private-key-file', config.private_key_path,
+    '--display-id', flags['display-id'],
+    '--source', flags.source,
+  ];
+  if (flags.prompt) submitArgs.push('--prompt', flags.prompt);
+  if (flags['prompt-file']) submitArgs.push('--prompt-file', flags['prompt-file']);
+  if (flags.network) submitArgs.push('--network', flags.network);
+  if (flags['expires-in']) submitArgs.push('--expires-in', flags['expires-in']);
+  if (flags['poll-interval']) submitArgs.push('--poll-interval', flags['poll-interval']);
+  if (flags.timeout) submitArgs.push('--timeout', flags.timeout);
+  if (flags['output-dir']) {
+    submitArgs.push('--output-dir', flags['output-dir']);
+    submitArgs.push('--roster-file', rosterFileFor(config));
+  }
+
+  const result = await runChildStreaming(process.execPath, [path.join(ROOT, 'bin', 'waspflow-federation-submit'), ...submitArgs]);
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.status !== 0) {
+    // Same translation as cmdContribute's — the executor's key_id is only
+    // known once the task settles, so this can't be pre-checked either.
+    const match = /signer key_id "([^"]+)"/.exec(result.stderr || '');
+    if (/is not in the roster/.test(result.stderr) && match) {
+      fail(
+        `you haven't trusted '${match[1]}' yet, so this task's result can't be verified as theirs.\n` +
+        `Ask them for their public key, then run: waspflow federation trust ${match[1]} <their-pubkey-file-or-string>`
+      );
+    }
+    process.exit(result.status || 1);
+  }
+}
+
+// --- status ------------------------------------------------------------------
+//
+// With no args: local config health (joined? as who? which coordinator?).
+// With --task-digest: proxies GET /tasks/:digest (unauthenticated on the
+// coordinator by design — the digest itself is the access token, see
+// lib/federation-coordinator.mjs's handleGet comment).
+async function cmdStatus(argv) {
+  const { flags } = parseFlags(argv, ['task-digest']);
+  const { loadConfig, configPath } = await import('../lib/federation-config.mjs');
+  const config = loadConfig();
+
+  if (!config) {
+    printResult(flags.json, [
+      'not joined yet.',
+      "run: waspflow federation join <coordinator-url> <invite-token>",
+    ], { status: 'not_joined' });
+    return;
+  }
+
+  if (flags['task-digest']) {
+    const res = await fetchCoordinator(`${config.coordinator_url}/tasks/${flags['task-digest']}`);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) fail(`task lookup failed: ${res.status} ${body.error || ''}`);
+    printResult(flags.json, [
+      `task ${flags['task-digest']}: ${body.status}`,
+    ], { status: 'task_status', ...body });
+    return;
+  }
+
+  printResult(flags.json, [
+    `joined as '${config.key_id}'`,
+    `coordinator: ${config.coordinator_url}`,
+    `config: ${configPath()}`,
+  ], { status: 'joined', key_id: config.key_id, coordinator_url: config.coordinator_url, config_path: configPath() });
+}
+
+async function main() {
+  const [verb, ...rest] = process.argv.slice(2);
+  switch (verb) {
+    case 'join': return cmdJoin(rest);
+    case 'contribute': return cmdContribute(rest);
+    case 'submit': return cmdSubmit(rest);
+    case 'status': return cmdStatus(rest);
+    case 'trust': return cmdTrust(rest);
+    default:
+      process.stderr.write(`usage: waspflow federation <join|contribute|submit|status|trust> ...\n`);
+      process.exit(verb ? 1 : 0);
+  }
+}
+
+// Expected, user-actionable errors (e.g. FederationConfigError already carries
+// a "Run 'waspflow federation join ...' first" message) render as a clean
+// guided line — a non-technical contributor who runs `contribute` before `join`
+// gets guidance, not a stack trace. Only genuinely unexpected errors show the
+// stack for debugging.
+function isExpectedError(error) {
+  return !!error && typeof error.name === 'string' && /^Federation\w*Error$/.test(error.name);
+}
+
+main().catch((error) => {
+  if (isExpectedError(error)) fail(error.message);
+  else fail(error && error.stack ? error.stack : String(error));
+});
