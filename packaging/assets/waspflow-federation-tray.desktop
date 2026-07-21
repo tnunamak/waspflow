@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Waspflow Federation
+Comment=Start the Waspflow Federation tray helper
+Exec=/usr/lib/waspflow/waspflow-federation-tray
+Terminal=false
+Categories=Utility;Network;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true

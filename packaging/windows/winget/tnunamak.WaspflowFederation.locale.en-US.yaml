@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+PackageIdentifier: tnunamak.WaspflowFederation
+PackageVersion: 0.0.0
+PackageLocale: en-US
+Publisher: Tim Nunamaker
+PublisherUrl: https://github.com/tnunamak
+PackageName: Waspflow Federation
+PackageUrl: https://github.com/tnunamak/waspflow
+License: MIT
+LicenseUrl: https://raw.githubusercontent.com/tnunamak/waspflow/main/LICENSE
+ShortDescription: Local Federation daemon, browser UI, and tray helper for Waspflow.
+Description: Waspflow Federation runs a local daemon and tray helper for trusted collective contribution.
+Moniker: waspflow-federation
+Tags:
+- ai
+- federation
+- docker
+- tray
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0
