@@ -15,7 +15,7 @@ On Ubuntu, it verifies these checks in the same Waspflow-owned sbx profile that 
 
 Each failure has a copy-paste fix. Package/runtime failures prescribe Docker's apt-repository installation path; daemon failures prescribe a restart; KVM failures prescribe the `kvm` group command and note nested virtualization; login failures prescribe `sbx login`.
 
-`waspflow federation doctor --fix-policy` is the sole opt-in mutation. It explicitly runs `sbx policy init balanced`, then re-probes. No privileged or destructive action is automatic.
+Federation automatically starts a stopped `sbx` daemon and initializes the balanced network policy for its own isolated `sbx` identity, then re-probes. Both repairs are idempotent, profile-isolated, and use the documented containment default. `waspflow federation doctor --fix-policy` remains available as an explicit retry. Docker login, installation/runtime, and KVM failures remain visible rather than being auto-repaired.
 
 ## JSON contract
 

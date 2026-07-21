@@ -93,6 +93,7 @@ async function sandboxPreflight({ json, fixPolicy = false, report = true } = {})
   const backend = new DockerSbxBackend();
   let capabilities = await backend.probeCapabilities();
   let preflight = capabilities.preflight;
+  const identityRepairs = capabilities.identity_repairs || [];
   let policyFix = null;
 
   if (fixPolicy && preflight?.checks.some((item) => item.name === 'network_policy' && !item.ok)) {
@@ -107,6 +108,7 @@ async function sandboxPreflight({ json, fixPolicy = false, report = true } = {})
     backend_id: preflight.backend_id,
     checks: preflight.checks,
   };
+  if (identityRepairs.length > 0) result.identity_repairs = identityRepairs;
   if (policyFix) result.policy_fix = { ok: policyFix.code === 0, detail: `${policyFix.stdout || ''}${policyFix.stderr || ''}`.trim() };
   if (report && json) {
     printResult(true, [], result, 'sandbox_preflight');
@@ -205,7 +207,7 @@ function printResult(json, humanLines, structured, type) {
 // means every OTHER already-approved member's public key auto-populates
 // here and at the start of contribute/submit — no pasting required for them.
 async function cmdJoin(argv) {
-  const { flags, positional } = parseFlags(argv, ['key-id']);
+  const { flags, positional } = parseFlags(argv, ['key-id', 'collective-name']);
   const [coordinatorUrl, inviteToken] = positional;
   if (!coordinatorUrl || !inviteToken) {
     fail('usage: waspflow federation join <coordinator-url> <invite-token> [--key-id <name>] [--json]');
@@ -215,6 +217,10 @@ async function cmdJoin(argv) {
 
   const existing = loadConfig();
   if (existing && existing.coordinator_url === coordinatorUrl) {
+    if (flags['collective-name'] && existing.collective_name !== flags['collective-name']) {
+      existing.collective_name = flags['collective-name'];
+      saveConfig(existing);
+    }
     log(`already joined ${coordinatorUrl} as '${existing.key_id}' — config at ${configPath()}`);
     printResult(flags.json, [
       `already joined as ${existing.key_id}`,
@@ -249,6 +255,7 @@ async function cmdJoin(argv) {
     collective_token: inviteToken,
     key_id: keyId,
     private_key_path: privateKeyPath,
+    ...(flags['collective-name'] ? { collective_name: flags['collective-name'] } : {}),
   };
   saveConfig(config);
 
@@ -341,6 +348,7 @@ async function cmdContribute(argv) {
     taskDigest = body.task_digest;
     log(`claimable task found: ${taskDigest}`);
   }
+  const displayId = await displayIdForTask(config, taskDigest);
 
   const pullArgs = [
     '--coordinator-url', config.coordinator_url,
@@ -379,7 +387,10 @@ async function cmdContribute(argv) {
   }
   if (flags.json) {
     const submitResponse = JSON.parse(result.stdout);
-    printResult(true, [], { status: 'contributed', task_digest: taskDigest, ...submitResponse }, 'contributed');
+    printResult(true, [], {
+      status: 'contributed', task_digest: taskDigest, ...submitResponse,
+      ...(displayId ? { display_id: displayId } : {}),
+    }, 'contributed');
   } else {
     log(`done — task ${taskDigest} submitted.`);
   }
@@ -419,6 +430,23 @@ async function refreshRosterCache(config) {
   }
   saveConfig(config);
   return config;
+}
+
+// The pull protocol deals in a digest, while the contributor-facing ledger
+// needs the signed task's human display id. Discovery is best-effort here:
+// the task can still run if a concurrent claim makes it disappear from the
+// list, but normal completion emits the display id for the daemon ledger.
+async function displayIdForTask(config, taskDigest) {
+  try {
+    const res = await fetch(`${config.coordinator_url}/tasks`, {
+      headers: { authorization: `Bearer ${config.collective_token}` },
+    });
+    const tasks = await res.json();
+    const task = Array.isArray(tasks) && tasks.find((item) => item?.task_digest === taskDigest);
+    return typeof task?.display_id === 'string' ? task.display_id : null;
+  } catch {
+    return null;
+  }
 }
 
 // Materializes the local roster cache into a temp file for --roster-file.
@@ -477,6 +505,39 @@ async function cmdTrust(argv) {
 
   log(`trusted '${keyId}' — saved to your local roster cache.`);
   printResult(flags.json, [`trusted '${keyId}'`], { status: 'trusted', key_id: keyId }, 'trusted');
+}
+
+// --- approve (owner-only local roster edit) ---------------------------------
+//
+// Membership remains a local filesystem decision. This is deliberately a
+// convenience for the coordinator owner, not a coordinator API: writing the
+// roster file lets the existing watcher hot-reload the approval without
+// adding a network-reachable registration surface.
+async function cmdApprove(argv) {
+  const { flags, positional } = parseFlags(argv, ['roster-file']);
+  const [keyId, publicKeyFile] = positional;
+  if (!keyId || !publicKeyFile) {
+    fail('usage: waspflow federation approve <key_id> <public_key_pem_file|-> [--roster-file <path>] [--json]');
+  }
+  const rosterFile = flags['roster-file'] || process.env.WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE;
+  if (!rosterFile) fail('approve requires --roster-file or WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE');
+  const publicKeyPem = publicKeyFile === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(publicKeyFile, 'utf8');
+  if (!publicKeyPem.includes('BEGIN PUBLIC KEY')) fail('that does not look like a PEM public key (expected "-----BEGIN PUBLIC KEY-----")');
+  let roster;
+  try {
+    roster = JSON.parse(fs.readFileSync(rosterFile, 'utf8'));
+  } catch (error) {
+    fail(`could not read/parse roster file ${rosterFile}: ${error.message}`);
+  }
+  if (!roster || typeof roster !== 'object' || Array.isArray(roster)) fail(`roster file ${rosterFile} must contain a JSON object`);
+  roster[keyId] = publicKeyPem;
+  // Keep the roster path's inode stable. The coordinator watches this exact
+  // local file; replacing it by rename can detach an fs.watch watcher on
+  // Linux after the first approval. A short malformed intermediate state is
+  // safe because its watcher deliberately keeps the previous valid roster.
+  fs.writeFileSync(rosterFile, JSON.stringify(roster, null, 2));
+  log(`approved '${keyId}' in ${rosterFile}; the coordinator will hot-reload it.`);
+  printResult(flags.json, [`approved '${keyId}'`], { status: 'approved', key_id: keyId, roster_file: rosterFile }, 'approved');
 }
 
 // --- submit ------------------------------------------------------------------
@@ -582,6 +643,7 @@ async function main() {
     case 'submit': return cmdSubmit(rest);
     case 'status': return cmdStatus(rest);
     case 'trust': return cmdTrust(rest);
+    case 'approve': return cmdApprove(rest);
     case 'daemon': {
       const { runDaemon } = await import('../lib/federation-daemon.mjs');
       return runDaemon(rest);
@@ -593,7 +655,7 @@ async function main() {
       return;
     }
     default:
-      process.stderr.write(`usage: waspflow federation <doctor|join|contribute|submit|status|trust|daemon|ui> ...\n`);
+      process.stderr.write(`usage: waspflow federation <doctor|join|contribute|submit|status|trust|approve|daemon|ui> ...\n`);
       process.exit(verb ? 1 : 0);
   }
 }

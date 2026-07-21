@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
-import { _internal, probeSbxPreflight } from '../lib/federation-docker-backend.mjs';
+import { _internal, DockerSbxBackend, probeSbxPreflight } from '../lib/federation-docker-backend.mjs';
 
 const execFileAsync = promisify(execFile);
 const CLI = join(process.cwd(), 'bin', 'waspflow-federation');
@@ -29,6 +29,40 @@ function healthyInputs(overrides = {}) {
 
 function byName(inputs) {
   return Object.fromEntries(_internal.preflightChecks(inputs).map((item) => [item.name, item]));
+}
+
+function identityCommandStub({ daemonReady = true, policyReady = true, dockerLogin = true } = {}) {
+  const calls = [];
+  const state = { daemonReady, policyReady, dockerLogin };
+  const runCommand = async (command, args, options) => {
+    calls.push({ args, env: options.env });
+    if (args[0] === 'version') return result({ stdout: 'sbx version: v0.35.0 abc123' });
+    if (args[0] === 'diagnose') {
+      if (!state.daemonReady) return result({ code: 1, stderr: 'daemon connection refused' });
+      return state.dockerLogin
+        ? result({ stdout: 'Daemon healthy\nDocker authentication healthy' })
+        : result({ code: 1, stdout: 'Daemon healthy', stderr: 'user is not authenticated to Docker' });
+    }
+    if (args[0] === 'policy' && args[1] === 'ls') {
+      return state.policyReady
+        ? result({ stdout: 'Policy rules' })
+        : result({ code: 1, stderr: 'global network policy has not been initialized' });
+    }
+    if (args[0] === 'daemon' && args[1] === 'start' && args[2] === '--detach') {
+      state.daemonReady = true;
+      return result({ stdout: 'daemon started' });
+    }
+    if (args[0] === 'policy' && args[1] === 'init' && args[2] === 'balanced') {
+      state.policyReady = true;
+      return result({ stdout: 'policy initialized' });
+    }
+    if (command === 'dpkg-query') return result({ stdout: 'docker-sbx\tinstalled\t0.35.0\ndocker-ce\tinstalled\t28.0.0\ncontainerd.io\tinstalled\t2.1.0\n' });
+    if (command === 'docker') return result({ stdout: '28.0.0' });
+    if (command === 'containerd') return result({ stdout: 'containerd github.com/containerd/containerd v2.1.0' });
+    if (command === 'test') return result();
+    throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
+  };
+  return { calls, runCommand };
 }
 
 test('preflight classifies a fully ready Ubuntu sbx installation', () => {
@@ -63,6 +97,35 @@ test('preflight rejects the exact uninitialized policy diagnostic and offers the
   assert.equal(checks.network_policy.ok, false);
   assert.match(checks.network_policy.detail, /has not been initialized/);
   assert.match(checks.network_policy.fix, /doctor --fix-policy/);
+});
+
+test('probeCapabilities starts a stopped daemon under the isolated Federation sbx identity, then passes', async () => {
+  const stub = identityCommandStub({ daemonReady: false });
+  const report = await new DockerSbxBackend().probeCapabilities({ runCommand: stub.runCommand, platformName: 'linux' });
+  assert.equal(report.available, true);
+  assert.deepEqual(report.identity_repairs.map((item) => item.name), ['sbx_daemon']);
+  const start = stub.calls.find((call) => call.args.join(' ') === 'daemon start --detach');
+  assert.ok(start, 'expected the stopped daemon to be started');
+  assert.equal(start.env.HOME, _internal.sbxHome());
+});
+
+test('probeCapabilities initializes an uninitialized balanced policy under the isolated Federation sbx identity, then passes', async () => {
+  const stub = identityCommandStub({ policyReady: false });
+  const report = await new DockerSbxBackend().probeCapabilities({ runCommand: stub.runCommand, platformName: 'linux' });
+  assert.equal(report.available, true);
+  assert.deepEqual(report.identity_repairs.map((item) => item.name), ['network_policy']);
+  const initialize = stub.calls.find((call) => call.args.join(' ') === 'policy init balanced');
+  assert.ok(initialize, 'expected the missing policy to be initialized');
+  assert.equal(initialize.env.HOME, _internal.sbxHome());
+});
+
+test('probeCapabilities leaves Docker login as the only manual preflight failure after identity setup is ready', async () => {
+  const stub = identityCommandStub({ dockerLogin: false });
+  const report = await new DockerSbxBackend().probeCapabilities({ runCommand: stub.runCommand, platformName: 'linux' });
+  assert.equal(report.available, false);
+  assert.deepEqual(report.preflight.checks.filter((item) => !item.ok).map((item) => item.name), ['docker_login']);
+  assert.deepEqual(report.identity_repairs, []);
+  assert.equal(stub.calls.some((call) => call.args[0] === 'daemon' || (call.args[0] === 'policy' && call.args[1] === 'init')), false);
 });
 
 test('preflight rejects the exact KVM permission diagnostic', () => {

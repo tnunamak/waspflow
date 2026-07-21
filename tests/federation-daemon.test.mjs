@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -82,6 +82,91 @@ function statusBody(response) {
   return body;
 }
 
+function waitFor(predicate, timeoutMs = 250) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const poll = async () => {
+      if (await predicate()) return resolve();
+      if (Date.now() >= deadline) return reject(new Error('timed out waiting for expected daemon state'));
+      setTimeout(poll, 5);
+    };
+    void poll();
+  });
+}
+
+test('approval polling keeps a newly joined member pending, rejects contribution, then flips to idle after their key appears in GET /roster', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'wf-federation-approval-'));
+  let approved = false;
+  const daemon = await startFederationDaemon({
+    token: 'test-session-token',
+    infoPath: join(directory, 'daemon.json'),
+    ledgerPath: join(directory, 'ledger.json'),
+    approvalPollIntervalMs: 5,
+    configLoader: () => ({ coordinator_url: 'http://coordinator.example', collective_token: 'collective-token', key_id: 'oshin' }),
+    fetchImpl: async () => new Response(JSON.stringify({ roster: approved ? [{ key_id: 'oshin' }] : [] }), { status: 200 }),
+  });
+  const base = `http://127.0.0.1:${daemon.info.port}`;
+  try {
+    const pending = statusBody(await request(base, '/status', { token: 'test-session-token' }));
+    assert.equal(pending.state, 'pending_approval');
+    assert.equal(pending.detail, "Waiting for the collective owner to approve you — you'll start automatically once approved.");
+    const blocked = await request(base, '/contribute/start', { method: 'POST', token: 'test-session-token' });
+    assert.equal(blocked.status, 409);
+    assert.equal(JSON.parse(blocked.text).error, "Waiting for the collective owner to approve you — you'll start automatically once approved.");
+
+    approved = true;
+    await waitFor(async () => statusBody(await request(base, '/status', { token: 'test-session-token' })).state === 'idle');
+  } finally {
+    await daemon.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('completed contribution appends a private ledger entry and exposes its weekly summary and last completion', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'wf-federation-ledger-'));
+  const ledgerPath = join(directory, 'ledger.json');
+  const children = [];
+  const daemon = await startFederationDaemon({
+    token: 'test-session-token',
+    infoPath: join(directory, 'daemon.json'),
+    ledgerPath,
+    approvalPollIntervalMs: 5,
+    configLoader: () => ({ coordinator_url: 'http://coordinator.example', collective_token: 'collective-token', key_id: 'oshin' }),
+    fetchImpl: async () => new Response(JSON.stringify({ roster: [{ key_id: 'oshin' }] }), { status: 200 }),
+    spawnProcess: (...args) => {
+      const child = fakeChild();
+      children.push({ args, child });
+      return child;
+    },
+  });
+  const base = `http://127.0.0.1:${daemon.info.port}`;
+  try {
+    await waitFor(async () => statusBody(await request(base, '/status', { token: 'test-session-token' })).state === 'idle');
+    const started = await request(base, '/contribute/start', { method: 'POST', token: 'test-session-token' });
+    assert.equal(started.status, 202);
+    children[0].child.stdout.emit('data', Buffer.from(JSON.stringify({
+      schema_version: 1, type: 'contributed', status: 'settled', task_digest: 'a'.repeat(64), display_id: 'Fix onboarding',
+    }) + '\n'));
+    children[0].child.emit('close', 0);
+
+    const ledger = await request(base, '/ledger', { token: 'test-session-token' });
+    assert.equal(ledger.status, 200);
+    const entries = JSON.parse(ledger.text);
+    assert.equal(entries.length, 1);
+    assert.deepEqual(entries[0], {
+      display_id: 'Fix onboarding', coordinator: 'http://coordinator.example', finished_at: entries[0].finished_at,
+    });
+    const status = statusBody(await request(base, '/status', { token: 'test-session-token' }));
+    assert.deepEqual(status.ledger_summary, { count_7d: 1, last: { display_id: 'Fix onboarding', finished_at: entries[0].finished_at } });
+    assert.deepEqual(status.last_completed, entries[0]);
+    assert.equal((await stat(ledgerPath)).mode & 0o777, 0o600);
+    assert.deepEqual(JSON.parse(await readFile(ledgerPath, 'utf8')), entries);
+  } finally {
+    await daemon.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('GET /status exposes every daemon state and auth handoff payloads', async () => {
   await withDaemon(async ({ base, children, setConfig }) => {
     const token = 'test-session-token';
@@ -145,6 +230,19 @@ test('GET /status exposes every daemon state and auth handoff payloads', async (
     assert.equal(setupRequired.state, 'setup_required');
     assert.equal(setupRequired.action.kind, 'sandbox_preflight');
     assert.deepEqual(setupRequired.action.checks, [{ name: 'network_policy', ok: false, detail: 'global network policy has not been initialized.', fix: 'sbx policy init balanced' }]);
+
+    await request(base, '/contribute/start', { method: 'POST', token });
+    children[4].child.stdout.emit('data', Buffer.from(JSON.stringify({
+      schema_version: 1,
+      type: 'sandbox_preflight',
+      status: 'setup_required',
+      backend_id: 'docker-sbx',
+      checks: [{ name: 'docker_login', ok: false, detail: 'not authenticated', fix: 'sbx login' }],
+    }) + '\n'));
+    children[4].child.emit('close', 1);
+    const dockerLogin = statusBody(await request(base, '/status', { token }));
+    assert.equal(dockerLogin.state, 'action_needed');
+    assert.deepEqual(dockerLogin.action, { kind: 'docker_login', url: 'https://app.docker.com/' });
   });
 });
 
@@ -242,9 +340,9 @@ test('GET /tasks passes through claimable tasks and POST /contribute/start deleg
     assert.deepEqual(children[0].args[1], [
       '/real/path/to/bin/waspflow-federation', 'contribute', '--task-digest', digest, '--json',
     ]);
-    assert.deepEqual(JSON.parse(started.text).contribution, { selection: 'chosen', task_digest: digest });
+    assert.deepEqual(JSON.parse(started.text).contribution, { selection: 'chosen', task_digest: digest, display_id: 'Fix the login test' });
     assert.deepEqual(statusBody(await request(base, '/status', { token: 'test-session-token' })).contribution, {
-      selection: 'chosen', task_digest: digest,
+      selection: 'chosen', task_digest: digest, display_id: 'Fix the login test',
     });
   });
 });
@@ -254,10 +352,10 @@ test('POST /join accepts an invite and shells out to the guided join verb', asyn
     const response = await request(base, '/join', {
       method: 'POST',
       token: 'test-session-token',
-      body: { invite: 'waspflow://join?coordinator=http%3A%2F%2Fcoordinator.example&token=invite-token' },
+      body: { invite: 'waspflow://join?coordinator=http%3A%2F%2Fcoordinator.example&token=invite-token&name=Oshin%27s%20Collective' },
     });
     assert.equal(response.status, 202);
-    assert.deepEqual(children[0].args[1], ['/real/path/to/bin/waspflow-federation', 'join', 'http://coordinator.example', 'invite-token', '--json']);
+    assert.deepEqual(children[0].args[1], ['/real/path/to/bin/waspflow-federation', 'join', 'http://coordinator.example', 'invite-token', '--collective-name', "Oshin's Collective", '--json']);
     setConfig({ coordinator_url: 'http://coordinator.example' });
     children[0].child.stdout.emit('data', Buffer.from(JSON.stringify({
       schema_version: 1,
@@ -315,6 +413,10 @@ test('parseJoinInvite normalizes deep links, pasted commands, and raw tokens', (
   assert.deepEqual(
     parseJoinInvite('waspflow://join?coordinator=https%3A%2F%2Fcoordinator.example%2F&token=deep-token'),
     { coordinatorUrl: 'https://coordinator.example', token: 'deep-token' },
+  );
+  assert.deepEqual(
+    parseJoinInvite('waspflow://join?coordinator=https%3A%2F%2Fcoordinator.example%2F&token=deep-token&name=Oshin%27s%20Collective'),
+    { coordinatorUrl: 'https://coordinator.example', token: 'deep-token', collectiveName: "Oshin's Collective" },
   );
   assert.deepEqual(
     parseJoinInvite('waspflow federation join http://127.0.0.1:8787 command-token'),

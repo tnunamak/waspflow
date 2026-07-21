@@ -3,6 +3,7 @@ const lifecycleSteps = ['queued', 'claimed', 'running', 'settled'];
 
 export function viewForStatus(status) {
   if (!status || status.state === 'not_joined') return { name: 'join' };
+  if (status.state === 'pending_approval') return { name: 'pending' };
   if (status.state === 'action_needed') return { name: 'action', action: status.action || {} };
   if (status.state === 'setup_required') return { name: 'setup', checks: status.action?.checks || [] };
   const names = { contributing: 'Contributing', paused: 'Paused', idle: 'Idle' };
@@ -55,7 +56,8 @@ function accordion(key, openState, summaryText, ...children) {
 }
 
 function safetyPanel(status, openState) {
-  const coordinator = status.coordinator_url ? element('p', {}, element('span', { className: 'badge', text: 'Coordinator: trusted' }), document.createTextNode(` ${status.coordinator_url}`)) : null;
+  const collective = status.collective_name || status.coordinator_url;
+  const coordinator = collective ? element('p', {}, element('span', { className: 'badge', text: 'Coordinator: trusted' }), document.createTextNode(` Tasks come only from ${collective}.`)) : null;
   return accordion('safety', openState, 'How this works / Is this safe?',
     coordinator,
     element('p', { text: 'Tasks run inside an isolated Docker sandbox on your machine. The sandbox can use your Claude or Codex subscription to do the work, but it cannot see anything else on your computer.' }),
@@ -63,6 +65,11 @@ function safetyPanel(status, openState) {
     element('p', { text: 'Everything else is blocked: the sandbox cannot read your other files, cannot reach your home network, and cannot see other tasks.' }),
     element('p', { className: 'muted', text: 'You can pause anytime. Nothing runs while Waspflow is paused.' }),
   );
+}
+
+function contributionThanks(status) {
+  const count = status.ledger_summary?.count_7d || 0;
+  return element('p', { className: 'muted', text: `You've completed ${count} task${count === 1 ? '' : 's'} this week.` });
 }
 
 function lifecycle(status, task) {
@@ -200,11 +207,12 @@ function createApplication(root) {
       ));
     } else if (view.name === 'action') {
       const browserAction = view.action.kind === 'awaiting_browser';
+      const dockerLogin = view.action.kind === 'docker_login';
       content.push(element('section', { className: 'card' },
         element('p', { className: 'eyebrow', text: 'Action needed' }),
-        element('h2', { text: browserAction ? 'Sign in to continue' : 'One-time sign-in step' }),
-        element('p', { text: browserAction ? 'Finish signing in in the browser window. This page will update automatically when it is done.' : 'Your agent needs one manual sign-in step. This is needed because the sign-in happens inside the agent, not in Waspflow.' }),
-        browserAction ? element('div', { className: 'actions' }, button('Open sign-in', () => window.open(view.action.url, '_blank', 'noopener'))) : instructions(view.action.instruction),
+        element('h2', { text: browserAction || dockerLogin ? 'Sign in to continue' : 'One-time sign-in step' }),
+        element('p', { text: browserAction ? 'Finish signing in in the browser window. This page will update automatically when it is done.' : dockerLogin ? 'Federation uses its own isolated Docker Sandbox identity. Sign it in, then select Start contributing again.' : 'Your agent needs one manual sign-in step. This is needed because the sign-in happens inside the agent, not in Waspflow.' }),
+        browserAction || dockerLogin ? element('div', { className: 'actions' }, button(dockerLogin ? 'Open Docker sign-in' : 'Open sign-in', () => window.open(view.action.url, '_blank', 'noopener'))) : instructions(view.action.instruction),
         element('p', { className: 'detail', text: latestStatus?.detail || '' }),
       ));
     } else if (view.name === 'setup') {
@@ -215,14 +223,24 @@ function createApplication(root) {
         setupInstructions(view.checks),
         element('p', { className: 'detail', text: latestStatus?.detail || '' }),
       ));
+    } else if (view.name === 'pending') {
+      const collective = latestStatus?.collective_name || latestStatus?.coordinator_url;
+      content.push(element('section', { className: 'card' },
+        element('p', { className: 'eyebrow', text: 'Almost there' }),
+        element('h2', { text: 'Waiting for approval' }),
+        collective ? element('p', { text: `You're helping: ${collective}` }) : null,
+        element('p', { className: 'detail', text: latestStatus?.detail || 'Waiting for the collective owner to approve you.' }),
+        element('p', { className: 'muted', text: 'You do not need to keep this page open. Waspflow will start automatically once you are approved.' }),
+      ));
     } else {
       const pause = view.control === 'pause';
       content.push(element('section', { className: 'card' },
         element('p', { className: 'eyebrow', text: 'Your contribution' }),
         element('div', { className: 'status', 'data-state': latestStatus?.state || '', text: view.title }),
         element('p', { className: 'detail', text: latestStatus?.detail || '' }),
-        latestStatus?.coordinator_url ? element('p', {}, element('span', { className: 'badge', text: 'Coordinator: trusted' }), document.createTextNode(` ${latestStatus.coordinator_url}`)) : null,
+        latestStatus?.coordinator_url ? element('p', {}, element('span', { className: 'badge', text: 'Coordinator: trusted' }), document.createTextNode(` You're helping: ${latestStatus.collective_name || latestStatus.coordinator_url}`)) : null,
         element('div', { className: 'actions' }, button(pause ? 'Pause contributing' : 'Start contributing', () => control(pause ? '/contribute/stop' : '/contribute/start'))),
+        contributionThanks(latestStatus),
       ));
       if (latestStatus?.state === 'idle') {
         content.push(taskChoices(availableTasks, (taskDigest) => control('/contribute/start', taskDigest ? { task_digest: taskDigest } : undefined)));
@@ -244,6 +262,8 @@ function createApplication(root) {
       state: latestStatus?.state || null,
       detail: latestStatus?.detail || null,
       coordinator: latestStatus?.coordinator_url || null,
+      collective: latestStatus?.collective_name || null,
+      ledger: latestStatus?.ledger_summary || null,
       contribution: latestStatus?.contribution || null,
       task: latestTask?.status || null,
       availableTasks,

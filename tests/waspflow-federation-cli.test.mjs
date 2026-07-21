@@ -160,6 +160,38 @@ test('join: running it twice against the same coordinator is idempotent, not a s
   });
 });
 
+test('approve: appends a member public key to the owner roster file without replacing existing JSON entries', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'wf-fed-approve-'));
+  const rosterFile = join(directory, 'roster.json');
+  const publicKeyFile = join(directory, 'oshin.pub.pem');
+  const existingPem = '-----BEGIN PUBLIC KEY-----\nexisting\n-----END PUBLIC KEY-----\n';
+  const osHinPem = '-----BEGIN PUBLIC KEY-----\nnew-member\n-----END PUBLIC KEY-----\n';
+  try {
+    await writeFile(rosterFile, JSON.stringify({ 'tim-owner': existingPem }, null, 2));
+    await writeFile(publicKeyFile, osHinPem);
+    const { stdout } = await runCli(['approve', 'oshin', publicKeyFile, '--roster-file', rosterFile, '--json']);
+    assert.deepEqual(JSON.parse(stdout), { status: 'approved', key_id: 'oshin', roster_file: rosterFile, schema_version: 1, type: 'approved' });
+    assert.deepEqual(JSON.parse(await readFile(rosterFile, 'utf8')), { 'tim-owner': existingPem, oshin: osHinPem });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('approve: accepts the coordinator roster path from WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'wf-fed-approve-env-'));
+  const rosterFile = join(directory, 'roster.json');
+  const publicKeyFile = join(directory, 'member.pub.pem');
+  const publicKeyPem = '-----BEGIN PUBLIC KEY-----\nfrom-env\n-----END PUBLIC KEY-----\n';
+  try {
+    await writeFile(rosterFile, JSON.stringify({ 'tim-owner': '-----BEGIN PUBLIC KEY-----\nowner\n-----END PUBLIC KEY-----\n' }));
+    await writeFile(publicKeyFile, publicKeyPem);
+    await runCli(['approve', 'oshin', publicKeyFile], { env: { WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE: rosterFile } });
+    assert.equal(JSON.parse(await readFile(rosterFile, 'utf8')).oshin, publicKeyPem);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('status: reports "not joined" before join, and the joined identity after', async () => {
   await withCoordinator(async ({ coordinatorUrl }) => {
     await withMemberHome(async (home) => {
