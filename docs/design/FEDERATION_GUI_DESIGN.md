@@ -2,20 +2,80 @@
 
 **Date:** 2026-07-21
 **Status:** DESIGN (research-backed, not yet built). Prior-art corpus entry:
-`ai/research/session-ux/federation-contributor-tray-app-should-reuse-clawmeters-go-systray-stack-and-wrap-the-cli-as-a-thin-ndjson-renderer.md` (three converging research passes).
-**Depends on:** the shipped guided CLI (PR #17, `bin/waspflow-federation`, `--json` events). The GUI is a
-**renderer + launcher** over that CLI — it reimplements NONE of the federation loop.
+`ai/research/session-ux/federation-contributor-tray-app-should-reuse-clawmeters-go-systray-stack-and-wrap-the-cli-as-a-thin-ndjson-renderer.md` (multiple converging research passes).
+**Depends on:** the shipped guided CLI (PR #17, `bin/waspflow-federation`, `--json` events) + the federation
+loop (Node). The GUI reimplements NONE of the federation loop.
+
+## ARCHITECTURE (decided 2026-07-21, supersedes the earlier native-Tauri pick)
+
+**Hybrid: a local Node daemon serving a localhost web UI (opened in the user's own browser) + a thin
+no-webview native tray (clawmeter's Go + `fyne.io/systray` stack) + autostart — shipped via apt/brew/WinGet.**
+
+This supersedes the earlier "native Tauri v2 app" decision. It was reconsidered when the owner asked about
+(a) easy install across Linux/macOS/Windows and (b) distribution through apt and other package managers.
+The reasoning chain, each step research-backed and independently verified:
+- **The rich screens move to a browser web UI** (join/paste-invite, trust-safety panel, requester
+  submit+watch). Served over `127.0.0.1` by a Node daemon (same `node:http` idiom the federation coordinator
+  already uses — see the honest scope note below). Because it renders in the user's *own* browser, there is
+  **no bundled webview → the Linux webkit2gtk "won't launch on distro X" hazard vanishes**, and **no
+  `.app`/`.exe` GUI to sign → most of the macOS-notarization / Windows-SmartScreen burden vanishes**. Install
+  collapses to "install a daemon," which is also the most apt-repo-friendly shape (no `.desktop`/icon/webview
+  dependency surface — just a binary + a systemd unit; the Syncthing/Jellyfin/Cockpit model).
+- **A native tray is REQUIRED** (owner: non-negotiable) — the ambient "am I contributing / needs my
+  attention" signal a browser tab cannot give. But its job is now MINIMAL: 2-3 icon states
+  (contributing / paused / action-needed) + a menu whose primary action **opens the web UI URL** in the
+  browser, and auto-opens on `awaiting_browser` / `auth_required_manual`. It renders none of the rich UI.
+- **A tray-that-opens-a-URL needs NO webview** → a systray-only lib is correct, which is exactly clawmeter's
+  actual stack (**Go + `fyne.io/systray`**, verified to link only libc-level libs, zero webkit). So the tray
+  kills the webkit2gtk hazard for the native piece by *not containing a webview at all*. This is the piece
+  the earlier "systray-only can't do windows, so we need Tauri/Electron/Wails" reasoning ruled out — that
+  reasoning only held while the tray had to render the rich screens; it doesn't once they're in the browser.
+- **The two-language split (Node daemon + Go tray) is acceptable here** — unlike a full native GUI (which
+  would duplicate loop/event logic and force hand-porting the event schema into a second language), the tray
+  shares ZERO logic with the daemon: it polls one state endpoint and opens a URL. Thin poll-and-launch, no
+  types to port. This is precisely the split the earlier "don't add a Go GUI" memo did NOT object to.
+- **Syncthing is the direct template**: a Go daemon serving a localhost web UI, distributed via its own
+  signed apt repo, run as a systemd `--user` service, with a SEPARATE optional tray (`syncthingtray`, now
+  mainline in Debian). Federation's tray is mandatory rather than optional, but the packaging shape is the same.
+
+### Honest scope correction (recorded so nothing builds on a false premise)
+An earlier draft/turn implied the local web UI was "~90% already built" because the coordinator runs a Node
+HTTP server. **That is wrong and is corrected here:** the existing `lib/federation-coordinator.mjs` server is
+the OWNER-HOSTED, machine-to-machine JSON coordinator API (Tim hosts it; contributors' clients call it over
+the network) — it serves **zero HTML** and is not a localhost UI. The **contributor-side local web UI is a
+NEW daemon to build.** The accurate claim is "same runtime, same `node:http` idiom, same team-familiar
+pattern as the coordinator — a well-understood build, not a new capability class," NOT "already there."
+
+### Residual native cost, stated plainly (the tray is the only native piece left)
+- macOS: a menubar-only helper (`LSUIElement`, no window) is still a `.app` and still hits Gatekeeper — but
+  it's a TINY dependency-light binary, not a webview GUI. Ship it via a Homebrew cask/formula (clawmeter's
+  path); pay the one-time $99/yr Apple notarization only if a non-brew double-click-from-Finder path is
+  wanted. Far smaller than notarizing a full Tauri/Electron app.
+- Windows: SmartScreen applies to any unsigned `.exe`. `syncthingtray`'s answer is to skip a signed installer
+  and ship via WinGet/Scoop/Chocolatey; SignPath Foundation (free OSS OV signing) is the clean fix for a
+  native double-click path. Same cost as clawmeter already plans.
+- Linux: the tray binary has no webview dep (libc-level only) → no webkit2gtk hazard; packages cleanly as a
+  `.deb`/`.rpm` with a systemd/XDG-autostart entry.
 
 ## Goal
 
-Give the non-technical contributor ("Oshin") a **background system-tray app**, in the exact mold of
-clawmeter, that makes contributing spare AI-subscription capacity a set-and-forget experience: install
-in one command, join with an invite, and mostly ignore it — the tray surfaces state and the occasional
-required action (a browser login). No terminal, no flags, no PEM, no digest.
+Give the non-technical contributor ("Oshin") a **set-and-forget background experience**: install in one
+command (apt/brew), join with an invite, and mostly ignore it. A persistent **tray** surfaces state and the
+occasional required action (a browser login); the richer screens open in the **browser**. No terminal, no
+flags, no PEM, no digest.
 
 ## Decisions (research-backed)
 
-### Stack: Node/TypeScript, via Tauri with the federation CLI as a sidecar (Electron fallback)
+### Stack decision history (superseded — see the ARCHITECTURE section above for the FINAL decision)
+> **SUPERSEDED 2026-07-21.** This section captures the reasoning that led from "Go tray (clawmeter)" →
+> "Node/Tauri native GUI" → and finally to the **hybrid web-UI + thin Go tray** now recorded in the
+> ARCHITECTURE section at the top. The final call: rich UI in the browser (Node daemon), tray in Go+systray.
+> The end-state/language reasoning below is why "a full native GUI, if we built one, should be Node" — but
+> we are NOT building a full native GUI; the only native piece is the thin no-webview tray, for which
+> Go+systray (clawmeter's stack) is correct precisely because it shares no logic with the daemon. Retained
+> for the record.
+
+#### (historical) Node/TypeScript, via Tauri with the federation CLI as a sidecar
 **Revised 2026-07-21 after an end-state decision memo (pressure-tested + owner-flagged).** The initial
 draft of this doc recommended Go + `fyne.io/systray` (reuse clawmeter's toolchain). That was the right
 answer to the *narrow* question "cheapest tray app matching clawmeter's UX bar," but the wrong answer to
@@ -60,15 +120,17 @@ consolidation logic above.
 **This stack decision remains owner-gated** — it flips only if waspflow's *core* is expected to move to
 Go (then Go+Wails becomes correct). Absent that, Node/Tauri.
 
-### Architecture: thin spawn-per-command NDJSON renderer (NO daemon for v0)
-- The CLI emits **one terminal JSON line per invocation** on stdout and streams live progress on stderr.
-- The GUI `spawn`s `waspflow federation <verb> --json`, reads stderr as **opaque progress text**
-  (never parsed for control flow), and treats the single stdout JSON line as the **authoritative event**.
-- This matches lazygit/gitui/gh ("thin renderer, real logic in the binary"). GitHub-Desktop-vs-`gh`
-  (two independent reimplementations that drift) is the anti-pattern we explicitly avoid: one CLI is
-  the source of truth, so one security review covers both surfaces.
-- **Defer** a daemon + event-endpoint (Syncthing/Ollama/Docker-Desktop model) until we actually need
-  multiple simultaneous observers, restart-durable state, or a long-running `contribute --loop`.
+#### (historical) Thin spawn-per-command NDJSON renderer — SUPERSEDED by the daemon architecture
+> **SUPERSEDED 2026-07-21.** This "no daemon, spawn-per-command from a native GUI" note belonged to the
+> Tauri-native-GUI plan. The FINAL architecture (top ARCHITECTURE section) IS a local daemon serving a
+> web UI — the daemon is now required, because a browser UI + a persistent tray are two simultaneous
+> observers of one state that must survive tab/window close (exactly the "graduate to a daemon" trigger
+> this note named). Retained for the record; the daemon is authoritative.
+- The invariant that STILL holds: the CLI/daemon reimplements none of the loop — it shells out to the
+  existing `waspflow federation <verb> --json` verbs, reads stderr as opaque progress and the stdout JSON
+  line as the authoritative event (schema in `lib/federation-events.mjs`). The daemon is a supervisor +
+  HTTP surface; the web UI + tray are thin renderers over its `GET /status` + control API. GitHub-Desktop-
+  vs-`gh` (two divergent reimplementations) remains the anti-pattern we avoid: one source of truth.
 
 ### Contract discipline (do this to the CLI BEFORE the GUI depends on it)
 1. Add a `schema_version` field to the single `printResult()` emitter in `bin/waspflow-federation`, so
@@ -136,33 +198,75 @@ negative-space line once on the join-confirm screen (the moment of highest anxie
   a failed/partial run may still have a branch worth reviewing (v0's review-like-a-PR model).
 - Errors are just another lifecycle terminus with the stderr tail shown collapsed-by-default.
 
-## Distribution
-Reuse clawmeter's distribution *learnings* (the packaging patterns, not its language): a Homebrew
-one-liner, `LSUIElement=true` (no Dock icon), a `brew services`-style autostart, Linux XDG autostart +
-`.deb`/`.rpm` artifacts. Tauri/Electron have their own bundlers (`tauri build` / electron-builder) that
-produce the `.app`/`.dmg`/`.deb`/`.rpm`/`.msi` — map those onto a brew cask + the Linux packages.
-**One documented caveat, inherited not introduced:** GNOME 45/46 need an AppIndicator/Tray-Icons
-extension for the tray icon to appear (modern KDE works out of the box) — this is a Linux-desktop
-StatusNotifierItem reality that applies to any tray app (clawmeter carries it too), independent of stack.
+## Distribution & install-ease (owner requirement: anyone can install on Linux/macOS/Windows)
 
-## Build slices (proposed, for a future lane)
-0. **CLI contract prep** (small, do first; STACK-INDEPENDENT — already dispatched as lane `fedgui-s0`):
-   `schema_version` on every `--json` event + shared event schema + golden CI test. Lands on the CLI side
-   (extends PR #17). Needed no matter which GUI language wins.
-1. **Tray skeleton + config read**: Node/TS Tauri app (Electron fallback), reads
-   `~/.waspflow/federation/config.json`, 3-state tray icon, menu scaffold. Set up the Tauri sidecar
-   packaging of the federation CLI here.
-2. **Join flow**: paste-field window + `waspflow://` deep-link handler + confirm screen; shells out to
-   `join`, renders the result event.
-3. **Contribute loop + auth-handoff**: run `contribute`, stream stderr as progress, render
-   `awaiting_browser` (device-flow: open URL, poll, auto-clear) and `auth_required_manual` (instruction
+**The decisive finding (researched 2026-07-21): install-ease is a GUI-vs-no-GUI / which-webview question,
+NOT a Go-vs-Node question.** clawmeter's easy install is verified to come from it being a tray-only app
+with NO embedded browser (zero webkit/webview deps; its Linux binary links only 3 libc-level shared libs)
+— NOT from being written in Go. Consequences:
+- **Go via Wails does NOT preserve clawmeter's superpower.** Wails uses the system `webkit2gtk` just like
+  Tauri, so it inherits the exact same Linux "installed but won't launch on distro X" hazard (Ubuntu
+  24.04/Debian 13 ship webkit2gtk-4.1 not 4.0; Arch renames it; `wails doctor` exists precisely because
+  this bites users). Switching to a Go GUI buys **nothing** on install-ease and re-adds the language split.
+  So the earlier "reconsider Go for easy install" instinct is disproven — Node/Tauri stays.
+- **macOS:** any double-click GUI (Tauri OR Electron OR Wails) needs Apple notarization ($99/yr, a ONE-TIME
+  maintainer cost) to be non-technical-friendly — macOS Sequoia removed the right-click-to-open bypass, so
+  unsigned = a multi-step Settings/password dance. This is a GUI cost, not a stack cost; clawmeter dodges
+  it only by being a CLI (brew-build-from-source → no quarantine flag). Budget the $99/yr.
+- **Windows:** SmartScreen friction is identical for any unsigned installer (Go/Tauri/Electron alike);
+  mitigation is SignPath Foundation (free OV signing for OSS, stack-agnostic — clawmeter's own plan).
+- **Linux:** the one axis where the webview choice matters. **Tauri** = small but the webkit2gtk
+  version-matrix hazard (mitigate via targeted `.deb`/`.rpm` that pull the right webkit2gtk as a dep;
+  AppImage-that-bundles-webkit is the "always works" fallback but ~76MB, erasing the size win). **Electron**
+  = ~100-150MB but a genuinely self-contained AppImage that "just works" across distros (bundles its own
+  Chromium, no system-webview dep).
+
+**Decision on the install-ease axis:** keep **Tauri v2** (the stack-consolidation logic holds, and its
+macOS/Windows install profile is fine — system webview always present there). **For Linux specifically,
+if install-reliability proves paramount in practice, Electron's self-contained AppImage is the safer
+choice for that one platform** (trade size for guaranteed launch) — decide during slice 6 (packaging)
+based on how painful the webkit2gtk matrix actually is. Either way, the language stays Node/TS.
+
+Reuse clawmeter's distribution *learnings* (packaging patterns): a Homebrew one-liner (a **cask** for the
+signed app), `LSUIElement=true` (no Dock icon), autostart, `.deb`/`.rpm`. Tauri/Electron bundlers
+(`tauri build` / electron-builder) produce the `.app`/`.dmg`/`.deb`/`.rpm`/`.msi`/AppImage.
+**One tray caveat, inherited not introduced (any stack):** GNOME 45/46 need an AppIndicator/Tray-Icons
+extension for the tray icon to appear (modern KDE works out of the box) — a Linux StatusNotifierItem
+reality clawmeter carries too.
+
+## Build slices (for the hybrid web-UI + Go-tray architecture)
+0. **CLI contract prep** — DONE (PR #18): `schema_version` + `type` on every `--json` event + shared
+   `lib/federation-events.mjs` schema + golden test. The daemon/tray/web-UI all build against this.
+1. [x] **Local daemon + localhost web server** (Node) — **DONE (slice 1):** a `waspflow federation daemon` (or `ui`) process that
+   binds `127.0.0.1:<port>`, serves the web UI static assets + a small JSON state/control API over the
+   existing `bin/waspflow-federation` verbs (spawn-per-command, reads its `--json` events). Security from
+   the start: Host-header validation, a locally-generated session token, no wildcard CORS. Reuse the
+   `node:http` idiom from `lib/federation-coordinator.mjs` (do NOT reuse the coordinator itself — different
+   process, different trust domain). A `GET /status` endpoint the tray polls; `POST` control for
+   pause/resume/contribute.
+2. **Web UI: join + status** (browser, plain HTML/JS or a light framework — keep it small): the join
+   screen (one paste field: deep link / `join` command / raw token, auto-detected → confirm coordinator →
+   join), and the steady status view (contributing / paused / idle). Talks only to the local daemon's API.
+3. **Web UI: contribute + auth-handoff**: drive `contribute` via the daemon, stream progress, render
+   `awaiting_browser` (open URL, poll, auto-clear) and `auth_required_manual` (honest numbered instruction
    card); pause/resume control.
-4. **Trust/safety panel** + trust badge.
-5. **Requester submit view**: 3-field form + lifecycle stepper + decoupled result-ready affordance.
-6. **Packaging**: brew formula, `.app`/LSUIElement, Linux autostart + deb/rpm, the GNOME caveat doc.
+4. **Web UI: trust/safety panel** (Docker-Sandboxes 3-part copy + `trusted{key_id}` badge) + **requester
+   submit view** (3-field form + lifecycle stepper + decoupled result-ready affordance).
+5. **Thin native tray** (Go + `fyne.io/systray`, clawmeter's stack — NO webview): 3-state icon
+   (contributing/paused/action-needed) by polling the daemon's `GET /status`; menu → "Open Waspflow
+   Federation" (`xdg-open`/`open`/`start` the localhost URL); auto-open the browser on
+   `awaiting_browser`/`auth_required_manual`. Shares zero logic with the daemon — poll + open-URL only.
+6. **Packaging + distribution**: `nfpm`-generated `.deb`/`.rpm` (daemon depends on `nodejs`; tray is
+   libc-only) + systemd `--user` unit / launchd LaunchAgent / XDG autostart for both; a signed **apt repo**
+   (reprepro/aptly + GPG `signed-by=` key, Syncthing's pattern); Homebrew formula (daemon) + cask/formula
+   (tray); WinGet/Scoop manifests. Document the GNOME AppIndicator-extension tray caveat.
 
-Keep the GUI a thin renderer throughout; any logic gap is a CLI event to add, not GUI logic to write.
+Keep the web UI + tray thin renderers throughout; any logic gap is a CLI/daemon event to add, not
+UI-side federation logic. Slices 2-4 (web UI) and 5 (tray) are largely independent behind the daemon's
+`GET /status` + control API contract (slice 1) — parallelize once slice 1 lands.
 
 ## Non-goals (v0)
-No daemon/event-endpoint, no in-app editor, no progress bar beyond streamed milestones, no GUI-side
-crypto/loop logic, no Windows-first work (parity path exists via clawmeter's winget if needed later).
+No in-app editor, no progress bar beyond streamed milestones, no UI-side crypto/loop logic (the daemon
+shells out to the existing verbs; UI is a thin renderer), no Windows-first work (parity path exists via
+winget if needed later). NOTE: a local daemon IS in scope now (it's the architecture) — the earlier
+"no daemon" non-goal was from the superseded native-GUI plan and is removed.
