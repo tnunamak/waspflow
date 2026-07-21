@@ -152,7 +152,7 @@ test('status: reports "not joined" before join, and the joined identity after', 
   await withCoordinator(async ({ coordinatorUrl }) => {
     await withMemberHome(async (home) => {
       const before = await runCli(['status', '--json'], { home });
-      assert.deepEqual(JSON.parse(before.stdout), { status: 'not_joined' });
+      assert.deepEqual(JSON.parse(before.stdout), { status: 'not_joined', schema_version: 1, type: 'not_joined' });
 
       await runCli(['join', coordinatorUrl, 'test-invite-token', '--key-id', 'tim-author'], { home });
       const after = await runCli(['status', '--json'], { home });
@@ -185,7 +185,7 @@ test('trust: adds a peer public key to the local roster cache, round-trips throu
       await runCli(['join', coordinatorUrl, 'test-invite-token', '--key-id', 'ocean-executor'], { home });
       const pubkeyPem = '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAZkcNBVMeGBosN5XTHB2/gz/H0yDxMeNRbhV+R7+ZCG0=\n-----END PUBLIC KEY-----\n';
       const { stdout } = await runCli(['trust', 'tim-author', pubkeyPem, '--json'], { home });
-      assert.deepEqual(JSON.parse(stdout), { status: 'trusted', key_id: 'tim-author' });
+      assert.deepEqual(JSON.parse(stdout), { status: 'trusted', key_id: 'tim-author', schema_version: 1, type: 'trusted' });
 
       const config = JSON.parse(await readFile(join(home, 'config.json'), 'utf8'));
       assert.equal(config.roster['tim-author'], pubkeyPem);
@@ -228,7 +228,7 @@ test('contribute: no --task-digest and no queued task -> reports "no task availa
           WASPFLOW_SBX_BIN: stubPath,
         },
       });
-      assert.deepEqual(JSON.parse(stdout), { status: 'no_task_available' });
+      assert.deepEqual(JSON.parse(stdout), { status: 'no_task_available', schema_version: 1, type: 'no_task_available' });
 
       await rm(stubHome, { recursive: true, force: true });
       await rm(stubBinDir, { recursive: true, force: true });
