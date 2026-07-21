@@ -70,14 +70,29 @@ function parseFlags(argv, known) {
 // existing bins already go to stderr, so a long sandboxed run isn't silent)
 // while still buffering both streams so callers can translate a known
 // failure into this CLI's own vocabulary and parse the final stdout JSON.
-function runChildStreaming(execPath, args) {
+function runChildStreaming(execPath, args, { onEvent } = {}) {
   return new Promise((resolve) => {
     const child = spawn(execPath, args, { stdio: ['inherit', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    let pendingStdout = '';
+    child.stdout.on('data', (chunk) => {
+      pendingStdout += chunk;
+      const lines = pendingStdout.split(/\r?\n/);
+      pendingStdout = lines.pop();
+      for (const line of lines) {
+        try {
+          const event = JSON.parse(line);
+          if (event.type === 'awaiting_browser' || event.type === 'auth_required_manual') {
+            onEvent?.(event);
+            continue;
+          }
+        } catch { /* final output is not necessarily JSON */ }
+        stdout += `${line}\n`;
+      }
+    });
     child.stderr.on('data', (chunk) => { stderr += chunk; process.stderr.write(chunk); });
-    child.on('exit', (code) => resolve({ status: code, stdout, stderr }));
+    child.on('exit', (code) => resolve({ status: code, stdout: `${stdout}${pendingStdout}`, stderr }));
   });
 }
 
@@ -216,66 +231,6 @@ async function cmdJoin(argv) {
   }, 'joined');
 }
 
-// --- auth pre-flight ---------------------------------------------------------
-//
-// waspflow-federation-pull never checks or drives harness auth itself — it
-// assumes the executor's Federation-owned sbx identity is already logged in
-// and just fails deep inside a sandboxed run if it isn't (a confusing place
-// for a non-technical user to hit a login wall). This pre-flight is the
-// actual "detect-first, waspflow drives login, user only clicks" wiring the
-// owner asked for: it runs isProviderSecretSet/startAuthFlow/
-// describeAuthRequirement against the SAME identity DockerSbxBackend uses
-// for the real job (WASPFLOW_FEDERATION_SBX_HOME, not the operator's
-// personal sbx HOME) so the check reflects the credential the sandboxed run
-// will actually see.
-async function ensureHarnessAuthed(harnessName, { json } = {}) {
-  const { resolveHarness } = await import('../lib/federation-pull-internals.mjs');
-  const { isProviderSecretSet, startAuthFlow, describeAuthRequirement } = await import('../lib/federation-auth-flow.mjs');
-
-  const spec = resolveHarness(harnessName);
-  const federationSbxHome = process.env.WASPFLOW_FEDERATION_SBX_HOME || path.join(os.homedir(), '.waspflow', 'sbx-home');
-  fs.mkdirSync(federationSbxHome, { recursive: true });
-  const env = { ...process.env, HOME: federationSbxHome };
-
-  const { alreadySet } = await isProviderSecretSet(spec, { env });
-  if (alreadySet) {
-    log(`${harnessName}: already authenticated (detected, no login needed)`);
-    return;
-  }
-
-  const requirement = describeAuthRequirement(spec);
-  if (!requirement.drivable) {
-    // Claude Code subscription auth genuinely cannot be reduced to a
-    // {url, waitForCompletion} handle in this sbx release (see
-    // lib/federation-auth-flow.mjs's module doc and
-    // docs/design/FEDERATION_V0_UAT_REPORT.md's "Claude Code auth" section —
-    // this is an sbx limitation, not something a better wrapper fixes).
-    // Print the honest instruction rather than hanging or faking a URL.
-    printResult(json, [
-      `${harnessName} needs a one-time login this CLI can't drive for you:`,
-      requirement.instruction,
-    ], { status: 'auth_required_manual', harness: harnessName, flow_shape: requirement.flow_shape, instruction: requirement.instruction }, 'auth_required_manual');
-    fail(`${harnessName}: complete the login above, then re-run 'waspflow federation contribute'`);
-  }
-
-  log(`${harnessName}: not yet authenticated — starting the login for you...`);
-  const handle = startAuthFlow(spec, { env });
-  const result = await handle.waitForCompletion();
-  if (result.status !== 'complete' && !handle.url) {
-    fail(`${harnessName}: login did not produce a URL in time — ${result.detail}`);
-  }
-  if (handle.url) {
-    printResult(json, [
-      `${harnessName}: open this URL to finish logging in:`,
-      handle.url,
-      'waiting for you to complete it in the browser...',
-    ], { status: 'awaiting_browser', harness: harnessName, url: handle.url }, 'awaiting_browser');
-    const finalResult = await handle.waitForCompletion();
-    if (finalResult.status !== 'complete') fail(`${harnessName}: login failed — ${finalResult.detail}`);
-  }
-  log(`${harnessName}: login complete.`);
-}
-
 // --- contribute --------------------------------------------------------------
 //
 // The two-command contributor journey's second half. No flags required:
@@ -294,8 +249,6 @@ async function cmdContribute(argv) {
   config = await refreshRosterCache(config);
 
   const harness = flags.harness || 'claude-code-subscription';
-  await ensureHarnessAuthed(harness, { json: flags.json });
-
   let taskDigest = flags['task-digest'];
   if (!taskDigest) {
     log('no --task-digest given — asking the coordinator for the next claimable task...');
@@ -326,12 +279,15 @@ async function cmdContribute(argv) {
     '--harness', harness,
   ];
   if (flags['lease-seconds']) pullArgs.push('--lease-seconds', flags['lease-seconds']);
+  if (flags.json) pullArgs.push('--auth-events', 'json');
 
   log(`running task ${taskDigest} sandboxed (harness: ${harness})...`);
   // stderr streams live (a sandboxed run can take a while) AND is buffered so
   // a "not in --roster-file" failure can be translated into this CLI's own
   // `trust` vocabulary below.
-  const result = await runChildStreaming(process.execPath, [path.join(ROOT, 'bin', 'waspflow-federation-pull'), ...pullArgs]);
+  const result = await runChildStreaming(process.execPath, [path.join(ROOT, 'bin', 'waspflow-federation-pull'), ...pullArgs], {
+    onEvent: (event) => printResult(true, [], event, event.type),
+  });
   if (result.status !== 0) {
     // The author's key_id is only known once the underlying pull bin claims
     // the task (it comes back inside the task envelope's own signature), so

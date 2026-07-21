@@ -21,7 +21,7 @@ test('Codex and Claude Code both report an explicit auth mode, not just request 
   // sentinel to the guest). The real signal is the sbx proxy-layer
   // SBX_CRED_OPENAI_MODE env var, checked via `sbx exec ... env`.
   assert.match(CODEX_HARNESS.login_status_probe.mode_field_hint, /SBX_CRED_OPENAI_MODE/);
-  assert.match(CLAUDE_CODE_HARNESS.login_status_probe.mode_field_hint, /claudeAiOauth/);
+  assert.match(CLAUDE_CODE_HARNESS.login_status_probe.mode_field_hint, /loggedIn:true/);
 });
 
 test('Codex and Claude Code both have proven indefinite refresh (docker-native-oauth + docker-builtin)', () => {
@@ -49,17 +49,14 @@ test('none of the three harnesses claim host-file-proxy/host-env-proxy docker-bu
   }
 });
 
-test('Codex and Claude Code have DIFFERENT auth flow_shapes despite sharing an auth_strategy label (auth UX reframe)', () => {
+test('Codex and Claude Code both use scriptable host-url-flows', () => {
   assert.equal(CODEX_HARNESS.credential_discovery.flow_shape, 'host-url-flow');
-  assert.equal(CLAUDE_CODE_HARNESS.credential_discovery.flow_shape, 'interactive-session-flow');
-  // The two flow_shapes must stay distinct — collapsing them would force a
-  // false uniformity (a host-side URL that Claude's flow does not have).
-  assert.notEqual(CODEX_HARNESS.credential_discovery.flow_shape, CLAUDE_CODE_HARNESS.credential_discovery.flow_shape);
+  assert.equal(CLAUDE_CODE_HARNESS.credential_discovery.flow_shape, 'host-url-flow');
 });
 
-test('only host-url-flow declares a url_prompt_pattern; interactive-session-flow has none to declare', () => {
+test('both scriptable flows declare their URL prompt pattern', () => {
   assert.ok(CODEX_HARNESS.credential_discovery.url_prompt_pattern);
-  assert.equal(CLAUDE_CODE_HARNESS.credential_discovery.url_prompt_pattern, undefined);
+  assert.equal(CLAUDE_CODE_HARNESS.credential_discovery.url_prompt_pattern, 'visit:');
 });
 
 test('CLAUDE_CODE_HARNESS default alias resolves to the subscription variant, matching product intent', () => {
@@ -73,8 +70,8 @@ test('Claude Code has two real, independently-classified auth strategies — a p
   assert.notEqual(CLAUDE_CODE_SUBSCRIPTION_HARNESS.harness_id, CLAUDE_CODE_API_KEY_HARNESS.harness_id);
 });
 
-test('CLAUDE_CODE_SUBSCRIPTION_HARNESS: unavoidable interactive-session-flow, proven indefinite refresh', () => {
-  assert.equal(CLAUDE_CODE_SUBSCRIPTION_HARNESS.credential_discovery.flow_shape, 'interactive-session-flow');
+test('CLAUDE_CODE_SUBSCRIPTION_HARNESS: scriptable browser flow, proven indefinite refresh', () => {
+  assert.equal(CLAUDE_CODE_SUBSCRIPTION_HARNESS.credential_discovery.flow_shape, 'host-url-flow');
   assert.equal(hasProvenIndefiniteRefresh(CLAUDE_CODE_SUBSCRIPTION_HARNESS), true);
 });
 
@@ -100,8 +97,8 @@ test('Claude Code variants need DIFFERENT login-status probes — corrected afte
   // The probe must not START with /status (a stray mention explaining why
   // it's avoided is fine — the comment text above legitimately says
   // "NOT /status"; what matters is the actual command isn't literally that).
-  assert.match(CLAUDE_CODE_SUBSCRIPTION_HARNESS.login_status_probe.command, /^cat ~\/\.claude\/\.credentials\.json/);
-  assert.match(CLAUDE_CODE_SUBSCRIPTION_HARNESS.login_status_probe.mode_field_hint, /claudeAiOauth/);
+  assert.equal(CLAUDE_CODE_SUBSCRIPTION_HARNESS.login_status_probe.command, 'claude auth status --json');
+  assert.deepEqual(CLAUDE_CODE_SUBSCRIPTION_HARNESS.login_status_probe.success, { loggedIn: true });
   assert.match(CLAUDE_CODE_API_KEY_HARNESS.login_status_probe.mode_field_hint, /SBX_CRED_ANTHROPIC_MODE/);
 });
 

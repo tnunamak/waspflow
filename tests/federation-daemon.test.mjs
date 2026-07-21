@@ -152,6 +152,32 @@ test('POST /contribute/start is idempotent and spawns the guided contribute verb
   });
 });
 
+test('daemon immediately exposes awaiting_browser for a host-url-flow and never downgrades it to manual auth', async () => {
+  await withDaemon(async ({ base, children, setConfig }) => {
+    setConfig({ coordinator_url: 'http://coordinator.example' });
+    await request(base, '/contribute/start', { method: 'POST', token: 'test-session-token' });
+    children[0].child.stdout.emit('data', Buffer.from(JSON.stringify({
+      schema_version: 1,
+      type: 'awaiting_browser',
+      status: 'awaiting_browser',
+      harness: 'claude-code-subscription',
+      url: 'https://claude.com/cai/oauth/authorize?state=abc',
+    }) + '\n'));
+    const waiting = statusBody(await request(base, '/status', { token: 'test-session-token' }));
+    assert.deepEqual(waiting.action, { kind: 'awaiting_browser', url: 'https://claude.com/cai/oauth/authorize?state=abc' });
+    assert.notEqual(waiting.action.kind, 'auth_required_manual');
+
+    children[0].child.stdout.emit('data', Buffer.from(JSON.stringify({
+      schema_version: 1,
+      type: 'contributed',
+      status: 'settled',
+      task_digest: 'a'.repeat(64),
+    }) + '\n'));
+    children[0].child.emit('close', 0);
+    assert.equal(statusBody(await request(base, '/status', { token: 'test-session-token' })).state, 'idle');
+  });
+});
+
 test('POST /join accepts an invite and shells out to the guided join verb', async () => {
   await withDaemon(async ({ base, children, setConfig }) => {
     const response = await request(base, '/join', {

@@ -175,7 +175,30 @@ async function main() {
   // it's unusable by any real caller in the current backend, a pre-existing
   // gap this routes around rather than silently papering over).
   const materializeSource = (scratchDir) => materializeSourceArtifact(sourceBytes, taskPayload.source.base_artifact.media_type, scratchDir);
-  const { collected, cleanupReceipt } = await runJob({ jobSpec, materializeSource });
+  const authorize = async (handle) => {
+    const { startAuthFlow, describeAuthRequirement } = await import('../lib/federation-auth-flow.mjs');
+    const requirement = describeAuthRequirement(harness);
+    if (!requirement.drivable) {
+      emitAuthEvent({ type: 'auth_required_manual', status: 'auth_required_manual', harness: harnessName, flow_shape: requirement.flow_shape, instruction: requirement.instruction });
+      throw new Error(requirement.instruction);
+    }
+    const auth = await startAuthFlow(harness, { sandboxId: handle.sandbox_id });
+    if (auth.url) {
+      emitAuthEvent({ type: 'awaiting_browser', status: 'awaiting_browser', harness: harnessName, url: auth.url });
+    }
+    const result = await auth.waitForCompletion();
+    if (result.status !== 'complete') throw new Error(`login failed: ${result.detail}`);
+  };
+  function emitAuthEvent(event) {
+    if (args['auth-events'] === 'json') {
+      process.stdout.write(`${JSON.stringify({ schema_version: 1, ...event })}\n`);
+    } else if (event.type === 'awaiting_browser') {
+      process.stderr.write(`Open this URL to finish logging in: ${event.url}\n`);
+    } else {
+      process.stderr.write(`${event.instruction}\n`);
+    }
+  }
+  const { collected, cleanupReceipt } = await runJob({ jobSpec, materializeSource, authorize });
   process.stderr.write(`run complete; collected ${collected.length} declared output(s); destroy removed=${cleanupReceipt.removed}\n`);
   if (collected.length === 0) fail('run produced no collected output — nothing to submit as a candidate artifact');
 

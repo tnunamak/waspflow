@@ -17,7 +17,7 @@ const base = (overrides = {}) => ({
     url_prompt_pattern: 'Open this URL to sign in',
   },
   oauth_refresh: { supports_refresh: true, refresh_owner: 'docker-builtin', evidence: 'docker/sbx-releases#300' },
-  login_status_probe: { command: 'codex login status', reports_auth_mode: true, mode_field_hint: 'auth_mode' },
+  login_status_probe: { command: 'codex login status', reports_auth_mode: true, mode_field_hint: 'auth_mode', success: { loggedIn: true } },
   cancellation: { cancel_signal: 'sbx stop', on_cancel: 'sandbox stopped, process killed' },
   result_behavior: { result_transport: 'stdout' },
   ...overrides,
