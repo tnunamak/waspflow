@@ -117,7 +117,7 @@ Verbs:
   reap    <lane|--status S,...> [--force] [--keep-worktree] [--no-archive]  clean up
   check   [--cwd DIR] [--config FILE] [--no-fail] [--explain] project integrity gate
   doctor                                check deps + backends
-  federation <join|contribute|submit|status|trust> ...   guided Federation Preview CLI (see below)
+  federation <join|contribute|submit|status|trust|daemon|ui> ...   guided Federation Preview CLI (see below)
 
 Federation Preview (pool spare subscription capacity across a trusted collective):
   federation join <coordinator-url> <invite-token>   one-time: auto keypair + save config
@@ -125,6 +125,8 @@ Federation Preview (pool spare subscription capacity across a trusted collective
   federation submit --display-id ID --source DIR (--prompt TEXT|--prompt-file F) [--output-dir DIR]
   federation status [--task-digest D]                local config / task status
   federation trust <key-id> <pubkey-pem-or-@file>    trust a peer's public key for signature re-verification
+  federation daemon [--port N]                       run the local Federation web-UI daemon
+  federation ui                                      open the local Federation web UI (starts daemon if needed)
   # Advanced/flagged power-user CLIs (unchanged): bin/waspflow-federation-{coordinator,submit,pull}
 
 Operating points (not cheap/default/max profiles):

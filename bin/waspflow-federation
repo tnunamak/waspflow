@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Guided Federation v0 CLI: `waspflow federation {join,contribute,submit,status}`.
+ * Guided Federation v0 CLI: `waspflow federation {join,contribute,submit,status,daemon,ui}`.
  *
  * This is the CONSUMABLE layer the owner asked for on top of the proven,
  * already-shipped federation loop (bin/waspflow-federation-{coordinator,
@@ -552,8 +552,18 @@ async function main() {
     case 'submit': return cmdSubmit(rest);
     case 'status': return cmdStatus(rest);
     case 'trust': return cmdTrust(rest);
+    case 'daemon': {
+      const { runDaemon } = await import('../lib/federation-daemon.mjs');
+      return runDaemon(rest);
+    }
+    case 'ui': {
+      const { openFederationUi } = await import('../lib/federation-daemon.mjs');
+      const url = await openFederationUi();
+      process.stdout.write(`${url}\n`);
+      return;
+    }
     default:
-      process.stderr.write(`usage: waspflow federation <join|contribute|submit|status|trust> ...\n`);
+      process.stderr.write(`usage: waspflow federation <join|contribute|submit|status|trust|daemon|ui> ...\n`);
       process.exit(verb ? 1 : 0);
   }
 }
