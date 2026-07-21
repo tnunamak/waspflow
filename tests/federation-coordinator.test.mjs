@@ -409,3 +409,64 @@ test('GET /tasks/next never returns a SETTLED task', async () => {
     assert.deepEqual(await res.json(), { task_digest: null });
   });
 });
+
+// --- GET /roster: read-only public-key directory (owner decision, 2026-07-21) -----
+//
+// Lets a collective member auto-populate their local roster cache (waspflow
+// federation join/contribute/submit) instead of hand-relaying/pasting every
+// peer's public key via `waspflow federation trust`. Read-only: this suite
+// never exercises (and the coordinator never implements) any way to write
+// to the roster over the network — see this file's own withServer roster
+// param and lib/federation-coordinator.mjs's top-of-file doc.
+
+async function roster(base, headers = authed()) {
+  return fetch(`${base}/roster`, { headers });
+}
+
+test('GET /roster returns every registered member\'s key_id and public key, nothing else', async () => {
+  await withServer(async ({ base }) => {
+    const res = await roster(base);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.roster.length, 2);
+    const byKeyId = Object.fromEntries(body.roster.map((entry) => [entry.key_id, entry.public_key_pem]));
+    assert.equal(byKeyId[AUTHOR_KEY_ID], authorPublicKey);
+    assert.equal(byKeyId[EXECUTOR_KEY_ID], executorPublicKey);
+    // Never leaks a private key or any other roster-adjacent secret — the
+    // response shape is exactly {key_id, public_key_pem} per entry.
+    for (const entry of body.roster) {
+      assert.deepEqual(Object.keys(entry).sort(), ['key_id', 'public_key_pem']);
+    }
+  });
+});
+
+test('GET /roster requires the bearer token — a discovery surface across the whole roster, same gate as GET /tasks/next', async () => {
+  await withServer(async ({ base }) => {
+    const noToken = await fetch(`${base}/roster`);
+    assert.equal(noToken.status, 401);
+    const wrongToken = await roster(base, authed('wrong-token'));
+    assert.equal(wrongToken.status, 401);
+  });
+});
+
+test('GET /roster reflects a hot-reloaded roster file — adding a member makes them visible without a restart', async () => {
+  // Mirrors the coordinator bin's own roster hot-reload (watchRosterFile):
+  // this test exercises the same Map instance a hot-reload would mutate in
+  // place, proving GET /roster reads deps.roster live rather than a snapshot
+  // taken at server-start time.
+  const dataDir = await mkdtemp(join(tmpdir(), 'federation-coordinator-'));
+  const liveRoster = new Map([[AUTHOR_KEY_ID, authorPublicKey]]);
+  const server = await startCoordinator({ dataDir, token: TOKEN, roster: liveRoster, port: 0 });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const before = await (await roster(base)).json();
+    assert.equal(before.roster.length, 1);
+
+    liveRoster.set(EXECUTOR_KEY_ID, executorPublicKey);
+
+    const after = await (await roster(base)).json();
+    assert.equal(after.roster.length, 2);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

@@ -117,6 +117,15 @@ Verbs:
   reap    <lane|--status S,...> [--force] [--keep-worktree] [--no-archive]  clean up
   check   [--cwd DIR] [--config FILE] [--no-fail] [--explain] project integrity gate
   doctor                                check deps + backends
+  federation <join|contribute|submit|status|trust> ...   guided Federation Preview CLI (see below)
+
+Federation Preview (pool spare subscription capacity across a trusted collective):
+  federation join <coordinator-url> <invite-token>   one-time: auto keypair + save config
+  federation contribute [--task-digest D] [--harness H]   pull + run a task sandboxed (default flow)
+  federation submit --display-id ID --source DIR (--prompt TEXT|--prompt-file F) [--output-dir DIR]
+  federation status [--task-digest D]                local config / task status
+  federation trust <key-id> <pubkey-pem-or-@file>    trust a peer's public key for signature re-verification
+  # Advanced/flagged power-user CLIs (unchanged): bin/waspflow-federation-{coordinator,submit,pull}
 
 Operating points (not cheap/default/max profiles):
   waspflow ops list --task implementation
@@ -1501,6 +1510,17 @@ _reap_one_locked() {
   return 0
 }
 
+# Guided Federation v0 CLI: `waspflow federation {join,contribute,submit,status,trust}`.
+# A thin passthrough to bin/waspflow-federation (Node) — see that file's own
+# module doc for why: every verb there either calls straight into the
+# existing federation libs or shells out to the existing, already-tested
+# bin/waspflow-federation-{submit,pull} bins, so this dispatcher deliberately
+# adds no logic of its own beyond finding node and the sibling script.
+cmd_federation() {
+  require_cmd node
+  node "$WASPFLOW_BIN_DIR/waspflow-federation" "$@"
+}
+
 cmd_doctor() {
   echo "waspflow doctor"
   echo "  WASPFLOW_HOME = $WASPFLOW_HOME"
@@ -1603,6 +1623,7 @@ main() {
     reap)   cmd_reap "$@" ;;
     check)  cmd_check "$@" ;;
     doctor) cmd_doctor "$@" ;;
+    federation) cmd_federation "$@" ;;
     -h|--help|help|"") usage ;;
     *) die "unknown command '$verb' (try: waspflow help)" ;;
   esac
