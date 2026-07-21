@@ -62,7 +62,7 @@ function identityCommandStub({ daemonReady = true, policyReady = true, dockerLog
     if (command === 'test') return result();
     throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
   };
-  return { calls, runCommand };
+  return { calls, runCommand, state };
 }
 
 test('preflight classifies a fully ready Ubuntu sbx installation', () => {
@@ -70,6 +70,24 @@ test('preflight classifies a fully ready Ubuntu sbx installation', () => {
   assert.equal(Object.keys(checks).length, 6);
   assert.ok(Object.values(checks).every((item) => item.ok));
   assert.ok(Object.values(checks).every((item) => typeof item.detail === 'string' && typeof item.fix === 'string'));
+});
+
+test('every preflight detail is one plain sentence while raw command output stays in diagnostics', () => {
+  const hostile = '\u001b[32m✓\u001b[0m Daemon healthy\n╰─ detailed terminal output';
+  const linux = Object.values(byName(healthyInputs({ diagnose: result({ stdout: hostile }) })));
+  const windows = Object.values(byName(healthyInputs({
+    platformName: 'win32',
+    version: result({ stdout: hostile }),
+    hypervisorPlatform: result({ stdout: hostile }),
+    diagnose: result({ stdout: hostile }),
+  })));
+  for (const item of [...linux, ...windows]) {
+    assert.doesNotMatch(item.detail, /[\r\n\x1b\u2500-\u257f]/, `${item.name} detail leaked terminal formatting`);
+    assert.equal(item.detail.split(/[.!?]/).filter(Boolean).length, 1, `${item.name} detail must be one sentence`);
+    assert.equal(typeof item.diagnostics, 'string');
+  }
+  assert.match(linux.find((item) => item.name === 'docker_login').diagnostics, /Daemon healthy/);
+  assert.match(windows.find((item) => item.name === 'sbx_install').diagnostics, /\x1b\[32m/);
 });
 
 test('preflight rejects a bare sbx binary that was not installed as docker-sbx', () => {
@@ -126,6 +144,19 @@ test('probeCapabilities leaves Docker login as the only manual preflight failure
   assert.deepEqual(report.preflight.checks.filter((item) => !item.ok).map((item) => item.name), ['docker_login']);
   assert.deepEqual(report.identity_repairs, []);
   assert.equal(stub.calls.some((call) => call.args[0] === 'daemon' || (call.args[0] === 'policy' && call.args[1] === 'init')), false);
+});
+
+test('after Docker sign-in is confirmed, the existing daemon and policy repairs lead directly to a ready contribution preflight', async () => {
+  const stub = identityCommandStub({ daemonReady: false, policyReady: false, dockerLogin: false });
+  const blocked = await new DockerSbxBackend().probeCapabilities({ runCommand: stub.runCommand, platformName: 'linux' });
+  assert.equal(blocked.available, false);
+  assert.deepEqual(blocked.identity_repairs.map((item) => item.name), ['sbx_daemon', 'network_policy']);
+  assert.deepEqual(blocked.preflight.checks.filter((item) => !item.ok).map((item) => item.name), ['docker_login']);
+
+  stub.state.dockerLogin = true;
+  const ready = await new DockerSbxBackend().probeCapabilities({ runCommand: stub.runCommand, platformName: 'linux' });
+  assert.equal(ready.available, true);
+  assert.equal(ready.preflight.ok, true);
 });
 
 test('preflight rejects the exact KVM permission diagnostic', () => {

@@ -33,7 +33,7 @@ function request(base, path, { method = 'GET', token, host, body } = {}) {
   });
 }
 
-async function withDaemon(fn) {
+async function withDaemon(fn, options = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'wf-federation-daemon-'));
   let config = null;
   const children = [];
@@ -56,6 +56,7 @@ async function withDaemon(fn) {
         headers: { 'content-type': 'application/json' },
       });
     },
+    startDockerLogin: options.startDockerLogin,
   });
   const base = `http://127.0.0.1:${daemon.info.port}`;
   try {
@@ -231,18 +232,47 @@ test('GET /status exposes every daemon state and auth handoff payloads', async (
     assert.equal(setupRequired.action.kind, 'sandbox_preflight');
     assert.deepEqual(setupRequired.action.checks, [{ name: 'network_policy', ok: false, detail: 'global network policy has not been initialized.', fix: 'sbx policy init balanced' }]);
 
-    await request(base, '/contribute/start', { method: 'POST', token });
-    children[4].child.stdout.emit('data', Buffer.from(JSON.stringify({
+  });
+});
+
+test('Docker device sign-in becomes an awaiting_browser action with its code, then automatically resumes contribution', async () => {
+  let completeLogin;
+  const loginDone = new Promise((resolve) => { completeLogin = resolve; });
+  await withDaemon(async ({ base, children, setConfig }) => {
+    setConfig({ coordinator_url: 'http://coordinator.example' });
+    await request(base, '/contribute/start', { method: 'POST', token: 'test-session-token' });
+    children[0].child.stdout.emit('data', Buffer.from(JSON.stringify({
       schema_version: 1,
       type: 'sandbox_preflight',
       status: 'setup_required',
       backend_id: 'docker-sbx',
-      checks: [{ name: 'docker_login', ok: false, detail: 'not authenticated', fix: 'sbx login' }],
+      checks: [{ name: 'docker_login', ok: false, detail: "The sandbox service isn't signed in to Docker yet.", fix: 'sbx login' }],
     }) + '\n'));
-    children[4].child.emit('close', 1);
-    const dockerLogin = statusBody(await request(base, '/status', { token }));
-    assert.equal(dockerLogin.state, 'action_needed');
-    assert.deepEqual(dockerLogin.action, { kind: 'docker_login', url: 'https://app.docker.com/' });
+    children[0].child.emit('close', 1);
+
+    await waitFor(async () => statusBody(await request(base, '/status', { token: 'test-session-token' })).action?.code === 'XQZN-BWCH');
+    const awaitingBrowser = statusBody(await request(base, '/status', { token: 'test-session-token' }));
+    assert.deepEqual(awaitingBrowser.action, {
+      kind: 'awaiting_browser',
+      url: 'https://login.docker.com/activate?user_code=XQZN-BWCH',
+      code: 'XQZN-BWCH',
+    });
+
+    completeLogin({ status: 'complete' });
+    await waitFor(() => children.length === 2);
+    assert.deepEqual(children[1].args[1], ['/real/path/to/bin/waspflow-federation', 'contribute', '--json']);
+    children[1].child.stdout.emit('data', Buffer.from(JSON.stringify({
+      schema_version: 1, type: 'contributed', status: 'settled', task_digest: 'a'.repeat(64),
+    }) + '\n'));
+    children[1].child.emit('close', 0);
+    assert.equal(statusBody(await request(base, '/status', { token: 'test-session-token' })).state, 'idle');
+  }, {
+    startDockerLogin: async () => ({
+      url: 'https://login.docker.com/activate?user_code=XQZN-BWCH',
+      code: 'XQZN-BWCH',
+      cancel: () => {},
+      waitForCompletion: () => loginDone,
+    }),
   });
 });
 

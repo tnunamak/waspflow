@@ -207,12 +207,12 @@ function createApplication(root) {
       ));
     } else if (view.name === 'action') {
       const browserAction = view.action.kind === 'awaiting_browser';
-      const dockerLogin = view.action.kind === 'docker_login';
       content.push(element('section', { className: 'card' },
         element('p', { className: 'eyebrow', text: 'Action needed' }),
-        element('h2', { text: browserAction || dockerLogin ? 'Sign in to continue' : 'One-time sign-in step' }),
-        element('p', { text: browserAction ? 'Finish signing in in the browser window. This page will update automatically when it is done.' : dockerLogin ? 'Federation uses its own isolated Docker Sandbox identity. Sign it in, then select Start contributing again.' : 'Your agent needs one manual sign-in step. This is needed because the sign-in happens inside the agent, not in Waspflow.' }),
-        browserAction || dockerLogin ? element('div', { className: 'actions' }, button(dockerLogin ? 'Open Docker sign-in' : 'Open sign-in', () => window.open(view.action.url, '_blank', 'noopener'))) : instructions(view.action.instruction),
+        element('h2', { text: browserAction ? 'Sign in to continue' : 'One-time sign-in step' }),
+        element('p', { text: browserAction ? 'Finish signing in in the browser window. This page will update automatically when it is done.' : 'Your agent needs one manual sign-in step. This is needed because the sign-in happens inside the agent, not in Waspflow.' }),
+        browserAction ? element('div', { className: 'actions' }, button(view.action.code ? 'Sign in to Docker' : 'Open sign-in', () => window.open(view.action.url, '_blank', 'noopener'))) : instructions(view.action.instruction),
+        view.action.code ? element('p', { className: 'detail', text: `Confirmation code: ${view.action.code}` }) : null,
         element('p', { className: 'detail', text: latestStatus?.detail || '' }),
       ));
     } else if (view.name === 'setup') {
