@@ -102,10 +102,33 @@ function instructions(text) {
   return element('ol', { className: 'manual-steps' }, ...lines.map((line) => element('li', { text: line.replace(/^\s*\d+[.)]\s*/, '') })));
 }
 
+function taskChoices(tasks, contribute) {
+  const choices = Array.isArray(tasks) ? tasks : [];
+  const list = choices.length === 0
+    ? element('p', { className: 'muted', text: 'There are no tasks available right now.' })
+    : element('ul', { className: 'task-list', 'aria-label': 'Available tasks' }, ...choices.map((task) => {
+      const description = typeof task.description === 'string' && task.description.trim() ? task.description : null;
+      return element('li', { className: 'task-choice' },
+        element('div', {},
+          element('strong', { text: task.display_id || 'Task' }),
+          description ? element('p', { className: 'muted', text: description }) : null,
+        ),
+        button('Contribute this', () => contribute(task.task_digest), 'secondary'),
+      );
+    }));
+  return element('section', { className: 'card' },
+    element('h2', { text: 'Choose a task' }),
+    element('p', { text: 'Pick something that suits you, or let Waspflow choose the next available task.' }),
+    element('div', { className: 'actions' }, button('Contribute next available', () => contribute())),
+    list,
+  );
+}
+
 function createApplication(root) {
   const token = new URLSearchParams(window.location.search).get('token');
   let latestStatus = null;
   let latestTask = null;
+  let availableTasks = [];
   let pollBusy = false;
   let message = '';
   let lastRenderSignature = null;
@@ -139,6 +162,7 @@ function createApplication(root) {
       latestStatus = await request('/status');
       const digest = latestStatus.submission?.task_digest;
       if (digest) latestTask = await request(`/submit/status?task_digest=${encodeURIComponent(digest)}`);
+      availableTasks = latestStatus.state === 'idle' ? await request('/tasks') : [];
       message = '';
     } catch (error) {
       message = error.message === 'Failed to fetch' ? 'Waspflow is not running. Open Federation again from Waspflow.' : error.message;
@@ -180,6 +204,9 @@ function createApplication(root) {
         latestStatus?.coordinator_url ? element('p', {}, element('span', { className: 'badge', text: 'Coordinator: trusted' }), document.createTextNode(` ${latestStatus.coordinator_url}`)) : null,
         element('div', { className: 'actions' }, button(pause ? 'Pause contributing' : 'Start contributing', () => control(pause ? '/contribute/stop' : '/contribute/start'))),
       ));
+      if (latestStatus?.state === 'idle') {
+        content.push(taskChoices(availableTasks, (taskDigest) => control('/contribute/start', taskDigest ? { task_digest: taskDigest } : undefined)));
+      }
     }
     if (latestStatus && latestStatus.state !== 'not_joined') {
       content.push(safetyPanel(latestStatus, openState));
@@ -197,7 +224,9 @@ function createApplication(root) {
       state: latestStatus?.state || null,
       detail: latestStatus?.detail || null,
       coordinator: latestStatus?.coordinator_url || null,
+      contribution: latestStatus?.contribution || null,
       task: latestTask?.status || null,
+      availableTasks,
       message,
     });
     if (signature === lastRenderSignature) return;

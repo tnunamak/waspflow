@@ -9,6 +9,14 @@ test('web UI document loads its browser module', async () => {
   assert.match(index, /app\.src = `\/app\.mjs\?token=/);
 });
 
+test('idle contributor UI offers both task choice and the one-click next-task path', async () => {
+  const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
+  assert.match(app, /Choose a task/);
+  assert.match(app, /Contribute this/);
+  assert.match(app, /Contribute next available/);
+  assert.match(app, /request\('\/tasks'\)/);
+});
+
 test('web UI maps daemon states to the join, status, and auth views', () => {
   assert.deepEqual(viewForStatus({ state: 'not_joined' }), { name: 'join' });
   assert.deepEqual(viewForStatus({ state: 'contributing' }), { name: 'status', title: 'Contributing', control: 'pause' });
