@@ -1,19 +1,34 @@
 # Federation v0 UAT report — Docker Sandboxes backend
 
-**Date:** 2026-07-20
-**Branch:** `waspflow/fedv0-docker-backend` (child of `feat/federation-v0`)
-**Source of truth:** `inbox/2026-07-20-chatgpt-sandbox.md` (the "Runtime Decision" note)
-**Verdict:** **Federation Preview, mechanism-complete, install UX complete, auth UX live-verified
-end-to-end for all three harnesses (fully autonomous, unattended, real `sbx`), graduation gates B/C/E/F/G
-now REPRODUCED against real sbx (2 real containment observations, 5 honest FAILs — see below —
-none silently fixed into a PASS).** Merge-ready as a gated preview backend. **This machine's
-current local `sbx` policy is genuinely permissive ("allow all hosts"), not deny-all — gate B
-FAILs for real; this is a host-configuration fact, not a code bug, and needs an owner decision
-before any stranger-submitted (or even friends-and-family) job runs against this policy.** **Owner
-decision needed:** Claude Code has two selectable auth strategies with a real billing tradeoff —
-see "Claude Code auth" below. Live-gate proof commands are documented in "Owner handoff" for
-anything this session could not run to completion (gates A, D, F's bomb fixtures, and the ~1h
-refresh-window follow-up).
+**Date:** 2026-07-20 (updated 2026-07-21 — full federated loop)
+**Branch:** `waspflow/fedv0-docker-backend` (child of `feat/federation-v0`); full-loop work on
+`waspflow/fedv0-full-loop` (stacked child of `fedv0-docker-backend`)
+**Source of truth:** `inbox/2026-07-20-chatgpt-sandbox.md` (the "Runtime Decision" note) for the
+Docker Sandboxes backend; `docs/design/FEDERATION_DESIGN_V2.md` §B.5.2 for the coordinator state
+machine shape (settlement/escrow economics explicitly excluded from this build — see below).
+**Verdict:** **The full federation loop now runs for real, not just the sandbox mechanism.** Tim
+submits a task, Ocean's client pulls and runs it sandboxed against her subscription, Tim receives
+the result branch — proven end-to-end this session with real infrastructure: a real coordinator
+process, two genuinely distinct ed25519 keypairs (author vs executor), real signed envelopes, real
+content-addressed artifact transport, a real Claude Code subscription-authenticated task run
+through the already-proven `DockerSbxBackend`, independent signature re-verification on BOTH ends
+(the executor re-verifies the task it claims; the requester re-verifies the result it downloads),
+and a real settled result materialized back to disk with byte-identical content. See "Federation
+full loop (2026-07-21)" below for the complete build/verify record and "User guide" for how to run
+it yourself. **Settlement/escrow/ledger economics are explicitly out of scope for this build** — a
+task reaching `SETTLED` means "a validly signed, correctly-bound result was recorded," nothing
+economic; see `FEDERATION_DESIGN_V2.md` §B.5.3/B.5.4 for what a future build would still need.
+Docker Sandboxes backend status (2026-07-20, unchanged by this update): mechanism-complete, install
+UX complete, auth UX live-verified end-to-end for all three original harnesses, graduation gates
+B/C/E/F/G REPRODUCED against real sbx (2 real containment observations, 5 honest FAILs, none
+silently fixed into a PASS). **This machine's current local `sbx` policy is genuinely permissive
+("allow all hosts"), not deny-all — gate B FAILs for real; the isolated Federation-owned identity
+(`~/.waspflow/sbx-home`) was separately initialized to deny-all with scoped allow rules for the
+three harnesses' provider domains only** — see "Federation full loop" below for that decision.
+**Owner decisions needed:** (1) Claude Code has two selectable auth strategies with a real billing
+tradeoff — see "Claude Code auth" below; (2) this machine's PERSONAL sbx policy (distinct from the
+Federation-owned identity) is still permissive — gate B; (3) settlement/escrow is deferred by
+design, not forgotten — a production collective needs it before real value changes hands.
 
 ## Owner UAT findings and fixes (2026-07-20, real sbx v0.35.0)
 
@@ -800,8 +815,9 @@ Per the decision note's constraints, this work does **not** claim:
   config.** The `HOME`-override mechanism is real, exercised code, but whether it produces true
   daemon-state/policy/credential separation on a real `sbx` install is exactly graduation gate A,
   unverified here.
-- **That `sbx exec`/`sbx cp` invocations are syntactically correct.** Two CLI surfaces are marked
-  unverified in-code and must be confirmed against a real `sbx --help` before any job can run.
+- ~~That `sbx exec`/`sbx cp` invocations are syntactically correct.~~ **RESOLVED (2026-07-21):**
+  both were fixed and proven against a real sbx install, including a real, absolute-path bug in
+  `sbx cp` found only by running a real end-to-end task — see "Federation full loop" below.
 - **That Docker's native OAuth/credential proxy has been proven to keep Codex/Claude tokens out of
   the guest.** `scripts/federation-harness-auth-proof-live-run.sh`'s six-column proof is real,
   HarnessSpec-driven, runnable code for all three harnesses that has not been executed against a
@@ -822,14 +838,201 @@ Per the decision note's constraints, this work does **not** claim:
   with a refreshing credential. It proves the documented kit mechanism works for a **static**
   credential; a harness needing `host-auth-adapter-required` remains unsupported until a
   purpose-built adapter exists.
-- **That subscription pooling works for Gemini the way it does for Codex/Claude.** Explicitly not
-  assumed — Gemini's Docker auth path is API-key/proxy-managed, tracked as a separate deferred
-  spike.
+- **That subscription pooling works for Gemini the way it does for Codex/Claude.** Confirmed, not
+  merely assumed (2026-07-21): Gemini's Docker auth path is `docker-stored-secret` (a static,
+  usage-billed API key), NOT `docker-native-oauth` — `sbx secret set --oauth` is hard-coded
+  openai-only, same limitation already found for Anthropic. `lib/providers/gemini.sh` and
+  `GEMINI_HARNESS` are both built and unit-tested, but neither has run a real task to completion:
+  this machine's linked Google account is rejected outright by gemini-cli 0.50.0/0.51.0
+  (`IneligibleTierError`, a server-side account-tier check unrelated to sbx or Waspflow).
 - **That `lib/federation-auth-flow.mjs`'s `startAuthFlow()` has been proven against the real Codex
   OAuth flow end-to-end.** It was unit-tested exclusively against stub `sbx` binaries. This session
   DID observe the real flow's actual output shape once (to write `url_prompt_pattern` correctly
   rather than guess it) — see the incident note in "Auth UX reframe" — but that was a manual probe
   of the real command's behavior, not an automated, repeatable test of the wrapper driving it.
+
+## Federation full loop (2026-07-21)
+
+**Full-ship directive:** build the missing "federated" half so a real user can submit a task, have
+it run on someone else's machine, and get the result back — not just prove the sandbox mechanism
+in isolation. Built on branch `waspflow/fedv0-full-loop` (stacked child of
+`fedv0-docker-backend`), owned end-to-end by this session per the same autonomous-fix-loop
+directive as the Docker Sandboxes UAT above: run real proof scripts, diagnose and fix real CLI/
+mechanism bugs without stopping to ask, and only surface for containment results, product/security
+decisions, or true blockers.
+
+### What was built
+
+| Slice | Component | Status |
+| --- | --- | --- |
+| 1. Gemini provider adapter | `lib/providers/gemini.sh` | Built, unit-tested, registered in `WASPFLOW_PROVIDERS`/`lib/billing.sh`. E2E-unverified — this machine's Google account is rejected by gemini-cli 0.50.0/0.51.0 (`IneligibleTierError`, account-tier, not a Waspflow or sbx issue). Real flag shapes (`--session-id`, `-o json`, `--approval-mode yolo`, `--skip-trust`) and the `~/.gemini/tmp/<cwd-basename>/chats/session-*.jsonl` transcript layout were all confirmed against the real, installed CLI before the account-tier wall was hit. |
+| 2. Coordinator service | `lib/federation-coordinator.mjs`, `bin/waspflow-federation-coordinator` | Built and tested. HTTP service implementing `PUBLISHED->QUEUED->CLAIMED->SUBMITTED->EVALUATING->SETTLED` (per `FEDERATION_DESIGN_V2.md` §B.5.2) over the pre-existing signed envelope contract. Settlement/escrow/ledger economics explicitly deferred — `SETTLED` means "a validly signed, correctly-bound result was recorded," nothing economic. Multi-member signer roster (key_id -> publicKeyPem), not a single shared key — a real gap found and fixed before merge (see below). Artifact transport (`PUT`/`GET /artifacts/:digest`, content-addressed, digest-verified) added during slice 3. |
+| 3. Requester CLI | `lib/federation-submit.mjs`, `bin/waspflow-federation-submit` | Built and tested. Packages a local source dir (`git archive HEAD` when possible) and prompt text into digest-addressed artifacts, signs a v0 task envelope, uploads, publishes, polls for settlement, materializes the candidate result with independent signature re-verification. |
+| 4. Executor CLI | `lib/federation-pull-internals.mjs`, `bin/waspflow-federation-pull` | Built and tested. Claims a task, independently re-verifies its signature before running any of its content, fetches artifacts, runs a real task through the already-proven `DockerSbxBackend`, submits a signed result. Defaults to `CLAUDE_CODE_SUBSCRIPTION_HARNESS` ("her subscription"), `--harness`-overridable. |
+| 5. Gemini as a federated harness | `GEMINI_HARNESS` in `lib/federation-harnesses.mjs` | Built, unit-tested, and live-verified THROUGH the real `DockerSbxBackend` mechanism up to the same account-tier wall as slice 1 — real sandbox creation, real credential injection (`SBX_CRED_GOOGLE_MODE=apikey`), real, correctly-enforced network-policy rejection of an ungranted domain. |
+| 6. End-to-end wiring | (integration, no new files) | **Proven live, real infrastructure, this session** — see below. |
+
+### Real bugs found and fixed this round (each independently reproduced, not assumed from a report)
+
+1. **Coordinator: single shared key could not distinguish author from executor.** The first cut of
+   `lib/federation-coordinator.mjs` verified every envelope against one `publicKeyPem` — meaning it
+   could only ever recognize ONE signer identity, when the whole point of this slice is that Tim
+   (author) and Ocean (executor) have DIFFERENT keys. Caught in review before merge (not by the
+   agent's own tests, which — tellingly — signed every fixture with the same keypair). Fixed with a
+   `key_id -> publicKeyPem` roster resolved from the envelope's own claimed `signature.key_id`
+   *before* calling `verifyEnvelope`, so a signature is checked against exactly the key its claimed
+   identity owns, never "does it match any registered key." Re-tested with three genuinely distinct
+   keypairs (author, executor, an unregistered "stranger") proving both roster-gating and
+   exact-key resolution.
+2. **`DockerSbxBackend` (the ALREADY-PROVEN Docker Sandboxes mechanism from the earlier UAT round)
+   still had the exact `sbx run` argument-order bug and entrypoint-not-driven bug that round had
+   already fixed elsewhere** — this file was never touched by that fix loop. Caught by reading the
+   code before handing the executor slice a foundation to build on, not discovered by accident.
+   Fixed (`prepare()`: agent before path, `--detached`; `start()`: entrypoint driven via `sbx exec
+   SANDBOX -- sh -c ENTRYPOINT` so a multi-word HarnessSpec command string is actually parsed, not
+   treated as one literal argv token) and PROVEN with a real prepare->start->destroy smoke cycle
+   against a fresh, deny-all-policy sbx identity before any slice built on top of it.
+3. **`sbx cp` requires an ABSOLUTE guest path — found only by running a real end-to-end task.**
+   `_copyIn`/`collectDeclaredOutputs` built remote paths as `<sandbox>:<relative-dest>`; real sbx
+   rejects this outright ("container path must be absolute (use SANDBOX:/path)"). The guest's
+   absolute workspace mirrors `handle.scratch_dir` (confirmed live: `sbx exec <sandbox> -- pwd`
+   inside a freshly-created sandbox returns the exact host scratch_dir path) — both copy directions
+   now resolve a declared relative path against `scratch_dir` first. This bug was invisible to
+   every stub-based unit test (none of them exercise a real `sbx cp`); only the executor slice's
+   live-sbx integration test surfaced it, which is exactly why that test exists.
+4. **This machine's isolated Federation sbx identity (`~/.waspflow/sbx-home`) needed real,
+   scoped network-policy allow rules to complete a live task, not just create a sandbox.** Its
+   deny-all policy (initialized during the earlier UAT round) correctly blocked
+   `api.anthropic.com` — a real containment behavior working as intended, not a bug. Added scoped
+   `sbx policy allow network` rules for exactly the three harnesses' `provider_domains` (Anthropic,
+   OpenAI/ChatGPT, Google) — an explicit owner decision (asked and confirmed mid-session), keeping
+   deny-all as the base posture rather than reverting to allow-all.
+5. **Requester never independently re-verified the result envelope it was about to extract to
+   disk.** `materializeCandidate()` originally only checked the result payload's SCHEMA
+   (`validatePayload`), never its SIGNATURE — meaning `waspflow-federation-submit --output-dir`
+   would `tar -xf` whatever bytes the coordinator claimed were the settled result, trusting the
+   coordinator rather than independently confirming a specific, roster-registered executor key
+   actually signed them. This is the same class of gap the executor slice's own re-verification of
+   the TASK envelope was built to avoid, just on the other end of the loop. Fixed with an optional
+   `--roster-file` on the requester CLI (mirroring the executor's own flag) that independently
+   verifies `result_envelope`'s signature against the claimed `key_id` before extraction; 3 new
+   tests prove correct extraction, a missing-key rejection, and a wrong-key-for-the-claimed-id
+   rejection (not just "some signature checked out").
+
+### Live end-to-end proof (real infrastructure, this session, 2026-07-21)
+
+Ran the actual "Tim submits, Ocean pulls, Ocean runs it against her subscription, Tim gets the
+result" loop with nothing simulated or stubbed:
+
+1. Generated two genuinely distinct ed25519 keypairs (`tim-author`, `ocean-executor`) and a roster
+   file — not reused from any test fixture.
+2. Started a real `bin/waspflow-federation-coordinator` process (`node:http`, real port, real
+   on-disk task/artifact storage).
+3. `bin/waspflow-federation-submit` packaged a real git repo via `git archive HEAD`, signed a real
+   task envelope with `tim-author`'s key, uploaded the artifacts, published, and correctly reported
+   `status=queued` while polling (no executor had claimed it yet — proves the publish half works
+   independent of any executor being present).
+4. `bin/waspflow-federation-pull` claimed the task with `ocean-executor`'s key, **independently
+   re-verified `tim-author`'s signature on the claimed task envelope**, fetched both artifacts,
+   built a `ValidatedJobSpec`, and ran it through the real `DockerSbxBackend` — a real, disposable
+   sbx sandbox, real Claude Code subscription auth (via the isolated Federation identity's global
+   `sbx secret set -g anthropic --oauth`, the same host-persistent credential proven earlier),
+   `image=claude`. The run completed, `destroy()` independently confirmed removal, and the executor
+   signed and submitted a result envelope. Coordinator responded `status: "settled"`.
+5. Polled from the REQUESTER side again (a fresh, independent client call, not reusing state from
+   step 4) — confirmed `status: "SETTLED"` with the executor's signed result envelope attached.
+6. Materialized the candidate **with `--roster-file`/independent signature re-verification
+   enabled** — confirmed the extraction only proceeds because `ocean-executor`'s registered public
+   key actually verifies the signature on the settled result, not merely because the coordinator
+   said so.
+7. Confirmed the extracted result tree contains the exact source file (`README.md`) that was in
+   Tim's original repo, round-tripped through the entire federated loop: published, claimed,
+   materialized into a real sandbox, tarred by the executor, submitted, downloaded and re-extracted
+   by the requester.
+8. Confirmed clean teardown: no leaked sandboxes on either the personal or Federation-owned sbx
+   identity (`sbx ls` on both, verified after the run), coordinator process killed, temp
+   directories removed.
+
+This is the strongest evidence class in this report: not a unit test against a stub, not a design
+document, but a real multi-process, real-crypto, real-sandboxed run of the exact scenario the
+owner described, replayed by hand and independently confirmed rather than trusted from an agent's
+report.
+
+### What this does NOT prove
+
+- **No settlement/economics.** `SETTLED` here carries no value transfer, fee, escrow, or
+  attempt-compensation — see `FEDERATION_DESIGN_V2.md` §B.5.3/§B.5.4 for what a real collective
+  economy would still need. Building it was explicitly out of scope for this round.
+- **No task discovery/listing.** The executor must be told a task's digest out-of-band (by the
+  requester, over whatever channel the collective already uses to coordinate). There is no "list
+  available tasks" endpoint — a real, honest v0 limitation, not an oversight.
+- **No multi-task/daemon mode.** `waspflow-federation-pull` is one-shot: claim one task, run it,
+  submit, exit. A background poller that claims whatever's queued is future work (the brief's own
+  "(or a daemon)" parenthetical).
+- **No cross-machine network proof.** This session's live E2E test ran the coordinator and the
+  "requester"/"executor" CLIs on the SAME machine (against `127.0.0.1`), because that's what this
+  environment allows. The coordinator is a normal HTTP service with no localhost-specific logic —
+  nothing in its design assumes same-host clients — but an owner running Tim's coordinator on a
+  real, internet-reachable host with Ocean's client on a genuinely different machine is the one
+  remaining gap between this proof and the literal "different machines" framing of the brief.
+- **No revocation/rotation ceremony beyond "edit the roster file and restart."** Matches the
+  brief's own scoping ("no dynamic registration endpoint, no revocation logic beyond removing the
+  line").
+
+## User guide: install, configure, submit, pull, get result
+
+1. **Install** (once per machine): `sbx` (Docker Sandboxes) must be installed and authenticated —
+   see "Install sbx" in the README, or `bin/federation-install-sbx`. Global credentials for each
+   harness you plan to use must be configured once (`sbx secret set -g anthropic --oauth`, `sbx
+   secret set -g openai --oauth`, etc.) — see "Auth UX reframe" above; this is a one-time step, not
+   per-task, once confirmed host-persistent.
+2. **Generate a keypair** for your identity in the collective (one per person, author and/or
+   executor role — a flat roster, no separate author/executor key spaces):
+   ```bash
+   node -e "
+     const {generateKeyPairSync}=require('crypto'), fs=require('fs');
+     const k=generateKeyPairSync('ed25519');
+     fs.writeFileSync('me.pem', k.privateKey.export({type:'pkcs8',format:'pem'}));
+     fs.writeFileSync('me.pub.pem', k.publicKey.export({type:'spki',format:'pem'}));
+   "
+   ```
+   Send `me.pub.pem` to whoever runs the coordinator; keep `me.pem` private.
+3. **Coordinator operator** (Tim) maintains a roster file (`key_id -> PEM`) and a shared collective
+   bearer token, then runs:
+   ```bash
+   WASPFLOW_FEDERATION_COORDINATOR_PORT=8787 \
+   WASPFLOW_FEDERATION_COLLECTIVE_TOKEN=<shared-secret> \
+   WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE=./roster.json \
+   WASPFLOW_FEDERATION_COORDINATOR_DATA_DIR=./coordinator-data \
+   node bin/waspflow-federation-coordinator
+   ```
+4. **Submit a task** (Tim, or any author-role collective member):
+   ```bash
+   node bin/waspflow-federation-submit \
+     --coordinator-url http://<coordinator-host>:8787 \
+     --collective-token <shared-secret> --collective <name> \
+     --author-key-id tim-author --private-key-file ./tim-author.pem \
+     --display-id <task-name> --source ./my-repo --prompt-file ./task.md \
+     --network disabled --timeout 3600
+   ```
+   Prints the `task_digest` — share this with whoever will execute it (no discovery endpoint in v0).
+5. **Pull and run a task** (Ocean, or any executor-role collective member):
+   ```bash
+   node bin/waspflow-federation-pull \
+     --coordinator-url http://<coordinator-host>:8787 \
+     --collective-token <shared-secret> \
+     --task-digest <digest-from-step-4> \
+     --executor-key ocean-executor --private-key-file ./ocean-executor.pem \
+     --roster-file ./roster.json --harness claude-code-subscription
+   ```
+   Runs the task against Ocean's own configured harness credentials, sandboxed via `sbx`.
+6. **Get the result** (Tim): re-run `waspflow-federation-submit`'s poll, or fetch directly:
+   ```bash
+   curl http://<coordinator-host>:8787/tasks/<digest>   # status + result envelope once SETTLED
+   ```
+   Add `--output-dir <path> --roster-file ./roster.json` to a submit invocation (or call
+   `materializeCandidate` directly) to download and extract the result tree with independent
+   signature verification, rather than trusting the coordinator's claim blindly.
 
 ## Owner handoff: what's left after the autonomous fix loop
 
@@ -855,9 +1058,12 @@ credential state) this session cannot manufacture.
   CLI; the "what's next #1" item from the prior revision of this report is done.
 
 **Still genuinely needs the owner:**
-1. **Gate B: this machine's `sbx` policy is "allow all hosts", not deny-all.** A real security
-   decision, not a code fix — run `sbx policy init deny-all` (plus job-scoped allow rules) before
-   any job (friends-and-family or stranger-submitted) executes against this machine for real.
+1. **Gate B: this machine's PERSONAL `sbx` policy is "allow all hosts", not deny-all.** A real
+   security decision, not a code fix — run `sbx policy init deny-all` (plus job-scoped allow rules)
+   before any job (friends-and-family or stranger-submitted) executes against this machine's
+   personal identity for real. (The Federation-owned identity, `~/.waspflow/sbx-home`, was
+   separately initialized to deny-all with scoped allow rules this session — see "Federation full
+   loop" above — but that does not change this machine's personal `sbx` posture.)
 2. **Which Claude Code auth variant Federation should default to in a shipped product** —
    subscription (product intent, one-time global `/login`, now confirmed NOT a per-run cost) vs
    api-key (smoother, usage-billed). Both are implemented, tested, and proven working this round;
@@ -871,27 +1077,44 @@ credential state) this session cannot manufacture.
    step, not attempted this round for lack of a second concurrent job to test against.
 6. **Gate F's bomb fixtures** need wiring to an actual pass/fail measurement against declared
    resource limits — a build item.
+7. **Settlement/escrow economics** (`FEDERATION_DESIGN_V2.md` §B.5.3/§B.5.4) — the coordinator's
+   state machine has the SLOTS for this (a `SETTLED` terminal state exists) but no actual balances,
+   fees, or ledger. Needed before any collective runs on real economic incentives rather than pure
+   goodwill/reciprocity.
+8. **Cross-machine deployment** — this session's live E2E proof ran the coordinator and both CLIs
+   on one machine (`127.0.0.1`). Nothing in the design assumes same-host clients, but an owner
+   actually running Tim's coordinator on an internet-reachable host with Ocean's client on a
+   genuinely separate machine is the one remaining gap between this proof and a literal
+   cross-machine deployment. Likely needs: a real domain/TLS in front of the coordinator (currently
+   plain HTTP), and confirming firewall/NAT reachability for whoever hosts it.
+9. **Task discovery** — v0 has no "list available tasks" endpoint; the digest must be shared
+   out-of-band. A real product would need this before a collective grows past a handful of people
+   coordinating over Slack/chat.
 
 ## What's next (in priority order, after the owner handoff above)
 
-1. **Fix gate B's local policy** (`sbx policy init deny-all`) — the single highest-priority item,
-   since it's the difference between this machine's actual current posture and the deny-all
-   default the design assumes.
-2. **Wire gate F's fork-bomb/memory/disk fixtures** into an actual pass/fail measurement against
+1. **Fix gate B's PERSONAL local policy** (`sbx policy init deny-all`) — the single highest-priority
+   item, since it's the difference between this machine's actual current posture and the deny-all
+   default the design assumes. (Not the same as the Federation-owned identity, already fixed.)
+2. **Deploy the coordinator cross-machine** and confirm the full loop still works over a real
+   network, not just localhost — the one dimension this session's live proof could not exercise.
+3. **Wire gate F's fork-bomb/memory/disk fixtures** into an actual pass/fail measurement against
    declared resource limits, now that `sbx exec`'s real syntax is confirmed.
-3. **Implement gate A's independent-profile mechanism** (`WASPFLOW_FEDERATION_SBX_PROFILE_DIR`) so
+4. **Implement gate A's independent-profile mechanism** (`WASPFLOW_FEDERATION_SBX_PROFILE_DIR`) so
    gate A can move off SKIP.
-4. **Run the ~1h refresh-window follow-up** for Codex and Claude Code subscription auth.
-5. **Contact Docker** on the 8 outstanding questions tracked in
+5. **Design and build settlement/escrow** once the loop's mechanics are trusted — real balances,
+   fees, and a signed ledger per `FEDERATION_DESIGN_V2.md` §B.5.3/§B.5.4.
+6. **Run the ~1h refresh-window follow-up** for Codex and Claude Code subscription auth.
+7. **Contact Docker** on the 8 outstanding questions tracked in
    `docs/design/FEDERATION_V0_CONFORMANCE_MATRIX.md` (redistribution, commercial-use scope, OEM/
    account-free mode, automation API, independent profile mechanism, SSH-agent disable guarantee,
    storage cap, compatibility/security-support commitments) — none block this preview, but several
    block a production release decision per the note's explicit gate.
-6. **Pin a version ceiling** in `profiles/wf-federation-docker-v0.json` once a real adversarial
+8. **Pin a version ceiling** in `profiles/wf-federation-docker-v0.json` once a real adversarial
    conformance pass validates a specific `sbx` release.
-7. **Scope a Gemini spike separately** once Codex/Claude's native-auth model is proven — do not
-   assume the same design transfers; Gemini's Docker auth path is API-key/proxy-managed, not
-   subscription OAuth.
+9. **Get this machine onto an eligible Gemini tier** (or point gemini-cli at a different account)
+   to close the one remaining unproven harness — everything up to that account-tier wall is
+   already built, tested, and live-verified through the real sandbox mechanism.
 
 ## Honest confidence
 
@@ -942,3 +1165,32 @@ not been proven for that specific release. **The one deliberately open item befo
 here is gate B**: fix this machine's `sbx` policy to deny-all first. Everything else above is
 either done, correctly deferred with a stated reason, or an owner-level product/security decision
 this session correctly did not make unilaterally.
+
+**High confidence, backed by a real multi-process live run, that the full federated loop works
+mechanically**: publish, claim, independent-verify, run, submit, settle, poll, and materialize with
+independent verification on BOTH ends — every step of the "Tim submits, Ocean pulls and runs it
+against her subscription, Tim gets the result" scenario was executed with real infrastructure this
+session (real coordinator process, two genuinely distinct keypairs, real signed envelopes, a real
+sandboxed Claude Code subscription task, real artifact transport with content-addressed digest
+verification), not simulated in a test harness. Five real bugs were found and fixed in the course
+of getting this to work for real — a coordinator that could only recognize one signer identity, a
+backend that had regressed two already-fixed sbx-CLI bugs, a THIRD real sbx-CLI bug (`sbx cp`'s
+absolute-path requirement) findable only by running a genuine end-to-end task, a network-policy gap
+on the Federation-owned sbx identity, and a requester that never independently verified the result
+it was about to trust — none silently glossed over, each independently reproduced and re-tested.
+
+**No confidence claim, positive or negative,** on cross-machine deployment specifically: this
+session's live proof ran the coordinator and both CLIs on one machine against `127.0.0.1`. The
+coordinator's design has no localhost-specific assumption, but "the code doesn't assume same-host"
+is not the same claim as "it was proven to work across two real machines over a real network" — see
+"What this does NOT prove" above.
+
+**No confidence claim, positive or negative,** on settlement/economics — deliberately unbuilt this
+round. A collective running on anything beyond pure goodwill/reciprocity needs
+`FEDERATION_DESIGN_V2.md` §B.5.3/§B.5.4 actually implemented first.
+
+**Test coverage**: 156 tests pass across the full `node --test tests/*.test.mjs` suite (up from 102
+before this round's Docker-backend UAT work, then 156 after slices 1-6), including two live-sbx
+integration tests that exercise real infrastructure rather than stubs
+(`tests/federation-docker-backend.test.mjs`, `tests/federation-pull.test.mjs`) and one hand-run,
+outside-the-test-suite live E2E walkthrough of the complete loop described above.
