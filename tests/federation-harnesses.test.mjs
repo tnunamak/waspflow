@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CODEX_HARNESS, CLAUDE_CODE_HARNESS, CLAUDE_CODE_SUBSCRIPTION_HARNESS, CLAUDE_CODE_API_KEY_HARNESS, GH_CLI_HARNESS } from '../lib/federation-harnesses.mjs';
+import { CODEX_HARNESS, CLAUDE_CODE_HARNESS, CLAUDE_CODE_SUBSCRIPTION_HARNESS, CLAUDE_CODE_API_KEY_HARNESS, GH_CLI_HARNESS, GEMINI_HARNESS } from '../lib/federation-harnesses.mjs';
 import { hasProvenIndefiniteRefresh } from '../lib/federation-harness-spec.mjs';
 
 test('Codex and Claude Code are both classified docker-native-oauth, not assumed identical mechanisms', () => {
@@ -143,4 +143,36 @@ test('gh-cli entrypoint needs no bypass flag — gh subcommands are non-interact
   // interactive agent session, so it has no first-run trust/approval prompt
   // to bypass in the first place.
   assert.equal(GH_CLI_HARNESS.entrypoint, 'gh');
+});
+
+test('Gemini is classified docker-stored-secret, not docker-native-oauth — sbx --oauth is openai-only, confirmed live', () => {
+  // Same limitation class already found for Anthropic: `sbx secret set
+  // --help` hard-codes --oauth to openai/global only. There is no
+  // host-drivable Google subscription OAuth in this sbx release.
+  assert.equal(GEMINI_HARNESS.auth_strategy, 'docker-stored-secret');
+  assert.equal(GEMINI_HARNESS.credential_discovery.secret_name, 'google');
+  assert.equal(GEMINI_HARNESS.oauth_refresh.supports_refresh, false);
+  assert.equal(GEMINI_HARNESS.oauth_refresh.refresh_owner, 'none');
+  assert.equal(hasProvenIndefiniteRefresh(GEMINI_HARNESS), false);
+});
+
+test('Gemini entrypoint includes both --approval-mode yolo AND --skip-trust — confirmed these are two SEPARATE gates', () => {
+  // Live UAT found --approval-mode yolo alone does not clear gemini-cli's
+  // first-run directory-trust prompt; --skip-trust is required separately.
+  assert.match(GEMINI_HARNESS.entrypoint, /--approval-mode yolo/);
+  assert.match(GEMINI_HARNESS.entrypoint, /--skip-trust/);
+  assert.match(GEMINI_HARNESS.entrypoint, /^gemini /);
+  // -o json for structured, parseable headless output; -p as the final
+  // token so the appended task prompt becomes its value once start() joins
+  // entrypoint + prompt through `sh -c`.
+  assert.match(GEMINI_HARNESS.entrypoint, /-o json/);
+  assert.match(GEMINI_HARNESS.entrypoint, /-p$/);
+});
+
+test('Gemini harness never claims an --effort flag — gemini-cli has none, confirmed via --help', () => {
+  assert.equal(/--effort|--reasoning-effort/.test(GEMINI_HARNESS.entrypoint), false);
+});
+
+test('Gemini install is the built-in sbx agent template name, matching `sbx run --help`\'s listed agents', () => {
+  assert.equal(GEMINI_HARNESS.install, 'gemini');
 });
