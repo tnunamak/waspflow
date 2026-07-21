@@ -1,0 +1,83 @@
+#!/usr/bin/env node
+/*
+ * Owner-hosted Federation v0 coordinator process. "Tim runs a coordinator
+ * he hosts" is literally this: a single foreground HTTP server, started
+ * with one command, kept running under systemd/tmux/whatever the operator
+ * already uses for long-lived processes (this script does not daemonize
+ * itself, matching waspflow-federation-injector's style).
+ *
+ * Configuration is env-only, no flags, to keep this trivially scriptable:
+ *   WASPFLOW_FEDERATION_COORDINATOR_PORT       default 8787
+ *   WASPFLOW_FEDERATION_COORDINATOR_HOST       default 127.0.0.1
+ *   WASPFLOW_FEDERATION_COORDINATOR_DATA_DIR   default ~/.waspflow/federation-coordinator/tasks
+ *   WASPFLOW_FEDERATION_COLLECTIVE_TOKEN       required, shared-secret gate (see lib/federation-coordinator.mjs)
+ *   WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE
+ *                                               required, JSON file mapping key_id -> public key PEM for every
+ *                                               registered collective member (author AND executor keys share this
+ *                                               one flat roster — see lib/federation-coordinator.mjs's roster
+ *                                               comment for why). Shape:
+ *                                                 { "tim-author": "-----BEGIN PUBLIC KEY-----\n...", "ocean-executor": "..." }
+ *                                               Onboarding a new member is a manual step: Tim hand-appends their
+ *                                               key_id/PEM entry to this file and restarts the coordinator.
+ *                                               Removing a line + restart is the only revocation mechanism v0
+ *                                               supports — no dynamic registration endpoint, no live revocation.
+ */
+'use strict';
+
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+function fail(message) {
+  process.stderr.write(`waspflow-federation-coordinator: ${message}\n`);
+  process.exit(1);
+}
+
+async function main() {
+  const { startCoordinator } = await import('../lib/federation-coordinator.mjs');
+
+  const token = process.env.WASPFLOW_FEDERATION_COLLECTIVE_TOKEN;
+  if (!token) fail('WASPFLOW_FEDERATION_COLLECTIVE_TOKEN is required (shared-secret collective gate)');
+
+  const rosterFile = process.env.WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE;
+  if (!rosterFile) fail('WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE is required (JSON file mapping key_id -> public key PEM)');
+  let rosterJson;
+  try {
+    rosterJson = JSON.parse(fs.readFileSync(rosterFile, 'utf8'));
+  } catch (error) {
+    fail(`could not read/parse WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE (${rosterFile}): ${error.message}`);
+  }
+  if (!rosterJson || typeof rosterJson !== 'object' || Array.isArray(rosterJson)) {
+    fail(`WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE (${rosterFile}) must contain a JSON object of key_id -> PEM string`);
+  }
+  const entries = Object.entries(rosterJson);
+  if (entries.length === 0) fail(`WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE (${rosterFile}) has no roster entries`);
+  for (const [keyId, pem] of entries) {
+    if (typeof pem !== 'string' || !pem) fail(`roster entry "${keyId}" must map to a PEM string`);
+  }
+  const roster = new Map(entries);
+
+  const port = Number(process.env.WASPFLOW_FEDERATION_COORDINATOR_PORT || 8787);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) fail('WASPFLOW_FEDERATION_COORDINATOR_PORT must be a valid port number');
+  const host = process.env.WASPFLOW_FEDERATION_COORDINATOR_HOST || '127.0.0.1';
+  const dataDir = process.env.WASPFLOW_FEDERATION_COORDINATOR_DATA_DIR
+    || path.join(os.homedir(), '.waspflow', 'federation-coordinator', 'tasks');
+
+  const server = await startCoordinator({ dataDir, token, roster, port, host });
+  const address = server.address();
+  process.stdout.write(JSON.stringify({
+    status: 'listening',
+    host: address.address,
+    port: address.port,
+    data_dir: dataDir,
+    roster_size: roster.size,
+  }) + '\n');
+
+  const shutdown = () => {
+    server.close(() => process.exit(0));
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
+
+main().catch((error) => fail(error && error.message ? error.message : String(error)));
