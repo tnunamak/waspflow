@@ -259,7 +259,11 @@ reality clawmeter carries too.
 6. **Packaging + distribution**: `nfpm`-generated `.deb`/`.rpm` (daemon depends on `nodejs`; tray is
    libc-only) + systemd `--user` unit / launchd LaunchAgent / XDG autostart for both; a signed **apt repo**
    (reprepro/aptly + GPG `signed-by=` key, Syncthing's pattern); Homebrew formula (daemon) + cask/formula
-   (tray); WinGet/Scoop manifests. Document the GNOME AppIndicator-extension tray caveat.
+   (tray); WinGet/Scoop manifests. The signed Windows installer runs elevated after the normal UAC consent,
+   enables `HypervisorPlatform` with `Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+   -All -NoRestart`, and schedules or prompts the required reboot. It also owns `sbx` installation and repair;
+   doctor is a post-install backstop, not contributor setup documentation. A device that cannot meet this
+   requirement gets a clear in-product unsupported-device state. Document the GNOME AppIndicator-extension tray caveat.
 
 Keep the web UI + tray thin renderers throughout; any logic gap is a CLI/daemon event to add, not
 UI-side federation logic. Slices 2-4 (web UI) and 5 (tray) are largely independent behind the daemon's

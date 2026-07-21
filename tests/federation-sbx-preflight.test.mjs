@@ -155,6 +155,36 @@ test('probeSbxPreflight builds its JSON-ready report from stubbed command output
   assert.equal(report.checks.length, 6);
 });
 
+test('Windows preflight uses where, checks HypervisorPlatform, and skips Linux-only checks', async () => {
+  const calls = [];
+  const report = await probeSbxPreflight({
+    platformName: 'win32',
+    runCommand: async (command, args) => {
+      calls.push([command, args]);
+      if (command === 'where' && args[0] === 'sbx') return result({ stdout: 'C:\\Program Files\\Docker\\sbx.exe' });
+      if (command === 'powershell.exe') return result({ stdout: 'Enabled' });
+      if (args[0] === 'diagnose') return result({ stdout: 'Daemon healthy\nDocker authentication healthy' });
+      throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
+    },
+  });
+  assert.equal(report.ok, true);
+  assert.deepEqual(report.checks.map((item) => item.name), ['sbx_install', 'hypervisor_platform', 'docker_login', 'windows_file_permissions']);
+  assert.ok(calls.some(([command, args]) => command === 'where' && args[0] === 'sbx'));
+  assert.ok(calls.some(([command, args]) => command === 'powershell.exe' && args.some((arg) => arg.includes('Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform'))));
+  assert.ok(!calls.some(([command]) => ['dpkg-query', 'docker', 'containerd', 'test'].includes(command)));
+});
+
+test('Windows preflight routes HypervisorPlatform recovery through installer repair before an administrator fallback', () => {
+  const checks = byName(healthyInputs({
+    platformName: 'win32',
+    version: result({ stdout: 'C:\\Program Files\\Docker\\sbx.exe' }),
+    hypervisorPlatform: result({ stdout: 'Disabled' }),
+  }));
+  assert.equal(checks.hypervisor_platform.ok, false);
+  assert.match(checks.hypervisor_platform.fix, /^Reinstall or run the Federation installer's Repair action\./);
+  assert.match(checks.hypervisor_platform.fix, /Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All -NoRestart$/);
+});
+
 test('doctor --json returns a structured setup_required event, never a stack trace', async () => {
   await assert.rejects(execFileAsync(process.execPath, [CLI, 'doctor', '--json'], {
     env: { ...process.env, WASPFLOW_SBX_BIN: '/definitely/missing/sbx' },

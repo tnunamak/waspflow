@@ -451,3 +451,24 @@ test('openFederationUi opens the tokenized local URL for a running daemon', asyn
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('openFederationUi uses cmd start with an empty title on Windows', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'wf-federation-ui-windows-'));
+  const infoPath = join(directory, 'daemon.json');
+  const daemon = await startFederationDaemon({ token: 'ui-session-token', infoPath, configLoader: () => null });
+  const calls = [];
+  try {
+    const url = await openFederationUi({
+      infoPath,
+      platformName: 'win32',
+      spawnProcess: (...args) => {
+        calls.push(args);
+        return { unref() {} };
+      },
+    });
+    assert.deepEqual(calls, [['cmd.exe', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }]]);
+  } finally {
+    await daemon.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
