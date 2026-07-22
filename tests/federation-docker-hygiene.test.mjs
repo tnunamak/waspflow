@@ -127,3 +127,24 @@ esac
     await rm(stubDir, { recursive: true, force: true });
   }
 });
+
+test('sbx child env interposes a no-op xdg-open so login flows cannot pop the desktop browser', skip, async () => {
+  // Live finding 2026-07-22: `sbx login` device flows auto-launched Chrome on
+  // the host every time a flow started; auth URLs belong in the Federation UI.
+  const wfSbxHome = await mkdtemp(join(tmpdir(), 'wf-sbx-nobrowser-'));
+  const previous = process.env.WASPFLOW_FEDERATION_SBX_HOME;
+  process.env.WASPFLOW_FEDERATION_SBX_HOME = wfSbxHome;
+  try {
+    const env = backend.sbxChildEnv();
+    assert.equal(env.BROWSER, 'true', 'BROWSER must point at a no-op for CLIs that honor it');
+    const shimDir = env.PATH.split(':')[0];
+    assert.ok(shimDir.startsWith(wfSbxHome), `PATH must lead with the shim dir inside the sbx home, got ${shimDir}`);
+    const result = spawnSync(join(shimDir, 'xdg-open'), ['https://example.com/device'], { encoding: 'utf8' });
+    assert.equal(result.status, 0, 'the xdg-open shim must exist, be executable, and succeed silently');
+    assert.equal((result.stdout || '').trim(), '', 'the shim must not write to stdout');
+  } finally {
+    if (previous === undefined) delete process.env.WASPFLOW_FEDERATION_SBX_HOME;
+    else process.env.WASPFLOW_FEDERATION_SBX_HOME = previous;
+    await rm(wfSbxHome, { recursive: true, force: true });
+  }
+});
