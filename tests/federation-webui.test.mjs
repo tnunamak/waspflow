@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { capacityKind, lifecycleStage, providerCapacitySubject, routeFromHash, taskTimeline, viewForStatus } from '../public/app.mjs';
+import { capacityKind, lifecycleStage, providerCapacitySubject, providerDisplayName, routeFromHash, taskTimeline, viewForStatus } from '../public/app.mjs';
 
 test('web UI document loads its browser module', async () => {
   const index = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
@@ -9,12 +9,13 @@ test('web UI document loads its browser module', async () => {
   assert.match(index, /app\.src = `\/app\.mjs\?token=/);
 });
 
-test('idle contributor UI offers both task choice and disables the empty next-task path', async () => {
+test('idle contributor UI offers task choice and collapses an empty queue to quiet copy', async () => {
   const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
   assert.match(app, /Choose a task/);
   assert.match(app, /Contribute this/);
   assert.match(app, /Contribute next available/);
-  assert.match(app, /disabled: choices\.length === 0/);
+  assert.match(app, /No tasks are waiting\. Leave contributing on/);
+  assert.doesNotMatch(app, /disabled: choices\.length === 0/);
   assert.match(app, /optionalRequest\('\/tasks', \[\]\)/);
 });
 
@@ -53,7 +54,7 @@ test('web UI renders approval waiting, collective-first personalization, and con
   const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
   assert.match(app, /Waiting for approval/);
   assert.match(app, /You’re joining/);
-  assert.match(app, /Collective: \$\{collectiveName\}/);
+  assert.match(app, /collectiveName \? element\('p', \{ className: 'collective-line'/);
   assert.match(app, /completed this week/);
   assert.match(app, /Sign in to Docker/);
   assert.match(app, /Confirmation code/);
@@ -96,15 +97,33 @@ test('product UI contains all five surfaces and the Wave A compatible task, resu
 
 test('identity capacity kind drives provider wording without assuming one capacity source', async () => {
   assert.equal(capacityKind({ capacity_kind: 'managed_plan' }), 'managed_plan');
-  assert.equal(providerCapacitySubject({ accounts: [{ provider: 'Claude', capacity_kind: 'managed_plan' }] }), 'your Claude account');
-  assert.equal(providerCapacitySubject({ providers: [{ service: 'anthropic', capacity_kind: 'subscription' }] }), 'your anthropic account');
+  assert.equal(providerCapacitySubject({ accounts: [{ provider: 'Claude', capacity_kind: 'managed_plan' }] }), 'your Anthropic (Claude) account');
+  assert.equal(providerDisplayName('anthropic'), 'Anthropic (Claude)');
+  assert.equal(providerCapacitySubject({ providers: [{ service: 'anthropic', capacity_kind: 'subscription' }] }), 'your Anthropic (Claude) account');
   assert.equal(providerCapacitySubject({ accounts: [{ provider: 'OpenAI', capacity_kind: 'api_key' }] }), 'your OpenAI API key');
   assert.equal(providerCapacitySubject({ accounts: [{ provider: 'Ollama', capacity_kind: 'local_model' }] }), 'the Ollama local model');
   const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(app, /subscript(?:ion)/i);
-  assert.match(app, /Capacity source/);
+  assert.match(app, /provider-card/);
+  assert.match(app, /Managed automatically/);
+  assert.match(app, /API key/);
   assert.match(app, /Member ID/);
   assert.match(app, /identity\/signin/);
+});
+
+test('activity rows use a whole-row plain control and stale sessions stop after repeated unauthorized polls', async () => {
+  const [app, index] = await Promise.all([
+    readFile(new URL('../public/app.mjs', import.meta.url), 'utf8'),
+    readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
+  ]);
+  assert.match(app, /className: 'history-select'/);
+  assert.match(app, /className: 'receipt-chip'/);
+  assert.match(app, /SESSION_EXPIRED_MESSAGE/);
+  assert.match(app, /unauthorizedPolls >= 2/);
+  assert.match(app, /window\.clearInterval\(pollTimer\)/);
+  assert.match(app, /docker_status === 'failed'/);
+  assert.match(app, /Checking…/);
+  assert.match(index, /\.history-select \{[^}]*background: transparent/s);
+  assert.match(index, /\.receipt-chip \{[^}]*color: #245139/s);
 });
 
 test('request form stores values and an inline error outside its recreated DOM subtree', async () => {

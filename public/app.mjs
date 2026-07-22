@@ -1,4 +1,5 @@
 const POLL_INTERVAL_MS = 1500;
+const SESSION_EXPIRED_MESSAGE = 'This session expired. Reopen Federation from Waspflow (waspflow federation ui).';
 const navigation = [
   ['contribute', 'Contribute'], ['requests', 'Requests'], ['activity', 'Activity'],
   ['settings', 'Settings'], ['help', 'Help'],
@@ -48,13 +49,26 @@ export function capacityKind(account = {}) {
 }
 
 function readableCapacityKind(value) {
-  return String(value || 'not reported').replace(/[_-]+/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase());
+  const normalized = String(value || 'not reported').replace(/[_-]+/g, ' ').toLowerCase();
+  if (normalized === 'api key') return 'API key';
+  return normalized.replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+export function providerDisplayName(value) {
+  const provider = String(value || 'provider').trim();
+  const names = {
+    anthropic: 'Anthropic (Claude)',
+    claude: 'Anthropic (Claude)',
+    openai: 'OpenAI',
+    google: 'Google',
+  };
+  return names[provider.toLowerCase()] || provider;
 }
 
 export function providerCapacitySubject(identity) {
   const account = providerAccounts(identity)[0];
   if (!account) return 'your configured provider account';
-  const provider = account.provider || account.service || account.name || 'provider';
+  const provider = providerDisplayName(account.provider || account.service || account.name);
   const kind = String(capacityKind(account)).toLowerCase();
   if (kind.includes('local')) return `the ${provider} local model`;
   if (kind.includes('api')) return `your ${provider} API key`;
@@ -161,18 +175,22 @@ function contributionStatus(status, view, control, settings) {
   const isContributing = view.control === 'pause';
   const controlLabel = isContributing ? 'Pause contributing' : status?.state === 'paused' ? 'Resume contributing' : 'Start contributing';
   const count = status?.ledger_summary?.count_7d || 0;
-  const collectiveName = settings?.collective_name || status?.collective_name || 'your collective';
+  const collectiveName = settings?.collective_name || status?.collective_name;
   const activeTask = status?.contribution?.display_id;
   const requester = status?.contribution?.requester || status?.contribution?.author;
   const completion = status?.last_completed?.display_id;
   const detail = isContributing && activeTask
     ? `Working on '${activeTask}'${requester ? ` for ${requester}` : ''}`
-    : status?.detail || 'Waspflow checks for a safe next task.';
+    : status?.state === 'idle' && completion
+      ? `Last completed '${completion}'.`
+      : status?.state === 'idle'
+        ? ''
+        : status?.detail || 'Waspflow checks for a safe next task.';
   return panel('Your contribution', null,
-    element('p', { className: 'collective-line', text: `Collective: ${collectiveName}` }),
+    collectiveName ? element('p', { className: 'collective-line', text: `Collective: ${collectiveName}` }) : null,
     element('div', { className: 'contribution-state' },
       element('div', { className: 'status-dot', 'data-state': status?.state || 'idle' }),
-      element('div', {}, element('p', { className: 'status-label', text: view.title }), element('p', { className: 'detail', text: detail })),
+      element('div', {}, element('p', { className: 'status-label', text: view.title }), detail ? element('p', { className: 'detail', text: detail }) : null),
     ),
     element('div', { className: 'actions' }, button(controlLabel, () => control(isContributing ? '/contribute/stop' : '/contribute/start'), isContributing ? 'secondary' : '')),
     completion ? element('a', { className: 'ledger-link', href: '#/activity', text: `Finished '${completion}' · View activity` }) : element('a', { className: 'ledger-link', href: '#/activity', text: `${count} completed this week · View activity` }),
@@ -182,9 +200,12 @@ function contributionStatus(status, view, control, settings) {
 
 function taskChoices(tasks, contribute) {
   const choices = Array.isArray(tasks) ? tasks : [];
+  if (!choices.length) {
+    return element('p', { className: 'task-queue-empty', text: 'No tasks are waiting. Leave contributing on — Waspflow will pick up the next trusted request.' });
+  }
   return panel('Choose a task', 'Pick a request that suits your capacity.',
-    element('div', { className: 'actions' }, button('Contribute next available', () => contribute(), 'secondary', { disabled: choices.length === 0, 'aria-disabled': choices.length === 0 })),
-    choices.length ? element('ul', { className: 'task-list', 'aria-label': 'Available tasks' }, ...choices.map((task) => element('li', { className: 'task-row' },
+    element('div', { className: 'actions' }, button('Contribute next available', () => contribute(), 'secondary')),
+    element('ul', { className: 'task-list', 'aria-label': 'Available tasks' }, ...choices.map((task) => element('li', { className: 'task-row' },
       element('div', { className: 'task-main' },
         element('div', { className: 'task-title' }, element('strong', { text: task.display_id || 'Untitled task' }), task.author ? element('span', { className: 'muted', text: `by ${task.author}` }) : null),
         element('p', { className: 'muted', text: taskAge(task.published_at) }),
@@ -192,7 +213,7 @@ function taskChoices(tasks, contribute) {
         task.network !== undefined ? element('p', { className: 'network', text: `Network: ${task.network ? 'on' : 'off'}` }) : null,
       ),
       button('Contribute this', () => contribute(task.task_digest), 'secondary'),
-    ))) : element('div', { className: 'empty-state' }, element('strong', { text: 'Nothing is waiting right now.' }), element('p', { text: 'Keep contributing on and Waspflow will pick up the next trusted request.' })),
+    ))),
   );
 }
 
@@ -300,11 +321,13 @@ function activityDetail(entry) {
 function activityView(ledger, requests, select, selectedContribution, selectContribution) {
   const contributionRows = ledger.filter((entry) => entry.role !== 'requester' && entry.author !== 'me');
   const contributionList = contributionRows.length
-    ? element('ul', { className: 'history-list' }, ...contributionRows.map((entry) => element('li', {},
+    ? element('ul', { className: 'history-list contribution-list' }, ...contributionRows.map((entry) => element('li', {},
       element('button', { type: 'button', className: 'history-select', onclick: () => selectContribution(entry) },
-        element('strong', { text: entry.display_id || entry.task_name || 'Federation task' }),
-        element('span', { className: 'muted', text: labeledDate('Finished', entry.finished_at || entry.settled_at) }),
-        element('span', { className: 'history-meta', text: [entry.duration, entry.model || entry.receipt?.model, entry.tokens || tokenUsage(entry.receipt || entry)].filter(Boolean).join(' · ') || 'Receipt pending' }),
+        element('span', { className: 'history-main' },
+          element('strong', { text: entry.display_id || entry.task_name || 'Federation task' }),
+          element('span', { className: 'history-date', text: labeledDate('Finished', entry.finished_at || entry.settled_at) }),
+        ),
+        element('span', { className: 'receipt-chip', text: [entry.duration, entry.model || entry.receipt?.model, entry.tokens || tokenUsage(entry.receipt || entry)].filter(Boolean).join(' · ') || 'Receipt pending' }),
       ),
     )))
     : element('div', { className: 'empty-state' }, element('strong', { text: 'Your contribution history will appear here.' }));
@@ -324,6 +347,31 @@ function providerSignInCard(status) {
   );
 }
 
+function providerAccountCard(account, signIn) {
+  const service = account.provider || account.service || account.name || 'Provider';
+  const displayName = providerDisplayName(service);
+  const unauthenticated = (account.authenticated ?? account.authed) === false;
+  const managed = !unauthenticated && String(service).toLowerCase().includes('anthropic');
+  return element('li', { className: 'provider-card' },
+    element('div', { className: 'provider-account-copy' },
+      element('strong', { text: displayName }),
+      element('span', { className: 'provider-account-meta', text: `${readableCapacityKind(capacityKind(account))} · ${unauthenticated ? 'Needs sign-in' : 'Signed in'}` }),
+      account.account_email || account.email ? element('span', { className: 'field-help', text: account.account_email || account.email }) : null,
+    ),
+    unauthenticated
+      ? button('Sign in', () => signIn(String(account.service || account.provider || service).toLowerCase()), 'secondary')
+      : managed ? element('span', { className: 'provider-managed', text: 'Managed automatically' }) : null,
+  );
+}
+
+function dockerAccountLabel(identity) {
+  const account = identity?.docker?.email || identity?.docker_account;
+  if (account) return account;
+  if (identity?.docker_status === 'failed') return "Couldn't detect — is Docker signed in?";
+  if (identity?.docker_status === 'checking' || identity?.refreshing) return 'Checking…';
+  return 'Not reported yet';
+}
+
 function settingsView(identity, settings, roster, saveSettings, signIn, status) {
   const schedule = settings?.schedule || {};
   const collectiveName = element('input', { id: 'collective-name', value: settings?.collective_name || identity?.collective_name || '', placeholder: 'Your collective' });
@@ -340,28 +388,15 @@ function settingsView(identity, settings, roster, saveSettings, signIn, status) 
     feedback, element('div', { className: 'actions' }, element('button', { type: 'submit', text: 'Save schedule' })),
   );
   const accounts = providerAccounts(identity);
-  const providerRows = accounts.flatMap((account) => {
-    const service = account.provider || account.service || account.name || 'Provider';
-    const unauthenticated = (account.authenticated ?? account.authed) === false;
-    return [
-      element('dt', { text: service }),
-      element('dd', {},
-        element('span', { text: [account.email || account.account_email, account.tier, unauthenticated ? 'needs sign-in' : 'signed in'].filter(Boolean).join(' · ') }),
-        unauthenticated ? button('Sign in', () => signIn(account.service || account.provider), 'secondary') : String(service).toLowerCase().includes('anthropic') ? element('p', { className: 'field-help', text: 'Managed automatically by Waspflow.' }) : null,
-      ),
-      element('dt', { text: 'Capacity source' }),
-      element('dd', { text: readableCapacityKind(capacityKind(account)) }),
-    ];
-  });
   return element('div', { className: 'view-stack' },
     providerSignInCard(status),
     panel('Accounts in use', 'The identities this machine uses.',
       element('dl', { className: 'identity-list' },
-        element('dt', { text: 'Docker account' }), element('dd', {}, element('span', { text: identity?.docker?.email || identity?.docker_account || 'Not reported yet' }), element('p', { className: 'field-help', text: 'Used to run isolated task sandboxes.' })),
+        element('dt', { text: 'Docker account' }), element('dd', {}, element('span', { text: dockerAccountLabel(identity) }), element('p', { className: 'field-help', text: 'Used to run isolated task sandboxes.' })),
         element('dt', { text: 'Member ID' }), element('dd', {}, element('span', { text: identity?.key_id || 'Not reported yet' }), element('p', { className: 'field-help', text: 'How the collective recognizes your machine.' })),
         identity?.coordinator_url ? [element('dt', { text: 'Connection address' }), element('dd', {}, element('span', { text: identity.coordinator_url }), element('p', { className: 'field-help', text: 'Where this machine checks for collective work.' }))] : null,
-        ...providerRows,
       ),
+      accounts.length ? element('ul', { className: 'provider-list', 'aria-label': 'Provider accounts' }, ...accounts.map((account) => providerAccountCard(account, signIn))) : null,
     ),
     panel('Limit to certain hours (optional)', 'Pause is always available immediately.', scheduleForm),
     panel('Collective roster', 'Approved members.', roster?.length ? element('ul', { className: 'roster-list' }, ...roster.map((member) => element('li', {}, element('strong', { text: member.name || member.key_id || 'Member' }), element('code', { text: member.key_id || member.public_key_pem || '' })))) : element('div', { className: 'empty-state' }, element('strong', { text: 'Roster unavailable.' }))),
@@ -379,7 +414,7 @@ function helpView(identity) {
 
 function createApplication(root) {
   const token = new URLSearchParams(window.location.search).get('token');
-  let status = null; let availableTasks = []; let ledger = []; let requests = []; let identity = null; let settings = null; let roster = []; let selectedDigest = null; let selectedTask = null; let selectedContribution = null; let message = ''; let pollBusy = false; let lastRenderSignature = null;
+  let status = null; let availableTasks = []; let ledger = []; let requests = []; let identity = null; let settings = null; let roster = []; let selectedDigest = null; let selectedTask = null; let selectedContribution = null; let message = ''; let pollBusy = false; let lastRenderSignature = null; let unauthorizedPolls = 0; let sessionExpired = false; let pollTimer = null;
   const requestForm = { display_id: '', prompt: '', source: '', error: '' };
   const failedRequests = new Map();
 
@@ -387,7 +422,11 @@ function createApplication(root) {
     if (!token) throw new Error('This link is missing its Waspflow session token. Open Federation again from Waspflow.');
     const response = await fetch(path, { ...options, headers: { 'x-waspflow-session-token': token, ...(options.body ? { 'content-type': 'application/json' } : {}) } });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || 'Waspflow could not complete that request.');
+    if (!response.ok) {
+      const error = new Error(body.error || 'Waspflow could not complete that request.');
+      error.status = response.status;
+      throw error;
+    }
     return body;
   }
 
@@ -416,7 +455,7 @@ function createApplication(root) {
       || (localIdentity && (entry.author_key === localIdentity || entry.author === localIdentity)));
   }
   async function refresh() {
-    if (pollBusy) return; pollBusy = true;
+    if (pollBusy || sessionExpired) return; pollBusy = true;
     try {
       status = await request('/status');
       const coordinatorReady = ['idle', 'paused', 'contributing'].includes(status.state);
@@ -430,13 +469,24 @@ function createApplication(root) {
       if (submission?.task_digest && /^sha256:[a-f0-9]{64}$/i.test(submission.task_digest) && !selectedDigest) selectedDigest = submission.task_digest;
       if (selectedDigest) void refreshTask();
       message = '';
-    } catch (error) { message = error.message === 'Failed to fetch' ? 'Waspflow is not running. Open Federation again from Waspflow.' : error.message; }
+      unauthorizedPolls = 0;
+    } catch (error) {
+      if (error.status === 401) {
+        unauthorizedPolls += 1;
+        if (unauthorizedPolls >= 2) {
+          sessionExpired = true;
+          if (pollTimer) window.clearInterval(pollTimer);
+          message = SESSION_EXPIRED_MESSAGE;
+        }
+      } else message = error.message === 'Failed to fetch' ? 'Waspflow is not running. Open Federation again from Waspflow.' : error.message;
+    }
     finally { pollBusy = false; render(); }
   }
   function render() {
     const active = routeFromHash(window.location.hash); const view = viewForStatus(status);
     const content = [header(active), banner(message), element('section', { className: 'content' })]; const main = content.at(-1);
-    if (active === 'contribute') main.append(contributeView(status, availableTasks, view, control, settings));
+    if (sessionExpired) main.append(panel('Session expired', SESSION_EXPIRED_MESSAGE));
+    else if (active === 'contribute') main.append(contributeView(status, availableTasks, view, control, settings));
     else if (active === 'requests') {
       const resultHref = selectedDigest ? `/result/${encodeURIComponent(selectedDigest)}?token=${encodeURIComponent(token || '')}` : '#/requests';
       main.append(requestsView(requests, selectedDigest, selectedTask, submit, select, resultHref, requestForm));
@@ -444,10 +494,10 @@ function createApplication(root) {
     else if (active === 'activity') main.append(activityView(ledger, requests, select, selectedContribution, selectContribution));
     else if (active === 'settings') main.append(settingsView(identity, settings, roster, saveSettings, signIn, status));
     else main.append(helpView(identity));
-    const signature = JSON.stringify({ active, status, availableTasks, ledger, requests, identity, settings, roster, selectedDigest, selectedTask, message });
+    const signature = JSON.stringify({ active, status, availableTasks, ledger, requests, identity, settings, roster, selectedDigest, selectedTask, selectedContribution, message, sessionExpired });
     if (signature === lastRenderSignature) return; lastRenderSignature = signature; root.replaceChildren(...content.filter(Boolean));
   }
-  window.addEventListener('hashchange', render); render(); void refresh(); window.setInterval(refresh, POLL_INTERVAL_MS);
+  window.addEventListener('hashchange', render); render(); void refresh(); pollTimer = window.setInterval(refresh, POLL_INTERVAL_MS);
 }
 
 if (typeof document !== 'undefined') createApplication(document.getElementById('app'));

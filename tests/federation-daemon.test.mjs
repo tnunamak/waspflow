@@ -240,7 +240,7 @@ test('identity, task detail, and verified result endpoints keep identities priva
     const firstIdentity = await request(base, '/identity', { token: 'test-session-token' });
     const secondIdentity = await request(base, '/identity', { token: 'test-session-token' });
     assert.deepEqual(JSON.parse(firstIdentity.text), {
-      docker_account: 'oshin', providers: [{ service: 'anthropic', capacity_kind: 'subscription', account_email: 'oshin@example.test', tier: 'max', authed: true }],
+      docker_account: 'oshin', docker_status: 'detected', providers: [{ service: 'anthropic', capacity_kind: 'subscription', account_email: 'oshin@example.test', tier: 'max', authed: true }],
       key_id: 'oshin', coordinator_url: 'http://coordinator.example', collective_name: 'Friends', refreshing: false,
     });
     assert.equal(identityCalls, 1);
@@ -623,10 +623,19 @@ test('GET /identity returns cached or partial data immediately while a slow prob
     const started = Date.now();
     const response = await request(base, '/identity', { token: 'test-session-token' });
     assert.ok(Date.now() - started < 100, 'identity response must not await its probe');
-    assert.deepEqual(JSON.parse(response.text), { docker_account: null, providers: [], key_id: null, coordinator_url: null, refreshing: true });
+    assert.deepEqual(JSON.parse(response.text), { docker_account: null, docker_status: 'checking', providers: [], key_id: null, coordinator_url: null, refreshing: true });
     release({ docker_account: 'oshin', providers: [] });
     await waitFor(async () => JSON.parse((await request(base, '/identity', { token: 'test-session-token' })).text).docker_account === 'oshin');
   }, { identityProbe: () => probe });
+});
+
+test('GET /identity reports a failed Docker probe separately from an empty cache', async () => {
+  await withDaemon(async ({ base }) => {
+    await waitFor(async () => JSON.parse((await request(base, '/identity', { token: 'test-session-token' })).text).docker_status === 'failed');
+    const identity = JSON.parse((await request(base, '/identity', { token: 'test-session-token' })).text);
+    assert.equal(identity.docker_account, null);
+    assert.equal(identity.docker_status, 'failed');
+  }, { identityProbe: async () => { throw new Error('docker unavailable'); } });
 });
 
 test('GET /requests returns only the local author history and merges the active local submission', async () => {

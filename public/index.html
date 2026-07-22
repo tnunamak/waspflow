@@ -42,7 +42,7 @@
       .actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 20px; }
       .contribution-state { display: flex; align-items: flex-start; gap: 14px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
       .status-dot { width: 13px; height: 13px; flex: 0 0 auto; margin-top: 7px; border-radius: 50%; background: #8c9b92; }
-      .status-dot[data-state="contributing"] { background: #19a464; box-shadow: 0 0 0 4px #e1f5e9; }
+      .status-dot[data-state="idle"], .status-dot[data-state="contributing"] { background: #19a464; box-shadow: 0 0 0 4px #e1f5e9; }
       .status-dot[data-state="paused"] { background: #b37d17; box-shadow: 0 0 0 4px #fff4dc; }
       .status-dot[data-state="action_needed"], .status-dot[data-state="setup_required"] { background: #bd5c24; box-shadow: 0 0 0 4px #ffede4; }
       .status-label { margin: 0; font-size: 1.55rem; line-height: 1.15; font-weight: 760; letter-spacing: -.025em; }
@@ -52,7 +52,8 @@
       .chip-trusted, .chip-settled { background: #e1f3e8; color: #145b3b; }
       .chip-claimed, .chip-running { background: #e6f0f7; color: #19597e; }
       .chip-failed { background: #fff0eb; color: #913e18; }
-      .ledger-link { display: inline-block; margin-top: 16px; }
+      .ledger-link { display: inline-block; margin-top: 16px; color: #526359; font-size: .9rem; font-weight: 600; text-decoration: none; }
+      .ledger-link:hover { color: #145a3d; text-decoration: underline; }
       .guard { margin-top: 22px; padding: 16px; border-radius: 9px; background: #eef5f0; }
       .guard p { margin: 6px 0; color: #3e5747; }
       .task-list, .request-list, .history-list, .roster-list { list-style: none; padding: 0; margin: 16px 0 0; }
@@ -65,6 +66,7 @@
       .network { color: #445d4c; font-size: .84rem; font-weight: 650; }
       .empty-state { padding: 20px 0 4px; color: var(--muted); }
       .empty-state p { margin: 5px 0 0; }
+      .task-queue-empty { margin: 0; padding: 2px 2px 0; color: var(--muted); }
       .timeline { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; list-style: none; padding: 0; margin: 18px 0; }
       .timeline li { position: relative; padding-top: 23px; color: #718078; font-size: .82rem; text-transform: capitalize; }
       .timeline li::before { content: ""; position: absolute; top: 4px; left: 0; width: 12px; height: 12px; border-radius: 50%; background: #d8e1da; }
@@ -91,12 +93,22 @@
       .history-list { border-top: 1px solid var(--line); }
       .history-list li { display: flex; gap: 14px; align-items: center; justify-content: space-between; padding: 14px 0; border-bottom: 1px solid var(--line); }
       .history-list p { margin: 3px 0 0; font-size: .88rem; }
-      .history-meta { max-width: 32ch; color: #526359; font-size: .86rem; text-align: right; }
+      .history-select { width: 100%; min-height: 0; padding: 13px 2px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px 20px; align-items: center; color: var(--ink); background: transparent; border-radius: 7px; text-align: left; }
+      .history-select:hover { color: var(--ink); background: #f0f6f2; }
+      .history-main { display: grid; min-width: 0; gap: 3px; }
+      .history-main strong, .history-date { overflow-wrap: anywhere; }
+      .history-date { color: var(--muted); font-size: .88rem; }
+      .receipt-chip { max-width: 32ch; padding: 5px 8px; border: 1px solid #c8dbce; border-radius: 999px; color: #245139; background: #edf6ef; font-size: .82rem; font-weight: 650; line-height: 1.35; overflow-wrap: anywhere; text-align: right; }
       .text-button { min-height: auto; padding: 0; color: #145a3d; background: none; text-decoration: underline; text-underline-offset: 3px; }
       .text-button:hover { color: #0e482f; background: none; }
       .roster-list { border-top: 1px solid var(--line); }
       .roster-list li { display: grid; gap: 5px; padding: 12px 0; border-bottom: 1px solid var(--line); }
       code { width: max-content; max-width: 100%; padding: 3px 5px; border-radius: 4px; background: #edf2ed; color: #284433; overflow-wrap: anywhere; white-space: pre-wrap; }
+      .provider-list { display: grid; gap: 10px; list-style: none; margin: 20px 0 0; padding: 0; }
+      .provider-card { display: flex; gap: 16px; align-items: center; justify-content: space-between; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: #fbfcfb; }
+      .provider-account-copy { display: grid; min-width: 0; gap: 3px; }
+      .provider-account-meta { color: #475a4e; }
+      .provider-managed { flex: 0 0 auto; padding: 5px 8px; border-radius: 999px; background: #edf3ef; color: #355343; font-size: .8rem; font-weight: 650; text-align: center; }
       .manual-steps { padding-left: 1.25rem; line-height: 1.6; }
       .instruction { padding: 13px; overflow: auto; white-space: pre-wrap; border-radius: 8px; background: #edf2ed; font: inherit; line-height: 1.5; }
       .quiet-note { margin: 22px 0 0; padding-top: 16px; border-top: 1px solid var(--line); color: #3f5748; }
@@ -107,7 +119,7 @@
       .faq summary { cursor: pointer; font-weight: 700; }
       .faq p { max-width: 70ch; margin: 10px 0 0; color: #46564d; }
       @media (max-width: 680px) { .app-header { width: min(100% - 24px, 1080px); display: block; padding: 16px 0 0; } .primary-nav { justify-content: space-between; margin: 15px 0 0; padding: 0 0 12px; } .primary-nav a { min-height: 38px; padding: 9px 5px; display: inline-flex; align-items: center; font-size: .82rem; } .content, .notice { width: min(100% - 24px, 790px); } .content { margin-top: 24px; margin-bottom: 44px; } .panel { padding: 18px; } }
-      @media (max-width: 480px) { .task-row { align-items: flex-start; flex-direction: column; } .task-row button { width: 100%; } .timeline { gap: 4px; } .timeline li { font-size: .72rem; } .timeline li:not(:last-child)::after { left: 15px; } .schedule-grid { grid-template-columns: 1fr; } .history-list li { align-items: flex-start; flex-direction: column; } .history-meta { text-align: left; } .receipt, .identity-list { grid-template-columns: 1fr; gap: 2px; } .receipt dd, .identity-list dd { margin-bottom: 10px; } }
+      @media (max-width: 480px) { .task-row { align-items: flex-start; flex-direction: column; } .task-row button { width: 100%; } .timeline { gap: 4px; } .timeline li { font-size: .72rem; } .timeline li:not(:last-child)::after { left: 15px; } .schedule-grid { grid-template-columns: 1fr; } .history-list li, .history-select, .provider-card { align-items: flex-start; } .history-select, .provider-card { grid-template-columns: 1fr; flex-direction: column; } .receipt-chip { max-width: 100%; text-align: left; } .receipt, .identity-list { grid-template-columns: 1fr; gap: 2px; } .receipt dd, .identity-list dd { margin-bottom: 10px; } }
       @media (prefers-reduced-motion: no-preference) { button, .button-link, .primary-nav a { transition: background-color 160ms ease-out, color 160ms ease-out; } }
     </style>
   </head>

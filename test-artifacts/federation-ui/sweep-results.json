@@ -11,7 +11,7 @@
       "status": "PASS"
     },
     {
-      "name": "Task choice card has a next-available button and selectable tasks",
+      "name": "Task choice card only appears when work is available",
       "status": "PASS"
     },
     {
@@ -19,7 +19,7 @@
       "status": "PASS"
     },
     {
-      "name": "Requester form is a dedicated Requests view and survives polling",
+      "name": "Requester form keeps its values and an inline submit error across polling, then clears the error on edit",
       "status": "PASS"
     },
     {
@@ -28,6 +28,10 @@
     },
     {
       "name": "Contribution controls are present and enabled without mutating the rig",
+      "status": "PASS"
+    },
+    {
+      "name": "Expired sessions stop polling after two unauthorized status responses",
       "status": "PASS"
     },
     {

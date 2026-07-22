@@ -42,20 +42,19 @@ async function main() {
     await check('Idle contributor view and ledger copy', async () => {
       await assertSelectorVisible(page, '.status-dot[data-state="idle"]');
       await assertText(page, 'Ready when you are');
-      await assertText(page, 'Collective:');
-      await assertText(page, 'completed this week');
       await page.screenshot({ path: path.join(artifactDir, 'idle.png'), fullPage: true });
     });
 
-    await check('Task choice card has a next-available button and selectable tasks', async () => {
-      await assertText(page.locator('h2'), 'Choose a task');
+    await check('Task choice card only appears when work is available', async () => {
       const next = page.getByRole('button', { name: 'Contribute next available' });
       const taskButtons = page.getByRole('button', { name: 'Contribute this' });
       if (await taskButtons.count()) {
+        await assertText(page.locator('h2'), 'Choose a task');
         await assertEnabled(next);
         await assertEnabled(taskButtons.first());
       } else {
-        assert.equal(await next.isDisabled(), true, 'next-available must be disabled when the queue is empty');
+        assert.equal(await next.count(), 0, 'empty queues must not show a disabled contribute button');
+        await assertText(page, 'No tasks are waiting. Leave contributing on');
       }
     });
 
@@ -76,6 +75,7 @@ async function main() {
       await page.locator('#task-folder').fill('/definitely/not/a-folder');
       await page.getByRole('button', { name: 'Submit task' }).click();
       await assertText(page.locator('.form-feedback'), 'source folder does not exist');
+      rawConsoleErrors.length = 0; // This deliberate 400 is the error path under test, not a page failure.
       await page.waitForTimeout(3_500);
       assert.equal(await page.locator('#task-name').inputValue(), 'wave-d-form-persistence');
       assert.equal(await page.locator('#task-prompt').inputValue(), 'Prove the error survives a status refresh.');
@@ -102,7 +102,27 @@ async function main() {
       await assertEnabled(page.getByRole('button', { name: 'Start contributing' }));
       const next = page.getByRole('button', { name: 'Contribute next available' });
       if (await page.getByRole('button', { name: 'Contribute this' }).count()) await assertEnabled(next);
-      else assert.equal(await next.isDisabled(), true);
+      else assert.equal(await next.count(), 0);
+    });
+
+    await check('Expired sessions stop polling after two unauthorized status responses', async () => {
+      const stalePage = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
+      const staleErrors = [];
+      let statusRequests = 0;
+      stalePage.on('console', (message) => { if (message.type() === 'error') staleErrors.push(message.text()); });
+      await stalePage.route('**/status', async (route) => {
+        statusRequests += 1;
+        await route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: 'missing or invalid daemon session token' }) });
+      });
+      try {
+        await stalePage.goto(targetUrl.toString(), { waitUntil: 'networkidle', timeout: 15_000 });
+        await assertText(stalePage, 'This session expired. Reopen Federation from Waspflow');
+        await stalePage.waitForTimeout(3_500);
+        assert.equal(statusRequests, 2, 'the stale tab must stop status polling after repeated 401 responses');
+        assert.equal(staleErrors.length, 2, 'the browser may report the two real 401 responses, but it must not keep emitting them');
+      } finally {
+        await stalePage.close();
+      }
     });
 
     await check('No console errors on any Federation view', () => {
