@@ -1,5 +1,5 @@
 var ne, y, Ie, H, ve, Fe, Ue, ae, B, M, He, pe, le, ce, V = {}, K = [], Ze = /acit|ex(?:s|g|n|p|$)|rph|grid|ows|mnc|ntw|ine[ch]|zoo|^ord|itera/i, re = Array.isArray;
-function I(t, e) {
+function F(t, e) {
   for (var r in e) t[r] = e[r];
   return t;
 }
@@ -29,7 +29,7 @@ function L(t, e) {
 }
 function tt(t) {
   if (t.__P && t.__d) {
-    var e = t.__v, r = e.__e, a = [], s = [], i = I({}, e);
+    var e = t.__v, r = e.__e, a = [], s = [], i = F({}, e);
     i.__v = e.__v + 1, y.vnode && y.vnode(i), he(t.__P, i, e, t.__n, t.__P.namespaceURI, 32 & e.__u ? [r] : null, a, r ?? L(e), !!(32 & e.__u), s), i.__v = e.__v, i.__.__k[i.__i] = i, We(a, i, s), e.__e = e.__ = null, i.__e != r && Ee(i);
   }
 }
@@ -111,17 +111,17 @@ function ke(t) {
   };
 }
 function he(t, e, r, a, s, i, d, l, p, c) {
-  var u, h, o, _, f, b, w, k, v, m, g, x, q, P, R, F, $ = e.type;
+  var u, h, o, _, f, b, w, k, v, m, g, x, q, P, R, U, $ = e.type;
   if (e.constructor !== void 0) return null;
   128 & r.__u && (p = !!(32 & r.__u), i = [l = e.__e = r.__e]), (u = y.__b) && u(e);
   e: if (typeof $ == "function") {
     h = d.length;
     try {
-      if (v = e.props, m = $.prototype && $.prototype.render, g = (u = $.contextType) && a[u.__c], x = u ? g ? g.props.value : u.__ : a, r.__c ? k = (o = e.__c = r.__c).__ = o.__E : (m ? e.__c = o = new $(v, x) : (e.__c = o = new Y(v, x), o.constructor = $, o.render = at), g && g.sub(o), o.state || (o.state = {}), o.__n = a, _ = o.__d = !0, o.__h = [], o._sb = []), m && o.__s == null && (o.__s = o.state), m && $.getDerivedStateFromProps != null && (o.__s == o.state && (o.__s = I({}, o.__s)), I(o.__s, $.getDerivedStateFromProps(v, o.__s))), f = o.props, b = o.state, o.__v = e, _) m && $.getDerivedStateFromProps == null && o.componentWillMount != null && o.componentWillMount(), m && o.componentDidMount != null && o.__h.push(o.componentDidMount);
+      if (v = e.props, m = $.prototype && $.prototype.render, g = (u = $.contextType) && a[u.__c], x = u ? g ? g.props.value : u.__ : a, r.__c ? k = (o = e.__c = r.__c).__ = o.__E : (m ? e.__c = o = new $(v, x) : (e.__c = o = new Y(v, x), o.constructor = $, o.render = at), g && g.sub(o), o.state || (o.state = {}), o.__n = a, _ = o.__d = !0, o.__h = [], o._sb = []), m && o.__s == null && (o.__s = o.state), m && $.getDerivedStateFromProps != null && (o.__s == o.state && (o.__s = F({}, o.__s)), F(o.__s, $.getDerivedStateFromProps(v, o.__s))), f = o.props, b = o.state, o.__v = e, _) m && $.getDerivedStateFromProps == null && o.componentWillMount != null && o.componentWillMount(), m && o.componentDidMount != null && o.__h.push(o.componentDidMount);
       else {
         if (m && $.getDerivedStateFromProps == null && v !== f && o.componentWillReceiveProps != null && o.componentWillReceiveProps(v, x), e.__v == r.__v || !o.__e && o.shouldComponentUpdate != null && o.shouldComponentUpdate(v, o.__s, x) === !1) {
-          e.__v != r.__v && (o.props = v, o.state = o.__s, o.__d = !1), e.__e = r.__e, e.__k = r.__k, e.__k.some(function(U) {
-            U && (U.__ = e);
+          e.__v != r.__v && (o.props = v, o.state = o.__s, o.__d = !1), e.__e = r.__e, e.__k = r.__k, e.__k.some(function(I) {
+            I && (I.__ = e);
           }), K.push.apply(o.__h, o._sb), o._sb = [], o.__h.length && d.push(o);
           break e;
         }
@@ -133,15 +133,15 @@ function he(t, e, r, a, s, i, d, l, p, c) {
       else do
         o.__d = !1, q && q(e), u = o.render(o.props, o.state, o.context), o.state = o.__s;
       while (o.__d && ++P < 25);
-      o.state = o.__s, o.getChildContext != null && (a = I(I({}, a), o.getChildContext())), m && !_ && o.getSnapshotBeforeUpdate != null && (w = o.getSnapshotBeforeUpdate(f, b)), R = u != null && u.type === T && u.key == null ? Oe(u.props.children) : u, l = De(t, re(R) ? R : [R], e, r, a, s, i, d, l, p, c), o.base = e.__e, e.__u &= -161, o.__h.length && d.push(o), k && (o.__E = o.__ = null);
-    } catch (U) {
+      o.state = o.__s, o.getChildContext != null && (a = F(F({}, a), o.getChildContext())), m && !_ && o.getSnapshotBeforeUpdate != null && (w = o.getSnapshotBeforeUpdate(f, b)), R = u != null && u.type === T && u.key == null ? Oe(u.props.children) : u, l = De(t, re(R) ? R : [R], e, r, a, s, i, d, l, p, c), o.base = e.__e, e.__u &= -161, o.__h.length && d.push(o), k && (o.__E = o.__ = null);
+    } catch (I) {
       if (d.length = h, e.__v = null, p || i != null) {
-        if (U.then) {
+        if (I.then) {
           for (e.__u |= p ? 160 : 128; l && l.nodeType == 8 && l.nextSibling; ) l = l.nextSibling;
           i != null && (i[i.indexOf(l)] = null), e.__e = l;
-        } else if (i != null) for (F = i.length; F--; ) _e(i[F]);
+        } else if (i != null) for (U = i.length; U--; ) _e(i[U]);
       } else e.__e = r.__e;
-      e.__k == null && (e.__k = r.__k || []), U.then || Me(e), y.__e(U, e, r);
+      e.__k == null && (e.__k = r.__k || []), I.then || Me(e), y.__e(I, e, r);
     }
   } else i == null && e.__v == r.__v ? (e.__k = r.__k, e.__e = r.__e) : l = e.__e = it(r.__e, e, r, a, s, i, d, p, c);
   return (u = y.diffed) && u(e), 128 & e.__u ? void 0 : l;
@@ -162,7 +162,7 @@ function We(t, e, r) {
   });
 }
 function Oe(t) {
-  return typeof t != "object" || t == null || t.__b > 0 ? t : re(t) ? t.map(Oe) : t.constructor !== void 0 ? null : I({}, t);
+  return typeof t != "object" || t == null || t.__b > 0 ? t : re(t) ? t.map(Oe) : t.constructor !== void 0 ? null : F({}, t);
 }
 function it(t, e, r, a, s, i, d, l, p) {
   var c, u, h, o, _, f, b, w = r.props || V, k = e.props, v = e.type;
@@ -226,7 +226,7 @@ ne = K.slice, y = { __e: function(t, e, r, a) {
   throw t;
 } }, Ie = 0, Y.prototype.setState = function(t, e) {
   var r;
-  r = this.__s != null && this.__s != this.state ? this.__s : this.__s = I({}, this.state), typeof t == "function" && (t = t(I({}, r), this.props)), t && I(r, t), t != null && this.__v && (e && this._sb.push(e), be(this));
+  r = this.__s != null && this.__s != this.state ? this.__s : this.__s = F({}, this.state), typeof t == "function" && (t = t(F({}, r), this.props)), t && F(r, t), t != null && this.__v && (e && this._sb.push(e), be(this));
 }, Y.prototype.forceUpdate = function(t) {
   this.__v && (this.__e = !0, t && this.__h.push(t), be(this));
 }, Y.prototype.render = T, H = [], Fe = typeof Promise == "function" ? Promise.prototype.then.bind(Promise.resolve()) : setTimeout, Ue = function(t, e) {
@@ -814,8 +814,8 @@ function Ht() {
     return q;
   }, [t]), o = z(async () => {
     try {
-      const m = await h("/status"), g = !m.coordinator_unavailable, [x, q, P, R, F, $, U] = await Promise.all([m.state === "idle" ? h("/tasks").catch(() => []) : Promise.resolve([]), h("/ledger").catch(() => []), h("/identity").catch(() => null), h("/settings").catch(() => null), g ? h("/roster").catch(() => []) : Promise.resolve([]), g ? h("/activity").catch(() => []) : Promise.resolve([]), g ? h("/requests").catch(() => null) : Promise.resolve(null)]);
-      r((Xe) => ({ ...Xe, status: m, tasks: D(x), ledger: D(q), identity: P || { key_id: m.key_id, coordinator_url: m.coordinator_url }, settings: R, roster: D(F?.roster || F), requests: D(U || q).filter((ie) => ie.author === "me" || ie.role === "requester" || ie.requester === !0), coordinatorUnavailable: !!m.coordinator_unavailable, daemonUnavailable: !1 }));
+      const m = await h("/status"), g = !m.coordinator_unavailable, [x, q, P, R, U, $, I] = await Promise.all([m.state === "idle" ? h("/tasks").catch(() => []) : Promise.resolve([]), h("/ledger").catch(() => []), h("/identity").catch(() => null), h("/settings").catch(() => null), g ? h("/roster").catch(() => []) : Promise.resolve([]), g ? h("/activity").catch(() => []) : Promise.resolve([]), g ? h("/requests").catch(() => null) : Promise.resolve(null)]);
+      r((Xe) => ({ ...Xe, status: m, tasks: D(x), ledger: D(q), identity: P || { key_id: m.key_id, coordinator_url: m.coordinator_url }, settings: R, roster: D(U?.roster || U), requests: I ? D(I) : D(q).filter((ie) => ie.author === "me" || ie.role === "requester" || ie.requester === !0), coordinatorUnavailable: !!m.coordinator_unavailable, daemonUnavailable: !1 }));
     } catch (m) {
       m.status === 401 ? r((g) => ({ ...g, sessionExpired: !0 })) : r((g) => ({ ...g, daemonUnavailable: !0 }));
     }
@@ -839,7 +839,7 @@ function Ht() {
   }, f = async (m) => {
     try {
       const g = await Promise.all(m.files.map(wt));
-      if (g.reduce((R, F) => R + Math.floor(F.data_base64.length * 3 / 4), 0) > 20 * 1024 * 1024) throw new Error("Attachments are limited to 20 MB. Choose fewer or smaller files.");
+      if (g.reduce((R, U) => R + Math.floor(U.data_base64.length * 3 / 4), 0) > 20 * 1024 * 1024) throw new Error("Attachments are limited to 20 MB. Choose fewer or smaller files.");
       const q = { ...m, attachments: g, network: m.git_url || m.network ? "enabled" : "disabled" };
       delete q.files;
       const P = await h("/submit", { method: "POST", body: JSON.stringify(q) });
@@ -892,7 +892,9 @@ function Ht() {
 }
 if (typeof document < "u") {
   const t = document.createElement("style");
-  t.textContent = gt, document.head.append(t), ot(/* @__PURE__ */ n(Ht, {}), document.getElementById("app"));
+  t.textContent = gt, document.head.append(t);
+  const e = document.getElementById("app");
+  e.textContent = "", ot(/* @__PURE__ */ n(Ht, {}), e);
 }
 export {
   ft as capacityKind,
