@@ -229,6 +229,76 @@ test('collectDeclaredOutputs and _copyIn use an ABSOLUTE guest path, not a bare 
   }
 });
 
+test('cloneGitSource clones anonymously in the GitHub kit sandbox, transfers the tree, and destroys the clone sandbox', async () => {
+  const taskScratch = await mkdtemp(path.join(os.tmpdir(), 'wf-git-task-'));
+  const cloneScratch = await mkdtemp(path.join(os.tmpdir(), 'wf-git-clone-'));
+  const stubDir = await writeStub('git-clone-record', `
+    echo "$@" >> "$WF_STUB_LOG"
+    exit 0
+  `);
+  const logPath = path.join(stubDir, 'invocation.log');
+  const previousBin = process.env.WASPFLOW_SBX_BIN;
+  process.env.WASPFLOW_SBX_BIN = path.join(stubDir, 'sbx');
+  process.env.WF_STUB_LOG = logPath;
+  const taskHandle = { backend_id: BACKEND_ID, job_id: 'job-git', sandbox_id: 'wf-task', scratch_dir: taskScratch };
+  const cloneHandle = { backend_id: BACKEND_ID, job_id: 'job-git-git', sandbox_id: 'wf-clone', scratch_dir: cloneScratch };
+  try {
+    const backend = new DockerSbxBackend();
+    const prepared = [];
+    let destroyed = null;
+    backend.prepare = async (job) => { prepared.push(job); return cloneHandle; };
+    backend.destroy = async (handle) => { destroyed = handle; };
+    await backend.cloneGitSource(taskHandle, { url: 'https://github.com/octocat/Hello-World.git', ref: 'main' });
+
+    assert.deepEqual(prepared, [{ job_id: 'job-git-git', image: 'wf-gh-cli', entrypoint: 'true', inputs: [] }]);
+    assert.equal(destroyed, cloneHandle);
+    const invocations = await import('node:fs/promises').then((m) => m.readFile(logPath, 'utf8'));
+    assert.match(invocations, /exec wf-clone -- sh -c git clone --depth 1 --branch 'main' 'https:\/\/github\.com\/octocat\/Hello-World\.git' repo/);
+    assert.match(invocations, new RegExp(`cp wf-clone:${cloneScratch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\/repo ${taskScratch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\/repo`));
+    assert.doesNotMatch(invocations, /gh repo clone/);
+  } finally {
+    if (previousBin === undefined) delete process.env.WASPFLOW_SBX_BIN;
+    else process.env.WASPFLOW_SBX_BIN = previousBin;
+    delete process.env.WF_STUB_LOG;
+    await rm(stubDir, { recursive: true, force: true });
+    await rm(taskScratch, { recursive: true, force: true });
+    await rm(cloneScratch, { recursive: true, force: true });
+  }
+});
+
+test('cloneGitSource falls back to kit-proxied gh only after anonymous Git transport fails', async () => {
+  const taskScratch = await mkdtemp(path.join(os.tmpdir(), 'wf-git-task-'));
+  const cloneScratch = await mkdtemp(path.join(os.tmpdir(), 'wf-git-clone-'));
+  const stubDir = await writeStub('git-clone-fallback', `
+    echo "$@" >> "$WF_STUB_LOG"
+    case "$*" in *'git clone'*) exit 1 ;; *) exit 0 ;; esac
+  `);
+  const logPath = path.join(stubDir, 'invocation.log');
+  const previousBin = process.env.WASPFLOW_SBX_BIN;
+  process.env.WASPFLOW_SBX_BIN = path.join(stubDir, 'sbx');
+  process.env.WF_STUB_LOG = logPath;
+  const taskHandle = { backend_id: BACKEND_ID, job_id: 'job-git-fallback', sandbox_id: 'wf-task', scratch_dir: taskScratch };
+  const cloneHandle = { backend_id: BACKEND_ID, job_id: 'job-git-fallback-git', sandbox_id: 'wf-clone', scratch_dir: cloneScratch };
+  try {
+    const backend = new DockerSbxBackend();
+    backend.prepare = async () => cloneHandle;
+    backend.destroy = async () => {};
+    await backend.cloneGitSource(taskHandle, { url: 'https://github.com/octocat/Hello-World.git' });
+    const invocations = await import('node:fs/promises').then((m) => m.readFile(logPath, 'utf8'));
+    const anonymous = invocations.indexOf('git clone --depth 1');
+    const authenticated = invocations.indexOf('gh repo clone');
+    assert.ok(anonymous >= 0, 'must try anonymous Git transport first');
+    assert.ok(authenticated > anonymous, 'gh must only run after anonymous clone fails');
+  } finally {
+    if (previousBin === undefined) delete process.env.WASPFLOW_SBX_BIN;
+    else process.env.WASPFLOW_SBX_BIN = previousBin;
+    delete process.env.WF_STUB_LOG;
+    await rm(stubDir, { recursive: true, force: true });
+    await rm(taskScratch, { recursive: true, force: true });
+    await rm(cloneScratch, { recursive: true, force: true });
+  }
+});
+
 // --- live-sbx-dependent behavior: stub executable or skip -------------------
 
 async function sbxOnPath() {

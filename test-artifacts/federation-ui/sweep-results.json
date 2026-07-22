@@ -31,6 +31,10 @@
       "status": "PASS"
     },
     {
+      "name": "GitHub task access device code renders without completing a real login",
+      "status": "PASS"
+    },
+    {
       "name": "Contribution controls require a consented task without mutating the rig",
       "status": "PASS"
     },

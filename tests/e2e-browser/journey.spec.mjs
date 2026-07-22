@@ -121,6 +121,23 @@ async function main() {
       }
     });
 
+    await check('GitHub task access device code renders without completing a real login', async () => {
+      const githubPage = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
+      await githubPage.route('**/status', async (route) => route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ schema_version: 1, type: 'daemon_status', state: 'action_needed', detail: 'Finish github sign-in in your browser.', action: { kind: 'awaiting_browser', service: 'github', url: 'https://github.com/login/device', code: 'TEST-1234' }, coordinator_unavailable: false, ledger_summary: { count_7d: 0 } }),
+      }));
+      try {
+        await githubPage.goto(targetUrl.toString(), { waitUntil: 'networkidle', timeout: 15_000 });
+        await assertText(githubPage, 'Sign in to GitHub');
+        await assertText(githubPage, 'Confirmation code: TEST-1234');
+        await githubPage.screenshot({ path: path.join(artifactDir, 'github-device-flow.png'), fullPage: true });
+      } finally {
+        await githubPage.close();
+      }
+    });
+
     await check('Contribution controls require a consented task without mutating the rig', async () => {
       await page.getByRole('link', { name: 'Contribute' }).click();
       const next = page.getByRole('button', { name: 'Contribute next available' });

@@ -149,10 +149,14 @@ test('activity rows use a whole-row plain control and recovery states do not exp
 
 test('request form stores values and an inline error outside its recreated DOM subtree', async () => {
   const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
-  assert.match(app, /const requestForm = \{ display_id: '', prompt: '', source: '', files: \[\], network: false, error: '' \}/);
+  assert.match(app, /const requestForm = \{ display_id: '', prompt: '', source: '', git_url: '', git_ref: '', git_private: false, files: \[\], network: false, error: '' \}/);
   assert.match(app, /formState\.error = error\.message/);
   assert.match(app, /Attach the files the task should work on/);
   assert.match(app, /Advanced: use a folder path on this machine/);
   assert.match(app, /Allow internet access/);
-  assert.match(app, /Private repositories need scoped access/);
+  assert.match(app, /Git repository \(optional\)/);
+  assert.match(app, /This repository needs GitHub access/);
+  assert.match(app, /Set up GitHub access/);
+  assert.match(app, /Needs: GitHub/);
+  assert.match(app, /private Git repository tasks/);
 });

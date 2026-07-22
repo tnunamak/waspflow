@@ -551,7 +551,7 @@ async function cmdApprove(argv) {
 // filled in.
 async function cmdSubmit(argv) {
   const { flags } = parseFlags(argv, [
-    'display-id', 'source', 'prompt', 'prompt-file', 'network', 'expires-in',
+    'display-id', 'source', 'git-url', 'git-ref', 'git-private', 'prompt', 'prompt-file', 'network', 'expires-in',
     'poll-interval', 'timeout', 'output-dir',
   ]);
   const { requireConfig } = await import('../lib/federation-config.mjs');
@@ -559,7 +559,8 @@ async function cmdSubmit(argv) {
   config = await refreshRosterCache(config);
 
   if (!flags['display-id']) fail('submit: --display-id is required');
-  if (!flags.source) fail('submit: --source is required');
+  if (!flags.source && !flags['git-url']) fail('submit: --source or --git-url is required');
+  if (flags.source && flags['git-url']) fail('submit: --source and --git-url cannot be used together');
   if (!flags.prompt && !flags['prompt-file']) fail('submit: --prompt or --prompt-file is required');
 
   const submitArgs = [
@@ -569,8 +570,11 @@ async function cmdSubmit(argv) {
     '--author-key-id', config.key_id,
     '--private-key-file', config.private_key_path,
     '--display-id', flags['display-id'],
-    '--source', flags.source,
   ];
+  if (flags.source) submitArgs.push('--source', flags.source);
+  if (flags['git-url']) submitArgs.push('--git-url', flags['git-url']);
+  if (flags['git-ref']) submitArgs.push('--git-ref', flags['git-ref']);
+  if (flags['git-private']) submitArgs.push('--git-private', flags['git-private']);
   if (flags.prompt) submitArgs.push('--prompt', flags.prompt);
   if (flags['prompt-file']) submitArgs.push('--prompt-file', flags['prompt-file']);
   if (flags.network) submitArgs.push('--network', flags.network);

@@ -177,7 +177,7 @@ async function main() {
   // runJob doc for why: ValidatedJobSpec.inputs/_copyIn can't be used here —
   // it's unusable by any real caller in the current backend, a pre-existing
   // gap this routes around rather than silently papering over).
-  const materializeSource = (scratchDir) => materializeSourceArtifact(sourceBytes, taskPayload.source.base_artifact.media_type, scratchDir);
+  const materializeSource = taskPayload.git_source ? undefined : (scratchDir) => materializeSourceArtifact(sourceBytes, taskPayload.source.base_artifact.media_type, scratchDir);
   const authorize = async (handle) => {
     const { startAuthFlow, describeAuthRequirement } = await import('../lib/federation-auth-flow.mjs');
     const requirement = describeAuthRequirement(harness);
@@ -204,6 +204,7 @@ async function main() {
   const { collected, cleanupReceipt, execution } = await runJob({
     jobSpec,
     materializeSource,
+    cloneGitSource: taskPayload.git_source,
     authorize,
     statusProbe: statusProbeCommand(harness.harness_id),
     // Preserve the provider's exact stdout lines separately from Federation

@@ -411,7 +411,10 @@ test('GET /requests returns every lifecycle state authored by the requested key 
 
 test('GET /tasks returns every claimable task, lazily requeues expired claims, and excludes live claims and settled tasks', async () => {
   await withServer(async ({ base }) => {
-    const queuedEnvelope = signTask({ display_id: 'queued' });
+    const queuedEnvelope = signTask({
+      display_id: 'queued',
+      git_source: { url: 'https://github.com/octocat/Hello-World.git', ref: 'main', authentication_required: true },
+    });
     const expiredEnvelope = signTask({ display_id: 'expired' });
     const liveEnvelope = signTask({ display_id: 'live-claim' });
     const settledEnvelope = signTask({ display_id: 'settled' });
@@ -437,10 +440,11 @@ test('GET /tasks returns every claimable task, lazily requeues expired claims, a
     assert.deepEqual(body.map((task) => task.task_digest).sort(), [expired.task_digest, queued.task_digest].sort());
 
     const queuedTask = body.find((task) => task.task_digest === queued.task_digest);
-    assert.deepEqual(Object.keys(queuedTask).sort(), ['author', 'display_id', 'network', 'prompt', 'published_at', 'source', 'task_digest']);
+    assert.deepEqual(Object.keys(queuedTask).sort(), ['author', 'display_id', 'git_source', 'network', 'prompt', 'published_at', 'source', 'task_digest']);
     assert.equal(queuedTask.author, queuedEnvelope.payload.author_key);
     assert.equal(queuedTask.network, queuedEnvelope.payload.network);
     assert.deepEqual(queuedTask.source, queuedEnvelope.payload.source);
+    assert.deepEqual(queuedTask.git_source, queuedEnvelope.payload.git_source);
     assert.deepEqual(queuedTask.prompt, queuedEnvelope.payload.prompt);
     assert.match(queuedTask.published_at, /^\d{4}-\d{2}-\d{2}T/);
 

@@ -61,6 +61,7 @@ export function providerDisplayName(value) {
     anthropic: 'Anthropic (Claude)',
     claude: 'Anthropic (Claude)',
     openai: 'OpenAI',
+    github: 'GitHub',
     google: 'Google',
   };
   return names[provider.toLowerCase()] || provider;
@@ -193,8 +194,9 @@ function authOrJoinView(view, status, control) {
   );
   const browserAction = view.action?.kind === 'awaiting_browser';
   const provider = providerDisplayName(view.action?.service || status?.contribution?.provider || 'your provider');
-  return panel(browserAction ? `Sign in to ${provider}` : 'Sign-in needs support', browserAction ? 'Finish this one browser step, then return here to see whether the same task can resume.' : 'This provider cannot complete sign-in in Federation yet.',
-    element('p', { text: browserAction ? `This affects ${status?.contribution?.display_id || 'your pending contribution'}. Waspflow will show the result here after you finish.` : 'No task will resume automatically. Use a provider with browser sign-in, or ask your collective owner to enable this account.' }),
+  const githubTaskAccess = String(view.action?.service || '').toLowerCase() === 'github';
+  return panel(browserAction ? `Sign in to ${provider}` : 'Sign-in needs support', browserAction ? githubTaskAccess ? 'Connect GitHub task access under Federation’s isolated identity.' : 'Finish this one browser step, then return here to see whether the same task can resume.' : 'This provider cannot complete sign-in in Federation yet.',
+    element('p', { text: browserAction ? githubTaskAccess ? 'This access is used only for private Git repository tasks. Waspflow will show the result here after you finish.' : `This affects ${status?.contribution?.display_id || 'your pending contribution'}. Waspflow will show the result here after you finish.` : 'No task will resume automatically. Use a provider with browser sign-in, or ask your collective owner to enable this account.' }),
     browserAction ? button(`Sign in to ${provider}`, () => window.open(view.action?.url, '_blank', 'noopener')) : null,
     view.action?.code ? element('p', { className: 'detail', text: `Confirmation code: ${view.action.code}` }) : null,
   );
@@ -226,7 +228,14 @@ function contributionStatus(status, view, control, settings, coordinatorUnavaila
   );
 }
 
-function taskChoices(tasks, contribute, pendingNext, setPendingNext) {
+function taskRequirementChips(task) {
+  const chips = [];
+  if (task?.git_source?.authentication_required) chips.push(element('span', { className: 'receipt-chip', text: 'Needs: GitHub' }));
+  if (task?.network === 'enabled' || task?.git_source) chips.push(element('span', { className: 'receipt-chip', text: 'Needs: internet' }));
+  return chips.length ? element('div', { className: 'receipt-chips', 'aria-label': 'Task requirements' }, ...chips) : null;
+}
+
+function taskChoices(tasks, identity, contribute, setUpGitHub, pendingNext, setPendingNext) {
   const choices = Array.isArray(tasks) ? tasks : [];
   if (!choices.length) {
     return element('p', { className: 'task-queue-empty', text: 'No tasks are waiting right now. Nothing will run automatically.' });
@@ -237,7 +246,10 @@ function taskChoices(tasks, contribute, pendingNext, setPendingNext) {
       element('p', { text: `Task: ${nextTask.display_id || 'Untitled task'}` }),
       element('p', { text: `From: ${nextTask.author || 'Unknown requester'}` }),
       element('p', { className: 'prompt-preview', text: `Prompt: ${promptFirstLine(nextTask.prompt_preview || nextTask.prompt)}` }),
-      element('div', { className: 'actions' }, button('Run this', () => contribute(nextTask.task_digest)), button('Skip', () => setPendingNext(null), 'secondary')),
+      taskRequirementChips(nextTask),
+      element('div', { className: 'actions' }, nextTask.git_source?.authentication_required && !identity?.providers?.some((provider) => provider.service === 'github' && provider.authed)
+        ? button('Set up GitHub access', setUpGitHub)
+        : button('Run this', () => contribute(nextTask.task_digest)), button('Skip', () => setPendingNext(null), 'secondary')),
     ) : element('div', { className: 'actions' }, button('Contribute next available', () => setPendingNext(nextTask), 'secondary')),
     element('ul', { className: 'task-list', 'aria-label': 'Available tasks' }, ...choices.map((task) => element('li', { className: 'task-row' },
       element('div', { className: 'task-main' },
@@ -245,15 +257,18 @@ function taskChoices(tasks, contribute, pendingNext, setPendingNext) {
         element('p', { className: 'muted', text: taskAge(task.published_at) }),
         element('p', { className: 'prompt-preview', text: `Prompt: ${promptFirstLine(task.prompt_preview || task.prompt)}` }),
         task.network !== undefined ? element('p', { className: 'network', text: `Internet access: ${task.network === 'enabled' ? 'on' : 'off'}` }) : null,
+        taskRequirementChips(task),
       ),
-      button('Contribute this', () => contribute(task.task_digest), 'secondary'),
+      task.git_source?.authentication_required && !identity?.providers?.some((provider) => provider.service === 'github' && provider.authed)
+        ? button('Set up GitHub access', setUpGitHub, 'secondary')
+        : button('Contribute this', () => contribute(task.task_digest), 'secondary'),
     ))),
   );
 }
 
-function contributeView(status, tasks, view, control, settings, coordinatorUnavailable, pendingNext, setPendingNext, showStopNow, setShowStopNow, watchTask) {
+function contributeView(status, tasks, identity, view, control, settings, coordinatorUnavailable, pendingNext, setPendingNext, showStopNow, setShowStopNow, watchTask, setUpGitHub) {
   if (view.name !== 'status') return authOrJoinView(view, status, control);
-  return element('div', { className: 'view-stack' }, contributionStatus(status, view, control, settings, coordinatorUnavailable, showStopNow, setShowStopNow, watchTask), status?.state === 'idle' && !coordinatorUnavailable ? taskChoices(tasks, (digest) => control('/contribute/start', { task_digest: digest }), pendingNext, setPendingNext) : null);
+  return element('div', { className: 'view-stack' }, contributionStatus(status, view, control, settings, coordinatorUnavailable, showStopNow, setShowStopNow, watchTask), status?.state === 'idle' && !coordinatorUnavailable ? taskChoices(tasks, identity, (digest) => control('/contribute/start', { task_digest: digest }), setUpGitHub, pendingNext, setPendingNext) : null);
 }
 
 function timeline(task) {
@@ -317,6 +332,7 @@ function taskDetail(task, selectedDigest, resultHref, executionLog, loadExecutio
   return element('div', { className: 'view-stack' },
     panel(detail.display_id || 'Task detail', detail.author ? `Requested by ${detail.author}` : 'Request lifecycle and receipt.',
       timeline(detail),
+      taskRequirementChips(detail),
       element('p', { className: 'detail', text: labeledDate('Started', detail.started_at || detail.running_at || detail.claimed_at) }),
       element('p', { className: 'detail', text: labeledDate('Finished', detail.finished_at || detail.settled_at) }),
       element('p', { className: 'detail', text: `Duration: ${formatDuration(detail.duration || detail.execution_metadata?.duration_ms)}` }),
@@ -349,6 +365,9 @@ function submitForm(submit, formState) {
   const name = element('input', { id: 'task-name', required: true, value: formState.display_id, placeholder: 'Fix the login test', oninput: (event) => { formState.display_id = event.target.value; edited(); } });
   const prompt = element('textarea', { id: 'task-prompt', required: true, placeholder: 'Describe the outcome you need.', oninput: (event) => { formState.prompt = event.target.value; edited(); } }, formState.prompt);
   const folder = element('input', { id: 'task-folder', value: formState.source, placeholder: '/path/to/project (optional)', oninput: (event) => { formState.source = event.target.value; edited(); } });
+  const gitUrl = element('input', { id: 'task-git-url', value: formState.git_url, placeholder: 'https://github.com/owner/repository.git', oninput: (event) => { formState.git_url = event.target.value; edited(); } });
+  const gitRef = element('input', { id: 'task-git-ref', value: formState.git_ref, placeholder: 'main (optional)', oninput: (event) => { formState.git_ref = event.target.value; edited(); } });
+  const gitPrivate = element('input', { id: 'task-git-private', type: 'checkbox', checked: Boolean(formState.git_private), onchange: (event) => { formState.git_private = event.target.checked; edited(); } });
   const files = element('input', { id: 'task-files', type: 'file', multiple: true, webkitdirectory: true, onchange: (event) => { formState.files = Array.from(event.target.files || []); edited(); } });
   const network = element('input', { id: 'task-network', type: 'checkbox', checked: Boolean(formState.network), onchange: (event) => { formState.network = event.target.checked; edited(); } });
   feedback = element('p', { className: 'form-feedback', role: 'alert', text: formState.error });
@@ -369,7 +388,7 @@ function submitForm(submit, formState) {
       }));
       const bytes = attachments.reduce((sum, file) => sum + Math.floor(file.data_base64.length * 3 / 4), 0);
       if (bytes > 20 * 1024 * 1024) throw new Error('Attachments are limited to 20 MB. Choose fewer or smaller files.');
-      await submit({ display_id: formState.display_id, prompt: formState.prompt, source: formState.source, attachments, network: formState.network ? 'enabled' : 'disabled' });
+      await submit({ display_id: formState.display_id, prompt: formState.prompt, source: formState.source, attachments, git_url: formState.git_url, git_ref: formState.git_ref, git_private: formState.git_private, network: formState.git_url ? 'enabled' : formState.network ? 'enabled' : 'disabled' });
     }
     catch (error) { formState.error = error.message; feedback.textContent = formState.error; }
   } },
@@ -378,9 +397,13 @@ function submitForm(submit, formState) {
     element('label', { for: 'task-files', text: 'Attach files or a folder (optional)' }), files,
     element('p', { className: 'field-help', text: 'Attach the files the task should work on (optional — leave empty to start from scratch).' }),
     element('label', { for: 'task-folder', text: 'Advanced: use a folder path on this machine' }), folder,
+    element('label', { for: 'task-git-url', text: 'Git repository (optional)' }), gitUrl,
+    element('label', { for: 'task-git-ref', text: 'Branch or ref (optional)' }), gitRef,
+    element('label', { className: 'check-label', for: 'task-git-private' }, gitPrivate, document.createTextNode(' This repository needs GitHub access')),
+    element('p', { className: 'field-help', text: 'Federation clones Git repositories inside the contributor sandbox. Private repositories require their Federation GitHub task access.' }),
     element('label', { className: 'check-label', for: 'task-network' }, network, document.createTextNode(' Allow internet access')),
     element('p', { className: 'field-help', text: 'When on, tasks can fetch public resources, such as cloning a public Git repository named in the prompt.' }),
-    element('p', { className: 'quiet-note', text: 'Private repositories need scoped access — coming; public repos work today with internet on.' }), feedback,
+    element('p', { className: 'quiet-note', text: 'GitHub access is task access, not contribution capacity. The credential stays behind the sandbox proxy.' }), feedback,
     element('div', { className: 'actions' }, element('button', { type: 'submit', text: 'Submit task' })),
   );
   return panel('Submit a request', 'Describe the outcome for your collective.', form);
@@ -465,10 +488,11 @@ function providerAccountCard(account, signIn) {
   const unauthenticated = (account.authenticated ?? account.authed) === false;
   const managed = !unauthenticated && String(service).toLowerCase().includes('anthropic');
   const checking = Boolean(account.checking);
+  const taskAccess = String(service).toLowerCase() === 'github';
   return element('li', { className: 'provider-card' },
     element('div', { className: 'provider-account-copy' },
       element('strong', { text: displayName }),
-      element('span', { className: 'provider-account-meta', text: `${readableCapacityKind(capacityKind(account))} · ${checking ? 'Checking…' : unauthenticated ? 'Needs sign-in' : 'Signed in'}` }),
+      element('span', { className: 'provider-account-meta', text: `${taskAccess ? 'Task access' : readableCapacityKind(capacityKind(account))} · ${checking ? 'Checking…' : unauthenticated ? 'Needs sign-in' : 'Signed in'}` }),
       account.account_email || account.email ? element('span', { className: 'field-help', text: account.account_email || account.email }) : null,
     ),
     unauthenticated && !checking
@@ -541,7 +565,7 @@ function helpView(identity) {
 function createApplication(root) {
   const token = new URLSearchParams(window.location.search).get('token');
   let status = null; let availableTasks = []; let ledger = []; let requests = []; let collective = []; let identity = null; let settings = null; let roster = []; let selectedDigest = null; let selectedTask = null; let selectedTaskRevision = 0; let selectedContribution = null; let selectedExecutionLog = null; let executionLogRevision = 0; let message = ''; let pollBusy = false; let lastLayoutSignature = null; let unauthorizedPolls = 0; let sessionExpired = false; let daemonUnavailable = false; let coordinatorUnavailable = false; let lastKnownAt = null; let pollTimer = null; let pendingNext = null; let showStopNow = false;
-  const requestForm = { display_id: '', prompt: '', source: '', files: [], network: false, error: '' };
+  const requestForm = { display_id: '', prompt: '', source: '', git_url: '', git_ref: '', git_private: false, files: [], network: false, error: '' };
   const failedRequests = new Map();
   const settingsDraft = { value: { schedule: { enabled: false, start: '', end: '', days: '', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone } }, dirty: false, saved: false };
   window.addEventListener('beforeunload', (event) => { if (settingsDraft.dirty) { event.preventDefault(); event.returnValue = ''; } });
@@ -577,7 +601,7 @@ function createApplication(root) {
     }
   }
   async function control(path, body) { message = ''; try { status = await request(path, { method: 'POST', body: body ? JSON.stringify(body) : undefined }); pendingNext = null; showStopNow = false; } catch (error) { message = error.message; } render(); }
-  async function submit(body) { const result = await request('/submit', { method: 'POST', body: JSON.stringify(body) }); requestForm.display_id = ''; requestForm.prompt = ''; requestForm.source = ''; requestForm.files = []; requestForm.network = false; requestForm.error = ''; status = result; selectedDigest = /^sha256:[a-f0-9]{64}$/i.test(result.submission?.task_digest || '') ? result.submission.task_digest : selectedDigest; window.location.hash = '#/requests'; render(); }
+  async function submit(body) { const result = await request('/submit', { method: 'POST', body: JSON.stringify(body) }); requestForm.display_id = ''; requestForm.prompt = ''; requestForm.source = ''; requestForm.git_url = ''; requestForm.git_ref = ''; requestForm.git_private = false; requestForm.files = []; requestForm.network = false; requestForm.error = ''; status = result; selectedDigest = /^sha256:[a-f0-9]{64}$/i.test(result.submission?.task_digest || '') ? result.submission.task_digest : selectedDigest; window.location.hash = '#/requests'; render(); }
   async function saveSettings(body) { settings = await request('/settings', { method: 'POST', body: JSON.stringify(body) }); settingsDraft.value = structuredClone(settings); render(); }
   async function signIn(service) { message = ''; try { status = await request('/identity/signin', { method: 'POST', body: JSON.stringify({ service }) }); } catch (error) { message = error.message; } render(); }
   function select(digest) { selectedDigest = digest; selectedTask = null; selectedTaskRevision += 1; selectedExecutionLog = null; executionLogRevision += 1; window.location.hash = '#/requests'; void refreshTask(); render(); }
@@ -659,7 +683,7 @@ function createApplication(root) {
     main.append(element('h1', { className: 'sr-only', text: `${navigation.find(([route]) => route === active)?.[1] || 'Federation'} in Waspflow Federation` }));
     if (sessionExpired) main.append(panel('Session expired', SESSION_EXPIRED_MESSAGE, button('Reconnect Federation', reconnectFederation), element('p', { className: 'field-help', text: 'If this does not reopen Federation, open it from the Waspflow app.' })));
     else if (daemonUnavailable) main.append(panel('Federation is not running on this computer', 'No new task can start. Your last known state is still shown when Federation reconnects.', lastKnownAt ? element('p', { className: 'detail', text: `Last connected ${formatDate(lastKnownAt)}.` }) : null, button('Reconnect Federation', reconnectFederation), element('p', { className: 'field-help', text: 'If this does not reopen Federation, open it from the Waspflow app.' })));
-    else if (active === 'contribute') main.append(contributeView(status, availableTasks, view, control, settings, coordinatorUnavailable, pendingNext, (task) => { pendingNext = task; render(); }, showStopNow, (value) => { showStopNow = value; render(); }, select));
+    else if (active === 'contribute') main.append(contributeView(status, availableTasks, identity, view, control, settings, coordinatorUnavailable, pendingNext, (task) => { pendingNext = task; render(); }, showStopNow, (value) => { showStopNow = value; render(); }, select, () => { window.location.hash = '#/settings'; }));
     else if (active === 'requests') {
       const resultHref = selectedDigest ? `/result/${encodeURIComponent(selectedDigest)}?token=${encodeURIComponent(token || '')}` : '#/requests';
       main.append(requestsView(requests, selectedDigest, selectedTask, submit, select, resultHref, requestForm, selectedExecutionLog, loadExecutionLog));

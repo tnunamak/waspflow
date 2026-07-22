@@ -205,6 +205,18 @@ test('buildTaskPayload defaults network to disabled (the safer posture)', () => 
   assert.equal(payload.network, 'disabled');
 });
 
+test('buildTaskPayload signs an optional Git repository requirement without changing the source artifact contract', () => {
+  const payload = buildTaskPayload({
+    collective: 'c', displayId: 'git-task', authorKeyId: AUTHOR_KEY_ID,
+    source: { sha256: 'a'.repeat(64), bytes: 0, media_type: SOURCE_MEDIA_TYPE },
+    prompt: { sha256: 'b'.repeat(64), bytes: 1, media_type: PROMPT_MEDIA_TYPE },
+    gitSource: { url: 'https://github.com/octocat/Hello-World.git', ref: 'main', authenticationRequired: true },
+  });
+  assert.deepEqual(payload.git_source, { url: 'https://github.com/octocat/Hello-World.git', ref: 'main', authentication_required: true });
+  assert.equal(payload.source.base_artifact.bytes, 0);
+  assert.equal(payload.network, 'enabled');
+});
+
 test('buildTaskPayload rejects an invalid network value', () => {
   assert.throws(() => buildTaskPayload({
     collective: 'c', displayId: 'd', authorKeyId: AUTHOR_KEY_ID,

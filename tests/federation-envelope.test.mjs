@@ -33,6 +33,19 @@ test('v0 reserves future verification and settlement slots and rejects executor 
     assert.throws(() => signEnvelope({ ...task(), ...mutation }, privateKey, 'author-1'), EnvelopeError);
   }
 });
+test('task envelope accepts a signed additive GitHub source but rejects non-GitHub and malformed requirements', () => {
+  const gitTask = task();
+  gitTask.git_source = { url: 'https://github.com/octocat/Hello-World.git', ref: 'main', authentication_required: true };
+  assert.doesNotThrow(() => signEnvelope(gitTask, privateKey, 'author-1'));
+  assert.notEqual(payloadDigest(gitTask), payloadDigest(task()), 'git source must change the content-addressed task identity');
+  for (const git_source of [
+    { url: 'git@github.com:octocat/Hello-World.git' },
+    { url: 'https://example.test/repo' },
+    { url: 'https://github.com/octocat/Hello-World', authentication_required: 'yes' },
+  ]) {
+    assert.throws(() => signEnvelope({ ...task(), git_source }, privateKey, 'author-1'), EnvelopeError);
+  }
+});
 test('result binds task digest without requiring author-side re-verification', () => {
   const taskDigest = payloadDigest(task()); const envelope = signEnvelope(result(taskDigest), privateKey, 'executor-1');
   assert.equal(verifyEnvelope(envelope, publicKey).kind, 'result');

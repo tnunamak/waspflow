@@ -56,6 +56,9 @@ function parseArgs(argv) {
     'private-key-file': null,
     'display-id': null,
     'source': null,
+    'git-url': null,
+    'git-ref': null,
+    'git-private': 'false',
     'prompt': null,
     'prompt-file': null,
     'network': 'disabled',
@@ -108,7 +111,8 @@ async function main() {
   if (!displayId) fail('--display-id is required');
 
   const sourceDir = flags['source'];
-  if (!sourceDir) fail('--source is required');
+  if (!sourceDir && !flags['git-url']) fail('--source or --git-url is required');
+  if (sourceDir && flags['git-url']) fail('--source and --git-url cannot be used together');
 
   let promptText = flags['prompt'];
   if (!promptText && flags['prompt-file']) {
@@ -140,14 +144,20 @@ async function main() {
     process.stderr.write('waspflow-federation-submit: WARNING: --output-dir given without --roster-file — extracting candidate bytes without independently verifying the executor signature that produced them.\n');
   }
 
-  process.stdout.write(`waspflow-federation-submit: packaging source from ${sourceDir}...\n`);
-  const source = await packageSourceDirectory(sourceDir);
+  // Git-source tasks retain the existing mandatory content-addressed source
+  // artifact as an intentionally empty bootstrap. The signed git_source is
+  // additive; runners replace this bootstrap only after cloning in a sandbox.
+  const emptySource = Buffer.alloc(0);
+  const source = sourceDir ? await packageSourceDirectory(sourceDir) : { buffer: emptySource, sha256: (await import('node:crypto')).createHash('sha256').update(emptySource).digest('hex'), bytes: 0, media_type: 'application/x-tar', method: 'git-source-bootstrap' };
+  process.stdout.write(sourceDir ? `waspflow-federation-submit: packaging source from ${sourceDir}...\n` : `waspflow-federation-submit: preparing Git repository task source...\n`);
   process.stdout.write(`waspflow-federation-submit: source artifact sha256:${source.sha256} (${source.bytes} bytes, via ${source.method})\n`);
 
   const prompt = packagePromptText(promptText);
   process.stdout.write(`waspflow-federation-submit: prompt artifact sha256:${prompt.sha256} (${prompt.bytes} bytes)\n`);
 
-  const payload = buildTaskPayload({ collective, displayId, authorKeyId, source, prompt, network, expiresInSeconds });
+  const privateFlag = flags['git-private'];
+  if (!['true', 'false'].includes(privateFlag)) fail('--git-private must be true or false');
+  const payload = buildTaskPayload({ collective, displayId, authorKeyId, source, prompt, network, expiresInSeconds, gitSource: flags['git-url'] ? { url: flags['git-url'], ref: flags['git-ref'], authenticationRequired: privateFlag === 'true' } : undefined });
   const envelope = signTaskEnvelope(payload, privateKeyPem, authorKeyId);
 
   process.stdout.write('waspflow-federation-submit: uploading source artifact...\n');

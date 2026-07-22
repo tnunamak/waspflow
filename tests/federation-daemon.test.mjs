@@ -601,6 +601,50 @@ test('POST /identity/signin exposes the existing browser auth handoff for an una
   }, { startProviderSignIn: async () => ({ status: 'awaiting-browser', url: 'https://auth.example/signin', code: 'ABCD-EFGH', waitForCompletion: async () => completion, cancel() {} }) });
 });
 
+test('a private GitHub task is gated before contribution and the daemon exposes the GitHub browser handoff', async () => {
+  const deviceFlow = {
+    url: 'https://github.com/login/device', code: 'TEST-1234', status: 'awaiting-browser',
+    cancel() {}, waitForCompletion: async () => ({ status: 'failed', detail: 'not completed in test' }),
+  };
+  await withDaemon(async ({ base, setConfig, setTaskListResponse }) => {
+    setConfig({ coordinator_url: 'http://coordinator.example', collective_token: 'collective-token' });
+    setTaskListResponse({ status: 200, body: [{
+      task_digest: 'a'.repeat(64), display_id: 'private repo', author: 'tim', network: 'enabled',
+      git_source: { url: 'https://github.com/octocat/Hello-World.git', authentication_required: true },
+      prompt: 'work from repo', source: { base_artifact: { bytes: 0 } },
+    }] });
+    const tasks = await request(base, '/tasks', { token: 'test-session-token' });
+    assert.equal(tasks.status, 200, tasks.text);
+    const blocked = await request(base, '/contribute/start', { method: 'POST', token: 'test-session-token', body: { task_digest: 'a'.repeat(64) } });
+    assert.equal(blocked.status, 409);
+    assert.match(JSON.parse(blocked.text).error, /Set up GitHub access in Settings/);
+    const signIn = await request(base, '/identity/signin', { method: 'POST', token: 'test-session-token', body: { service: 'github' } });
+    assert.equal(signIn.status, 202, signIn.text);
+    assert.equal(JSON.parse(signIn.text).action.code, 'TEST-1234');
+  }, {
+    identityProbe: async () => ({ docker_account: null, providers: [{ service: 'github', capacity_kind: 'n/a', authed: false }] }),
+    startProviderSignIn: async (service) => { assert.equal(service, 'github'); return deviceFlow; },
+  });
+});
+
+test('a public GitHub task may start without GitHub task access', async () => {
+  const digest = 'b'.repeat(64);
+  await withDaemon(async ({ base, children, setConfig, setTaskListResponse }) => {
+    setConfig({ coordinator_url: 'http://coordinator.example', collective_token: 'collective-token' });
+    setTaskListResponse({ status: 200, body: [{
+      task_digest: digest, display_id: 'public repo', author: 'tim', network: 'enabled',
+      git_source: { url: 'https://github.com/octocat/Hello-World.git' },
+      prompt: 'work from repo', source: { base_artifact: { bytes: 0 } },
+    }] });
+    await request(base, '/tasks', { token: 'test-session-token' });
+    const response = await request(base, '/contribute/start', { method: 'POST', token: 'test-session-token', body: { task_digest: digest } });
+    assert.equal(response.status, 202, response.text);
+    assert.equal(children.length, 1);
+  }, {
+    identityProbe: async () => ({ docker_account: null, providers: [{ service: 'github', capacity_kind: 'n/a', authed: false }] }),
+  });
+});
+
 test('provider sign-in replaces a stale flow and returns a clear UI state instead of a gateway error', async () => {
   let starts = 0;
   let cancelled = 0;
