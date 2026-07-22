@@ -43,7 +43,10 @@ asset_url() {
     head -n 1
 }
 
+INSTALLED_VIA=""
+
 install_tarball() {
+  INSTALLED_VIA="tarball"
   tar_url="$1"
   tar_file="$TMP_DIR/waspflow-federation.tar.gz"
   unpacked="$TMP_DIR/unpacked"
@@ -110,7 +113,24 @@ TMP_DIR="$(mktemp -d)"
 deb_url="$(asset_url '_amd64.deb' 'waspflow-federation_amd64.deb' || true)"
 tar_url="$(asset_url '_linux_amd64.tar.gz' 'waspflow-federation_linux_amd64.tar.gz' || true)"
 
-if [ -n "$deb_url" ] && command -v dpkg >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
+# The .deb declares Depends: nodejs (>= 20) against the SYSTEM package. A
+# machine whose Node comes from nvm or a tarball passes the runtime check
+# above but cannot satisfy that dpkg dependency — attempting dpkg -i there
+# half-installs the package (state iU), scares the user with dependency
+# errors, and leaves apt nagging forever (found live on a fresh tester
+# machine). Only take the .deb path when the system nodejs package itself
+# satisfies the dependency; otherwise the portable bundle is the right
+# install, not the fallback.
+system_nodejs_satisfies_deb() {
+  installed="$(dpkg-query -W -f '${Version}' nodejs 2>/dev/null)" || return 1
+  [ -n "$installed" ] || return 1
+  major="${installed#*:}"
+  major="${major%%.*}"
+  case "$major" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$major" -ge 20 ]
+}
+
+if [ -n "$deb_url" ] && command -v dpkg >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1 && system_nodejs_satisfies_deb; then
   deb_file="$TMP_DIR/waspflow-federation.deb"
   say "Installing the Debian package..."
   download "$deb_url" "$deb_file"
@@ -118,19 +138,29 @@ if [ -n "$deb_url" ] && command -v dpkg >/dev/null 2>&1 && command -v sudo >/dev
     say "Installed the Debian package."
   elif [ -n "$tar_url" ]; then
     warn "the Debian package could not be installed; using the portable bundle instead"
+    # Never leave a half-installed (unconfigured) package behind to break
+    # every later apt operation on the user's machine.
+    sudo dpkg --purge waspflow-federation >/dev/null 2>&1 || true
     install_tarball "$tar_url"
   else
+    sudo dpkg --purge waspflow-federation >/dev/null 2>&1 || true
     die "the Debian package could not be installed"
   fi
 elif [ -n "$tar_url" ]; then
+  if [ -n "$deb_url" ] && command -v dpkg >/dev/null 2>&1 && ! system_nodejs_satisfies_deb; then
+    say "Your Node.js is not from the system package manager; using the portable bundle (no sudo needed)."
+  fi
   install_tarball "$tar_url"
 else
   die "no Linux Federation .deb or portable tarball was found in the latest release"
 fi
 
-case ":$PATH:" in
-  *":$INSTALL_ROOT/bin:"*) ;;
-  *) warn "$INSTALL_ROOT/bin is not on PATH; add it before opening a new shell" ;;
-esac
+# Only the tarball installs under $INSTALL_ROOT; the .deb owns /usr/bin.
+if [ "$INSTALLED_VIA" = "tarball" ]; then
+  case ":$PATH:" in
+    *":$INSTALL_ROOT/bin:"*) ;;
+    *) warn "$INSTALL_ROOT/bin is not on PATH; add it before opening a new shell" ;;
+  esac
+fi
 
 say "Ready. Start the guided onboarding flow with: waspflow federation"
