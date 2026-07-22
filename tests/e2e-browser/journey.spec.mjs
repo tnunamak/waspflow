@@ -42,7 +42,7 @@ async function main() {
     await check('Idle contributor view and ledger copy', async () => {
       await assertSelectorVisible(page, '.status-dot[data-state="idle"]');
       await assertText(page, 'Ready when you are');
-      await assertText(page, 'Trusted coordinator');
+      await assertText(page, 'Collective:');
       await assertText(page, 'completed this week');
       await page.screenshot({ path: path.join(artifactDir, 'idle.png'), fullPage: true });
     });
@@ -50,9 +50,13 @@ async function main() {
     await check('Task choice card has a next-available button and selectable tasks', async () => {
       await assertText(page.locator('h2'), 'Choose a task');
       const next = page.getByRole('button', { name: 'Contribute next available' });
-      await assertEnabled(next);
       const taskButtons = page.getByRole('button', { name: 'Contribute this' });
-      if (await taskButtons.count()) await assertEnabled(taskButtons.first());
+      if (await taskButtons.count()) {
+        await assertEnabled(next);
+        await assertEnabled(taskButtons.first());
+      } else {
+        assert.equal(await next.isDisabled(), true, 'next-available must be disabled when the queue is empty');
+      }
     });
 
     await check('Help keeps the safety boundary available in-app', async () => {
@@ -62,13 +66,24 @@ async function main() {
       await page.screenshot({ path: path.join(artifactDir, 'safety-expanded.png'), fullPage: true });
     });
 
-    await check('Requester form is a dedicated Requests view and survives polling', async () => {
+    await check('Requester form keeps its values and an inline submit error across polling, then clears the error on edit', async () => {
       await page.getByRole('link', { name: 'Requests' }).click();
       await assertSelectorVisible(page, '#task-name');
       await assertSelectorVisible(page, '#task-prompt');
       await assertSelectorVisible(page, '#task-folder');
-      await page.waitForTimeout(4_000);
-      await assertSelectorVisible(page, '#task-name');
+      await page.locator('#task-name').fill('wave-d-form-persistence');
+      await page.locator('#task-prompt').fill('Prove the error survives a status refresh.');
+      await page.locator('#task-folder').fill('/definitely/not/a-folder');
+      await page.getByRole('button', { name: 'Submit task' }).click();
+      await assertText(page.locator('.form-feedback'), 'source folder does not exist');
+      await page.waitForTimeout(3_500);
+      assert.equal(await page.locator('#task-name').inputValue(), 'wave-d-form-persistence');
+      assert.equal(await page.locator('#task-prompt').inputValue(), 'Prove the error survives a status refresh.');
+      assert.equal(await page.locator('#task-folder').inputValue(), '/definitely/not/a-folder');
+      await assertText(page.locator('.form-feedback'), 'source folder does not exist');
+      await page.locator('#task-prompt').fill('Edited prompt clears the old error.');
+      assert.equal(await page.locator('.form-feedback').textContent(), '');
+      assert.equal(await page.locator('#task-folder').getAttribute('required'), null);
       await page.screenshot({ path: path.join(artifactDir, 'advanced-submit-expanded.png'), fullPage: true });
     });
 
@@ -85,7 +100,9 @@ async function main() {
     await check('Contribution controls are present and enabled without mutating the rig', async () => {
       await page.getByRole('link', { name: 'Contribute' }).click();
       await assertEnabled(page.getByRole('button', { name: 'Start contributing' }));
-      await assertEnabled(page.getByRole('button', { name: 'Contribute next available' }));
+      const next = page.getByRole('button', { name: 'Contribute next available' });
+      if (await page.getByRole('button', { name: 'Contribute this' }).count()) await assertEnabled(next);
+      else assert.equal(await next.isDisabled(), true);
     });
 
     await check('No console errors on any Federation view', () => {

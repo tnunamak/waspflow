@@ -9,11 +9,12 @@ test('web UI document loads its browser module', async () => {
   assert.match(index, /app\.src = `\/app\.mjs\?token=/);
 });
 
-test('idle contributor UI offers both task choice and the one-click next-task path', async () => {
+test('idle contributor UI offers both task choice and disables the empty next-task path', async () => {
   const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
   assert.match(app, /Choose a task/);
   assert.match(app, /Contribute this/);
   assert.match(app, /Contribute next available/);
+  assert.match(app, /disabled: choices\.length === 0/);
   assert.match(app, /optionalRequest\('\/tasks', \[\]\)/);
 });
 
@@ -48,11 +49,11 @@ test('web UI maps daemon states to the join, status, and auth views', () => {
   );
 });
 
-test('web UI renders approval waiting, collective-name personalization, and contribution thanks', async () => {
+test('web UI renders approval waiting, collective-first personalization, and contribution thanks', async () => {
   const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
   assert.match(app, /Waiting for approval/);
   assert.match(app, /You’re joining/);
-  assert.match(app, /Trusted coordinator/);
+  assert.match(app, /Collective: \$\{collectiveName\}/);
   assert.match(app, /completed this week/);
   assert.match(app, /Sign in to Docker/);
   assert.match(app, /Confirmation code/);
@@ -84,7 +85,7 @@ test('web UI keeps a neutral first-load screen, backs off failed optional fetche
 
 test('product UI contains all five surfaces and the Wave A compatible task, result, identity, and schedule affordances', async () => {
   const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
-  for (const label of ['Contribute', 'Requests', 'Activity', 'Settings', 'Help', 'Download result', 'Accounts in use', 'Pause schedule', 'Only spare capacity is used']) {
+  for (const label of ['Contribute', 'Requests', 'Activity', 'Settings', 'Help', 'Download result', 'Accounts in use', 'Limit to certain hours', 'capacity you’re not using']) {
     assert.match(app, new RegExp(label));
   }
   assert.match(app, /optionalRequest\(`\/tasks\/\$\{encodeURIComponent\(selectedDigest\.replace\(\/\^sha256:\/, ''\)\)\}`, null\)/);
@@ -101,5 +102,15 @@ test('identity capacity kind drives provider wording without assuming one capaci
   assert.equal(providerCapacitySubject({ accounts: [{ provider: 'Ollama', capacity_kind: 'local_model' }] }), 'the Ollama local model');
   const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(app, /subscript(?:ion)/i);
-  assert.match(app, /Capacity kind/);
+  assert.match(app, /Capacity source/);
+  assert.match(app, /Member ID/);
+  assert.match(app, /identity\/signin/);
+});
+
+test('request form stores values and an inline error outside its recreated DOM subtree', async () => {
+  const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
+  assert.match(app, /const requestForm = \{ display_id: '', prompt: '', source: '', error: '' \}/);
+  assert.match(app, /formState\.error = error\.message/);
+  assert.match(app, /Folder on this computer \(optional\)/);
+  assert.match(app, /Without a folder, the task starts in an empty workspace\./);
 });

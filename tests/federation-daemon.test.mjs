@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { statSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -65,6 +66,7 @@ async function withDaemon(fn, daemonOptions = {}) {
       });
     },
     startDockerLogin: daemonOptions.startDockerLogin,
+    startProviderSignIn: daemonOptions.startProviderSignIn,
     identityProbe: daemonOptions.identityProbe || (async () => ({ docker_account: null, providers: [] })),
     now: daemonOptions.now,
   });
@@ -554,6 +556,52 @@ test('POST /submit supervises the guided submit verb and GET /submit/status prox
     assert.equal(taskStatus.status, 200);
     assert.equal(JSON.parse(taskStatus.text).status, 'CLAIMED');
     assert.equal(statusBody(await request(base, '/status', { token: 'test-session-token' })).submission.state, 'claimed');
+  });
+});
+
+test('POST /submit accepts a prompt-only request by packaging a temporary empty workspace', async () => {
+  await withDaemon(async ({ base, children, setConfig }) => {
+    setConfig({ coordinator_url: 'http://coordinator.example' });
+    const response = await request(base, '/submit', {
+      method: 'POST',
+      token: 'test-session-token',
+      body: { source: '', prompt: 'Write a plan without project files.', display_id: 'Prompt only' },
+    });
+    assert.equal(response.status, 202, response.text);
+    const args = children[0].args[1];
+    const sourceIndex = args.indexOf('--source');
+    assert.match(args[sourceIndex + 1], /waspflow-federation-empty-source-/);
+    assert.equal(statSync(args[sourceIndex + 1]).isDirectory(), true);
+    children[0].child.emit('close', 1);
+    await waitFor(async () => {
+      try { statSync(args[sourceIndex + 1]); return false; } catch { return true; }
+    });
+  });
+});
+
+test('POST /identity/signin exposes the existing browser auth handoff for an unauthenticated provider', async () => {
+  let finish;
+  const completion = new Promise((resolve) => { finish = resolve; });
+  await withDaemon(async ({ base, setConfig }) => {
+    setConfig({ coordinator_url: 'http://coordinator.example' });
+    const response = await request(base, '/identity/signin', { method: 'POST', token: 'test-session-token', body: { service: 'anthropic' } });
+    assert.equal(response.status, 202, response.text);
+    const body = JSON.parse(response.text);
+    assert.equal(body.state, 'action_needed');
+    assert.deepEqual(body.action, { kind: 'awaiting_browser', service: 'anthropic', url: 'https://auth.example/signin', code: 'ABCD-EFGH' });
+    finish({ status: 'complete', detail: 'signed in' });
+    await waitFor(async () => statusBody(await request(base, '/status', { token: 'test-session-token' })).state === 'idle');
+  }, { startProviderSignIn: async () => ({ status: 'awaiting-browser', url: 'https://auth.example/signin', code: 'ABCD-EFGH', waitForCompletion: async () => completion, cancel() {} }) });
+});
+
+test('settings persist a locally edited collective name without changing the invite-backed identity contract', async () => {
+  await withDaemon(async ({ base, setConfig }) => {
+    setConfig({ coordinator_url: 'http://coordinator.example', collective_name: 'Invite collective' });
+    const response = await request(base, '/settings', {
+      method: 'POST', token: 'test-session-token', body: { collective_name: 'Local collective', schedule: { enabled: false, start: '', end: '', days: '' } },
+    });
+    assert.deepEqual(JSON.parse(response.text), { collective_name: 'Local collective', schedule: { enabled: false, start: '', end: '', days: '' } });
+    assert.equal(JSON.parse((await request(base, '/status', { token: 'test-session-token' })).text).collective_name, 'Local collective');
   });
 });
 
