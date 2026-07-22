@@ -1,0 +1,307 @@
+{
+  "task_id": "20260722-020101-implement-federation-wave-a-backend-observabilit",
+  "series": "A",
+  "profile": "code-change",
+  "query": "implement Federation Wave A backend observability",
+  "status": "packed",
+  "created_at": "2026-07-22T02:01:01Z",
+  "updated_at": "2026-07-22T02:19:26Z",
+  "repo_root": "/home/tnunamak/code/waspflow-fedgui-wavea",
+  "workspace": "/home/tnunamak/code/waspflow-fedgui-wavea/devspecs/tasks/20260722-020101-implement-federation-wave-a-backend-observabilit",
+  "artifacts": {
+    "series": "A",
+    "index": "A00-index.md",
+    "first_slice": "A01-map-receipt-capture-schemas-and-test-isolation-plan.md",
+    "result": "A01-map-receipt-capture-schemas-and-test-isolation-result.md",
+    "slices": [
+      {
+        "id": "A01",
+        "title": "Map receipt capture, schemas, and test isolation",
+        "plan": "A01-map-receipt-capture-schemas-and-test-isolation-plan.md",
+        "result": "A01-map-receipt-capture-schemas-and-test-isolation-result.md",
+        "kind": "slice",
+        "stage": "validated",
+        "decision": "promote",
+        "updated_at": "2026-07-22T02:13:38Z",
+        "latest_checkpoint_id": "cp_20260722T021338Z_a01_validated",
+        "latest_checkpoint": "checkpoints/20260722-021338-validated.md",
+        "latest_checkpoint_json": "checkpoints/20260722-021338-validated.json"
+      },
+      {
+        "id": "A02",
+        "title": "Implement receipt capture and audience split",
+        "plan": "A02-implement-receipt-capture-and-audience-split-plan.md",
+        "result": "A02-implement-receipt-capture-and-audience-split-result.md",
+        "kind": "slice",
+        "stage": "validated",
+        "decision": "promote",
+        "updated_at": "2026-07-22T02:14:18Z",
+        "latest_checkpoint_id": "cp_20260722T021418Z_a02_validated",
+        "latest_checkpoint": "checkpoints/20260722-021418-validated.md",
+        "latest_checkpoint_json": "checkpoints/20260722-021418-validated.json"
+      },
+      {
+        "id": "A03",
+        "title": "Implement daemon endpoints and coordinator timestamps",
+        "plan": "A03-implement-daemon-endpoints-and-coordinator-times-plan.md",
+        "result": "A03-implement-daemon-endpoints-and-coordinator-times-result.md",
+        "kind": "slice",
+        "stage": "validated",
+        "decision": "promote",
+        "updated_at": "2026-07-22T02:14:55Z",
+        "latest_checkpoint_id": "cp_20260722T021455Z_a03_validated",
+        "latest_checkpoint": "checkpoints/20260722-021455-validated.md",
+        "latest_checkpoint_json": "checkpoints/20260722-021455-validated.json"
+      },
+      {
+        "id": "A04",
+        "title": "Add tests, report, full verification, and commit",
+        "plan": "A04-add-tests-report-full-verification-and-commit-plan.md",
+        "result": "A04-add-tests-report-full-verification-and-commit-result.md",
+        "kind": "slice",
+        "stage": "validated",
+        "decision": "promote",
+        "updated_at": "2026-07-22T02:19:26Z",
+        "latest_checkpoint_id": "cp_20260722T021926Z_a04_validated",
+        "latest_checkpoint": "checkpoints/20260722-021926-validated.md",
+        "latest_checkpoint_json": "checkpoints/20260722-021926-validated.json"
+      }
+    ]
+  },
+  "predicted_context": {
+    "relevant_areas": [
+      "lib",
+      "tests",
+      "docs"
+    ],
+    "primary_files": [
+      {
+        "path": "lib/federation-docker-backend.mjs",
+        "title": "lib/federation-docker-backend.mjs (javascript)",
+        "kind": "source_context",
+        "role": "implementation_surface",
+        "evidence": [
+          "anchor-first ranking: score 24.000; matches federation, backend; fields path, title, body",
+          "query term match in path: backend",
+          "query term match in path: federation"
+        ]
+      },
+      {
+        "path": "lib/federation-runtime.mjs",
+        "title": "lib/federation-runtime.mjs (javascript)",
+        "kind": "source_context",
+        "role": "implementation_surface",
+        "evidence": [
+          "anchor-first ranking: score 24.000; matches federation, backend; fields path, title, body, symbol",
+          "query term match in path: federation",
+          "query term match in body: backend",
+          "scout source preservation: query roots feder,federa,federation; primary test roots feder,federa,federation,runti; top source rank 4; strong anchor rank",
+          "bounded body evidence: backend=16, federation=4, implement=14; bytes=7928"
+        ]
+      },
+      {
+        "path": "lib/federation-pull-internals.mjs",
+        "title": "lib/federation-pull-internals.mjs (javascript)",
+        "kind": "source_context",
+        "role": "implementation_surface",
+        "evidence": [
+          "relationship expansion: source_manifest_family_recovery",
+          "query term match in path: federation",
+          "query term match in body: backend"
+        ]
+      },
+      {
+        "path": "lib/federation-coordinator.mjs",
+        "title": "lib/federation-coordinator.mjs (javascript)",
+        "kind": "source_context",
+        "role": "implementation_surface",
+        "evidence": [
+          "relationship expansion: source_manifest_family_recovery",
+          "query term match in path: federation",
+          "query term match in body: implement",
+          "authority prior: stale or superseded"
+        ]
+      }
+    ],
+    "tests": [
+      {
+        "path": "tests/federation-docker-backend.test.mjs",
+        "title": "tests/federation-docker-backend.test.mjs (javascript)",
+        "kind": "source_context",
+        "subtype": "test_case",
+        "role": "behavior_tests",
+        "evidence": [
+          "anchor-first ranking: score 24.000; matches federation, backend; fields path, title, test_name, body",
+          "query term match in path: backend",
+          "query term match in path: federation"
+        ]
+      },
+      {
+        "path": "tests/federation-harness-spec.test.mjs",
+        "title": "tests/federation-harness-spec.test.mjs (javascript)",
+        "kind": "source_context",
+        "subtype": "test_case",
+        "role": "behavior_tests",
+        "evidence": [
+          "relationship expansion: source_manifest_family_recovery",
+          "query term match in path: federation"
+        ]
+      },
+      {
+        "path": "tests/federation-runtime.test.mjs#L56",
+        "title": "SandboxBackend base methods throw NotImplementedError, never silently no-op",
+        "kind": "source_context",
+        "subtype": "test_case",
+        "role": "behavior_tests",
+        "evidence": [
+          "relationship expansion: source_manifest_loss_safe_preserved",
+          "anchor-first ranking: score 24.000; matches federation, backend; fields path, body, title, test_name",
+          "query term match in path: federation"
+        ]
+      },
+      {
+        "path": "tests/federation-runtime.test.mjs",
+        "title": "tests/federation-runtime.test.mjs",
+        "kind": "source_context",
+        "subtype": "test_case",
+        "role": "behavior_tests",
+        "evidence": [
+          "relationship expansion: source_manifest_test_reservation",
+          "pack tier: related (reserved manifest test with direct query evidence)",
+          "query term match in path: federation"
+        ]
+      },
+      {
+        "path": "lib/federation-harness-spec.mjs",
+        "title": "lib/federation-harness-spec.mjs",
+        "kind": "source_context",
+        "subtype": "test_case",
+        "role": "behavior_tests",
+        "evidence": [
+          "relationship expansion: source_manifest_test_reservation",
+          "pack tier: related (reserved manifest test with direct query evidence)",
+          "query term match in path: federation"
+        ]
+      }
+    ],
+    "docs_plans_config": [
+      {
+        "path": "docs/design/FEDERATION_V0_UAT_REPORT.md",
+        "title": "Federation v0 UAT report — Docker Sandboxes backend",
+        "kind": "design",
+        "role": "background_decisions",
+        "evidence": [
+          "section-packed context: Federation v0 UAT report — Docker Sandboxes backend; Federation v0 UAT report — Docker Sandboxes backend \u003e What was built; Federation v0 UAT report — Docker Sandboxes backend \u003e Independent verification (maker ≠ judge); Federation v0 UAT report — Docker Sandboxes backend \u003e Honest confidence",
+          "indexed section match: Federation v0 UAT report — Docker Sandboxes backend lines 1-32; Federation v0 UAT report — Docker Sandboxes backend \u003e What was built lines 261-279; Federation v0 UAT report — Docker Sandboxes backend \u003e Independent verification (maker ≠ judge) lines 669-800",
+          "authority prior: current intent anchor because current decision context is present",
+          "anchor-first ranking: score 24.000; matches federation, backend; fields path, title, heading, body",
+          "query term match in path: federation"
+        ]
+      }
+    ],
+    "noise_risks": [
+      {
+        "path": "docs/design/FEDERATION_V0_UX_REPORT.md",
+        "title": "Federation v0 UX report — the guided CLI layer",
+        "kind": "design",
+        "role": "excluded_noise",
+        "evidence": [
+          "section-packed context: Federation v0 UX report — the guided CLI layer; Federation v0 UX report — the guided CLI layer \u003e What was built (cumulative across both revisions); Federation v0 UX report — the guided CLI layer \u003e The exact commands a non-technical contributor now runs; Federation v0 UX report — the guided CLI layer \u003e What's auto-managed vs. still manual",
+          "indexed section match: Federation v0 UX report — the guided CLI layer lines 1-23; Federation v0 UX report — the guided CLI layer \u003e What was built (cumulative across both revisions) lines 45-54; Federation v0 UX report — the guided CLI layer \u003e The exact commands a non-technical contributor now runs lines 55-87",
+          "authority prior: current intent anchor because current decision context is present",
+          "anchor-first ranking: score 24.000; matches federation, backend; fields path, title, heading, body",
+          "query term match in path: federation"
+        ]
+      },
+      {
+        "path": "tests/federation-pull.test.mjs",
+        "title": "tests/federation-pull.test.mjs (javascript)",
+        "kind": "source_context",
+        "subtype": "test_case",
+        "role": "excluded_noise",
+        "evidence": [
+          "relationship expansion: source_manifest_family_recovery",
+          "query term match in path: federation",
+          "query term match in body: backend"
+        ]
+      }
+    ],
+    "related_git_receipts": [
+      {
+        "sha": "ca8ba100a2be4ee8103d6c1f91224c38f8091852",
+        "short_sha": "ca8ba10",
+        "committed_at": "2026-07-20",
+        "subject": "fix(federation): DockerSbxBackend reproduced the sbx run/exec/rm bugs PR #15 already fixed",
+        "matched_paths": [
+          "lib/federation-docker-backend.mjs",
+          "tests/federation-docker-backend.test.mjs"
+        ],
+        "matched_terms": [
+          "federation",
+          "backend",
+          "a"
+        ],
+        "signals": [
+          "touched 2 packed path(s)",
+          "matched query anchors",
+          "PR/issue reference",
+          "cross-file change"
+        ]
+      },
+      {
+        "sha": "4bc5f5726d01335d2fea94c13d457fff84980df4",
+        "short_sha": "4bc5f57",
+        "committed_at": "2026-07-21",
+        "subject": "fix(federation): wait for sandbox readiness after sbx run --detached",
+        "matched_paths": [
+          "lib/federation-docker-backend.mjs",
+          "tests/federation-docker-backend.test.mjs"
+        ],
+        "matched_terms": [
+          "federation",
+          "a"
+        ],
+        "signals": [
+          "touched 2 packed path(s)",
+          "matched query anchors",
+          "cross-file change"
+        ]
+      },
+      {
+        "sha": "632e701ce6a60b741d47316f8411c8361cd7c66a",
+        "short_sha": "632e701",
+        "committed_at": "2026-07-20",
+        "subject": "feat(federation): requester submit + executor pull CLIs (slices 3-4 of full loop)",
+        "matched_paths": [
+          "lib/federation-coordinator.mjs",
+          "lib/federation-pull-internals.mjs"
+        ],
+        "matched_terms": [
+          "federation",
+          "backend",
+          "a"
+        ],
+        "signals": [
+          "touched 2 packed path(s)",
+          "matched query anchors",
+          "cross-file change"
+        ]
+      }
+    ]
+  },
+  "confidence": {
+    "primary_file_confidence": "high",
+    "test_coverage_confidence": "high",
+    "docs_config_confidence": "medium",
+    "git_receipt_confidence": "high",
+    "noise_risk": "medium",
+    "pack_completeness": "medium",
+    "why": [
+      "found 4 likely primary file(s)",
+      "found 5 likely test file(s)",
+      "found 3 related Git receipt(s)",
+      "2 file(s) were downgraded as likely noise"
+    ],
+    "agent_instruction": "Validate the test and integration surface before editing. Record critical misses and distracting inclusions in the slice result or a task checkpoint."
+  }
+}
