@@ -35,6 +35,8 @@ function request(base, path, { method = 'GET', token, host, body } = {}) {
 
 async function withDaemon(fn, daemonOptions = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'wf-federation-daemon-'));
+  const ledgerPath = join(directory, 'ledger.json');
+  const settingsPath = join(directory, 'settings.json');
   let config = null;
   const children = [];
   const coordinatorCalls = [];
@@ -42,7 +44,8 @@ async function withDaemon(fn, daemonOptions = {}) {
   const daemon = await startFederationDaemon({
     token: 'test-session-token',
     infoPath: join(directory, 'daemon.json'),
-    ledgerPath: join(directory, 'ledger.json'),
+    ledgerPath,
+    settingsPath,
     cliPath: '/real/path/to/bin/waspflow-federation',
     configLoader: () => config,
     spawnProcess: (...args) => {
@@ -69,6 +72,8 @@ async function withDaemon(fn, daemonOptions = {}) {
       daemon,
       children,
       coordinatorCalls,
+      ledgerPath,
+      settingsPath,
       setConfig: (value) => { config = value; },
       setTaskListResponse: (value) => { taskListResponse = value; },
     });
@@ -464,6 +469,25 @@ test('GET /tasks passes through claimable tasks and POST /contribute/start deleg
     assert.deepEqual(statusBody(await request(base, '/status', { token: 'test-session-token' })).contribution, {
       selection: 'chosen', task_digest: digest, display_id: 'Fix the login test',
     });
+  });
+});
+
+test('schedule settings persist behind the daemon token and roster is a token-gated coordinator passthrough', async () => {
+  await withDaemon(async ({ base, coordinatorCalls, setConfig, setTaskListResponse, settingsPath }) => {
+    const settings = await request(base, '/settings', { method: 'POST', token: 'test-session-token', body: {
+      schedule: { enabled: true, start: '18:00', end: '08:00', days: 'Weekdays' },
+    } });
+    assert.equal(settings.status, 200);
+    assert.deepEqual(JSON.parse(settings.text), { schedule: { enabled: true, start: '18:00', end: '08:00', days: 'Weekdays' } });
+    assert.deepEqual(JSON.parse((await request(base, '/settings', { token: 'test-session-token' })).text), JSON.parse(settings.text));
+    assert.equal((await stat(settingsPath)).mode & 0o777, 0o600);
+
+    setConfig({ coordinator_url: 'http://coordinator.example', collective_token: 'collective-secret' });
+    setTaskListResponse({ status: 200, body: { roster: [{ key_id: 'oshin', public_key_pem: 'PUBLIC KEY' }] } });
+    const roster = await request(base, '/roster', { token: 'test-session-token' });
+    assert.equal(roster.status, 200, roster.text);
+    assert.deepEqual(JSON.parse(roster.text), { roster: [{ key_id: 'oshin', public_key_pem: 'PUBLIC KEY' }] });
+    assert.ok(coordinatorCalls.some((call) => call.url === 'http://coordinator.example/roster' && call.options.headers.authorization === 'Bearer collective-secret'));
   });
 });
 

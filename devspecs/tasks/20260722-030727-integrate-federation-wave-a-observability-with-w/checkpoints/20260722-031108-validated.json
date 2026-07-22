@@ -1,0 +1,114 @@
+{
+  "schema_version": 2,
+  "checkpoint_id": "cp_20260722T031108Z_b02_validated",
+  "task_id": "20260722-030727-integrate-federation-wave-a-observability-with-w",
+  "target": "B02",
+  "series": "B",
+  "query": "integrate Federation Wave A observability with Wave B product UI",
+  "slice": "B02",
+  "slice_title": "verify contracts, document decisions, and commit merge",
+  "parent_slice": "B02",
+  "stage": "validated",
+  "decision": "complete",
+  "created_at": "2026-07-22T03:11:08Z",
+  "goal": "Verify the reconciled product contract",
+  "description": "Verified 239 passing tests, syntax checks, no conflict markers, and integration documentation.",
+  "note": "Wave A identity and receipt fields are consumed without collapsing capacity_kind into subscription.",
+  "resources": [
+    "../B00-index.md",
+    "../B02-verify-contracts-document-decisions-and-commit-m-plan.md",
+    "../B02-verify-contracts-document-decisions-and-commit-m-result.md",
+    "../task.json"
+  ],
+  "files_read": [
+    "docs/design/FEDERATION_WAVEA_REPORT.md",
+    "docs/design/FEDERATION_WAVEB_REPORT.md",
+    "public/app.mjs"
+  ],
+  "files_edited": [
+    "public/app.mjs",
+    "docs/design/FEDERATION_WAVEB_REPORT.md",
+    "docs/design/FEDERATION_INTEGRATION_NOTE.md"
+  ],
+  "tests_read": [
+    "tests/federation-webui.test.mjs"
+  ],
+  "tests_run": [
+    "node --test tests/*.test.mjs"
+  ],
+  "actual_context": {
+    "files_read": [
+      "docs/design/FEDERATION_WAVEA_REPORT.md",
+      "docs/design/FEDERATION_WAVEB_REPORT.md",
+      "public/app.mjs"
+    ],
+    "files_edited": [
+      "public/app.mjs",
+      "docs/design/FEDERATION_WAVEB_REPORT.md",
+      "docs/design/FEDERATION_INTEGRATION_NOTE.md"
+    ],
+    "tests_read": [
+      "tests/federation-webui.test.mjs"
+    ],
+    "tests_run": [
+      "node --test tests/*.test.mjs"
+    ]
+  },
+  "predicted_context_feedback": {
+    "relevant_found": [
+      "docs/design/FEDERATION_WAVEA_REPORT.md",
+      "docs/design/FEDERATION_WAVEB_REPORT.md",
+      "tests/federation-webui.test.mjs"
+    ]
+  },
+  "evidence": {
+    "git_diff": {
+      "command": "git diff --stat; git diff --name-only; git diff --cached --name-only; git ls-files --others --exclude-standard",
+      "changed_files": [
+        "docs/design/FEDERATION_INTEGRATION_NOTE.md",
+        "docs/design/FEDERATION_WAVEB_REPORT.md",
+        "lib/federation-daemon.mjs",
+        "public/app.mjs",
+        "public/index.html",
+        "tests/e2e-browser/journey.spec.mjs",
+        "tests/federation-daemon.test.mjs",
+        "tests/federation-webui.test.mjs",
+        "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B00-index.md",
+        "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B01-reconcile-daemon-api-and-test-helper-conflicts-plan.md",
+        "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B01-reconcile-daemon-api-and-test-helper-conflicts-result.md",
+        "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B02-verify-contracts-document-decisions-and-commit-m-plan.md",
+        "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B02-verify-contracts-document-decisions-and-commit-m-result.md",
+        "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/checkpoints/20260722-031100-validated.json",
+        "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/checkpoints/20260722-031100-validated.md",
+        "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/task.json"
+      ],
+      "max_bytes": 12000,
+      "truncated": false
+    },
+    "git_diff_paths": [
+      "docs/design/FEDERATION_INTEGRATION_NOTE.md",
+      "docs/design/FEDERATION_WAVEB_REPORT.md",
+      "lib/federation-daemon.mjs",
+      "public/app.mjs",
+      "public/index.html",
+      "tests/e2e-browser/journey.spec.mjs",
+      "tests/federation-daemon.test.mjs",
+      "tests/federation-webui.test.mjs",
+      "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B00-index.md",
+      "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B01-reconcile-daemon-api-and-test-helper-conflicts-plan.md",
+      "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B01-reconcile-daemon-api-and-test-helper-conflicts-result.md",
+      "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B02-verify-contracts-document-decisions-and-commit-m-plan.md",
+      "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B02-verify-contracts-document-decisions-and-commit-m-result.md",
+      "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/checkpoints/20260722-031100-validated.json",
+      "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/checkpoints/20260722-031100-validated.md",
+      "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/task.json"
+    ],
+    "plan_refs": [
+      "../B00-index.md",
+      "../B02-verify-contracts-document-decisions-and-commit-m-plan.md",
+      "../B02-verify-contracts-document-decisions-and-commit-m-result.md",
+      "../task.json"
+    ]
+  },
+  "next": {}
+}

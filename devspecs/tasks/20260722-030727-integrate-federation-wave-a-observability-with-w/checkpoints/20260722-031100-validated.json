@@ -1,0 +1,124 @@
+{
+  "schema_version": 2,
+  "checkpoint_id": "cp_20260722T031100Z_b01_validated",
+  "task_id": "20260722-030727-integrate-federation-wave-a-observability-with-w",
+  "target": "B01",
+  "series": "B",
+  "query": "integrate Federation Wave A observability with Wave B product UI",
+  "slice": "B01",
+  "slice_title": "reconcile daemon API and test helper conflicts",
+  "parent_slice": "B01",
+  "stage": "validated",
+  "decision": "promote",
+  "created_at": "2026-07-22T03:11:00Z",
+  "goal": "Reconcile daemon and test conflicts",
+  "description": "Combined Wave A identity, ledger, detail, and result behavior with Wave B settings and roster routes.",
+  "note": "The generated pack missed both actual conflict files; PRD and reports identified the correct contract.",
+  "resources": [
+    "../B00-index.md",
+    "../B01-reconcile-daemon-api-and-test-helper-conflicts-plan.md",
+    "../B01-reconcile-daemon-api-and-test-helper-conflicts-result.md",
+    "../task.json"
+  ],
+  "files_read": [
+    "lib/federation-daemon.mjs",
+    "tests/federation-daemon.test.mjs",
+    "public/app.mjs",
+    "docs/design/FEDERATION_PRODUCT_V1_PRD.md"
+  ],
+  "files_edited": [
+    "lib/federation-daemon.mjs",
+    "tests/federation-daemon.test.mjs"
+  ],
+  "tests_read": [
+    "tests/federation-daemon.test.mjs"
+  ],
+  "tests_run": [
+    "node --test tests/federation-daemon.test.mjs tests/federation-webui.test.mjs"
+  ],
+  "missed_files": [
+    "lib/federation-daemon.mjs",
+    "tests/federation-daemon.test.mjs"
+  ],
+  "noise_files": [
+    "lib/federation-coordinator.mjs",
+    "lib/federation-harnesses.mjs"
+  ],
+  "actual_context": {
+    "files_read": [
+      "lib/federation-daemon.mjs",
+      "tests/federation-daemon.test.mjs",
+      "public/app.mjs",
+      "docs/design/FEDERATION_PRODUCT_V1_PRD.md"
+    ],
+    "files_edited": [
+      "lib/federation-daemon.mjs",
+      "tests/federation-daemon.test.mjs"
+    ],
+    "tests_read": [
+      "tests/federation-daemon.test.mjs"
+    ],
+    "tests_run": [
+      "node --test tests/federation-daemon.test.mjs tests/federation-webui.test.mjs"
+    ]
+  },
+  "predicted_context_feedback": {
+    "relevant_found": [
+      "docs/design/FEDERATION_PRODUCT_V1_PRD.md"
+    ],
+    "critical_missed": [
+      "lib/federation-daemon.mjs",
+      "tests/federation-daemon.test.mjs"
+    ],
+    "distracting_included": [
+      "lib/federation-coordinator.mjs",
+      "lib/federation-harnesses.mjs"
+    ]
+  },
+  "evidence": {
+    "git_diff": {
+      "command": "git diff --stat; git diff --name-only; git diff --cached --name-only; git ls-files --others --exclude-standard",
+      "changed_files": [
+        "docs/design/FEDERATION_INTEGRATION_NOTE.md",
+        "docs/design/FEDERATION_WAVEB_REPORT.md",
+        "lib/federation-daemon.mjs",
+        "public/app.mjs",
+        "public/index.html",
+        "tests/e2e-browser/journey.spec.mjs",
+        "tests/federation-daemon.test.mjs",
+        "tests/federation-webui.test.mjs",
+        "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B00-index.md",
+        "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B01-reconcile-daemon-api-and-test-helper-conflicts-plan.md",
+        "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B01-reconcile-daemon-api-and-test-helper-conflicts-result.md",
+        "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B02-verify-contracts-document-decisions-and-commit-m-plan.md",
+        "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B02-verify-contracts-document-decisions-and-commit-m-result.md",
+        "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/task.json"
+      ],
+      "max_bytes": 12000,
+      "truncated": false
+    },
+    "git_diff_paths": [
+      "docs/design/FEDERATION_INTEGRATION_NOTE.md",
+      "docs/design/FEDERATION_WAVEB_REPORT.md",
+      "lib/federation-daemon.mjs",
+      "public/app.mjs",
+      "public/index.html",
+      "tests/e2e-browser/journey.spec.mjs",
+      "tests/federation-daemon.test.mjs",
+      "tests/federation-webui.test.mjs",
+      "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B00-index.md",
+      "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B01-reconcile-daemon-api-and-test-helper-conflicts-plan.md",
+      "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B01-reconcile-daemon-api-and-test-helper-conflicts-result.md",
+      "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B02-verify-contracts-document-decisions-and-commit-m-plan.md",
+      "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/B02-verify-contracts-document-decisions-and-commit-m-result.md",
+      "devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w/task.json"
+    ],
+    "plan_refs": [
+      "../B00-index.md",
+      "../B01-reconcile-daemon-api-and-test-helper-conflicts-plan.md",
+      "../B01-reconcile-daemon-api-and-test-helper-conflicts-result.md",
+      "../task.json"
+    ]
+  },
+  "next": {}
+}

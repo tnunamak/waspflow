@@ -1,0 +1,279 @@
+{
+  "task_id": "20260722-030727-integrate-federation-wave-a-observability-with-w",
+  "series": "B",
+  "profile": "code-change",
+  "query": "integrate Federation Wave A observability with Wave B product UI",
+  "status": "packed",
+  "created_at": "2026-07-22T03:07:27Z",
+  "updated_at": "2026-07-22T03:11:16Z",
+  "repo_root": "/home/tnunamak/code/waspflow-fedgui-e2e",
+  "workspace": "/home/tnunamak/code/waspflow-fedgui-e2e/devspecs/tasks/20260722-030727-integrate-federation-wave-a-observability-with-w",
+  "artifacts": {
+    "series": "B",
+    "index": "B00-index.md",
+    "first_slice": "B01-reconcile-daemon-api-and-test-helper-conflicts-plan.md",
+    "result": "B01-reconcile-daemon-api-and-test-helper-conflicts-result.md",
+    "slices": [
+      {
+        "id": "B01",
+        "title": "reconcile daemon API and test helper conflicts",
+        "plan": "B01-reconcile-daemon-api-and-test-helper-conflicts-plan.md",
+        "result": "B01-reconcile-daemon-api-and-test-helper-conflicts-result.md",
+        "kind": "slice",
+        "stage": "done",
+        "decision": "promote",
+        "updated_at": "2026-07-22T03:11:13Z",
+        "latest_checkpoint_id": "cp_20260722T031100Z_b01_validated",
+        "latest_checkpoint": "checkpoints/20260722-031100-validated.md",
+        "latest_checkpoint_json": "checkpoints/20260722-031100-validated.json"
+      },
+      {
+        "id": "B02",
+        "title": "verify contracts, document decisions, and commit merge",
+        "plan": "B02-verify-contracts-document-decisions-and-commit-m-plan.md",
+        "result": "B02-verify-contracts-document-decisions-and-commit-m-result.md",
+        "kind": "slice",
+        "stage": "completed",
+        "decision": "complete",
+        "updated_at": "2026-07-22T03:11:16Z",
+        "latest_checkpoint_id": "cp_20260722T031108Z_b02_validated",
+        "latest_checkpoint": "checkpoints/20260722-031108-validated.md",
+        "latest_checkpoint_json": "checkpoints/20260722-031108-validated.json"
+      }
+    ]
+  },
+  "predicted_context": {
+    "relevant_areas": [
+      "docs",
+      "lib",
+      "tests"
+    ],
+    "primary_files": [
+      {
+        "path": "lib/federation-coordinator.mjs",
+        "title": "lib/federation-coordinator.mjs (javascript)",
+        "kind": "source_context",
+        "role": "implementation_surface",
+        "evidence": [
+          "relationship expansion: source_manifest_family_recovery",
+          "query term match in path: federation",
+          "query term match in body: product",
+          "authority prior: stale or superseded"
+        ]
+      },
+      {
+        "path": "lib/federation-harnesses.mjs",
+        "title": "lib/federation-harnesses.mjs (javascript)",
+        "kind": "source_context",
+        "role": "implementation_surface",
+        "evidence": [
+          "relationship expansion: source_manifest_family_recovery",
+          "query term match in path: federation",
+          "query term match in body: product"
+        ]
+      }
+    ],
+    "tests": [
+      {
+        "path": "tests/federation-harness-spec.test.mjs",
+        "title": "tests/federation-harness-spec.test.mjs (javascript)",
+        "kind": "source_context",
+        "subtype": "test_case",
+        "role": "behavior_tests",
+        "evidence": [
+          "relationship expansion: source_manifest_family_recovery",
+          "query term match in path: federation"
+        ]
+      },
+      {
+        "path": "tests/federation-harnesses.test.mjs",
+        "title": "tests/federation-harnesses.test.mjs (javascript)",
+        "kind": "source_context",
+        "subtype": "test_case",
+        "role": "behavior_tests",
+        "evidence": [
+          "relationship expansion: source_manifest_family_recovery",
+          "query term match in path: federation",
+          "query term match in body: product"
+        ]
+      },
+      {
+        "path": "lib/federation-harness-spec.mjs",
+        "title": "lib/federation-harness-spec.mjs",
+        "kind": "source_context",
+        "subtype": "test_case",
+        "role": "behavior_tests",
+        "evidence": [
+          "relationship expansion: source_manifest_test_reservation",
+          "pack tier: related (reserved manifest test with direct query evidence)",
+          "query term match in path: federation"
+        ]
+      },
+      {
+        "path": "tests/federation-webui.test.mjs",
+        "title": "tests/federation-webui.test.mjs",
+        "kind": "source_context",
+        "subtype": "test_case",
+        "role": "behavior_tests",
+        "evidence": [
+          "relationship expansion: source_manifest_test_reservation",
+          "pack tier: related (reserved manifest test with direct query evidence)",
+          "query term match in path: federation"
+        ]
+      }
+    ],
+    "docs_plans_config": [
+      {
+        "path": "docs/design/FEDERATION_WAVEB_REPORT.md",
+        "title": "Federation Wave B — Product UI Report",
+        "kind": "design",
+        "role": "background_decisions",
+        "evidence": [
+          "section-packed context: Federation Wave B — Product UI Report \u003e Delivered; Federation Wave B — Product UI Report \u003e Data contracts and compatibility; Federation Wave B — Product UI Report \u003e Verification",
+          "indexed section match: Federation Wave B — Product UI Report \u003e Data contracts and compatibility lines 23-33; Federation Wave B — Product UI Report \u003e Verification lines 34-40",
+          "anchor-first ranking: score 24.000; matches federation, wave, product; fields path, title, heading, body",
+          "query term match in path: federation",
+          "authority prior: canonical design path"
+        ]
+      },
+      {
+        "path": "docs/design/FEDERATION_WAVEA_REPORT.md",
+        "title": "Federation Wave A report",
+        "kind": "design",
+        "role": "background_decisions",
+        "evidence": [
+          "section-packed context: Federation Wave A report; Federation Wave A report \u003e Scope; Federation Wave A report \u003e Shared result metadata",
+          "indexed section match: Federation Wave A report \u003e Scope lines 3-10; Federation Wave A report \u003e Shared result metadata lines 62-88",
+          "anchor-first ranking: score 24.000; matches federation, wave; fields path, title, heading, body",
+          "query term match in path: federation",
+          "authority prior: canonical design path"
+        ]
+      },
+      {
+        "path": "docs/design/FEDERATION_WAVE2_REPORT.md",
+        "title": "Federation Wave 2 Report",
+        "kind": "design",
+        "role": "background_decisions",
+        "evidence": [
+          "section-packed context: Federation Wave 2 Report \u003e Result; Federation Wave 2 Report \u003e Main implementation surfaces; Federation Wave 2 Report \u003e Constraint noted",
+          "indexed section match: Federation Wave 2 Report \u003e Result lines 6-34; Federation Wave 2 Report \u003e Main implementation surfaces lines 35-45",
+          "anchor-first ranking: score 24.000; matches federation, wave; fields path, title, heading, body",
+          "query term match in path: federation",
+          "authority prior: canonical design path"
+        ]
+      },
+      {
+        "path": "docs/design/FEDERATION_PRODUCT_V1_PRD.md",
+        "title": "Waspflow Federation — Product v1 PRD (\"sellable\" bar)",
+        "kind": "requirements",
+        "subtype": "prd",
+        "role": "background_decisions",
+        "evidence": [
+          "section-packed context: Waspflow Federation — Product v1 PRD (\"sellable\" bar) \u003e The six pillars (all required for v1) \u003e P3 — Trust \u0026 control; Waspflow Federation — Product v1 PRD (\"sellable\" bar) \u003e Build plan; Waspflow Federation — Product v1 PRD (\"sellable\" bar) \u003e Horizon (v2+, owner-directional 2026-07-21 — shapes v1 architecture, NOT v1 scope)",
+          "indexed section match: Waspflow Federation — Product v1 PRD (\"sellable\" bar) \u003e The six pillars (all required for v1) \u003e P3 — Trust \u0026 control lines 34-41; Waspflow Federation — Product v1 PRD (\"sellable\" bar) \u003e Build plan lines 66-73",
+          "anchor-first ranking: score 24.000; matches federation, wave, product; fields path, title, heading, body",
+          "query term match in path: federation",
+          "authority/query-intent signal: PRD"
+        ]
+      }
+    ],
+    "noise_risks": [
+      {
+        "path": "docs/design/FEDERATION_V0_UAT_REPORT.md",
+        "title": "Federation v0 UAT report — Docker Sandboxes backend",
+        "kind": "design",
+        "role": "excluded_noise",
+        "evidence": [
+          "section-packed context: Federation v0 UAT report — Docker Sandboxes backend \u003e Claude Code auth: a real product tradeoff, not a default we silently picked; Federation v0 UAT report — Docker Sandboxes backend \u003e Independent verification (maker ≠ judge); Federation v0 UAT report — Docker Sandboxes backend \u003e Owner handoff: what's left after the autonomous fix loop",
+          "indexed section match: Federation v0 UAT report — Docker Sandboxes backend lines 1-32; Federation v0 UAT report — Docker Sandboxes backend \u003e Independent verification (maker ≠ judge) lines 669-800",
+          "authority prior: current intent anchor because current decision context is present",
+          "anchor-first ranking: score 24.000; matches federation, product; fields path, title, heading, body",
+          "query term match in path: federation"
+        ]
+      }
+    ],
+    "related_git_receipts": [
+      {
+        "sha": "305e039d835ddf24ee32cb3a4f4324abc5cfe9d3",
+        "short_sha": "305e039",
+        "committed_at": "2026-07-21",
+        "subject": "feat(federation): add Wave A observability receipts",
+        "matched_paths": [
+          "docs/design/FEDERATION_WAVEA_REPORT.md",
+          "lib/federation-coordinator.mjs",
+          "lib/federation-harnesses.mjs"
+        ],
+        "matched_terms": [
+          "federation",
+          "wave",
+          "observability",
+          "a",
+          "b"
+        ],
+        "signals": [
+          "touched 3 packed path(s)",
+          "matched query anchors",
+          "cross-file change"
+        ]
+      },
+      {
+        "sha": "04f55f82f5d9b86b148132e7dec86946d12b282a",
+        "short_sha": "04f55f8",
+        "committed_at": "2026-07-21",
+        "subject": "feat(federation): complete Wave 2 onboarding and sbx setup",
+        "matched_paths": [
+          "docs/design/FEDERATION_WAVE2_REPORT.md",
+          "tests/federation-webui.test.mjs"
+        ],
+        "matched_terms": [
+          "federation",
+          "wave",
+          "a",
+          "b",
+          "ui"
+        ],
+        "signals": [
+          "touched 2 packed path(s)",
+          "matched query anchors",
+          "cross-file change"
+        ]
+      },
+      {
+        "sha": "78a1f0409f80a7399fdcd41e3dbe219b3621bab4",
+        "short_sha": "78a1f04",
+        "committed_at": "2026-07-21",
+        "subject": "feat(federation): let contributors choose claimable tasks",
+        "matched_paths": [
+          "lib/federation-coordinator.mjs",
+          "tests/federation-webui.test.mjs"
+        ],
+        "matched_terms": [
+          "federation",
+          "a",
+          "b",
+          "ui"
+        ],
+        "signals": [
+          "touched 2 packed path(s)",
+          "matched query anchors",
+          "cross-file change"
+        ]
+      }
+    ]
+  },
+  "confidence": {
+    "primary_file_confidence": "high",
+    "test_coverage_confidence": "high",
+    "docs_config_confidence": "high",
+    "git_receipt_confidence": "high",
+    "noise_risk": "medium",
+    "pack_completeness": "medium",
+    "why": [
+      "found 2 likely primary file(s)",
+      "found 4 likely test file(s)",
+      "found 3 related Git receipt(s)",
+      "1 file(s) were downgraded as likely noise"
+    ],
+    "agent_instruction": "Validate the test and integration surface before editing. Record critical misses and distracting inclusions in the slice result or a task checkpoint."
+  }
+}
