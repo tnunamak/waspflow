@@ -855,6 +855,14 @@ test('daemon serves a token-exempt favicon and surfaces child stderr for contrib
 
 test('parseJoinInvite normalizes deep links, pasted commands, and raw tokens', () => {
   assert.deepEqual(
+    parseJoinInvite('https://coordinator.example/join#fragment-token'),
+    { coordinatorUrl: 'https://coordinator.example', token: 'fragment-token' },
+  );
+  assert.deepEqual(
+    parseJoinInvite('waspflow federation join "https://coordinator.example/join#fragment-token"'),
+    { coordinatorUrl: 'https://coordinator.example', token: 'fragment-token' },
+  );
+  assert.deepEqual(
     parseJoinInvite('waspflow://join?coordinator=https%3A%2F%2Fcoordinator.example%2F&token=deep-token'),
     { coordinatorUrl: 'https://coordinator.example', token: 'deep-token' },
   );

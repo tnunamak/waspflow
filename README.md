@@ -67,10 +67,10 @@ Waspflow, then run one guided command:
 waspflow federation host
 ```
 
-Answer its one reachability question. **ngrok** is recommended: it guides you
-through its free GitHub or Google signup, installs Waspflow’s host-only tunnel
-connector only after you choose it, and prints the final public address and a
-paste-able invite. ngrok’s current free plan assigns one stable development
+Answer its one reachability question. **ngrok** is recommended: it gives the
+signup and authtoken links, installs Waspflow’s host-only tunnel connector
+only after you choose it, and prints the final public address and a paste-able
+HTTPS invite. ngrok’s current free plan assigns one stable development
 domain to an account; Waspflow uses that assigned address rather than asking
 you to buy or configure a domain. Your members do not need ngrok accounts.
 
@@ -90,6 +90,9 @@ user service; a source checkout keeps the coordinator attached to the terminal
 so its lifecycle stays visible. See [Federation coordinator deployment](docs/federation-deployment.md)
 for reverse-proxy details and [the host implementation report](docs/design/FEDERATION_HOST_REPORT.md)
 for the current ngrok limits and the live-tunnel verification boundary.
+
+If an invite leaks, run `waspflow federation host --rotate-token`, then send
+fresh invites; existing members must re-join with the new token.
 
 ## First Run
 

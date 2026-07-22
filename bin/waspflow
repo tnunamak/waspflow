@@ -121,8 +121,9 @@ Verbs:
 
 Federation Preview (pool spare subscription capacity across a trusted collective):
   federation host [--tunnel ngrok|url:<https://address>|lan]       create and run a collective coordinator
+                  [--rotate-token]                                 rotate the collective token and invalidate invites
   federation invite                                                print a paste-able member invite
-  federation join <coordinator-url> <invite-token>   one-time: auto keypair + save config
+  federation join <invite-url>|<coordinator-url> <invite-token>   one-time: auto keypair + save config
   federation contribute [--task-digest D] [--harness H]   pull + run a task sandboxed (default flow)
   federation submit --display-id ID --source DIR (--prompt TEXT|--prompt-file F) [--output-dir DIR]
   federation status [--task-digest D]                local config / task status

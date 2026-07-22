@@ -131,7 +131,7 @@ test('join: auto-generates a keypair and persists config with no PEM/roster/dige
     await withMemberHome(async (home) => {
       const { stdout } = await runCli(['join', coordinatorUrl, 'test-invite-token', '--key-id', 'tim-author'], { home });
       assert.match(stdout, /joined .* as 'tim-author'/);
-      assert.match(stdout, /ONE MORE STEP/);
+      assert.match(stdout, /send this public key to the coordinator operator/);
       // The printed snippet is a roster line, not a raw command the human
       // has to construct or a private key — the actual pain point being
       // fixed (see bin/waspflow-federation-submit's old --private-key-file
@@ -286,9 +286,9 @@ test('join: auto-populates the local roster cache from the coordinator\'s GET /r
     await withMemberHome(async (home) => {
       const { stdout } = await runCli(['join', coordinatorUrl, 'test-invite-token', '--key-id', 'ocean-executor'], { home });
       // The human-relay snippet is still printed (membership approval stays
-      // a real human step) but the report must be honest that a peer was
-      // already auto-fetched — not silently claim zero peers known.
-      assert.match(stdout, /fetched the public key of 1 existing collective member/);
+      // a real human step) and the concise copy must still state the actual
+      // number of already-known peers.
+      assert.match(stdout, /existing member keys: 1/);
 
       const config = JSON.parse(await readFile(join(home, 'config.json'), 'utf8'));
       assert.equal(config.roster[PRE_REGISTERED_AUTHOR_KEY_ID], preRegisteredAuthorPublicKeyPem);

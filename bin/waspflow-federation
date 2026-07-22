@@ -171,6 +171,14 @@ async function fetchCoordinator(url, opts) {
   }
 }
 
+async function verifyInviteToken(coordinatorUrl, inviteToken) {
+  const probe = await fetchCoordinator(`${coordinatorUrl}/tasks/next`, {
+    headers: { authorization: `Bearer ${inviteToken}` },
+  });
+  if (probe.status === 401) fail('the coordinator rejected the invite token — check it and try again.');
+  if (!probe.ok) fail(`coordinator responded with an unexpected error (${probe.status}) — check the coordinator URL.`);
+}
+
 // `type` is merged in LAST (after any spread of upstream data in
 // `structured`) so it can never be shadowed — e.g. `contributed` spreads the
 // pull bin's own `{status: 'settled', ...}` response, and `task_status`
@@ -210,7 +218,7 @@ function printResult(json, humanLines, structured, type) {
 async function cmdJoin(argv) {
   const { flags, positional } = parseFlags(argv, ['key-id', 'collective-name']);
   let [coordinatorUrl, inviteToken] = positional;
-  if (positional.length === 1 && positional[0].startsWith('waspflow://')) {
+  if (positional.length === 1 && /^(?:waspflow|https?):\/\//i.test(positional[0])) {
     const { parseJoinInvite } = await import('../lib/federation-daemon.mjs');
     const parsed = parseJoinInvite(positional[0]);
     coordinatorUrl = parsed.coordinatorUrl;
@@ -218,18 +226,28 @@ async function cmdJoin(argv) {
     if (!flags['collective-name'] && parsed.collectiveName) flags['collective-name'] = parsed.collectiveName;
   }
   if (!coordinatorUrl || !inviteToken) {
-    fail('usage: waspflow federation join <coordinator-url> <invite-token> | <waspflow://join?...> [--key-id <name>] [--json]');
+    fail('usage: waspflow federation join <coordinator-url> <invite-token> | <https://coordinator/join#token> | <waspflow://join?...> [--key-id <name>] [--json]');
   }
 
   const { loadConfig, saveConfig, generateAndStoreKeypair, configPath } = await import('../lib/federation-config.mjs');
 
   const existing = loadConfig();
   if (existing && existing.coordinator_url === coordinatorUrl) {
+    if (existing.collective_token !== inviteToken) {
+      await verifyInviteToken(coordinatorUrl, inviteToken);
+      existing.collective_token = inviteToken;
+      if (flags['collective-name']) existing.collective_name = flags['collective-name'];
+      saveConfig(existing);
+      printResult(flags.json, [
+        `updated the collective token for ${coordinatorUrl}`,
+        `saved configuration: ${configPath()}`,
+      ], { status: 'rejoined', key_id: existing.key_id, coordinator_url: existing.coordinator_url, config_path: configPath() }, 'rejoined');
+      return;
+    }
     if (flags['collective-name'] && existing.collective_name !== flags['collective-name']) {
       existing.collective_name = flags['collective-name'];
       saveConfig(existing);
     }
-    log(`already joined ${coordinatorUrl} as '${existing.key_id}' — config at ${configPath()}`);
     printResult(flags.json, [
       `already joined as ${existing.key_id}`,
       `coordinator: ${existing.coordinator_url}`,
@@ -241,15 +259,9 @@ async function cmdJoin(argv) {
   // accepted BEFORE generating a keypair and saving config — a mistyped URL
   // or token should surface here, not silently later the first time
   // contribute/submit tries to talk to the coordinator.
-  log(`checking coordinator ${coordinatorUrl}...`);
-  const probe = await fetchCoordinator(`${coordinatorUrl}/tasks/next`, {
-    headers: { authorization: `Bearer ${inviteToken}` },
-  });
-  if (probe.status === 401) fail(`the coordinator rejected the invite token — check it's correct and try again.`);
-  if (!probe.ok) fail(`coordinator responded with an unexpected error (${probe.status}) — check the coordinator URL.`);
+  await verifyInviteToken(coordinatorUrl, inviteToken);
 
   const keyId = flags['key-id'] || os.userInfo().username || 'member';
-  log(`generating a new ed25519 keypair for '${keyId}'...`);
   const { privateKeyPath, publicKeyPem } = generateAndStoreKeypair(keyId);
 
   // The invite token IS the collective bearer token in v0 — there is no
@@ -273,26 +285,17 @@ async function cmdJoin(argv) {
   // member's own key back yet, since the operator hasn't added it to the
   // roster file at this point in the flow — that's the one snippet still
   // printed below.
-  log('fetching the coordinator\'s current roster...');
   config = await refreshRosterCache(config);
 
   const snippet = JSON.stringify({ [keyId]: publicKeyPem });
   const peerCount = Object.keys(config.roster || {}).length;
-  log(`saved config (${peerCount} peer key${peerCount === 1 ? '' : 's'} already known) — contribute/submit/status need no flags from here.`);
   printResult(flags.json, [
     `joined ${coordinatorUrl} as '${keyId}'`,
-    peerCount > 0
-      ? `fetched the public key${peerCount === 1 ? '' : 's'} of ${peerCount} existing collective member${peerCount === 1 ? '' : 's'} — no manual trust step needed.`
-      : `no other collective members registered yet.`,
-    '',
-    'ONE MORE STEP (send this to whoever runs the coordinator, so they can',
-    'add YOU to their roster file — this is the one step waspflow cannot do',
-    'for you, since membership approval is a real, deliberate human decision):',
-    '',
+    `saved configuration: ${configPath()}`,
+    `existing member keys: ${peerCount}`,
+    'send this public key to the coordinator operator:',
     snippet,
-    '',
-    `Once they confirm you're added (the roster hot-reloads, no restart needed),`,
-    `run: waspflow federation contribute`,
+    'run: waspflow federation contribute',
   ], {
     status: 'joined',
     key_id: keyId,
@@ -330,10 +333,10 @@ async function ask(question) {
 }
 
 async function chooseReachability() {
-  process.stdout.write('\nHow should remote members reach this collective?\n\n');
-  process.stdout.write('  [1] ngrok (recommended — free account, guided)\n');
-  process.stdout.write('  [2] my own HTTPS address (you run its reverse proxy)\n');
-  process.stdout.write('  [3] local network only\n\n');
+  process.stdout.write('Choose how remote members reach this collective:\n');
+  process.stdout.write('  [1] Use ngrok\n');
+  process.stdout.write('  [2] Use my HTTPS address\n');
+  process.stdout.write('  [3] Use my local network\n');
   const choice = await ask('Choose 1, 2, or 3: ');
   if (choice === '1') return { kind: 'ngrok' };
   if (choice === '2') {
@@ -346,15 +349,13 @@ async function chooseReachability() {
 
 async function storeNgrokToken(paths) {
   if (fs.existsSync(paths.ngrokToken) && fs.readFileSync(paths.ngrokToken, 'utf8').trim()) return paths.ngrokToken;
-  process.stdout.write('\nTo use ngrok:\n');
-  process.stdout.write('  1. Sign up at https://dashboard.ngrok.com/signup — choose “Sign up with GitHub” or “Sign up with Google”.\n');
-  process.stdout.write('  2. In the dashboard, open “Your Authtoken” (https://dashboard.ngrok.com/get-started/your-authtoken).\n');
-  process.stdout.write('  3. Copy that authtoken and paste it here.\n');
-  process.stdout.write('This free account gives your collective a stable address; members never need one.\n\n');
-  const token = await ask('ngrok authtoken: ');
+  process.stdout.write('Create a free ngrok account: https://dashboard.ngrok.com/signup\n');
+  const { readSecret } = await import('../lib/federation-secret-prompt.mjs');
+  const token = await readSecret({ input: process.stdin, output: process.stdout, prompt: 'Paste your authtoken (Your Authtoken page): ' });
   if (!token) fail('an ngrok authtoken is required to start the recommended tunnel');
   fs.writeFileSync(paths.ngrokToken, `${token}\n`, { mode: 0o600 });
   fs.chmodSync(paths.ngrokToken, 0o600);
+  process.stdout.write('authtoken saved\n');
   return paths.ngrokToken;
 }
 
@@ -371,7 +372,6 @@ async function prepareNgrokRuntime(paths) {
     if (!fs.existsSync(destination)) fs.copyFileSync(source, destination);
   }
   if (fs.existsSync(path.join(runtime, 'node_modules', '@ngrok', 'ngrok'))) return runtime;
-  process.stdout.write('Preparing Waspflow’s built-in secure connector (one host-only download)…\n');
   const result = await runCommand('npm', ['ci', '--omit=dev', '--prefix', runtime]);
   if (result.code !== 0) {
     fail(`could not prepare the built-in ngrok connector: ${result.stderr.trim() || result.stdout.trim()}\n${await ngrokFallbackMessage()}`);
@@ -421,12 +421,49 @@ async function waitForCoordinatorStatus(config) {
 }
 
 async function cmdHost(argv) {
-  const { flags, positional } = parseFlags(argv, ['tunnel', 'port']);
-  if (positional.length > 0) fail('usage: waspflow federation host [--tunnel ngrok|url:<https://address>|lan] [--port <number>]');
-  const { ensureHostState, parseTunnel, resolveLanUrl, saveReachability, readCollectiveToken } = await import('../lib/federation-host.mjs');
+  const { flags, positional } = parseFlags(argv, ['tunnel', 'port'], ['rotate-token']);
+  if (positional.length > 0 || (flags['rotate-token'] && (flags.tunnel || flags.port))) {
+    fail('usage: waspflow federation host [--tunnel ngrok|url:<https://address>|lan] [--port <number>] | --rotate-token');
+  }
+  const { ensureHostState, parseTunnel, resolveLanUrl, saveReachability, readCollectiveToken, readCoordinatorStatus, rotateCollectiveToken, writeCollectiveToken } = await import('../lib/federation-host.mjs');
   const port = flags.port === undefined ? 8787 : Number(flags.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) fail('--port must be a number between 1 and 65535');
   let { config, paths } = ensureHostState({ port });
+
+  if (flags['rotate-token']) {
+    const status = readCoordinatorStatus(config);
+    if (!status?.port) {
+      fail('cannot rotate the collective token because the managed coordinator is not running; old invites remain active.');
+    }
+    const coordinatorUrl = `http://127.0.0.1:${status.port}`;
+    const oldToken = readCollectiveToken(config);
+    let before;
+    try {
+      before = await fetch(`${coordinatorUrl}/tasks/next`, { headers: { authorization: `Bearer ${oldToken}` } });
+    } catch {
+      fail('cannot rotate the collective token because the managed coordinator cannot be updated; old invites remain active.');
+    }
+    if (!before.ok) {
+      fail('cannot rotate the collective token because the managed coordinator rejected its current token; old invites remain active.');
+    }
+
+    const nextToken = rotateCollectiveToken(config);
+    let updated = false;
+    try {
+      const [withNewToken, withOldToken] = await Promise.all([
+        fetch(`${coordinatorUrl}/tasks/next`, { headers: { authorization: `Bearer ${nextToken}` } }),
+        fetch(`${coordinatorUrl}/tasks/next`, { headers: { authorization: `Bearer ${oldToken}` } }),
+      ]);
+      updated = withNewToken.ok && withOldToken.status === 401;
+    } catch { /* restore the known-good token below */ }
+    if (!updated) {
+      writeCollectiveToken(config, oldToken);
+      fail('cannot rotate the collective token because the coordinator could not be updated; old invites remain active.');
+    }
+    process.stdout.write('Collective token rotated; existing members must re-join with a new invite, and old invites are dead.\n');
+    return;
+  }
+
   let reachability = flags.tunnel ? parseTunnel(flags.tunnel) : config.reachability;
   if (!reachability) reachability = await chooseReachability();
   if (reachability.kind === 'lan') reachability = { ...reachability, publicUrl: resolveLanUrl({ port: config.port }) };
@@ -456,14 +493,14 @@ async function cmdHost(argv) {
   const invite = (await import('../lib/federation-host.mjs')).createJoinInvite({ coordinatorUrl: publicUrl, collectiveToken: readCollectiveToken(config) });
   process.stdout.write(`\nYOUR COLLECTIVE IS READY\n${publicUrl}\n\nSend this invite to each member:\n${invite}\n\n`);
   if (checkoutChild) {
-    process.stdout.write('This source-checkout coordinator is running in this terminal. Keep it open; packaged installs run it as a systemd user service.\n');
+    process.stdout.write('This source-checkout coordinator stops when this terminal closes.\n');
     await new Promise((resolve) => checkoutChild.on('exit', resolve));
   }
 }
 
 async function cmdInvite(argv) {
-  const { flags, positional } = parseFlags(argv, ['url', 'name']);
-  if (positional.length > 0) fail('usage: waspflow federation invite [--url <http(s)://address>] [--name <collective>]');
+  const { flags, positional } = parseFlags(argv, ['url']);
+  if (positional.length > 0) fail('usage: waspflow federation invite [--url <http(s)://address>]');
   const { coordinatorHome, hostPaths, createJoinInvite, readCollectiveToken, readCoordinatorStatus } = await import('../lib/federation-host.mjs');
   const paths = hostPaths(coordinatorHome());
   if (!fs.existsSync(paths.config)) fail(`no hosted collective found at ${paths.config}. Run: waspflow federation host`);
@@ -471,7 +508,7 @@ async function cmdInvite(argv) {
   const status = readCoordinatorStatus(config);
   const coordinatorUrl = flags.url || status?.public_url || config.reachability?.publicUrl;
   if (!coordinatorUrl) fail('the public coordinator URL is not known yet; run: waspflow federation host');
-  const invite = createJoinInvite({ coordinatorUrl, collectiveToken: readCollectiveToken(config), collectiveName: flags.name });
+  const invite = createJoinInvite({ coordinatorUrl, collectiveToken: readCollectiveToken(config) });
   process.stdout.write(`${invite}\n`);
 }
 

@@ -95,6 +95,12 @@ async function main() {
     ? fs.readFileSync(hostConfig.collective_token_path, 'utf8').trim()
     : process.env.WASPFLOW_FEDERATION_COLLECTIVE_TOKEN;
   if (!token) fail('WASPFLOW_FEDERATION_COLLECTIVE_TOKEN is required (shared-secret collective gate)');
+  // The managed host flow rotates this private file atomically. Resolve it at
+  // request time so a verified rotation takes effect without a coordinator
+  // restart; raw env-configured coordinators retain their static token.
+  const activeToken = hostConfig
+    ? () => fs.readFileSync(hostConfig.collective_token_path, 'utf8').trim()
+    : token;
 
   const rosterFile = hostConfig?.roster_path || process.env.WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE;
   if (!rosterFile) fail('WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE is required (JSON file mapping key_id -> public key PEM)');
@@ -115,7 +121,7 @@ async function main() {
   const dataDir = hostConfig?.data_dir || process.env.WASPFLOW_FEDERATION_COORDINATOR_DATA_DIR
     || path.join(os.homedir(), '.waspflow', 'federation-coordinator', 'tasks');
 
-  const server = await startCoordinator({ dataDir, token, roster, port, host });
+  const server = await startCoordinator({ dataDir, token: activeToken, roster, port, host });
   const address = server.address();
   const statusFile = hostConfig?.status_path;
   let tunnel = null;

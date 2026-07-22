@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -48,26 +48,92 @@ test('host reachability flags parse strictly and LAN uses the discovered local a
   assert.equal(resolveLanUrl({ port: 8787, networkInterfaces: { eth0: [{ family: 'IPv4', internal: false, address: '192.168.4.10' }] } }), 'http://192.168.4.10:8787');
 });
 
-test('invite round-trips through both the existing UI parser and the join CLI unchanged', async () => {
+test('join accepts HTTPS-fragment, legacy scheme, and two-argument invites', async () => {
   const coordinatorData = await mkdtemp(join(tmpdir(), 'wf-fed-host-coordinator-'));
-  const memberHome = await mkdtemp(join(tmpdir(), 'wf-fed-host-member-'));
+  const memberHomes = await Promise.all(Array.from({ length: 3 }, () => mkdtemp(join(tmpdir(), 'wf-fed-host-member-'))));
   const roster = new Map([['operator', '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n-----END PUBLIC KEY-----\n']]);
   const server = await startCoordinator({ dataDir: coordinatorData, token: 'host-token', roster, port: 0 });
   try {
     const { port } = server.address();
-    const invite = createJoinInvite({ coordinatorUrl: `http://127.0.0.1:${port}`, collectiveToken: 'host-token', collectiveName: 'Oshin collective' });
-    assert.deepEqual(parseJoinInvite(invite), { coordinatorUrl: `http://127.0.0.1:${port}`, token: 'host-token', collectiveName: 'Oshin collective' });
+    const invite = createJoinInvite({ coordinatorUrl: `http://127.0.0.1:${port}`, collectiveToken: 'host-token' });
+    assert.equal(invite, `http://127.0.0.1:${port}/join#host-token`);
+    assert.deepEqual(parseJoinInvite(invite), { coordinatorUrl: `http://127.0.0.1:${port}`, token: 'host-token' });
+    assert.deepEqual(
+      parseJoinInvite(`waspflow://join?coordinator=${encodeURIComponent(`http://127.0.0.1:${port}`)}&token=host-token&name=Oshin%20collective`),
+      { coordinatorUrl: `http://127.0.0.1:${port}`, token: 'host-token', collectiveName: 'Oshin collective' },
+    );
     await execFileAsync(process.execPath, [CLI, 'join', invite, '--key-id', 'member'], {
-      env: { ...process.env, WASPFLOW_FEDERATION_HOME: memberHome },
+      env: { ...process.env, WASPFLOW_FEDERATION_HOME: memberHomes[0] },
     });
-    const config = JSON.parse(await readFile(join(memberHome, 'config.json'), 'utf8'));
+    await execFileAsync(process.execPath, [CLI, 'join', `waspflow://join?coordinator=${encodeURIComponent(`http://127.0.0.1:${port}`)}&token=host-token`, '--key-id', 'legacy'], {
+      env: { ...process.env, WASPFLOW_FEDERATION_HOME: memberHomes[1] },
+    });
+    await execFileAsync(process.execPath, [CLI, 'join', `http://127.0.0.1:${port}`, 'host-token', '--key-id', 'two-arg'], {
+      env: { ...process.env, WASPFLOW_FEDERATION_HOME: memberHomes[2] },
+    });
+    const config = JSON.parse(await readFile(join(memberHomes[0], 'config.json'), 'utf8'));
     assert.equal(config.coordinator_url, `http://127.0.0.1:${port}`);
     assert.equal(config.collective_token, 'host-token');
-    assert.equal(config.collective_name, 'Oshin collective');
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(coordinatorData, { recursive: true, force: true });
+    await Promise.all(memberHomes.map((home) => rm(home, { recursive: true, force: true })));
+  }
+});
+
+test('host --rotate-token updates a running managed coordinator and fresh invites carry only the new token', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'wf-fed-host-rotate-'));
+  const memberHome = await mkdtemp(join(tmpdir(), 'wf-fed-host-rotate-member-'));
+  const state = ensureHostState({ home, port: 8787 });
+  const roster = new Map(Object.entries(JSON.parse(await readFile(state.config.roster_path, 'utf8'))));
+  const server = await startCoordinator({
+    dataDir: state.config.data_dir,
+    token: () => readCollectiveToken(state.config),
+    roster,
+    port: 0,
+  });
+  try {
+    const { port } = server.address();
+    await writeFile(state.config.status_path, JSON.stringify({ status: 'listening', port }), { mode: 0o600 });
+    const oldToken = readCollectiveToken(state.config);
+    const coordinatorUrl = `http://127.0.0.1:${port}`;
+    await execFileAsync(process.execPath, [CLI, 'join', coordinatorUrl, oldToken, '--key-id', 'member'], {
+      env: { ...process.env, WASPFLOW_FEDERATION_HOME: memberHome },
+    });
+    const { stdout } = await execFileAsync(process.execPath, [CLI, 'host', '--rotate-token'], {
+      env: { ...process.env, WASPFLOW_FEDERATION_COORDINATOR_HOME: home },
+    });
+    const newToken = readCollectiveToken(state.config);
+    assert.notEqual(newToken, oldToken);
+    assert.equal(stdout, 'Collective token rotated; existing members must re-join with a new invite, and old invites are dead.\n');
+    assert.equal((await fetch(`${coordinatorUrl}/tasks/next`, { headers: { authorization: `Bearer ${oldToken}` } })).status, 401);
+    assert.equal((await fetch(`${coordinatorUrl}/tasks/next`, { headers: { authorization: `Bearer ${newToken}` } })).status, 200);
+    assert.equal(createJoinInvite({ coordinatorUrl: `https://collective.example`, collectiveToken: newToken }), `https://collective.example/join#${newToken}`);
+    await execFileAsync(process.execPath, [CLI, 'join', createJoinInvite({ coordinatorUrl, collectiveToken: newToken })], {
+      env: { ...process.env, WASPFLOW_FEDERATION_HOME: memberHome },
+    });
+    assert.equal(JSON.parse(await readFile(join(memberHome, 'config.json'), 'utf8')).collective_token, newToken);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(home, { recursive: true, force: true });
     await rm(memberHome, { recursive: true, force: true });
+  }
+});
+
+test('host --rotate-token refuses when the managed coordinator cannot be updated', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'wf-fed-host-rotate-refused-'));
+  try {
+    const state = ensureHostState({ home, port: 8787 });
+    const oldToken = readCollectiveToken(state.config);
+    await assert.rejects(execFileAsync(process.execPath, [CLI, 'host', '--rotate-token'], {
+      env: { ...process.env, WASPFLOW_FEDERATION_COORDINATOR_HOME: home },
+    }), (error) => {
+      assert.match(error.stderr, /cannot rotate the collective token because the managed coordinator is not running/);
+      return true;
+    });
+    assert.equal(readCollectiveToken(state.config), oldToken);
+  } finally {
+    await rm(home, { recursive: true, force: true });
   }
 });
 

@@ -5,7 +5,7 @@
 `waspflow federation host` turns an operator’s machine into a coordinator in
 one guided flow. It creates durable operator credentials and a collective
 token under `~/.waspflow/federation-coordinator/`, starts the coordinator, and
-prints one paste-able `waspflow://join?...` invite. The matching
+prints one paste-able `https://<coordinator>/join#<token>` invite. The matching
 `waspflow federation invite` command prints the same kind of invite again
 later. `join` now consumes that deep link directly as well as its older
 two-argument form.
@@ -23,9 +23,8 @@ needed.
 Without a flag, host asks one reachability question:
 
 1. **ngrok (recommended)** — prints the verified signup URL,
-   `https://dashboard.ngrok.com/signup`, tells the operator to use GitHub or
-   Google and where **Your Authtoken** appears in the dashboard, then stores
-   the pasted token privately.
+   `https://dashboard.ngrok.com/signup`, then asks for the operator's
+   authtoken with masked terminal input and stores it privately.
 2. **my own HTTPS address** — accepts the existing reverse-proxy origin and
    binds the coordinator only on loopback.
 3. **local network only** — binds on all local interfaces and produces an

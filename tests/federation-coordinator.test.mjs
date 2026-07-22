@@ -101,6 +101,44 @@ async function get(base, digest) {
   return fetch(`${base}/tasks/${digest}`);
 }
 
+test('browser navigation receives the public landing and join pages without exposing coordinator data', async () => {
+  await withServer(async ({ base }) => {
+    const defaultLanding = await fetch(`${base}/`);
+    assert.match(defaultLanding.headers.get('content-type'), /^text\/html/);
+    const landing = await fetch(`${base}/`, { headers: { accept: 'text/html' } });
+    assert.equal(landing.status, 200);
+    assert.match(landing.headers.get('content-type'), /^text\/html/);
+    assert.match(await landing.text(), /Waspflow Federation collective coordinator/);
+
+    const join = await fetch(`${base}/join`, { headers: { accept: 'text/html' } });
+    assert.equal(join.status, 200);
+    const joinBody = await join.text();
+    assert.match(joinBody, /You’re invited to a Waspflow Federation collective/);
+    assert.match(joinBody, /waspflow federation join/);
+    assert.match(joinBody, /location\.href/);
+    assert.doesNotMatch(joinBody, new RegExp(TOKEN));
+
+    const unknown = await fetch(`${base}/missing`, { headers: { accept: 'text/html' } });
+    assert.equal(unknown.status, 200);
+    assert.match(await unknown.text(), /This coordinator is online/);
+  });
+});
+
+test('JSON clients and API paths retain the existing JSON not-found contract', async () => {
+  await withServer(async ({ base }) => {
+    for (const [url, options] of [
+      [`${base}/`, { headers: { accept: 'application/json' } }],
+      [`${base}/missing`, { headers: { accept: 'application/json' } }],
+      [`${base}/tasks`, { headers: { accept: 'text/html' } }],
+    ]) {
+      const response = await fetch(url, options);
+      assert.equal(response.status, url.endsWith('/tasks') ? 401 : 404);
+      assert.match(response.headers.get('content-type'), /^application\/json/);
+      assert.deepEqual(await response.json(), { error: url.endsWith('/tasks') ? 'missing or invalid collective bearer token' : 'not found' });
+    }
+  });
+});
+
 test('GET /activity exposes only task-level shared lifecycle facts', async () => {
   await withServer(async ({ base }) => {
     const published = await publish(base, signTask({ display_id: 'Fix the login test' }));

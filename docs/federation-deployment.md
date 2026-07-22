@@ -14,7 +14,8 @@ the final HTTPS origin with `--tunnel url:https://collective.example`; it keeps
 the coordinator loopback-only. For a private tailnet, use the same option with
 the tailnet HTTPS origin, or use `--tunnel lan` for an ordinary LAN.
 
-Give members the printed `waspflow://join?...` invite, not a separately copied
-URL and token. Do not publish an unauthenticated coordinator directly to the
-public internet: its bearer token and roster remain part of the collective's
-trust boundary.
+Give members the printed `https://<coordinator>/join#<token>` invite, not a
+separately copied URL and token. The token stays in the fragment, so a browser
+does not send it to the coordinator. Do not publish an unauthenticated
+coordinator directly to the public internet: its bearer token and roster
+remain part of the collective's trust boundary.
