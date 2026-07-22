@@ -279,7 +279,7 @@ test('prepare() invokes `sbx run` with the AGENT before the scratch-dir PATH, --
   // as a real "not a sandbox or known agent" failure — see
   // docs/design/FEDERATION_V0_UAT_REPORT.md "Owner UAT findings and fixes".
   const stubDir = await writeStub('run-record', `
-    echo "$@" >"$WF_STUB_LOG"
+    echo "$@" >>"$WF_STUB_LOG"
     exit 0
   `);
   const logPath = path.join(stubDir, 'invocation.log');
@@ -290,7 +290,14 @@ test('prepare() invokes `sbx run` with the AGENT before the scratch-dir PATH, --
     const backend = new DockerSbxBackend();
     const job = validJob({ job_id: 'job-record' });
     const handle = await backend.prepare(job);
-    const invocation = await import('node:fs/promises').then((m) => m.readFile(logPath, 'utf8'));
+    const log = await import('node:fs/promises').then((m) => m.readFile(logPath, 'utf8'));
+    const calls = log.split('\n').filter(Boolean);
+    const invocation = calls[0];
+    // prepare() must ALSO wait for the sandbox to be genuinely exec-able
+    // before returning (sbx run --detached returns before boot completes —
+    // found live as "no sandbox named <id>" on the very next exec).
+    assert.ok(calls.slice(1).some((c) => /^exec wf-[0-9a-f]{16} -- true$/.test(c)),
+      `prepare() must readiness-probe the sandbox after sbx run, got calls: ${JSON.stringify(calls)}`);
     assert.match(invocation, /^run --name wf-[0-9a-f]{16} /);
     const afterName = invocation.replace(/^run --name wf-[0-9a-f]{16} /, '');
     assert.ok(afterName.startsWith(job.image), `agent/image must come before the workspace path, got: ${afterName}`);
