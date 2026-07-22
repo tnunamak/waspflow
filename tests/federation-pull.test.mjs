@@ -17,6 +17,11 @@ import {
   resolveHarness,
   runJob,
   rfc3339Now,
+  parseHarnessExecutionResult,
+  parseProviderAccount,
+  executionMetadata,
+  buildTaskReceipt,
+  capacityKindForHarness,
 } from '../lib/federation-pull-internals.mjs';
 
 const execFile = promisify(execFileCb);
@@ -174,12 +179,68 @@ test('ValidatedJobSpec construction passes validateJobSpec and uses the harness 
   const spec = buildValidatedJobSpec({ taskDigest: 'a'.repeat(64), harness, entrypointWithPrompt });
   assert.doesNotThrow(() => validateJobSpec(spec));
   assert.equal(spec.image, 'claude');
-  assert.ok(spec.entrypoint.startsWith('claude --print --dangerously-skip-permissions'));
+  assert.ok(spec.entrypoint.startsWith('claude --print --output-format json --dangerously-skip-permissions'));
   assert.deepEqual(spec.output_manifest, ['.wf-result/result.tar.gz']);
 });
 
 test('resolveHarness rejects an unknown harness name rather than silently defaulting', () => {
   assert.throws(() => resolveHarness('nonexistent-harness'), /unknown --harness/);
+});
+
+test('receipt parsers capture only the fields emitted by Claude, Codex, and Gemini JSON output', () => {
+  const claude = parseHarnessExecutionResult('claude-code-subscription', JSON.stringify({
+    type: 'result', duration_ms: 3840,
+    usage: { input_tokens: 15166, output_tokens: 63 },
+    modelUsage: { 'claude-fable-5': { inputTokens: 15166, outputTokens: 63 } },
+  }));
+  assert.deepEqual(claude, { model: 'claude-fable-5', usage: { input_tokens: 15166, output_tokens: 63 } });
+
+  const codex = parseHarnessExecutionResult('codex', [
+    JSON.stringify({ type: 'thread.started', thread_id: 'abc' }),
+    JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 18795, cached_input_tokens: 10496, output_tokens: 6, reasoning_output_tokens: 0 } }),
+  ].join('\n'));
+  assert.deepEqual(codex, { model: null, usage: { input_tokens: 18795, output_tokens: 6 } });
+
+  const gemini = parseHarnessExecutionResult('gemini', JSON.stringify({
+    model: 'gemini-2.5-pro', stats: { inputTokens: 12, outputTokens: 7 },
+  }));
+  assert.deepEqual(gemini, { model: 'gemini-2.5-pro', usage: { input_tokens: 12, output_tokens: 7 } });
+  assert.deepEqual(parseHarnessExecutionResult('codex', 'not json'), { model: null, usage: null });
+});
+
+test('receipt parser reads optional Claude account identity from sandbox status output and never requires it for result metadata', () => {
+  const account = parseProviderAccount('claude-code-subscription', JSON.stringify({
+    loggedIn: true, email: 'oshin@example.test', subscriptionType: 'max',
+  }));
+  assert.deepEqual(account, { email: 'oshin@example.test', tier: 'max' });
+  assert.equal(parseProviderAccount('claude-code-subscription', '{"loggedIn":false}'), null);
+  assert.deepEqual(executionMetadata({ harness_id: 'claude-code-subscription', capacity_kind: 'subscription', model: 'claude-fable-5', usage: { input_tokens: 3, output_tokens: 2 }, duration_ms: 99 }), {
+    harness_id: 'claude-code-subscription', capacity_kind: 'subscription', model: 'claude-fable-5', usage: { input_tokens: 3, output_tokens: 2 }, duration_ms: 99,
+  });
+});
+
+test('capacity kind comes from the harness capacity source, not optional account tier data', () => {
+  assert.equal(capacityKindForHarness(resolveHarness('claude-code-subscription')), 'subscription');
+  assert.equal(capacityKindForHarness(resolveHarness('claude-code-api-key')), 'api_key');
+  assert.equal(capacityKindForHarness(resolveHarness('gemini')), 'api_key');
+  assert.equal(capacityKindForHarness(resolveHarness('gh-cli')), 'local');
+});
+
+test('task receipt joins measured sandbox facts, parsed output, and private identities', () => {
+  const receipt = buildTaskReceipt({
+    taskDigest: 'a'.repeat(64), harnessId: 'claude-code-subscription', dockerAccount: 'oshin',
+    execution: {
+      sandbox_id: 'wf-123', started_at: '2026-07-21T10:00:00.000Z', finished_at: '2026-07-21T10:00:01.200Z', duration_ms: 1200,
+      stdout: JSON.stringify({ usage: { input_tokens: 12, output_tokens: 4 }, modelUsage: { 'claude-fable-5': {} } }),
+      provider_status_stdout: JSON.stringify({ loggedIn: true, email: 'oshin@example.test', subscriptionType: 'max' }),
+    },
+  });
+  assert.deepEqual(receipt, {
+    schema_version: 1, task_digest: 'a'.repeat(64), harness_id: 'claude-code-subscription', capacity_kind: 'subscription', model: 'claude-fable-5',
+    usage: { input_tokens: 12, output_tokens: 4 }, duration_ms: 1200,
+    started_at: '2026-07-21T10:00:00.000Z', finished_at: '2026-07-21T10:00:01.200Z', sandbox_id: 'wf-123',
+    identities: { docker_account: 'oshin', provider_account: { email: 'oshin@example.test', tier: 'max' } },
+  });
 });
 
 test('result-envelope construction passes validatePayload (schema, DIGEST-prefixed task_digest)', () => {

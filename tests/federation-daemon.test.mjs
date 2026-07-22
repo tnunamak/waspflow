@@ -33,7 +33,7 @@ function request(base, path, { method = 'GET', token, host, body } = {}) {
   });
 }
 
-async function withDaemon(fn, options = {}) {
+async function withDaemon(fn, daemonOptions = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'wf-federation-daemon-'));
   let config = null;
   const children = [];
@@ -42,6 +42,7 @@ async function withDaemon(fn, options = {}) {
   const daemon = await startFederationDaemon({
     token: 'test-session-token',
     infoPath: join(directory, 'daemon.json'),
+    ledgerPath: join(directory, 'ledger.json'),
     cliPath: '/real/path/to/bin/waspflow-federation',
     configLoader: () => config,
     spawnProcess: (...args) => {
@@ -49,14 +50,17 @@ async function withDaemon(fn, options = {}) {
       children.push({ args, child });
       return child;
     },
-    fetchImpl: async (url, options) => {
-      coordinatorCalls.push({ url, options });
+    fetchImpl: async (url, requestOptions) => {
+      coordinatorCalls.push({ url, options: requestOptions });
+      if (daemonOptions.fetchImpl) return daemonOptions.fetchImpl(url, requestOptions);
       return new Response(JSON.stringify(taskListResponse.body), {
         status: taskListResponse.status,
         headers: { 'content-type': 'application/json' },
       });
     },
-    startDockerLogin: options.startDockerLogin,
+    startDockerLogin: daemonOptions.startDockerLogin,
+    identityProbe: daemonOptions.identityProbe,
+    now: daemonOptions.now,
   });
   const base = `http://127.0.0.1:${daemon.info.port}`;
   try {
@@ -147,6 +151,12 @@ test('completed contribution appends a private ledger entry and exposes its week
     assert.equal(started.status, 202);
     children[0].child.stdout.emit('data', Buffer.from(JSON.stringify({
       schema_version: 1, type: 'contributed', status: 'settled', task_digest: 'a'.repeat(64), display_id: 'Fix onboarding',
+      receipt: {
+        schema_version: 1, task_digest: 'a'.repeat(64), harness_id: 'claude-code-subscription', capacity_kind: 'subscription', model: 'claude-fable-5',
+        usage: { input_tokens: 12, output_tokens: 4 }, duration_ms: 1200,
+        started_at: '2026-07-21T10:00:00.000Z', finished_at: '2026-07-21T10:00:01.200Z', sandbox_id: 'wf-123',
+        identities: { docker_account: 'oshin', provider_account: { email: 'oshin@example.test', tier: 'max' } },
+      },
     }) + '\n'));
     children[0].child.emit('close', 0);
 
@@ -156,16 +166,96 @@ test('completed contribution appends a private ledger entry and exposes its week
     assert.equal(entries.length, 1);
     assert.deepEqual(entries[0], {
       display_id: 'Fix onboarding', coordinator: 'http://coordinator.example', finished_at: entries[0].finished_at,
+      task_digest: 'a'.repeat(64),
+      receipt: {
+        schema_version: 1, task_digest: 'a'.repeat(64), harness_id: 'claude-code-subscription', capacity_kind: 'subscription', model: 'claude-fable-5',
+        usage: { input_tokens: 12, output_tokens: 4 }, duration_ms: 1200,
+        started_at: '2026-07-21T10:00:00.000Z', finished_at: '2026-07-21T10:00:01.200Z', sandbox_id: 'wf-123',
+        identities: { docker_account: 'oshin', provider_account: { email: 'oshin@example.test', tier: 'max' } },
+      },
     });
     const status = statusBody(await request(base, '/status', { token: 'test-session-token' }));
     assert.deepEqual(status.ledger_summary, { count_7d: 1, last: { display_id: 'Fix onboarding', finished_at: entries[0].finished_at } });
     assert.deepEqual(status.last_completed, entries[0]);
+    assert.equal(entries[0].receipt.identities.provider_account.email, 'oshin@example.test');
     assert.equal((await stat(ledgerPath)).mode & 0o777, 0o600);
     assert.deepEqual(JSON.parse(await readFile(ledgerPath, 'utf8')), entries);
   } finally {
     await daemon.close();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('GET /ledger returns completed entries newest first', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'wf-federation-ledger-order-'));
+  const ledgerPath = join(directory, 'ledger.json');
+  await (await import('node:fs/promises')).writeFile(ledgerPath, JSON.stringify([
+    { display_id: 'First', finished_at: '2026-07-21T10:00:00.000Z' },
+    { display_id: 'Second', finished_at: '2026-07-21T11:00:00.000Z' },
+  ]));
+  const daemon = await startFederationDaemon({ token: 'test-session-token', infoPath: join(directory, 'daemon.json'), ledgerPath, configLoader: () => null });
+  try {
+    const response = await request(`http://127.0.0.1:${daemon.info.port}`, '/ledger', { token: 'test-session-token' });
+    assert.deepEqual(JSON.parse(response.text).map((entry) => entry.display_id), ['Second', 'First']);
+  } finally {
+    await daemon.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('identity, task detail, and verified result endpoints keep identities private and cache slow identity probes', async () => {
+  const digest = 'a'.repeat(64);
+  const artifactBytes = Buffer.from('result artifact bytes');
+  const artifactDigest = (await import('node:crypto')).createHash('sha256').update(artifactBytes).digest('hex');
+  const receipt = {
+    schema_version: 1, task_digest: digest, harness_id: 'claude-code-subscription', capacity_kind: 'subscription', model: 'claude-fable-5',
+    usage: { input_tokens: 12, output_tokens: 4 }, duration_ms: 1200,
+    started_at: '2026-07-21T10:00:00.000Z', finished_at: '2026-07-21T10:00:01.200Z', sandbox_id: 'wf-private',
+    identities: { docker_account: 'oshin', provider_account: { email: 'oshin@example.test', tier: 'max' } },
+  };
+  const task = {
+    task_digest: digest, status: 'SETTLED', display_id: 'Fix receipt UI', author: 'tim',
+    published_at: '2026-07-21T09:00:00.000Z', claimed_at: '2026-07-21T10:00:00.000Z', settled_at: '2026-07-21T10:00:02.000Z',
+    result_envelope: { payload: { candidate: { artifact: { sha256: artifactDigest, media_type: 'application/gzip' } }, execution_metadata: { harness_id: 'claude-code-subscription', capacity_kind: 'subscription', model: 'claude-fable-5', usage: { input_tokens: 12, output_tokens: 4 }, duration_ms: 1200 } } },
+  };
+  let identityCalls = 0;
+  await withDaemon(async ({ base, children, setConfig }) => {
+    setConfig({ coordinator_url: 'http://coordinator.example', collective_token: 'collective-token', key_id: 'oshin', collective_name: 'Friends' });
+    await waitFor(async () => statusBody(await request(base, '/status', { token: 'test-session-token' })).state === 'idle');
+    await request(base, '/contribute/start', { method: 'POST', token: 'test-session-token' });
+    children[0].child.stdout.emit('data', Buffer.from(JSON.stringify({ schema_version: 1, type: 'contributed', status: 'settled', task_digest: digest, receipt }) + '\n'));
+    children[0].child.emit('close', 0);
+
+    const firstIdentity = await request(base, '/identity', { token: 'test-session-token' });
+    const secondIdentity = await request(base, '/identity', { token: 'test-session-token' });
+    assert.deepEqual(JSON.parse(firstIdentity.text), {
+      docker_account: 'oshin', providers: [{ service: 'anthropic', capacity_kind: 'subscription', account_email: 'oshin@example.test', tier: 'max', authed: true }],
+      key_id: 'oshin', coordinator_url: 'http://coordinator.example', collective_name: 'Friends',
+    });
+    assert.equal(identityCalls, 1);
+    assert.equal(secondIdentity.status, 200);
+
+    const detail = await request(base, `/tasks/${digest}`, { token: 'test-session-token' });
+    const detailBody = JSON.parse(detail.text);
+    assert.deepEqual(detailBody.receipt, receipt);
+    assert.deepEqual(detailBody.execution_metadata, task.result_envelope.payload.execution_metadata);
+    assert.equal(JSON.stringify(detailBody.execution_metadata).includes('oshin@example.test'), false);
+
+    const result = await request(base, `/result/${digest}`, { token: 'test-session-token' });
+    assert.equal(result.status, 200);
+    assert.equal(result.text, artifactBytes.toString('utf8'));
+  }, {
+    identityProbe: async () => {
+      identityCalls += 1;
+      return { docker_account: 'oshin', providers: [{ service: 'anthropic', capacity_kind: 'subscription', account_email: 'oshin@example.test', tier: 'max', authed: true }] };
+    },
+    fetchImpl: async (url) => {
+      if (url.endsWith('/roster')) return new Response(JSON.stringify({ roster: [{ key_id: 'oshin' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      if (url.endsWith(`/tasks/${digest}`)) return new Response(JSON.stringify(task), { status: 200, headers: { 'content-type': 'application/json' } });
+      if (url.endsWith(`/artifacts/${artifactDigest}`)) return new Response(artifactBytes, { status: 200 });
+      return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { 'content-type': 'application/json' } });
+    },
+  });
 });
 
 test('GET /status exposes every daemon state and auth handoff payloads', async () => {
@@ -462,7 +552,7 @@ test('parseJoinInvite normalizes deep links, pasted commands, and raw tokens', (
 test('openFederationUi opens the tokenized local URL for a running daemon', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'wf-federation-ui-'));
   const infoPath = join(directory, 'daemon.json');
-  const daemon = await startFederationDaemon({ token: 'ui-session-token', infoPath, configLoader: () => null });
+  const daemon = await startFederationDaemon({ token: 'ui-session-token', infoPath, ledgerPath: join(directory, 'ledger.json'), configLoader: () => null });
   const calls = [];
   try {
     assert.equal((await stat(infoPath)).mode & 0o777, 0o600);
@@ -485,7 +575,7 @@ test('openFederationUi opens the tokenized local URL for a running daemon', asyn
 test('openFederationUi uses cmd start with an empty title on Windows', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'wf-federation-ui-windows-'));
   const infoPath = join(directory, 'daemon.json');
-  const daemon = await startFederationDaemon({ token: 'ui-session-token', infoPath, configLoader: () => null });
+  const daemon = await startFederationDaemon({ token: 'ui-session-token', infoPath, ledgerPath: join(directory, 'ledger.json'), configLoader: () => null });
   const calls = [];
   try {
     const url = await openFederationUi({

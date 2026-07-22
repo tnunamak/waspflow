@@ -206,6 +206,11 @@ test('claim a queued task -> CLAIMED, generation 0 -> 1, returns original task e
     assert.equal(state.status, 'CLAIMED');
     assert.equal(state.claim_generation, 1);
     assert.equal(state.executor_key, 'ed25519:executor-1');
+    assert.equal(state.display_id, 'golden');
+    assert.equal(state.author, 'ed25519:author');
+    assert.match(state.published_at, /^\d{4}-\d{2}-\d{2}T/);
+    assert.match(state.claimed_at, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(state.settled_at, null);
   });
 });
 
@@ -322,6 +327,7 @@ test('full round trip: publish -> claim -> submit -> GET shows settled with resu
     const finalState = await (await get(base, digest)).json();
     assert.equal(finalState.status, 'SETTLED');
     assert.deepEqual(finalState.result_envelope, resultEnv);
+    assert.match(finalState.settled_at, /^\d{4}-\d{2}-\d{2}T/);
   });
 });
 

@@ -59,7 +59,7 @@ function usage() {
     --roster-file <json: key_id -> public key PEM> \\
     [--collective-token <token> | env WASPFLOW_FEDERATION_COLLECTIVE_TOKEN] \\
     [--lease-seconds <n>]     default 3600 \\
-    [--harness <claude-code-subscription|codex|gh-cli>]  default claude-code-subscription\n\n` +
+    [--harness <claude-code-subscription|claude-code-api-key|codex|gemini|gh-cli>]  default claude-code-subscription\n\n` +
     'Sandbox scratch space is controlled by DockerSbxBackend\'s own\n' +
     'WASPFLOW_FEDERATION_SCRATCH_ROOT env var (see lib/federation-docker-backend.mjs),\n' +
     'not a flag on this script.\n');
@@ -128,6 +128,9 @@ async function main() {
     runJob,
     resolveHarness,
     rfc3339Now,
+    statusProbeCommand,
+    executionMetadata,
+    buildTaskReceipt,
   } = await loadInternals();
 
   const {
@@ -198,9 +201,26 @@ async function main() {
       process.stderr.write(`${event.instruction}\n`);
     }
   }
-  const { collected, cleanupReceipt } = await runJob({ jobSpec, materializeSource, authorize });
+  const { collected, cleanupReceipt, execution } = await runJob({
+    jobSpec,
+    materializeSource,
+    authorize,
+    statusProbe: statusProbeCommand(harness.harness_id),
+  });
   process.stderr.write(`run complete; collected ${collected.length} declared output(s); destroy removed=${cleanupReceipt.removed}\n`);
   if (collected.length === 0) fail('run produced no collected output — nothing to submit as a candidate artifact');
+
+  let dockerAccount = null;
+  try {
+    const { readDockerAccount } = await import('../lib/federation-docker-backend.mjs');
+    dockerAccount = await readDockerAccount();
+  } catch (error) {
+    // A completed task must not be discarded because `sbx diagnose` is slow
+    // or temporarily unavailable after its sandbox has been removed. Null is
+    // the receipt's explicit "not capturable" representation.
+    process.stderr.write(`could not read Docker account for receipt: ${error.message}\n`);
+  }
+  const receipt = buildTaskReceipt({ taskDigest, harnessId: harness.harness_id, execution, dockerAccount });
 
   // --- 7. build + sign the result envelope ----------------------------------
   const candidateFile = collected[0];
@@ -218,6 +238,7 @@ async function main() {
       // would be redundant computation for the same claim in v0.
       tree_digest: `sha256:${candidateFile.sha256}`,
     },
+    execution_metadata: executionMetadata(receipt),
     oracle_ref: null,
     result_verdict: null,
     settlement: null,
@@ -237,7 +258,7 @@ async function main() {
     claimGeneration: claimResult.claim_generation,
     leaseToken: claimResult.lease_token,
   });
-  process.stdout.write(JSON.stringify(submitResponse, null, 2) + '\n');
+  process.stdout.write(JSON.stringify({ ...submitResponse, task_digest: taskDigest, receipt }, null, 2) + '\n');
   if (submitResponse.status !== 'settled') process.exit(1);
 }
 

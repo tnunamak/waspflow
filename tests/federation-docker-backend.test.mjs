@@ -9,6 +9,7 @@ import {
   DockerSbxBackend,
   sanitizedEnv,
   BACKEND_ID,
+  parseDockerAccount,
   _internal,
 } from '../lib/federation-docker-backend.mjs';
 
@@ -33,6 +34,11 @@ test('sanitizedEnv strips SSH agent and DOCKER_HOST exactly', () => {
   assert.equal(out.SSH_AUTH_SOCK, undefined);
   assert.equal(out.DOCKER_HOST, undefined);
   assert.equal(out.KEEP_ME, 'yes');
+});
+
+test('parseDockerAccount reads the Docker account from ANSI-formatted sbx diagnose output and returns null when absent', () => {
+  assert.equal(parseDockerAccount('\u001b[32mSigned in as oshin\u001b[0m'), 'oshin');
+  assert.equal(parseDockerAccount('Docker authentication required'), null);
 });
 
 test('sanitizedEnv strips *_API_KEY and *_TOKEN patterns', () => {

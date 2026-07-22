@@ -39,6 +39,15 @@ test('result binds task digest without requiring author-side re-verification', (
   assert.equal(envelope.payload.task_digest, `sha256:${taskDigest}`);
   assert.equal(payloadDigest(envelope.payload), '85e47bee119e47066501070c3f7e85ca90e22c3588f7b7c47527433468116cc9');
 });
+test('result execution_metadata is optional, signed when present, and structurally excludes identities', () => {
+  const payload = result(payloadDigest(task()));
+  payload.execution_metadata = {
+    harness_id: 'claude-code-subscription', capacity_kind: 'subscription', model: 'claude-fable-5',
+    usage: { input_tokens: 10, output_tokens: 4 }, duration_ms: 123,
+  };
+  assert.doesNotThrow(() => signEnvelope(payload, privateKey, 'executor-1'));
+  assert.throws(() => signEnvelope({ ...payload, execution_metadata: { ...payload.execution_metadata, identities: {} } }, privateKey, 'executor-1'), /unknown field/);
+});
 test('strict parser rejects malformed UTF-8 and noncanonical numeric spellings', () => {
   assert.throws(() => parseCanonicalEnvelope(Buffer.from([0xc3, 0x28])), /encoded|UTF-8|JSON/);
   assert.throws(() => parseCanonicalEnvelope('{"payload":{},"signature":{},"z":1.0}'), /canonical|unknown/);
