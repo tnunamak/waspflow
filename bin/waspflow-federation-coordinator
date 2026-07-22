@@ -181,10 +181,14 @@ async function main() {
   process.stdout.write(JSON.stringify(status) + '\n');
 
   const shutdown = () => {
+    // A stale "public_listening" status after exit misleads liveness readers
+    // (host --rotate-token probes, future doctor checks); record the stop.
+    writeStatus(statusFile, { status: 'stopped', port: address.port });
     Promise.resolve(tunnel?.close()).catch(() => {}).finally(() => server.close(() => process.exit(0)));
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+  process.on('SIGHUP', shutdown);
 }
 
 function writeStatus(file, status) {

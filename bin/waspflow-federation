@@ -431,17 +431,23 @@ async function cmdHost(argv) {
   let { config, paths } = ensureHostState({ port });
 
   if (flags['rotate-token']) {
+    // A coordinator that is not running needs no live update: the token file
+    // is its only token source at startup, so rotating the file alone is
+    // complete. The status file can claim "listening" after a terminal-closed
+    // exit, so a connection-level probe (not the file) decides liveness.
     const status = readCoordinatorStatus(config);
-    if (!status?.port) {
-      fail('cannot rotate the collective token because the managed coordinator is not running; old invites remain active.');
-    }
-    const coordinatorUrl = `http://127.0.0.1:${status.port}`;
+    const coordinatorUrl = status?.port ? `http://127.0.0.1:${status.port}` : null;
     const oldToken = readCollectiveToken(config);
-    let before;
-    try {
-      before = await fetch(`${coordinatorUrl}/tasks/next`, { headers: { authorization: `Bearer ${oldToken}` } });
-    } catch {
-      fail('cannot rotate the collective token because the managed coordinator cannot be updated; old invites remain active.');
+    let before = null;
+    if (coordinatorUrl) {
+      try {
+        before = await fetch(`${coordinatorUrl}/tasks/next`, { headers: { authorization: `Bearer ${oldToken}` } });
+      } catch { /* not running; rotate the file directly below */ }
+    }
+    if (!before) {
+      rotateCollectiveToken(config);
+      process.stdout.write('Collective token rotated. Your coordinator is not running; the new token takes effect when you start it: waspflow federation host\nOld invites are dead. Send fresh ones with: waspflow federation invite\n');
+      return;
     }
     if (!before.ok) {
       fail('cannot rotate the collective token because the managed coordinator rejected its current token; old invites remain active.');
@@ -508,6 +514,15 @@ async function cmdInvite(argv) {
   const status = readCoordinatorStatus(config);
   const coordinatorUrl = flags.url || status?.public_url || config.reachability?.publicUrl;
   if (!coordinatorUrl) fail('the public coordinator URL is not known yet; run: waspflow federation host');
+  // A down coordinator can come back on a different public address (a tunnel
+  // pin that fails to re-bind), so an invite minted now could go stale.
+  if (!flags.url) {
+    let live = false;
+    if (status?.port) {
+      try { live = (await fetch(`http://127.0.0.1:${status.port}/tasks/next`, { headers: { authorization: `Bearer ${readCollectiveToken(config)}` } })).ok; } catch { /* not running */ }
+    }
+    if (!live) log('your coordinator is not running — start it first (waspflow federation host), then mint invites, so the address in them is the live one.');
+  }
   const invite = createJoinInvite({ coordinatorUrl, collectiveToken: readCollectiveToken(config) });
   process.stdout.write(`${invite}\n`);
 }
