@@ -92,15 +92,15 @@ function lifecycle(status, task) {
 function requesterPanel(status, task, submitTask, openState) {
   const source = element('input', { id: 'source', name: 'source', placeholder: '/path/to/folder', required: '' });
   const prompt = element('textarea', { id: 'prompt', name: 'prompt', placeholder: 'Describe the work you want done.', required: '' });
-  const displayId = element('input', { id: 'display-id', name: 'display-id', placeholder: 'contributor display id', required: '' });
+  const displayId = element('input', { id: 'display-id', name: 'display-id', placeholder: 'e.g. fix-the-login-page', required: '' });
   const form = element('form', { onsubmit: async (event) => {
     event.preventDefault();
     await submitTask({ source: source.value, prompt: prompt.value, display_id: displayId.value });
   } },
-  element('p', { className: 'muted', text: 'For a task you are requesting, enter a local folder path, the work prompt, and the contributor’s display id.' }),
-  element('label', { for: 'source', text: 'Folder path' }), source,
+  element('p', { className: 'muted', text: 'Sends work to the collective: pick a folder ON THIS COMPUTER (its contents are packaged as the task\u2019s code), describe the work, and give the task a short name.' }),
+  element('label', { for: 'source', text: 'Folder on this computer' }), source,
   element('label', { for: 'prompt', text: 'What should be done?' }), prompt,
-  element('label', { for: 'display-id', text: 'Contributor display id' }), displayId,
+  element('label', { for: 'display-id', text: 'Task name (what contributors will see)' }), displayId,
   element('div', { className: 'actions' }, element('button', { type: 'submit', text: 'Submit task' })));
   return accordion('submit', openState, 'Submit a task (advanced)', form, lifecycle(status, task));
 }
@@ -108,6 +108,13 @@ function requesterPanel(status, task, submitTask, openState) {
 function instructions(text) {
   const lines = String(text || 'Complete the sign-in instruction shown by your agent.').split(/\n+/).filter(Boolean);
   return element('ol', { className: 'manual-steps' }, ...lines.map((line) => element('li', { text: line.replace(/^\s*\d+[.)]\s*/, '') })));
+}
+
+function taskAge(publishedAt) {
+  const t = Date.parse(publishedAt || '');
+  if (!Number.isFinite(t)) return '';
+  const mins = Math.max(0, Math.round((Date.now() - t) / 60000));
+  return mins < 1 ? 'submitted just now' : mins < 60 ? `submitted ${mins}m ago` : `submitted ${Math.round(mins / 60)}h ago`;
 }
 
 function taskChoices(tasks, contribute) {
@@ -119,6 +126,7 @@ function taskChoices(tasks, contribute) {
       return element('li', { className: 'task-choice' },
         element('div', {},
           element('strong', { text: task.display_id || 'Task' }),
+          element('p', { className: 'muted', text: taskAge(task.published_at) }),
           description ? element('p', { className: 'muted', text: description }) : null,
         ),
         button('Contribute this', () => contribute(task.task_digest), 'secondary'),
