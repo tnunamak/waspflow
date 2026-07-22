@@ -167,7 +167,7 @@ async function main() {
   // --- 5. build + validate the job spec ------------------------------------
   const harness = resolveHarness(harnessName);
   const entrypointWithPrompt = `${harness.entrypoint} ${shellQuoteSingle(taskPrompt)}`;
-  const jobSpec = buildValidatedJobSpec({ taskDigest, harness, entrypointWithPrompt });
+  const jobSpec = buildValidatedJobSpec({ taskDigest, harness, entrypointWithPrompt, githubAccessRequired: taskPayload.github_access_required === true || taskPayload.git_source?.authentication_required === true });
   process.stderr.write(`built ValidatedJobSpec (image=${jobSpec.image}, job_id=${jobSpec.job_id})\n`);
 
   // --- 4 (materialize) + 6 (run) ---------------------------------------------

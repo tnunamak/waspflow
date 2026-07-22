@@ -96,6 +96,13 @@
       .request-select small { grid-column: 1; color: var(--muted); }
       .request-select .chip { grid-column: 2; grid-row: 1 / span 2; }
       .form-feedback { min-height: 1.5em; margin: 10px 0 0; color: #943b18; }
+      .drop-zone { display: grid; place-items: center; min-height: 90px; margin: 8px 0; border: 2px dashed #a8c0ae; border-radius: 9px; color: #46664e; background: #f6faf7; font-weight: 650; }
+      .drop-zone:focus, .drop-zone:hover { border-color: #29764d; outline: none; background: #eef7f0; }
+      .attachment-list { display: grid; gap: 7px; margin: 10px 0; padding: 0; list-style: none; }
+      .attachment-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; font-size: .88rem; }
+      .attachment-list span { overflow-wrap: anywhere; }
+      .one-time-code-wrap { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 7px; vertical-align: middle; }
+      .one-time-code { font-weight: 750; letter-spacing: .06em; cursor: copy; }
       .schedule-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
       .schedule-grid label { margin-top: 14px; }
       .check-label { display: flex; align-items: center; gap: 9px; }

@@ -70,6 +70,7 @@ async function withDaemon(fn, daemonOptions = {}) {
     startDockerLogin: daemonOptions.startDockerLogin,
     startProviderSignIn: daemonOptions.startProviderSignIn,
     identityProbe: daemonOptions.identityProbe || (async () => ({ docker_account: null, providers: [] })),
+    gitVisibilityProbe: daemonOptions.gitVisibilityProbe,
     now: daemonOptions.now,
   });
   const base = `http://127.0.0.1:${daemon.info.port}`;
@@ -538,14 +539,14 @@ test('POST /submit supervises the guided submit verb and GET /submit/status prox
     assert.equal(response.status, 202);
     assert.deepEqual(children[0].args[1], [
       '/real/path/to/bin/waspflow-federation', 'submit', '--display-id', 'oshin',
-      '--source', sourcePath, '--prompt', 'Fix the test failure.', '--network', 'disabled',
+      '--source', sourcePath, '--github-access', 'false', '--prompt', 'Fix the test failure.', '--network', 'disabled',
     ]);
 
     const digest = `sha256:${'a'.repeat(64)}`;
     children[0].child.stdout.emit('data', Buffer.from(`waspflow-federation-submit: task_digest=${digest} status=QUEUED\n`));
     const daemonStatus = statusBody(await request(base, '/status', { token: 'test-session-token' }));
     assert.equal(daemonStatus.submission.task_digest, digest);
-    assert.equal(daemonStatus.submission.state, 'queued');
+    assert.equal(daemonStatus.submission.state, 'published');
 
     const taskStatusPromise = request(base, `/submit/status?task_digest=${digest}`, { token: 'test-session-token' });
     for (let attempt = 0; children.length < 2 && attempt < 10; attempt++) {
@@ -788,13 +789,49 @@ test('GET /requests returns only the local author history and merges the active 
     assert.equal(response.status, 202);
     children[0].child.stdout.emit('data', Buffer.from(`task_digest=sha256:${digest} status=QUEUED\n`));
     const requests = await request(base, '/requests', { token: 'test-session-token' });
-    assert.deepEqual(JSON.parse(requests.text), [{ task_digest: `sha256:${digest}`, display_id: 'Local request', status: 'queued', published_at: null, has_result: false }]);
+    const body = JSON.parse(requests.text);
+    assert.equal(body[0].task_digest, `sha256:${digest}`);
+    assert.equal(body[0].display_id, 'Local request');
+    assert.equal(body[0].status, 'published');
+    assert.ok(body[0].published_at);
+    assert.equal(body[0].has_result, false);
     assert.ok(coordinatorCalls.some((call) => call.url === 'http://coordinator.example/requests?author=tim-author'));
   }, { fetchImpl: async (url) => {
     if (url.endsWith('/roster')) return new Response(JSON.stringify({ roster: [{ key_id: 'tim-author' }] }), { status: 200 });
     if (url.includes('/requests?')) return new Response(JSON.stringify([{ task_digest: 'b'.repeat(64), author: 'other', display_id: 'Not mine', status: 'SETTLED', published_at: '2026-07-21T00:00:00.000Z', has_result: true }]), { status: 200 });
     return new Response(JSON.stringify([]), { status: 200 });
   } });
+});
+
+test('Git visibility probing is daemon-side and unknown-field submission failures become an upgrade instruction', async () => {
+  await withDaemon(async ({ base, children, setConfig, sourcePath }) => {
+    setConfig({ coordinator_url: 'http://coordinator.example' });
+    const probe = await request(base, '/git/probe', { method: 'POST', token: 'test-session-token', body: { git_url: 'https://github.com/example/private.git' } });
+    assert.deepEqual(JSON.parse(probe.text), { visibility: 'private_or_unreachable', github_access_required: true });
+    await request(base, '/submit', { method: 'POST', token: 'test-session-token', body: { source: sourcePath, prompt: 'Inspect this org.', display_id: 'Credential-only', github_access_required: true } });
+    assert.ok(children[0].args[1].includes('--github-access'));
+    children[0].child.stderr.emit('data', Buffer.from('publishing task failed (HTTP 400): task payload has unknown field github_access_required\n'));
+    children[0].child.emit('close', 1);
+    const status = statusBody(await request(base, '/status', { token: 'test-session-token' }));
+    assert.equal(status.submission.state, 'failed');
+    assert.equal(status.submission.reason, "Your collective's coordinator is running an older version — ask the operator to update it.");
+    const acknowledged = await request(base, '/submit/ack', { method: 'POST', token: 'test-session-token' });
+    assert.equal(JSON.parse(acknowledged.text).submission, undefined);
+  }, { gitVisibilityProbe: async () => 'private_or_unreachable' });
+});
+
+test('a coordinator schema header is compared and blocks an incompatible credential capability before submission', async () => {
+  await withDaemon(async ({ base, children, setConfig, sourcePath }) => {
+    setConfig({ coordinator_url: 'http://coordinator.example', collective_token: 'collective-token' });
+    await request(base, '/tasks', { token: 'test-session-token' });
+    const observed = statusBody(await request(base, '/status', { token: 'test-session-token' }));
+    assert.equal(observed.coordinator_schema_version, 1);
+    assert.equal(observed.coordinator_outdated, true);
+    const response = await request(base, '/submit', { method: 'POST', token: 'test-session-token', body: { source: sourcePath, prompt: 'Find an org bug.', display_id: 'Old coordinator', github_access_required: true } });
+    assert.equal(response.status, 202);
+    assert.equal(children.length, 0);
+    assert.equal(JSON.parse(response.text).submission.reason, "Your collective's coordinator is running an older version — ask the operator to update it.");
+  }, { fetchImpl: async () => new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json', 'x-waspflow-federation-coordinator-schema': '1' } }) });
 });
 
 test('daemon serves a token-exempt favicon and surfaces child stderr for contribution and submission failures', async () => {

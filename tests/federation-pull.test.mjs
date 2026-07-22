@@ -183,6 +183,12 @@ test('ValidatedJobSpec construction passes validateJobSpec and uses the harness 
   assert.deepEqual(spec.output_manifest, ['.wf-result/result.tar.gz']);
 });
 
+test('credential-only GitHub tasks carry the capability into the sandbox job spec', () => {
+  const harness = resolveHarness('claude-code-subscription');
+  const spec = buildValidatedJobSpec({ taskDigest: 'b'.repeat(64), harness, entrypointWithPrompt: harness.entrypoint, githubAccessRequired: true });
+  assert.equal(spec.github_access_required, true);
+});
+
 test('resolveHarness rejects an unknown harness name rather than silently defaulting', () => {
   assert.throws(() => resolveHarness('nonexistent-harness'), /unknown --harness/);
 });

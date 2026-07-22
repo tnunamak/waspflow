@@ -380,6 +380,7 @@ test('GET /tasks returns an empty claimable-task list when the queue is empty', 
   await withServer(async ({ base }) => {
     const res = await list(base);
     assert.equal(res.status, 200);
+    assert.equal(res.headers.get('x-waspflow-federation-coordinator-schema'), '2');
     assert.deepEqual(await res.json(), []);
   });
 });

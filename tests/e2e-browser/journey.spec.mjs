@@ -69,6 +69,7 @@ async function main() {
       await page.getByRole('link', { name: 'Requests' }).click();
       await assertSelectorVisible(page, '#task-name');
       await assertSelectorVisible(page, '#task-prompt');
+      await page.getByText('Advanced', { exact: true }).click();
       await assertSelectorVisible(page, '#task-folder');
       await page.locator('#task-name').fill('wave-d-form-persistence');
       await page.locator('#task-prompt').fill('Prove the error survives a status refresh.');

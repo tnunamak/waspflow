@@ -59,6 +59,7 @@ function parseArgs(argv) {
     'git-url': null,
     'git-ref': null,
     'git-private': 'false',
+    'github-access': 'false',
     'prompt': null,
     'prompt-file': null,
     'network': 'disabled',
@@ -111,7 +112,6 @@ async function main() {
   if (!displayId) fail('--display-id is required');
 
   const sourceDir = flags['source'];
-  if (!sourceDir && !flags['git-url']) fail('--source or --git-url is required');
   if (sourceDir && flags['git-url']) fail('--source and --git-url cannot be used together');
 
   let promptText = flags['prompt'];
@@ -157,7 +157,9 @@ async function main() {
 
   const privateFlag = flags['git-private'];
   if (!['true', 'false'].includes(privateFlag)) fail('--git-private must be true or false');
-  const payload = buildTaskPayload({ collective, displayId, authorKeyId, source, prompt, network, expiresInSeconds, gitSource: flags['git-url'] ? { url: flags['git-url'], ref: flags['git-ref'], authenticationRequired: privateFlag === 'true' } : undefined });
+  const githubAccessFlag = flags['github-access'];
+  if (!['true', 'false'].includes(githubAccessFlag)) fail('--github-access must be true or false');
+  const payload = buildTaskPayload({ collective, displayId, authorKeyId, source, prompt, network, expiresInSeconds, githubAccessRequired: githubAccessFlag === 'true' || privateFlag === 'true', gitSource: flags['git-url'] ? { url: flags['git-url'], ref: flags['git-ref'], authenticationRequired: privateFlag === 'true' } : undefined });
   const envelope = signTaskEnvelope(payload, privateKeyPem, authorKeyId);
 
   process.stdout.write('waspflow-federation-submit: uploading source artifact...\n');
