@@ -89,3 +89,38 @@ test('the coordinator tunnel uses an injected SDK and gives a guided fallback fo
   );
   assert.match(ngrokUnavailableGuidance(), /Install the ngrok agent/);
 });
+
+test('the tunnel pins a previously assigned domain and falls back unpinned when ngrok rejects it', async () => {
+  // Stable public URL across coordinator restarts: the recorded hostname is
+  // passed as `domain`; a rejected pin retries unpinned rather than staying down.
+  const forwarded = [];
+  const pinned = await startNgrokTunnel({
+    port: 8787,
+    authtoken: 'secret-token',
+    domain: 'quiet-otter.ngrok-free.dev',
+    loadSdk: () => ({ forward: async (options) => {
+      forwarded.push(options);
+      return { url: () => `https://${options.domain}`, close: async () => {} };
+    } }),
+  });
+  assert.equal(forwarded[0].domain, 'quiet-otter.ngrok-free.dev');
+  assert.equal(pinned.url, 'https://quiet-otter.ngrok-free.dev');
+  assert.ok(!pinned.domainFellBack);
+
+  const attempts = [];
+  const fallback = await startNgrokTunnel({
+    port: 8787,
+    authtoken: 'secret-token',
+    domain: 'revoked.ngrok-free.dev',
+    loadSdk: () => ({ forward: async (options) => {
+      attempts.push(options);
+      if (options.domain) throw new Error('domain not allowed for this account');
+      return { url: () => 'https://fresh-crab.ngrok-free.dev', close: async () => {} };
+    } }),
+  });
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[1].domain, undefined);
+  assert.equal(fallback.url, 'https://fresh-crab.ngrok-free.dev');
+  assert.equal(fallback.domainFellBack, true);
+  assert.match(fallback.domainError, /not allowed/);
+});

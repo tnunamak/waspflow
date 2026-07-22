@@ -282,7 +282,7 @@ async function cmdJoin(argv) {
   printResult(flags.json, [
     `joined ${coordinatorUrl} as '${keyId}'`,
     peerCount > 0
-      ? `${peerCount} existing collective member${peerCount === 1 ? '' : 's'}' public keys auto-fetched — no manual trust needed for them.`
+      ? `fetched the public key${peerCount === 1 ? '' : 's'} of ${peerCount} existing collective member${peerCount === 1 ? '' : 's'} — no manual trust step needed.`
       : `no other collective members registered yet.`,
     '',
     'ONE MORE STEP (send this to whoever runs the coordinator, so they can',

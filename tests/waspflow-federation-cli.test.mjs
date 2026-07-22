@@ -288,7 +288,7 @@ test('join: auto-populates the local roster cache from the coordinator\'s GET /r
       // The human-relay snippet is still printed (membership approval stays
       // a real human step) but the report must be honest that a peer was
       // already auto-fetched — not silently claim zero peers known.
-      assert.match(stdout, /1 existing collective member.*auto-fetched/);
+      assert.match(stdout, /fetched the public key of 1 existing collective member/);
 
       const config = JSON.parse(await readFile(join(home, 'config.json'), 'utf8'));
       assert.equal(config.roster[PRE_REGISTERED_AUTHOR_KEY_ID], preRegisteredAuthorPublicKeyPem);
