@@ -1,60 +1,46 @@
-# DEMO READY — Waspflow Federation (Oshin demo)
+# DEMO READY — Waspflow Federation (FULL LOOP PROVEN)
 
-**Status: FINAL — verified 2026-07-21 late evening. The rig is live and idle, waiting for the demo.**
+**Status: FINAL. The complete federated loop has RUN FOR REAL tonight** — claim → signed
+verification → sandboxed microVM → Claude executed the task → signed result → settled →
+requester fetched the artifact → ledger ticked. Verified by inspecting the actual result:
+the README contains the exact line the task requested ("Contributed via Waspflow Federation.").
 
-## Open this in your browser (Oshin's app, live from her VM)
+## The demo URL (verified end-to-end through this exact URL)
 ```
-http://127.0.0.1:8902/?token=6SQWJBu4P3um1HvNNfjUCcfaKBy4I3EHGNK1QTUo0fs
+http://192.168.1.180:8904/?token=K_21o5zSNX4Z_WInTGgz1FgBS_2qlfoff38Q0yD4NXM
 ```
-You should see: **Idle / Ready to contribute** · "You're helping: http://10.0.2.2:9099" ·
-"You've completed 0 tasks this week" · a **Choose a task** card with two queued tasks.
+Current screen: **Idle / Ready to contribute** · "You've completed 1 task this week"
+(`the-real-one` — tonight's proven run) · one clean claimable task: **fix-the-login-page**.
 
-## The demo (3 beats; full script: docs/UAT_AND_DEMO_RUNBOOK.md part 2)
-1. **"This is everything you'd ever do"** — the app, the safety panel ("Everything else is
-   blocked…"), the story of join-by-invite and the pending→approved auto-flip.
-2. **"Pick a task, or let it pick"** — click **Contribute this**. A one-time
-   **"Sign in to Docker"** button appears with a confirmation code — click it (your real browser
-   has your Docker session), confirm the code, the page continues automatically. Then the
-   provider sign-in button (spare sub), same pattern. Then the task runs in a real sandboxed
-   microVM on "her" machine.
-3. **"And you get thanked"** — the requester lifecycle (Submit panel) reaches settled; her
-   ledger ticks to "You've completed 1 task this week."
+## The 1-tap demo (everything is pre-authed now — zero interruptions)
+Tap **Contribute this** on `fix-the-login-page` → ~30 seconds of "Contributing" →
+**"Contribution finished"** → ledger ticks to 2. A real Claude agent in a real sandboxed
+microVM does the work. Tell the sign-in story verbally (you did both one-click flows tonight —
+Docker device-confirm + they're one-time).
+To re-run the demo: submit another task (Submit panel or the CLI line in the runbook) and tap again.
 
-Sign-in note: each Contribute click generates a fresh confirmation code — nothing goes stale.
+## What tonight's autonomous loop found & fixed (each verified live, all pushed @ 9841257, suite 226/226)
+1. **Socket-path 104-char limit** — default sbx home broke `sbx daemon` for ~every username → `~/.wfsbx` + doctor check.
+2. **Docker sign-in button unreachable** — drive gated on docker_login being the sole failure; policy always co-fails pre-auth → gate fixed.
+3. **Raw CLI dumps in the setup card** → plain one-line copy.
+4. **Sandbox-readiness race** — `sbx run --detached` returns before the microVM is exec-able → readiness wait.
+5. **kvm_access false negative** — ACL-granted hosts blocked by a lying `test -r` probe → judge by sbx's own diagnostic.
+6. **THE loop-killer: split-brain sbx identity** — the auth flow resolved a different sbx HOME than the backend, so login execs targeted the personal daemon ("no sandbox named…") → one resolver, one identity.
+Also: test data was leaking into the real ledger (cleaned; test-isolation fix queued), and the daemon
+swallows the contribute child's stderr on failure (fix queued — detail should carry the last error line).
 
-## What you click (the ONLY human actions; identical to Oshin's real experience)
-1. **Sign in to Docker** (once) — the in-UI button + code confirm. ~15 s.
-2. **Provider sign-in** (once) — the in-UI button, your spare subscription. ~20 s.
-That's it. I attempted both autonomously; they require your logged-in browser sessions, which only
-your real browser has. Both are the product's own designed flow, not workarounds.
+## Known open items (post-demo)
+- Which subscription the sandboxed Claude billed (auth passed via sbx's account-level secret
+  provisioning — confirm the account path before promising Oshin whose quota is used).
+- VM/nested-virt: sbx exec output-streaming is unstable under nested KVM (sandbox VMs die on first
+  real exec) — fine for real machines, breaks VM-based contributors; documented, not our bug.
+- Daemon stderr surfacing, test-ledger isolation, packaging publication (artifacts exist in
+  `packaging/`), platform floors before any real-Oshin promise (Apple Silicon+macOS 26 / Win11 /
+  Ubuntu 24.04+KVM).
 
-## PROVEN tonight (live in a real browser, not claimed)
-- Full journey to the sign-in gate: idle view, personalized "You're helping", ledger, task list,
-  choose-a-task, accordion persistence, pending_approval → idle auto-flip (observed 3×).
-- **The "Sign in to Docker" button rendering live with its confirmation code** — the one-click
-  auth chain (auto-start sbx daemon → drive device flow → button → auto-continue) end-to-end.
-- Suite: **226 tests, 0 failures** on `waspflow/fedgui-e2e` @ `df8c3bd` (pushed).
-- Automated browser sweep (Playwright lane): all reachable checks PASS; screenshots in
-  `test-artifacts/federation-ui/`. Report: docs/design/FEDERATION_UITEST_REPORT.md.
-
-## Bugs found & FIXED during tonight's autonomous hardening (each verified live)
-1. **Socket-path 104-char limit**: the default federation sbx home broke `sbx daemon start` for
-   virtually every username. Default now `~/.wfsbx` + a `socket_path_length` doctor check.
-   (This would have hit the real Oshin on day one.)
-2. **Docker sign-in unreachable**: the device-flow drive required `docker_login` to be the *sole*
-   failing check, but the policy check always co-fails pre-auth. Fixed the gate; button now
-   surfaces correctly (verified in browser).
-3. **Raw CLI output in the setup card**: replaced with one-line plain-language details.
-
-## Still true / tomorrow's work (the "real thing" promise)
-- Packaging artifacts exist (`packaging/`: nfpm deb/rpm, brew formula, winget skeleton, systemd/
-  autostart, bundled clawmeter+tray) — tomorrow = build + publish (apt repo plan documented) +
-  the platform-floor check for Oshin's actual machine (macOS: Apple Silicon + macOS 26 · Windows:
-  Win11 + installer-absorbed HypervisorPlatform · Linux: Ubuntu 24.04+/KVM).
-- Windows verdict: code is port-ready; needs the signed installer + one live Win11 smoke.
-
-## If anything looks wrong
-- Coordinator: `curl -s http://127.0.0.1:9099/tasks -H "authorization: Bearer oshin-invite-7clzi-test" | head -c 80` (JSON = fine)
-- UI down: re-forward: `ssh -f -i ~/.tmp/oshin-vm/id_oshin -p 2222 -o StrictHostKeyChecking=no -N -L 127.0.0.1:8902:127.0.0.1:4242 oshin@localhost`
-- Daemon restart (VM): `ssh -i ~/.tmp/oshin-vm/id_oshin -p 2222 oshin@localhost 'pkill -f "federation daemon"; cd ~/waspflow && setsid nohup node bin/waspflow-federation daemon --port 4242 >~/fedd.log 2>&1 & sleep 3; cat ~/.waspflow/federation/daemon.json'` → new token → new URL.
-- Full troubleshooting: docs/UAT_AND_DEMO_RUNBOOK.md part 1.
+## Rig components (all running)
+coordinator :9099 (fresh queue, data2) · host daemon systemd `wf-fed-daemon` :4243 · LAN proxy :8904 ·
+sbx identity `~/.wfsbx` (Docker: timodl, authed; policy: balanced). VM rig retired for execution
+(nested-virt limit) — it proved join/UI/auth flows.
+Health: `curl -s http://127.0.0.1:9099/tasks -H "authorization: Bearer oshin-invite-7clzi-test"` +
+reload the demo URL. Daemon restart rotates the token — re-read `~/.waspflow/federation/daemon.json`.
