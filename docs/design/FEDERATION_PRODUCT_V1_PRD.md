@@ -90,3 +90,20 @@ Linear / Trello / GitHub Issues** so teams externalize task creation/prioritizat
   reserved (deferred) settlement/escrow slots remain reserved.
 - Guardrail: v1 ships NONE of this — no integration stubs, no credit UI — but v1 must not make any
   of it harder (reviewed at the evidence gate).
+
+## Separation of concerns: capacity sources ≠ subscriptions (owner-ratified 2026-07-21)
+Five separated layers: **Task** (signed envelope; power-agnostic) · **Harness** (which agent) ·
+**Capacity source** (a credential + its spend semantics) · **Sandbox** (containment) ·
+**Settlement** (receipts now, credits later). "Subscription" is ONE KIND of capacity source —
+peers: API key (dollar-metered), gateway-issued scoped key, self-hosted/local model (unmetered;
+the ToS-clean tier already in the vision). Consequences for v1:
+- Receipts: `provider_account.tier`/subscription fields are OPTIONAL metadata; usage semantics
+  typed by source kind (quota-tokens vs billed-tokens vs local-unmetered). No schema requires
+  subscription-ness.
+- Capacity guard = a SPEND POLICY per capacity source; quota-awareness is the subscription
+  sensor, dollar caps the API-key sensor, schedule-only the local sensor. Never "the
+  subscription guard."
+- UI copy: never hardcode "subscription" — reflect the actual source kind ("your Claude
+  account", "your API key", "your local model").
+- HarnessSpec's auth strategies already encode most of this; v1 must not collapse it in
+  receipts, guard, or copy.
