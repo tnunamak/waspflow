@@ -3,15 +3,15 @@
   "consoleErrors": [],
   "results": [
     {
-      "name": "Page loads with persistent Federation navigation",
+      "name": "Mode-first navigation and settings gear load",
       "status": "PASS"
     },
     {
-      "name": "Idle contributor view and ledger copy",
+      "name": "Idle contributor screen uses the ready status vocabulary",
       "status": "PASS"
     },
     {
-      "name": "Task choice card only appears when work is available",
+      "name": "Task review preserves explicit consent and empty queue safety",
       "status": "PASS"
     },
     {
@@ -19,35 +19,35 @@
       "status": "PASS"
     },
     {
-      "name": "Requester form keeps its values and an inline submit error across polling, then clears the error on edit",
+      "name": "Compose form keeps values and inline submit error across polling",
       "status": "PASS"
     },
     {
-      "name": "Activity and Settings render complete requester history and the cached identity",
+      "name": "Activity lenses and split settings render",
       "status": "PASS"
     },
     {
-      "name": "Settings shows a provider-start failure in the page instead of surfacing a transport error",
+      "name": "One shared task route renders live-watch details",
       "status": "PASS"
     },
     {
-      "name": "GitHub task access device code renders without completing a real login",
+      "name": "Provider sign-in failure remains a page recovery state",
       "status": "PASS"
     },
     {
-      "name": "Contribution controls require a consented task without mutating the rig",
+      "name": "GitHub device code is selectable and copyable",
       "status": "PASS"
     },
     {
-      "name": "Active contribution polls preserve a text selection for over ten seconds",
+      "name": "Contribute controls never start a task without review",
       "status": "PASS"
     },
     {
-      "name": "Requester task detail renders the bounded execution transcript",
+      "name": "Active contribution polling preserves text selection",
       "status": "PASS"
     },
     {
-      "name": "Expired sessions stop polling after two unauthorized status responses",
+      "name": "Session expiry stops polling and offers reconnect",
       "status": "PASS"
     },
     {
