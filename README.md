@@ -22,6 +22,47 @@ Use it when you want to:
 - require a report, transcript, and diff instead of "done, trust me";
 - recover worker state after your main agent or terminal loses context.
 
+## Federation
+
+Federation lets a trusted collective contribute spare agent capacity through a
+local daemon and browser UI. The complete contributor journey is below.
+
+**Install on Linux (first-class):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tnunamak/waspflow/main/bin/federation-install.sh | sh
+```
+
+The installer downloads the latest Linux `.deb` when it can install one, or a
+portable bundle in `~/.local` when it cannot. It requires Node.js 20 or newer.
+
+**Install on macOS (best effort; not tested in this Linux release pass):**
+
+```bash
+brew install tnunamak/tap/waspflow-federation
+```
+
+The formula is maintained at
+[`packaging/brew/waspflow-federation.rb`](packaging/brew/waspflow-federation.rb).
+It needs a published release tarball and has not been validated on macOS yet.
+
+**First run:**
+
+```bash
+waspflow federation
+```
+
+That checks sandbox readiness, starts the loopback-only daemon, and opens the
+onboarding UI. Paste the invite from your collective operator into **Join**;
+then, once they approve your generated key, click **Contribute**. The doctor
+keeps Docker Sandboxes (`sbx`) detect-and-guide: it tells you what is missing
+without making the UI or invite flow inaccessible.
+
+For someone operating a collective, remote contributors need an
+internet-reachable coordinator. Put it behind a reverse proxy with TLS, or
+make it reachable only to members over a tailnet. The owner chooses and runs
+that hosting; see [Federation coordinator deployment](docs/federation-deployment.md).
+
 ## First Run
 
 ```bash

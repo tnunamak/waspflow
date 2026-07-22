@@ -638,8 +638,34 @@ async function cmdStatus(argv) {
   ], { status: 'joined', key_id: config.key_id, coordinator_url: config.coordinator_url, config_path: configPath() }, 'member_status');
 }
 
+// `waspflow federation` is deliberately an entry point, not a second help
+// screen. The local daemon is safe to start before joining: its UI is the
+// onboarding surface and it binds only to loopback with a random session
+// token. Doctor remains detect-and-guide, so a missing sandbox explains the
+// next machine setup without preventing someone from pasting their invite.
+async function cmdFirstRun() {
+  const { loadConfig } = await import('../lib/federation-config.mjs');
+  const configured = loadConfig();
+
+  if (!configured) {
+    process.stdout.write('Welcome to Waspflow Federation. Checking this machine first...\n\n');
+    await sandboxPreflight({ report: true });
+    process.stdout.write('\nStarting the local Federation onboarding UI...\n');
+  } else {
+    process.stdout.write(`Federation is configured for ${configured.coordinator_url}. Opening the local UI...\n`);
+  }
+
+  const { openFederationUi } = await import('../lib/federation-daemon.mjs');
+  const url = await openFederationUi();
+  process.stdout.write(`Open: ${url}\n`);
+  if (!configured) {
+    process.stdout.write('Paste the invite from your collective operator into the Join screen, then click Contribute.\n');
+  }
+}
+
 async function main() {
   const [verb, ...rest] = process.argv.slice(2);
+  if (!verb) return cmdFirstRun();
   switch (verb) {
     case 'doctor': return cmdDoctor(rest);
     case 'join': return cmdJoin(rest);
@@ -660,7 +686,7 @@ async function main() {
     }
     default:
       process.stderr.write(`usage: waspflow federation <doctor|join|contribute|submit|status|trust|approve|daemon|ui> ...\n`);
-      process.exit(verb ? 1 : 0);
+      process.exit(1);
   }
 }
 

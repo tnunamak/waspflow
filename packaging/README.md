@@ -8,12 +8,11 @@ systemd unit in `/usr/lib/systemd/user`, and XDG tray autostart in
 
 ## Build Linux packages
 
-Install [nFPM](https://nfpm.goreleaser.com/) and Go, then pass the exact
-clawmeter executable to bundle. The build never guesses which clawmeter binary
-is safe to distribute.
+Install Go. `build.sh` uses a local `nfpm` when present and otherwise runs the
+official `goreleaser/nfpm` image through Docker, so a release build does not
+depend on a workstation-specific packaging tool.
 
 ```bash
-CLAWMETER_BIN=/usr/local/bin/clawmeter \
 PACKAGE_VERSION=0.1.0 \
 packaging/build.sh
 ```
@@ -27,36 +26,49 @@ cd tray && go build ./cmd/waspflow-federation-tray
 Artifacts:
 
 - `packaging/dist/waspflow-federation_0.1.0_amd64.deb`
-- `packaging/dist/waspflow-federation-0.1.0-1.x86_64.rpm`
+- `packaging/dist/waspflow-federation_0.1.0_linux_amd64.tar.gz`
 - `packaging/stage/` — inspectable package filesystem tree; it is regenerated
   on every build and is not a release artifact.
 
 The `.deb` declares `Depends: nodejs (>= 20)` and `Recommends: docker-sbx`.
 `docker-sbx` is deliberately not a hard package dependency; the installed
-doctor command evaluates the real local backend readiness. The package also
-installs `waspflow-federation` and a federation-only `waspflow` dispatcher, so
-both `waspflow-federation doctor` and the documented `waspflow federation
-doctor` work. The latter dispatcher intentionally rejects non-Federation
-commands; it is not a partial copy of the main Waspflow CLI.
+doctor command evaluates and explains the real local backend readiness. The
+package bundles the Federation CLI entry points, all Federation runtime
+modules, static UI, native tray binary, a systemd user unit, and XDG autostart
+entry. It installs `waspflow-federation` and a federation-only `waspflow`
+dispatcher, so both `waspflow-federation doctor` and `waspflow federation
+doctor` work. The dispatcher intentionally rejects non-Federation commands;
+it is not a partial copy of the main Waspflow CLI.
 
 For a disposable package journey, run:
 
 ```bash
-CLAWMETER_BIN=/usr/local/bin/clawmeter \
 PACKAGE_VERSION=0.1.0 \
 packaging/smoke.sh
 ```
 
-It uses plain Docker (not Docker Sandboxes), installs Node 20 in an Ubuntu
-container, installs the generated `.deb`, and checks the command, installed
-files, and unit syntax.
+It uses plain Docker (not Docker Sandboxes), installs Node 20 in a fresh
+Ubuntu 24.04 container, installs the generated `.deb`, proves `doctor` gives
+the expected detect-and-guide result without `sbx`, starts the installed
+first-run daemon, and fetches the authenticated localhost UI.
+
+## Curl installer
+
+`bin/federation-install.sh` is the public Linux installer. It queries the
+latest GitHub release, prefers its `.deb`, and falls back to the release
+portable tarball under `~/.local` when `dpkg` is unavailable or installation
+fails. It intentionally requires Node.js 20+ rather than silently installing
+a third-party runtime. During development, `WASPFLOW_FEDERATION_RELEASE_API`
+and `WASPFLOW_FEDERATION_INSTALL_ROOT` point it at a staging release and a
+temporary destination.
 
 ## Homebrew
 
-`brew/waspflow-federation.rb` is a release template modelled on the local
-clawmeter formula: it builds the Go tray from source, runs the daemon through
-`brew services`, and prints the doctor next step. Replace its tag URL and
-SHA256 when a source release exists, then place it in the Homebrew tap.
+`brew/waspflow-federation.rb` is a best-effort release formula: it builds the
+Go tray from source, runs the daemon through `brew services`, and prints the
+doctor next step. Replace its tag URL and SHA256 when a source release exists,
+then place it in the Homebrew tap. It is deliberately marked untested here;
+the Linux smoke is the release gate for this pass.
 
 ## Windows
 
