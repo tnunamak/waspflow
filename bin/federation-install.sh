@@ -5,6 +5,11 @@
 set -eu
 
 REPOSITORY="${WASPFLOW_FEDERATION_REPOSITORY:-tnunamak/waspflow}"
+# Version-stable asset names via the releases/latest/download redirect: no
+# GitHub API call, so shared-IP unauthenticated rate limits (403s from office
+# NAT, CI, containers) cannot break a tester's install. The API remains a
+# fallback for releases that only carry versioned asset names.
+DOWNLOAD_BASE="${WASPFLOW_FEDERATION_DOWNLOAD_BASE:-https://github.com/${REPOSITORY}/releases/latest/download}"
 API_URL="${WASPFLOW_FEDERATION_RELEASE_API:-https://api.github.com/repos/${REPOSITORY}/releases/latest}"
 INSTALL_ROOT="${WASPFLOW_FEDERATION_INSTALL_ROOT:-${HOME}/.local}"
 TMP_DIR=""
@@ -28,6 +33,11 @@ download() {
 
 asset_url() {
   suffix="$1"
+  stable_name="$2"
+  if curl -fsIL "$DOWNLOAD_BASE/$stable_name" >/dev/null 2>&1; then
+    printf '%s\n' "$DOWNLOAD_BASE/$stable_name"
+    return 0
+  fi
   curl -fsSL "$API_URL" |
     sed -n "s|.*\"browser_download_url\": \"\([^\"]*${suffix}\)\".*|\1|p" |
     head -n 1
@@ -97,8 +107,8 @@ case "$(uname -m)" in
 esac
 
 TMP_DIR="$(mktemp -d)"
-deb_url="$(asset_url '_amd64.deb' || true)"
-tar_url="$(asset_url '_linux_amd64.tar.gz' || true)"
+deb_url="$(asset_url '_amd64.deb' 'waspflow-federation_amd64.deb' || true)"
+tar_url="$(asset_url '_linux_amd64.tar.gz' 'waspflow-federation_linux_amd64.tar.gz' || true)"
 
 if [ -n "$deb_url" ] && command -v dpkg >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
   deb_file="$TMP_DIR/waspflow-federation.deb"
