@@ -84,6 +84,11 @@
       .receipt dd, .identity-list dd { margin: 0; overflow-wrap: anywhere; }
       .prompt-detail { white-space: pre-wrap; }
       .execution-log { max-height: min(55vh, 560px); margin: 16px 0 0; padding: 14px; overflow: auto; border-radius: 8px; background: #17231b; color: #e5f1e8; font: .8rem/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .transcript-list { display: grid; gap: 10px; margin-top: 16px; }
+      .transcript-turn, .transcript-tool { padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfb; }
+      .transcript-turn p { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .transcript-role { display: inline-block; padding: 2px 7px; border-radius: 999px; background: #e6f0f7; color: #19597e; font-size: .78rem; }
+      .transcript-tool summary { cursor: pointer; color: #355343; font-weight: 700; }
       .request-list { border-top: 1px solid var(--line); }
       .request-list li { border-bottom: 1px solid var(--line); }
       .request-select { width: 100%; min-height: 58px; padding: 11px 0; display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; align-items: center; text-align: left; color: var(--ink); background: transparent; border-radius: 0; }

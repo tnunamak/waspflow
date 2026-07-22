@@ -101,6 +101,21 @@ async function get(base, digest) {
   return fetch(`${base}/tasks/${digest}`);
 }
 
+test('GET /activity exposes only task-level shared lifecycle facts', async () => {
+  await withServer(async ({ base }) => {
+    const published = await publish(base, signTask({ display_id: 'Fix the login test' }));
+    const { task_digest: digest } = await published.json();
+    const claimBody = await (await claim(base, digest, { executor_key: EXECUTOR_KEY_ID, lease_seconds: 60 })).json();
+    const activity = await fetch(`${base}/activity`, { headers: authed() });
+    assert.equal(activity.status, 200);
+    const [entry] = await activity.json();
+    assert.deepEqual(Object.keys(entry).sort(), ['author', 'claimed_at', 'display_id', 'executor_key', 'published_at', 'settled_at', 'status', 'task_digest']);
+    assert.equal(entry.display_id, 'Fix the login test');
+    assert.equal(entry.executor_key, EXECUTOR_KEY_ID);
+    assert.equal(claimBody.task_digest, digest);
+  });
+});
+
 test('publish a validly-signed task -> 200 queued, persisted to disk', async () => {
   await withServer(async ({ base, dataDir }) => {
     const envelope = signTask();

@@ -92,7 +92,8 @@ async function main() {
       await assertText(page, 'Contribution history');
       await assertText(page, 'Requester history');
       await page.getByRole('link', { name: 'Settings' }).click();
-      await assertText(page, 'Accounts in use');
+      await assertText(page, 'This machine');
+      await assertText(page, 'Your collective');
       await assertText(page, 'Docker account');
       await page.screenshot({ path: path.join(artifactDir, 'activity-settings.png'), fullPage: true });
     });
@@ -164,15 +165,15 @@ async function main() {
       const digest = 'a'.repeat(64);
       await logPage.route('**/status', async (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ schema_version: 1, type: 'daemon_status', state: 'idle', detail: 'Ready to contribute.', coordinator_unavailable: false, ledger_summary: { count_7d: 0 } }) }));
       await logPage.route('**/requests', async (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{ task_digest: `sha256:${digest}`, display_id: 'transcript-check', status: 'SETTLED', published_at: '2026-07-22T00:00:00.000Z' }]) }));
-      await logPage.route(`**/tasks/${digest}/log`, async (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task_digest: `sha256:${digest}`, output: ['[stdout] task started', '[stderr] harness progress', ''].join('\n'), truncated: false }) }));
+      await logPage.route(`**/tasks/${digest}/log**`, async (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task_digest: `sha256:${digest}`, output: JSON.stringify({ type: 'assistant', message: { content: 'I am checking the login test.' } }) + '\n', transcript: true, next_offset: 70, truncated: false }) }));
       await logPage.route(`**/tasks/${digest}`, async (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task_digest: digest, display_id: 'transcript-check', author: 'ed25519:requester', status: 'SETTLED', execution_log_available: true, prompt: 'Render the transcript.' }) }));
       try {
         await logPage.goto(targetUrl.toString(), { waitUntil: 'networkidle', timeout: 15_000 });
         await logPage.getByRole('link', { name: 'Requests' }).click();
         await logPage.getByRole('button', { name: 'transcript-check' }).click();
         await logPage.getByRole('button', { name: 'View execution log' }).click();
-        await assertText(logPage.locator('.execution-log'), 'harness progress');
-        await logPage.screenshot({ path: path.join(artifactDir, 'execution-log.png'), fullPage: true });
+        await assertText(logPage.locator('.transcript-list'), 'I am checking the login test.');
+        await logPage.screenshot({ path: path.join(artifactDir, 'transcript.png'), fullPage: true });
       } finally {
         await logPage.close();
       }

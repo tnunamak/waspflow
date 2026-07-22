@@ -179,7 +179,7 @@ test('ValidatedJobSpec construction passes validateJobSpec and uses the harness 
   const spec = buildValidatedJobSpec({ taskDigest: 'a'.repeat(64), harness, entrypointWithPrompt });
   assert.doesNotThrow(() => validateJobSpec(spec));
   assert.equal(spec.image, 'claude');
-  assert.ok(spec.entrypoint.startsWith('claude --print --output-format json --dangerously-skip-permissions'));
+  assert.ok(spec.entrypoint.startsWith('claude --print --verbose --output-format stream-json --dangerously-skip-permissions'));
   assert.deepEqual(spec.output_manifest, ['.wf-result/result.tar.gz']);
 });
 
@@ -193,6 +193,10 @@ test('receipt parsers capture only the fields emitted by Claude, Codex, and Gemi
     usage: { input_tokens: 15166, output_tokens: 63 },
     modelUsage: { 'claude-fable-5': { inputTokens: 15166, outputTokens: 63 } },
   }));
+  assert.deepEqual(parseHarnessExecutionResult('claude-code-subscription', [
+    JSON.stringify({ type: 'assistant', message: { content: 'working' } }),
+    JSON.stringify({ type: 'result', model: 'claude-fable-5', usage: { input_tokens: 8, output_tokens: 3 } }),
+  ].join('\n')), { model: 'claude-fable-5', usage: { input_tokens: 8, output_tokens: 3 } });
   assert.deepEqual(claude, { model: 'claude-fable-5', usage: { input_tokens: 15166, output_tokens: 63 } });
   assert.deepEqual(parseHarnessExecutionResult('claude-code-subscription', JSON.stringify({
     model: 'claude-sonnet-4-5', usage: { input_tokens: 3, output_tokens: 2 }, modelUsage: { 'claude-haiku-4-5': {} },

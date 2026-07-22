@@ -92,7 +92,7 @@ test('web UI keeps a neutral first-load screen, backs off failed optional fetche
 
 test('product UI contains all five surfaces and the Wave A compatible task, result, identity, and schedule affordances', async () => {
   const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
-  for (const label of ['Contribute', 'Requests', 'Activity', 'Settings', 'Help', 'Download result', 'Accounts in use', 'Limit to certain hours', 'You approve every task before it runs', 'View execution log']) {
+  for (const label of ['Contribute', 'Requests', 'Activity', 'Settings', 'Help', 'Download result', 'This machine', 'Your collective', 'You approve every task before it runs', 'View execution log', 'Transcript']) {
     assert.match(app, new RegExp(label));
   }
   assert.match(app, /optionalRequest\(`\/tasks\/\$\{encodeURIComponent\(selectedDigest\.replace\(\/\^sha256:\/, ''\)\)\}`, null\)/);
@@ -149,8 +149,10 @@ test('activity rows use a whole-row plain control and recovery states do not exp
 
 test('request form stores values and an inline error outside its recreated DOM subtree', async () => {
   const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
-  assert.match(app, /const requestForm = \{ display_id: '', prompt: '', source: '', error: '' \}/);
+  assert.match(app, /const requestForm = \{ display_id: '', prompt: '', source: '', files: \[\], network: false, error: '' \}/);
   assert.match(app, /formState\.error = error\.message/);
-  assert.match(app, /Folder on this computer \(optional\)/);
-  assert.match(app, /Without a folder, the task starts in an empty workspace\./);
+  assert.match(app, /Attach the files the task should work on/);
+  assert.match(app, /Advanced: use a folder path on this machine/);
+  assert.match(app, /Allow internet access/);
+  assert.match(app, /Private repositories need scoped access/);
 });

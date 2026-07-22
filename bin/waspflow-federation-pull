@@ -206,6 +206,14 @@ async function main() {
     materializeSource,
     authorize,
     statusProbe: statusProbeCommand(harness.harness_id),
+    // Preserve the provider's exact stdout lines separately from Federation
+    // progress. The guided parent forwards these records unchanged enough for
+    // the daemon to persist and tail them before this task settles.
+    onLog: ({ stream, chunk }) => {
+      for (const raw of Buffer.from(chunk).toString('utf8').split(/(?<=\n)/)) {
+        if (raw) process.stdout.write(`${JSON.stringify({ schema_version: 1, type: 'agent_transcript_event', stream, raw })}\n`);
+      }
+    },
   });
   process.stderr.write(`run complete; collected ${collected.length} declared output(s); destroy removed=${cleanupReceipt.removed}\n`);
   if (collected.length === 0) fail('run produced no collected output — nothing to submit as a candidate artifact');

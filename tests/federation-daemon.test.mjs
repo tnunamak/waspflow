@@ -538,7 +538,7 @@ test('POST /submit supervises the guided submit verb and GET /submit/status prox
     assert.equal(response.status, 202);
     assert.deepEqual(children[0].args[1], [
       '/real/path/to/bin/waspflow-federation', 'submit', '--display-id', 'oshin',
-      '--source', sourcePath, '--prompt', 'Fix the test failure.',
+      '--source', sourcePath, '--prompt', 'Fix the test failure.', '--network', 'disabled',
     ]);
 
     const digest = `sha256:${'a'.repeat(64)}`;
@@ -641,6 +641,23 @@ test('contribution output is stored as a token-gated bounded local execution log
     assert.equal(logStat.mode & 0o777, 0o600);
     assert.ok(logStat.size <= 256 * 1024, 'the persisted transcript must stay bounded');
     assert.equal((await request(base, `/tasks/${digest}/log`, { token: 'wrong-token' })).status, 401);
+  });
+});
+
+test('agent transcript events are persisted incrementally and support offset tails', async () => {
+  const digest = 'b'.repeat(64);
+  await withDaemon(async ({ base, children, logsDir, setConfig }) => {
+    setConfig({ coordinator_url: 'http://coordinator.example' });
+    await request(base, '/contribute/start', { method: 'POST', token: 'test-session-token', body: { task_digest: digest } });
+    const raw = '{"type":"assistant","message":{"content":"I am inspecting the test."}}\n';
+    children[0].child.stdout.emit('data', Buffer.from(JSON.stringify({ schema_version: 1, type: 'agent_transcript_event', task_digest: digest, stream: 'stdout', raw }) + '\n'));
+    const first = await request(base, `/tasks/${digest}/log?since=0`, { token: 'test-session-token' });
+    const firstBody = JSON.parse(first.text);
+    assert.equal(firstBody.transcript, true);
+    assert.match(firstBody.output, /I am inspecting the test/);
+    const second = await request(base, `/tasks/${digest}/log?since=${firstBody.next_offset}`, { token: 'test-session-token' });
+    assert.equal(JSON.parse(second.text).output, '');
+    assert.equal(statSync(join(logsDir, `${digest}.transcript.jsonl`)).mode & 0o777, 0o600);
   });
 });
 

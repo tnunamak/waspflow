@@ -1,0 +1,310 @@
+{
+  "task_id": "20260722-165548-implement-federation-wave-h-agent-native-transcr",
+  "series": "F",
+  "profile": "code-change",
+  "query": "Implement Federation Wave H agent-native transcripts, live tailing, uploads, network controls, task labels, collective activity, and settings honesty",
+  "status": "packed",
+  "created_at": "2026-07-22T16:55:48Z",
+  "repo_root": "/home/tnunamak/code/waspflow-fedgui-e2e",
+  "workspace": "/home/tnunamak/code/waspflow-fedgui-e2e/devspecs/tasks/20260722-165548-implement-federation-wave-h-agent-native-transcr",
+  "artifacts": {
+    "series": "F",
+    "index": "F00-index.md",
+    "first_slice": "F01-daemon-stream-persistence-and-apis-plan.md",
+    "result": "F01-daemon-stream-persistence-and-apis-result.md",
+    "slices": [
+      {
+        "id": "F01",
+        "title": "daemon stream persistence and APIs",
+        "plan": "F01-daemon-stream-persistence-and-apis-plan.md",
+        "result": "F01-daemon-stream-persistence-and-apis-result.md",
+        "kind": "slice"
+      },
+      {
+        "id": "F02",
+        "title": "web UI workflows",
+        "plan": "F02-web-ui-workflows-plan.md",
+        "result": "F02-web-ui-workflows-result.md",
+        "kind": "slice"
+      },
+      {
+        "id": "F03",
+        "title": "tests, visual validation, report",
+        "plan": "F03-tests-visual-validation-report-plan.md",
+        "result": "F03-tests-visual-validation-report-result.md",
+        "kind": "slice"
+      }
+    ]
+  },
+  "predicted_context": {
+    "relevant_areas": [
+      "lib",
+      "tests",
+      "public"
+    ],
+    "primary_files": [
+      {
+        "path": "lib/federation-daemon.mjs",
+        "title": "lib/federation-daemon.mjs (javascript)",
+        "kind": "source_context",
+        "role": "implementation_surface",
+        "evidence": [
+          "anchor-first ranking: score 24.000; matches federation, task, collective, settings; fields path, title, symbol, body",
+          "query term match in path: federation",
+          "query term match in body: collective",
+          "authority prior: stale or superseded"
+        ]
+      },
+      {
+        "path": "lib/federation-coordinator.mjs",
+        "title": "lib/federation-coordinator.mjs (javascript)",
+        "kind": "source_context",
+        "role": "implementation_surface",
+        "evidence": [
+          "anchor-first ranking: score 24.000; matches federation, live, network, task; fields path, title, body, symbol",
+          "query term match in path: federation",
+          "query term match in body: collective",
+          "authority prior: stale or superseded"
+        ]
+      },
+      {
+        "path": "lib/federation-pull-internals.mjs",
+        "title": "lib/federation-pull-internals.mjs (javascript)",
+        "kind": "source_context",
+        "role": "implementation_surface",
+        "evidence": [
+          "relationship expansion: source_manifest_family_recovery",
+          "query term match in path: federation",
+          "query term match in body: live"
+        ]
+      },
+      {
+        "path": "lib/federation-submit.mjs",
+        "title": "lib/federation-submit.mjs (javascript)",
+        "kind": "source_context",
+        "role": "implementation_surface",
+        "evidence": [
+          "relationship expansion: source_manifest_family_recovery",
+          "query term match in path: federation",
+          "query term match in body: collective",
+          "scout source rescue: query roots feder,federa,federation; primary test roots feder,federa,federation",
+          "bounded body evidence: collective=3, federation=13, network=4, uploads=1; bytes=14009"
+        ]
+      },
+      {
+        "path": "public/app.mjs",
+        "title": "public/app.mjs (javascript)",
+        "kind": "source_context",
+        "role": "implementation_surface",
+        "evidence": [
+          "query term match in body: activity",
+          "query term match in body: collective",
+          "query term match in body: federation"
+        ]
+      }
+    ],
+    "tests": [
+      {
+        "path": "tests/federation-coordinator.test.mjs#L217",
+        "title": "claim an already-CLAIMED task with a live lease is rejected",
+        "kind": "source_context",
+        "subtype": "test_case",
+        "role": "behavior_tests",
+        "evidence": [
+          "relationship expansion: source_manifest_family_recovery",
+          "query term match in path: federation",
+          "query term match in title: live"
+        ]
+      },
+      {
+        "path": "tests/federation-harnesses.test.mjs",
+        "title": "tests/federation-harnesses.test.mjs (javascript)",
+        "kind": "source_context",
+        "subtype": "test_case",
+        "role": "behavior_tests",
+        "evidence": [
+          "relationship expansion: source_manifest_family_recovery",
+          "query term match in path: federation",
+          "query term match in body: live"
+        ]
+      },
+      {
+        "path": "tests/federation-webui.test.mjs",
+        "title": "tests/federation-webui.test.mjs",
+        "kind": "source_context",
+        "subtype": "test_case",
+        "role": "behavior_tests",
+        "evidence": [
+          "relationship expansion: source_manifest_test_reservation",
+          "pack tier: related (reserved manifest test with direct query evidence)",
+          "query term match in path: federation"
+        ]
+      },
+      {
+        "path": "tests/federation-daemon.test.mjs",
+        "title": "tests/federation-daemon.test.mjs",
+        "kind": "source_context",
+        "subtype": "test_case",
+        "role": "behavior_tests",
+        "evidence": [
+          "relationship expansion: source_manifest_test_reservation",
+          "pack tier: related (reserved manifest test with direct query evidence)",
+          "query term match in path: federation"
+        ]
+      }
+    ],
+    "noise_risks": [
+      {
+        "path": "docs/design/FEDERATION_V0_UAT_REPORT.md",
+        "title": "Federation v0 UAT report — Docker Sandboxes backend",
+        "kind": "design",
+        "role": "excluded_noise",
+        "evidence": [
+          "section-packed context: Federation v0 UAT report — Docker Sandboxes backend \u003e Graduation gates: what actually passes; Federation v0 UAT report — Docker Sandboxes backend \u003e Independent verification (maker ≠ judge); Federation v0 UAT report — Docker Sandboxes backend \u003e Owner handoff: what's left after the autonomous fix loop; Federation v0 UAT report — Docker Sandboxes backend \u003e Honest confidence",
+          "indexed section match: Federation v0 UAT report — Docker Sandboxes backend \u003e Auth architecture (tightened 2026-07-20) \u003e Per-harness six-column proof matrix — updated with real owner live-UAT results lines 492-521; Federation v0 UAT report — Docker Sandboxes backend \u003e Independent verification (maker ≠ judge) lines 669-800; Federation v0 UAT report — Docker Sandboxes backend \u003e Honest confidence lines 1157-1235",
+          "authority prior: current intent anchor because current decision context is present",
+          "anchor-first ranking: score 24.000; matches federation, live, network, task; fields path, title, heading, body",
+          "query term match in path: federation"
+        ]
+      },
+      {
+        "path": "docs/design/FEDERATION_V0_UX_REPORT.md",
+        "title": "Federation v0 UX report — the guided CLI layer",
+        "kind": "design",
+        "role": "excluded_noise",
+        "evidence": [
+          "section-packed context: Federation v0 UX report — the guided CLI layer \u003e The exact commands a non-technical contributor now runs; Federation v0 UX report — the guided CLI layer \u003e What's auto-managed vs. still manual; Federation v0 UX report — the guided CLI layer \u003e Independent verification (reproduced, not trusted) \u003e The default `join -\u003e contribute` journey, live, with zero manual `trust` calls; Federation v0 UX report — the guided CLI layer \u003e First independent review (Fable), and fixes applied (carried over from the prior revision)",
+          "indexed section match: Federation v0 UX report — the guided CLI layer lines 1-23; Federation v0 UX report — the guided CLI layer \u003e What's auto-managed vs. still manual lines 88-127; Federation v0 UX report — the guided CLI layer \u003e First independent review (Fable), and fixes applied (carried over from the prior revision) lines 199-233",
+          "authority prior: current intent anchor because current decision context is present",
+          "anchor-first ranking: score 24.000; matches federation, live, network, task; fields path, title, heading, body",
+          "query term match in path: federation"
+        ]
+      }
+    ],
+    "related_git_receipts": [
+      {
+        "sha": "b1f47bd4e05192dcf47f60ed9c45d1344c75e437",
+        "short_sha": "b1f47bd",
+        "committed_at": "2026-07-22",
+        "subject": "fix(federation): resolve Wave G live UI findings",
+        "matched_paths": [
+          "lib/federation-coordinator.mjs",
+          "lib/federation-daemon.mjs",
+          "public/app.mjs"
+        ],
+        "matched_terms": [
+          "federation",
+          "wave",
+          "live"
+        ],
+        "signals": [
+          "touched 6 packed path(s)",
+          "matched query anchors",
+          "cross-file change"
+        ]
+      },
+      {
+        "sha": "1e15eddf8bd7c36b2b5d9d90333918f8959a7d9e",
+        "short_sha": "1e15edd",
+        "committed_at": "2026-07-21",
+        "subject": "fix(federation): close Wave C evidence gates",
+        "matched_paths": [
+          "lib/federation-coordinator.mjs",
+          "lib/federation-daemon.mjs",
+          "lib/federation-pull-internals.mjs"
+        ],
+        "matched_terms": [
+          "federation",
+          "wave"
+        ],
+        "signals": [
+          "touched 7 packed path(s)",
+          "matched query anchors",
+          "cross-file change"
+        ]
+      },
+      {
+        "sha": "78a1f0409f80a7399fdcd41e3dbe219b3621bab4",
+        "short_sha": "78a1f04",
+        "committed_at": "2026-07-21",
+        "subject": "feat(federation): let contributors choose claimable tasks",
+        "matched_paths": [
+          "lib/federation-coordinator.mjs",
+          "lib/federation-daemon.mjs",
+          "public/app.mjs"
+        ],
+        "matched_terms": [
+          "federation"
+        ],
+        "signals": [
+          "touched 6 packed path(s)",
+          "matched query anchors",
+          "cross-file change"
+        ]
+      }
+    ]
+  },
+  "freshness_warnings": [
+    {
+      "path": "docs/design/FEDERATION_WAVEF_REPORT.md",
+      "reason": "on-disk path matched task terms but was not in the indexed candidate set: federation, wave"
+    },
+    {
+      "path": "docs/design/FEDERATION_WAVEG_REPORT.md",
+      "reason": "on-disk path matched task terms but was not in the indexed candidate set: federation, wave"
+    }
+  ],
+  "risk_cards": [
+    {
+      "id": "stale-index",
+      "title": "On-disk paths matched the task but were not indexed",
+      "severity": "medium",
+      "source": "freshness",
+      "evidence": [
+        "`docs/design/FEDERATION_WAVEF_REPORT.md` - on-disk path matched task terms but was not in the indexed candidate set: federation, wave",
+        "`docs/design/FEDERATION_WAVEG_REPORT.md` - on-disk path matched task terms but was not in the indexed candidate set: federation, wave"
+      ],
+      "agent_check": "Inspect the warned files or refresh the index before trusting missing context.",
+      "count": 2
+    },
+    {
+      "id": "prior-critical-miss",
+      "title": "Prior checkpoint recorded a critical miss in a related area",
+      "severity": "medium",
+      "source": "checkpoint_fact",
+      "evidence": [
+        "task 20260722-030727-integrate-federation-wave-a-observability-with-w checkpoint cp_20260722T031100Z_b01_validated missed `lib/federation-daemon.mjs`",
+        "task 20260722-030727-integrate-federation-wave-a-observability-with-w checkpoint cp_20260722T031100Z_b01_validated missed `tests/federation-daemon.test.mjs`"
+      ],
+      "agent_check": "Inspect the related area before assuming the initial pack is complete.",
+      "count": 2
+    },
+    {
+      "id": "prior-noise",
+      "title": "Prior checkpoint recorded distracting context",
+      "severity": "low",
+      "source": "checkpoint_fact",
+      "evidence": [
+        "task 20260722-030727-integrate-federation-wave-a-observability-with-w checkpoint cp_20260722T031100Z_b01_validated called distracting `lib/federation-coordinator.mjs`",
+        "task 20260722-030727-integrate-federation-wave-a-observability-with-w checkpoint cp_20260722T031100Z_b01_validated called distracting `lib/federation-harnesses.mjs`"
+      ],
+      "agent_check": "Keep that family as reference-only unless this task verifies it.",
+      "count": 2
+    }
+  ],
+  "confidence": {
+    "primary_file_confidence": "high",
+    "test_coverage_confidence": "high",
+    "docs_config_confidence": "low",
+    "git_receipt_confidence": "high",
+    "noise_risk": "medium",
+    "pack_completeness": "medium",
+    "why": [
+      "found 5 likely primary file(s)",
+      "found 4 likely test file(s)",
+      "found 3 related Git receipt(s)",
+      "2 file(s) were downgraded as likely noise"
+    ],
+    "agent_instruction": "Validate the test and integration surface before editing. Record critical misses and distracting inclusions in the slice result or a task checkpoint."
+  }
+}

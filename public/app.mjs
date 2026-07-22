@@ -200,7 +200,7 @@ function authOrJoinView(view, status, control) {
   );
 }
 
-function contributionStatus(status, view, control, settings, coordinatorUnavailable, showStopNow, setShowStopNow) {
+function contributionStatus(status, view, control, settings, coordinatorUnavailable, showStopNow, setShowStopNow, watchTask) {
   const isContributing = view.control === 'pause';
   const controlLabel = isContributing ? 'Pause after current task' : status?.state === 'paused' ? 'Choose a task to resume' : 'Choose a task below';
   const count = status?.ledger_summary?.count_7d || 0;
@@ -215,6 +215,7 @@ function contributionStatus(status, view, control, settings, coordinatorUnavaila
     ),
     coordinatorUnavailable ? element('p', { className: 'notice inline-notice', role: 'status', text: 'Your collective is unreachable right now — tasks will resume when it returns.' }) : null,
     element('div', { className: 'actions' }, button(controlLabel, () => isContributing && control('/contribute/pause'), isContributing ? 'secondary' : '', { disabled: !isContributing })),
+    isContributing && status?.contribution?.task_digest ? element('a', { className: 'button-link secondary', href: '#/requests', onclick: () => watchTask?.(status.contribution.task_digest), text: 'Watch live' }) : null,
     isContributing ? element('div', { className: 'stop-now' },
       showStopNow
         ? [element('p', { className: 'detail', text: 'Stop now abandons the current task. Waspflow records it as returned; requester confirmation is not available yet.' }), button('Stop now', () => control('/contribute/stop', { confirm: true }), 'secondary'), button('Keep working', () => setShowStopNow(false), 'secondary')]
@@ -250,9 +251,9 @@ function taskChoices(tasks, contribute, pendingNext, setPendingNext) {
   );
 }
 
-function contributeView(status, tasks, view, control, settings, coordinatorUnavailable, pendingNext, setPendingNext, showStopNow, setShowStopNow) {
+function contributeView(status, tasks, view, control, settings, coordinatorUnavailable, pendingNext, setPendingNext, showStopNow, setShowStopNow, watchTask) {
   if (view.name !== 'status') return authOrJoinView(view, status, control);
-  return element('div', { className: 'view-stack' }, contributionStatus(status, view, control, settings, coordinatorUnavailable, showStopNow, setShowStopNow), status?.state === 'idle' && !coordinatorUnavailable ? taskChoices(tasks, (digest) => control('/contribute/start', { task_digest: digest }), pendingNext, setPendingNext) : null);
+  return element('div', { className: 'view-stack' }, contributionStatus(status, view, control, settings, coordinatorUnavailable, showStopNow, setShowStopNow, watchTask), status?.state === 'idle' && !coordinatorUnavailable ? taskChoices(tasks, (digest) => control('/contribute/start', { task_digest: digest }), pendingNext, setPendingNext) : null);
 }
 
 function timeline(task) {
@@ -285,6 +286,30 @@ function executionLogPanel(log) {
   );
 }
 
+function transcriptEntries(log) {
+  return String(log?.output || '').split(/\r?\n/).filter(Boolean).map((raw) => {
+    try {
+      const event = JSON.parse(raw);
+      const message = event.message?.content || event.message?.text || event.content || event.result || event.text;
+      const tool = event.tool_name || event.name || event.tool_use?.name || event.tool?.name;
+      const args = event.input || event.tool_use?.input || event.arguments;
+      return { raw, role: event.type === 'assistant' || event.message?.role === 'assistant' ? 'Assistant' : tool ? 'Tool' : event.type || 'Event', message: typeof message === 'string' ? message : '', tool, args };
+    } catch { return { raw, role: 'Output', message: raw }; }
+  });
+}
+
+function transcriptPanel(log) {
+  if (!log) return null;
+  const raw = element('pre', { className: 'execution-log', text: log.output || 'No transcript events yet.' });
+  raw.hidden = true;
+  const entries = transcriptEntries(log);
+  const readable = element('div', { className: 'transcript-list' }, ...entries.map((entry) => entry.tool
+    ? element('details', { className: 'transcript-tool' }, element('summary', { text: `Tool · ${entry.tool}` }), element('pre', { className: 'execution-log', text: JSON.stringify(entry.args || entry.raw).slice(0, 1600) }))
+    : element('article', { className: 'transcript-turn' }, element('strong', { className: 'transcript-role', text: entry.role }), element('p', { text: entry.message || 'Structured event' }))));
+  const toggle = button('Raw JSON', () => { raw.hidden = !raw.hidden; readable.hidden = !readable.hidden; toggle.textContent = raw.hidden ? 'Raw JSON' : 'Readable transcript'; }, 'secondary');
+  return panel('Transcript', log.truncated ? 'Transcript capture reached its 2 MB limit.' : 'Agent-native assistant turns and tool calls captured on this machine.', toggle, readable, raw);
+}
+
 function taskDetail(task, selectedDigest, resultHref, executionLog, loadExecutionLog) {
   if (!selectedDigest || !/^sha256:[a-f0-9]{64}$/i.test(selectedDigest)) return null;
   const detail = task || { task_digest: selectedDigest, status: 'queued' };
@@ -299,11 +324,11 @@ function taskDetail(task, selectedDigest, resultHref, executionLog, loadExecutio
       detail.source ? element('p', { className: 'detail', text: `Source: ${typeof detail.source === 'string' ? detail.source : detail.source.name || 'Task source'}` }) : null,
     ),
     panel('Execution receipt', 'Shared execution metadata never includes the contributor’s account identities.', receipt(detail)),
-    panel('Execution transcript', 'This local daemon keeps the harness output for tasks it ran.',
+    panel('Execution transcript', 'This local daemon keeps the agent-native transcript for tasks it ran.',
       button('View execution log', () => loadExecutionLog(selectedDigest), 'secondary'),
       detail.execution_log_available === false ? element('p', { className: 'field-help', text: 'This task did not run on this machine, so its local execution log is unavailable here.' }) : null,
     ),
-    executionLogPanel(executionLog),
+    transcriptPanel(executionLog),
     result ? panel('Result', 'The task has settled.',
       element('div', { className: 'actions' }, element('a', { className: 'button-link', href: resultHref, text: 'Download result' }), button('Copy reference', () => copyText(detail.result_address || `result:${selectedDigest}`), 'secondary')),
     ) : null,
@@ -321,9 +346,11 @@ function requestList(requests, selectedDigest, select) {
 function submitForm(submit, formState) {
   let feedback;
   const edited = () => { formState.error = ''; if (feedback) feedback.textContent = ''; };
-  const name = element('input', { id: 'task-name', required: true, value: formState.display_id, placeholder: 'e.g. repair-login-test', oninput: (event) => { formState.display_id = event.target.value; edited(); } });
+  const name = element('input', { id: 'task-name', required: true, value: formState.display_id, placeholder: 'Fix the login test', oninput: (event) => { formState.display_id = event.target.value; edited(); } });
   const prompt = element('textarea', { id: 'task-prompt', required: true, placeholder: 'Describe the outcome you need.', oninput: (event) => { formState.prompt = event.target.value; edited(); } }, formState.prompt);
   const folder = element('input', { id: 'task-folder', value: formState.source, placeholder: '/path/to/project (optional)', oninput: (event) => { formState.source = event.target.value; edited(); } });
+  const files = element('input', { id: 'task-files', type: 'file', multiple: true, webkitdirectory: true, onchange: (event) => { formState.files = Array.from(event.target.files || []); edited(); } });
+  const network = element('input', { id: 'task-network', type: 'checkbox', checked: Boolean(formState.network), onchange: (event) => { formState.network = event.target.checked; edited(); } });
   feedback = element('p', { className: 'form-feedback', role: 'alert', text: formState.error });
   const form = element('form', { className: 'submit-form', onsubmit: async (event) => {
     event.preventDefault();
@@ -333,13 +360,27 @@ function submitForm(submit, formState) {
       feedback.textContent = formState.error;
       return;
     }
-    try { await submit({ display_id: formState.display_id, prompt: formState.prompt, source: formState.source }); }
+    try {
+      const attachments = await Promise.all((formState.files || []).map(async (file) => {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+        return { name: file.name, relative_path: file.webkitRelativePath || file.name, data_base64: btoa(binary) };
+      }));
+      const bytes = attachments.reduce((sum, file) => sum + Math.floor(file.data_base64.length * 3 / 4), 0);
+      if (bytes > 20 * 1024 * 1024) throw new Error('Attachments are limited to 20 MB. Choose fewer or smaller files.');
+      await submit({ display_id: formState.display_id, prompt: formState.prompt, source: formState.source, attachments, network: formState.network ? 'enabled' : 'disabled' });
+    }
     catch (error) { formState.error = error.message; feedback.textContent = formState.error; }
   } },
     element('label', { for: 'task-name', text: 'Task name' }), name,
     element('label', { for: 'task-prompt', text: 'What should be done' }), prompt,
-    element('label', { for: 'task-folder', text: 'Folder on this computer (optional)' }), folder,
-    element('p', { className: 'field-help', text: 'Without a folder, the task starts in an empty workspace.' }), feedback,
+    element('label', { for: 'task-files', text: 'Attach files or a folder (optional)' }), files,
+    element('p', { className: 'field-help', text: 'Attach the files the task should work on (optional — leave empty to start from scratch).' }),
+    element('label', { for: 'task-folder', text: 'Advanced: use a folder path on this machine' }), folder,
+    element('label', { className: 'check-label', for: 'task-network' }, network, document.createTextNode(' Allow internet access')),
+    element('p', { className: 'field-help', text: 'When on, tasks can fetch public resources, such as cloning a public Git repository named in the prompt.' }),
+    element('p', { className: 'quiet-note', text: 'Private repositories need scoped access — coming; public repos work today with internet on.' }), feedback,
     element('div', { className: 'actions' }, element('button', { type: 'submit', text: 'Submit task' })),
   );
   return panel('Submit a request', 'Describe the outcome for your collective.', form);
@@ -377,7 +418,7 @@ function activityDetail(entry, executionLog, loadExecutionLog) {
   );
 }
 
-function activityView(ledger, requests, select, selectedContribution, selectContribution, executionLog, loadExecutionLog) {
+function activityView(ledger, requests, collective, select, selectedContribution, selectContribution, executionLog, loadExecutionLog) {
   const contributionRows = ledger.filter((entry) => entry.role !== 'requester' && entry.author !== 'me');
   const contributionList = contributionRows.length
     ? element('ul', { className: 'history-list contribution-list' }, ...contributionRows.map((entry) => element('li', {},
@@ -392,6 +433,14 @@ function activityView(ledger, requests, select, selectedContribution, selectCont
     )))
     : element('div', { className: 'empty-state' }, element('strong', { text: 'Your contribution history will appear here.' }));
   return element('div', { className: 'view-stack' },
+    panel('Collective', 'Task-level activity shared with your collective. Private receipts stay private.', Array.isArray(collective) && collective.length
+      ? element('ul', { className: 'history-list' }, ...collective.map((entry) => {
+        const actor = entry.status === 'settled' ? entry.executor_key : entry.author;
+        const verb = entry.status === 'settled' ? 'completed' : entry.status === 'claimed' ? 'claimed' : 'submitted';
+        const at = entry.settled_at || entry.claimed_at || entry.published_at;
+        return element('li', {}, element('span', { className: 'history-main' }, element('strong', { text: `${actor || 'A member'} ${verb} '${entry.display_id || 'a task'}'` }), element('span', { className: 'history-date', text: `${entry.author || 'unknown requester'} · ${taskAge(at)}` })), statusChip(entry.status));
+      }))
+      : element('div', { className: 'empty-state' }, element('strong', { text: 'No collective activity yet.' }))),
     panel('Contribution history', 'Private receipts for every completed or returned attempt.', contributionList),
     activityDetail(selectedContribution, executionLog, loadExecutionLog),
     panel('Requester history', 'Requests and results.', requests.length ? element('ul', { className: 'history-list' }, ...requests.map((entry) => element('li', {}, element('button', { type: 'button', className: 'text-button', onclick: () => select(entry.task_digest), text: entry.display_id || 'Untitled task' }), statusChip(entry.status)))) : element('div', { className: 'empty-state' }, element('strong', { text: 'No requester activity yet.' }))),
@@ -448,27 +497,35 @@ function settingsView(identity, settings, roster, saveSettings, signIn, status, 
   if (!schedule.timezone) draft.value.schedule.timezone = timezone.value;
   const feedback = element('p', { className: 'form-feedback', role: 'alert' });
   const scheduleForm = element('form', { onsubmit: async (event) => { event.preventDefault(); feedback.textContent = ''; if (enabled.checked && (!start.value || !end.value || !days.value)) { feedback.textContent = 'Choose a start, end, and at least one day.'; return; } try { await saveSettings(draft.value); draft.dirty = false; draft.saved = true; } catch (error) { feedback.textContent = error.message; } } },
-    element('label', { for: 'collective-name', text: 'Collective name' }), collectiveName,
-    element('p', { className: 'field-help', text: 'Shown only on this machine.' }),
     element('label', { className: 'check-label', for: 'schedule-enabled' }, enabled, document.createTextNode(' Use a contribution schedule')),
     element('div', { className: 'schedule-grid' }, element('div', {}, element('label', { for: 'schedule-start', text: 'Start' }), start), element('div', {}, element('label', { for: 'schedule-end', text: 'End' }), end), element('div', {}, element('label', { for: 'schedule-days', text: 'Days' }), days)),
     element('label', { for: 'schedule-timezone', text: 'Timezone' }), timezone,
     element('p', { className: 'field-help', text: `Schedule times are in ${timezone.value}. ${enabled.checked && start.value && end.value ? `Active ${days.value || 'selected days'} from ${start.value} to ${end.value}.` : 'Schedule is currently off.'}` }),
     draft.dirty ? element('p', { className: 'field-help', text: 'Unsaved changes' }) : draft.saved ? element('p', { className: 'field-help', text: 'Saved' }) : null, feedback, element('div', { className: 'actions' }, element('button', { type: 'submit', text: 'Save schedule' })),
   );
+  const collectiveNameForm = element('form', { onsubmit: async (event) => { event.preventDefault(); try { await saveSettings(draft.value); draft.dirty = false; draft.saved = true; } catch (error) { feedback.textContent = error.message; } } },
+    element('label', { for: 'collective-name', text: 'Collective name' }), collectiveName,
+    element('p', { className: 'field-help', text: 'Shown only on this machine.' }),
+    element('div', { className: 'actions' }, element('button', { type: 'submit', text: 'Save collective name' })),
+  );
   const accounts = providerAccounts(identity);
+  const owner = roster?.[0]?.name || roster?.[0]?.key_id || 'the collective operator';
   return element('div', { className: 'view-stack' },
     providerSignInCard(status),
-    panel('Accounts in use', 'The identities this machine uses.',
+    panel('This machine', 'Accounts, schedule, and the member ID for this device.',
       element('dl', { className: 'identity-list' },
         element('dt', { text: 'Docker account' }), element('dd', {}, element('span', { text: dockerAccountLabel(identity) }), element('p', { className: 'field-help', text: 'Used to run isolated task sandboxes.' })),
         element('dt', { text: 'Member ID' }), element('dd', {}, element('span', { text: identity?.key_id || 'Not reported yet' }), element('p', { className: 'field-help', text: 'How the collective recognizes your machine.' })),
-        identity?.coordinator_url ? [element('dt', { text: 'Connection address' }), element('dd', {}, element('span', { text: identity.coordinator_url }), element('p', { className: 'field-help', text: 'Where this machine checks for collective work.' }))] : null,
       ),
       accounts.length ? element('ul', { className: 'provider-list', 'aria-label': 'Provider accounts' }, ...accounts.map((account) => providerAccountCard(account, signIn))) : null,
+      panel('Limit to certain hours (optional)', 'Pause is always available immediately.', scheduleForm),
     ),
-    panel('Limit to certain hours (optional)', 'Pause is always available immediately.', scheduleForm),
-    panel('Collective roster', 'Approved members.', roster?.length ? element('ul', { className: 'roster-list' }, ...roster.map((member) => element('li', {}, element('strong', { text: member.name || member.key_id || 'Member' }), element('code', { text: member.key_id || member.public_key_pem || '' })))) : element('div', { className: 'empty-state' }, element('strong', { text: 'Roster unavailable.' }))),
+    panel('Your collective', `Run by ${owner}.`,
+      collectiveNameForm,
+      identity?.coordinator_url ? element('p', { className: 'detail', text: `Connection address: ${identity.coordinator_url}` }) : null,
+      element('h3', { text: 'Collective roster' }), roster?.length ? element('ul', { className: 'roster-list' }, ...roster.map((member) => element('li', {}, element('strong', { text: member.name || member.key_id || 'Member' }), element('code', { text: member.key_id || member.public_key_pem || '' })))) : element('div', { className: 'empty-state' }, element('strong', { text: 'Roster unavailable.' })),
+      element('p', { className: 'quiet-note', text: "Collective management (approvals, removal) happens on the operator's machine today." }),
+    ),
   );
 }
 
@@ -483,8 +540,8 @@ function helpView(identity) {
 
 function createApplication(root) {
   const token = new URLSearchParams(window.location.search).get('token');
-  let status = null; let availableTasks = []; let ledger = []; let requests = []; let identity = null; let settings = null; let roster = []; let selectedDigest = null; let selectedTask = null; let selectedTaskRevision = 0; let selectedContribution = null; let selectedExecutionLog = null; let executionLogRevision = 0; let message = ''; let pollBusy = false; let lastLayoutSignature = null; let unauthorizedPolls = 0; let sessionExpired = false; let daemonUnavailable = false; let coordinatorUnavailable = false; let lastKnownAt = null; let pollTimer = null; let pendingNext = null; let showStopNow = false;
-  const requestForm = { display_id: '', prompt: '', source: '', error: '' };
+  let status = null; let availableTasks = []; let ledger = []; let requests = []; let collective = []; let identity = null; let settings = null; let roster = []; let selectedDigest = null; let selectedTask = null; let selectedTaskRevision = 0; let selectedContribution = null; let selectedExecutionLog = null; let executionLogRevision = 0; let message = ''; let pollBusy = false; let lastLayoutSignature = null; let unauthorizedPolls = 0; let sessionExpired = false; let daemonUnavailable = false; let coordinatorUnavailable = false; let lastKnownAt = null; let pollTimer = null; let pendingNext = null; let showStopNow = false;
+  const requestForm = { display_id: '', prompt: '', source: '', files: [], network: false, error: '' };
   const failedRequests = new Map();
   const settingsDraft = { value: { schedule: { enabled: false, start: '', end: '', days: '', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone } }, dirty: false, saved: false };
   window.addEventListener('beforeunload', (event) => { if (settingsDraft.dirty) { event.preventDefault(); event.returnValue = ''; } });
@@ -520,7 +577,7 @@ function createApplication(root) {
     }
   }
   async function control(path, body) { message = ''; try { status = await request(path, { method: 'POST', body: body ? JSON.stringify(body) : undefined }); pendingNext = null; showStopNow = false; } catch (error) { message = error.message; } render(); }
-  async function submit(body) { const result = await request('/submit', { method: 'POST', body: JSON.stringify(body) }); requestForm.display_id = ''; requestForm.prompt = ''; requestForm.source = ''; requestForm.error = ''; status = result; selectedDigest = /^sha256:[a-f0-9]{64}$/i.test(result.submission?.task_digest || '') ? result.submission.task_digest : selectedDigest; window.location.hash = '#/requests'; render(); }
+  async function submit(body) { const result = await request('/submit', { method: 'POST', body: JSON.stringify(body) }); requestForm.display_id = ''; requestForm.prompt = ''; requestForm.source = ''; requestForm.files = []; requestForm.network = false; requestForm.error = ''; status = result; selectedDigest = /^sha256:[a-f0-9]{64}$/i.test(result.submission?.task_digest || '') ? result.submission.task_digest : selectedDigest; window.location.hash = '#/requests'; render(); }
   async function saveSettings(body) { settings = await request('/settings', { method: 'POST', body: JSON.stringify(body) }); settingsDraft.value = structuredClone(settings); render(); }
   async function signIn(service) { message = ''; try { status = await request('/identity/signin', { method: 'POST', body: JSON.stringify({ service }) }); } catch (error) { message = error.message; } render(); }
   function select(digest) { selectedDigest = digest; selectedTask = null; selectedTaskRevision += 1; selectedExecutionLog = null; executionLogRevision += 1; window.location.hash = '#/requests'; void refreshTask(); render(); }
@@ -531,10 +588,14 @@ function createApplication(root) {
     if (JSON.stringify(next) !== JSON.stringify(selectedTask)) { selectedTask = next; selectedTaskRevision += 1; }
     render();
   }
-  async function loadExecutionLog(digest) {
+  async function loadExecutionLog(digest, append = false) {
     const bareDigest = String(digest || '').replace(/^sha256:/, '');
     if (!/^[a-f0-9]{64}$/i.test(bareDigest)) return;
-    try { selectedExecutionLog = await request(`/tasks/${encodeURIComponent(bareDigest)}/log`); }
+    try {
+      const since = append ? selectedExecutionLog?.next_offset || 0 : 0;
+      const next = await request(`/tasks/${encodeURIComponent(bareDigest)}/log?since=${since}`);
+      selectedExecutionLog = append && selectedExecutionLog ? { ...next, output: `${selectedExecutionLog.output || ''}${next.output || ''}` } : next;
+    }
     catch (error) { selectedExecutionLog = { output: error.message || 'The execution log is unavailable on this machine.', truncated: false }; }
     executionLogRevision += 1;
     render();
@@ -553,13 +614,14 @@ function createApplication(root) {
       const coordinatorReady = ['idle', 'paused', 'contributing'].includes(status.state);
       const baseRequests = coordinatorReady ? await optionalRequest('/requests', null) : null;
       const data = await Promise.all([
-        status.state === 'idle' ? optionalRequest('/tasks', []) : Promise.resolve([]), optionalRequest('/ledger', []), optionalRequest('/identity', null), optionalRequest('/settings', null), coordinatorReady ? optionalRequest('/roster', []) : Promise.resolve([]),
+        status.state === 'idle' ? optionalRequest('/tasks', []) : Promise.resolve([]), optionalRequest('/ledger', []), optionalRequest('/identity', null), optionalRequest('/settings', null), coordinatorReady ? optionalRequest('/roster', []) : Promise.resolve([]), coordinatorReady ? optionalRequest('/activity', []) : Promise.resolve([]),
       ]);
-      availableTasks = data[0]; ledger = Array.isArray(data[1]) ? data[1] : []; identity = data[2] || { key_id: status.key_id, coordinator_url: status.coordinator_url, collective_name: status.collective_name }; settings = data[3]; if (settings && !settingsDraft.dirty) settingsDraft.value = structuredClone(settings); roster = Array.isArray(data[4]?.roster) ? data[4].roster : Array.isArray(data[4]) ? data[4] : [];
+      availableTasks = data[0]; ledger = Array.isArray(data[1]) ? data[1] : []; identity = data[2] || { key_id: status.key_id, coordinator_url: status.coordinator_url, collective_name: status.collective_name }; settings = data[3]; if (settings && !settingsDraft.dirty) settingsDraft.value = structuredClone(settings); roster = Array.isArray(data[4]?.roster) ? data[4].roster : Array.isArray(data[4]) ? data[4] : []; collective = Array.isArray(data[5]) ? data[5] : [];
       requests = Array.isArray(baseRequests) ? baseRequests : requesterEntries(ledger, identity?.key_id);
       const submission = status.submission;
       if (submission?.task_digest && /^sha256:[a-f0-9]{64}$/i.test(submission.task_digest) && !selectedDigest) selectedDigest = submission.task_digest;
       if (selectedDigest) void refreshTask();
+      if (selectedDigest && ['claimed', 'submitted', 'evaluating', 'running'].includes(String(selectedTask?.status || '').toLowerCase())) void loadExecutionLog(selectedDigest, true);
       message = '';
       unauthorizedPolls = 0;
       if (!failedRequests.size) coordinatorUnavailable = false;
@@ -597,12 +659,12 @@ function createApplication(root) {
     main.append(element('h1', { className: 'sr-only', text: `${navigation.find(([route]) => route === active)?.[1] || 'Federation'} in Waspflow Federation` }));
     if (sessionExpired) main.append(panel('Session expired', SESSION_EXPIRED_MESSAGE, button('Reconnect Federation', reconnectFederation), element('p', { className: 'field-help', text: 'If this does not reopen Federation, open it from the Waspflow app.' })));
     else if (daemonUnavailable) main.append(panel('Federation is not running on this computer', 'No new task can start. Your last known state is still shown when Federation reconnects.', lastKnownAt ? element('p', { className: 'detail', text: `Last connected ${formatDate(lastKnownAt)}.` }) : null, button('Reconnect Federation', reconnectFederation), element('p', { className: 'field-help', text: 'If this does not reopen Federation, open it from the Waspflow app.' })));
-    else if (active === 'contribute') main.append(contributeView(status, availableTasks, view, control, settings, coordinatorUnavailable, pendingNext, (task) => { pendingNext = task; render(); }, showStopNow, (value) => { showStopNow = value; render(); }));
+    else if (active === 'contribute') main.append(contributeView(status, availableTasks, view, control, settings, coordinatorUnavailable, pendingNext, (task) => { pendingNext = task; render(); }, showStopNow, (value) => { showStopNow = value; render(); }, select));
     else if (active === 'requests') {
       const resultHref = selectedDigest ? `/result/${encodeURIComponent(selectedDigest)}?token=${encodeURIComponent(token || '')}` : '#/requests';
       main.append(requestsView(requests, selectedDigest, selectedTask, submit, select, resultHref, requestForm, selectedExecutionLog, loadExecutionLog));
     }
-    else if (active === 'activity') main.append(activityView(ledger, requests, select, selectedContribution, selectContribution, selectedExecutionLog, loadExecutionLog));
+    else if (active === 'activity') main.append(activityView(ledger, requests, collective, select, selectedContribution, selectContribution, selectedExecutionLog, loadExecutionLog));
     else if (active === 'settings') main.append(settingsView(identity, settings, roster, saveSettings, signIn, status, settingsDraft));
     else main.append(helpView(identity));
     // Polls are intentionally data-only updates. Replacing the app root on

@@ -132,6 +132,7 @@ test('both Claude Code variants include --dangerously-skip-permissions — same 
   assert.match(CLAUDE_CODE_SUBSCRIPTION_HARNESS.entrypoint, /--dangerously-skip-permissions/);
   assert.match(CLAUDE_CODE_API_KEY_HARNESS.entrypoint, /--dangerously-skip-permissions/);
   assert.match(CLAUDE_CODE_SUBSCRIPTION_HARNESS.entrypoint, /^claude --print/);
+  assert.match(CLAUDE_CODE_SUBSCRIPTION_HARNESS.entrypoint, /--verbose --output-format stream-json/);
 });
 
 test('gh-cli entrypoint needs no bypass flag — gh subcommands are non-interactive by construction for the harness\'s use case', () => {
