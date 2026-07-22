@@ -1,0 +1,13 @@
+[Unit]
+Description=Waspflow Federation coordinator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /usr/lib/waspflow/bin/waspflow-federation-coordinator --host-config %h/.waspflow/federation-coordinator/host.json
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

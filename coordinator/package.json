@@ -1,0 +1,11 @@
+{
+  "name": "waspflow-federation-coordinator-runtime",
+  "private": true,
+  "description": "Optional host-only tunnel runtime for Waspflow Federation coordinators",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@ngrok/ngrok": "1.7.0"
+  }
+}

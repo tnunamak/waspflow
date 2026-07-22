@@ -58,10 +58,38 @@ then, once they approve your generated key, click **Contribute**. The doctor
 keeps Docker Sandboxes (`sbx`) detect-and-guide: it tells you what is missing
 without making the UI or invite flow inaccessible.
 
-For someone operating a collective, remote contributors need an
-internet-reachable coordinator. Put it behind a reverse proxy with TLS, or
-make it reachable only to members over a tailnet. The owner chooses and runs
-that hosting; see [Federation coordinator deployment](docs/federation-deployment.md).
+### Host a collective
+
+You do not need a server or a domain to host a trusted collective. Install
+Waspflow, then run one guided command:
+
+```bash
+waspflow federation host
+```
+
+Answer its one reachability question. **ngrok** is recommended: it guides you
+through its free GitHub or Google signup, installs Waspflow’s host-only tunnel
+connector only after you choose it, and prints the final public address and a
+paste-able invite. ngrok’s current free plan assigns one stable development
+domain to an account; Waspflow uses that assigned address rather than asking
+you to buy or configure a domain. Your members do not need ngrok accounts.
+
+If you already operate an HTTPS reverse proxy, choose **my own HTTPS address**;
+if everyone is on the same network, choose **local network only**. Scripted
+hosts can skip prompts with one of:
+
+```bash
+waspflow federation host --tunnel ngrok
+waspflow federation host --tunnel url:https://collective.example
+waspflow federation host --tunnel lan
+```
+
+Then send the printed invite. You can print it again at any time with
+`waspflow federation invite`. A packaged Linux host is kept alive by a systemd
+user service; a source checkout keeps the coordinator attached to the terminal
+so its lifecycle stays visible. See [Federation coordinator deployment](docs/federation-deployment.md)
+for reverse-proxy details and [the host implementation report](docs/design/FEDERATION_HOST_REPORT.md)
+for the current ngrok limits and the live-tunnel verification boundary.
 
 ## First Run
 

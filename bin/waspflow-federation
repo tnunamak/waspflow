@@ -31,6 +31,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { spawn } = require('node:child_process');
+const readline = require('node:readline/promises');
 
 function fail(message) {
   process.stderr.write(`waspflow federation: ${message}\n`);
@@ -208,9 +209,16 @@ function printResult(json, humanLines, structured, type) {
 // here and at the start of contribute/submit — no pasting required for them.
 async function cmdJoin(argv) {
   const { flags, positional } = parseFlags(argv, ['key-id', 'collective-name']);
-  const [coordinatorUrl, inviteToken] = positional;
+  let [coordinatorUrl, inviteToken] = positional;
+  if (positional.length === 1 && positional[0].startsWith('waspflow://')) {
+    const { parseJoinInvite } = await import('../lib/federation-daemon.mjs');
+    const parsed = parseJoinInvite(positional[0]);
+    coordinatorUrl = parsed.coordinatorUrl;
+    inviteToken = parsed.token;
+    if (!flags['collective-name'] && parsed.collectiveName) flags['collective-name'] = parsed.collectiveName;
+  }
   if (!coordinatorUrl || !inviteToken) {
-    fail('usage: waspflow federation join <coordinator-url> <invite-token> [--key-id <name>] [--json]');
+    fail('usage: waspflow federation join <coordinator-url> <invite-token> | <waspflow://join?...> [--key-id <name>] [--json]');
   }
 
   const { loadConfig, saveConfig, generateAndStoreKeypair, configPath } = await import('../lib/federation-config.mjs');
@@ -294,6 +302,177 @@ async function cmdJoin(argv) {
     roster_snippet: { [keyId]: publicKeyPem },
     next_step: 'send roster_snippet to the coordinator operator, then run: waspflow federation contribute',
   }, 'joined');
+}
+
+// --- host / invite (operator journey) --------------------------------------
+//
+// The coordinator is a separate user-level service in packaged Linux builds,
+// because that is the long-lived-process primitive this package already
+// installs for the contributor daemon. A checkout has no installed unit, so
+// it keeps a child attached to this command instead of silently daemonizing a
+// process that the operator cannot inspect or stop.
+function runCommand(command, args) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', (error) => resolve({ code: 127, stderr: error.message, stdout }));
+    child.on('exit', (code) => resolve({ code: code ?? 1, stdout, stderr }));
+  });
+}
+
+async function ask(question) {
+  if (!process.stdin.isTTY) fail(`${question}\nRun again with --tunnel ngrok, --tunnel url:<https://address>, or --tunnel lan.`);
+  const prompt = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try { return (await prompt.question(question)).trim(); } finally { prompt.close(); }
+}
+
+async function chooseReachability() {
+  process.stdout.write('\nHow should remote members reach this collective?\n\n');
+  process.stdout.write('  [1] ngrok (recommended — free account, guided)\n');
+  process.stdout.write('  [2] my own HTTPS address (you run its reverse proxy)\n');
+  process.stdout.write('  [3] local network only\n\n');
+  const choice = await ask('Choose 1, 2, or 3: ');
+  if (choice === '1') return { kind: 'ngrok' };
+  if (choice === '2') {
+    const { parseTunnel } = await import('../lib/federation-host.mjs');
+    return parseTunnel(`url:${await ask('Paste your HTTPS address (for example https://collective.example): ')}`);
+  }
+  if (choice === '3') return { kind: 'lan' };
+  fail('please choose 1, 2, or 3');
+}
+
+async function storeNgrokToken(paths) {
+  if (fs.existsSync(paths.ngrokToken) && fs.readFileSync(paths.ngrokToken, 'utf8').trim()) return paths.ngrokToken;
+  process.stdout.write('\nTo use ngrok:\n');
+  process.stdout.write('  1. Sign up at https://dashboard.ngrok.com/signup — choose “Sign up with GitHub” or “Sign up with Google”.\n');
+  process.stdout.write('  2. In the dashboard, open “Your Authtoken” (https://dashboard.ngrok.com/get-started/your-authtoken).\n');
+  process.stdout.write('  3. Copy that authtoken and paste it here.\n');
+  process.stdout.write('This free account gives your collective a stable address; members never need one.\n\n');
+  const token = await ask('ngrok authtoken: ');
+  if (!token) fail('an ngrok authtoken is required to start the recommended tunnel');
+  fs.writeFileSync(paths.ngrokToken, `${token}\n`, { mode: 0o600 });
+  fs.chmodSync(paths.ngrokToken, 0o600);
+  return paths.ngrokToken;
+}
+
+async function prepareNgrokRuntime(paths) {
+  const manifestSource = path.join(ROOT, 'coordinator');
+  if (!fs.existsSync(path.join(manifestSource, 'package.json'))) {
+    fail(`this installation does not include the optional ngrok connector. ${await ngrokFallbackMessage()}`);
+  }
+  const runtime = paths.ngrokRuntime;
+  fs.mkdirSync(runtime, { recursive: true, mode: 0o700 });
+  for (const name of ['package.json', 'package-lock.json']) {
+    const source = path.join(manifestSource, name);
+    const destination = path.join(runtime, name);
+    if (!fs.existsSync(destination)) fs.copyFileSync(source, destination);
+  }
+  if (fs.existsSync(path.join(runtime, 'node_modules', '@ngrok', 'ngrok'))) return runtime;
+  process.stdout.write('Preparing Waspflow’s built-in secure connector (one host-only download)…\n');
+  const result = await runCommand('npm', ['ci', '--omit=dev', '--prefix', runtime]);
+  if (result.code !== 0) {
+    fail(`could not prepare the built-in ngrok connector: ${result.stderr.trim() || result.stdout.trim()}\n${await ngrokFallbackMessage()}`);
+  }
+  return runtime;
+}
+
+async function ngrokFallbackMessage() {
+  const { ngrokUnavailableGuidance } = await import('../lib/federation-coordinator-hosting.mjs');
+  return ngrokUnavailableGuidance();
+}
+
+function coordinatorServiceInstalled() {
+  return process.platform === 'linux' && fs.existsSync('/usr/lib/systemd/user/waspflow-federation-coordinator.service');
+}
+
+async function startPackagedCoordinator(config) {
+  for (const args of [
+    ['--user', 'daemon-reload'],
+    ['--user', 'enable', '--now', 'waspflow-federation-coordinator.service'],
+    ['--user', 'restart', 'waspflow-federation-coordinator.service'],
+  ]) {
+    const result = await runCommand('systemctl', args);
+    if (result.code !== 0) return { started: false, detail: result.stderr.trim() || result.stdout.trim() };
+  }
+  return { started: true };
+}
+
+function startCheckoutCoordinator(config) {
+  const child = spawn(process.execPath, [path.join(ROOT, 'bin', 'waspflow-federation-coordinator'), '--host-config', path.join(path.dirname(config.roster_path), 'host.json')], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stderr.on('data', (chunk) => process.stderr.write(chunk));
+  child.stdout.on('data', () => {}); // status.json is the stable parent/child contract.
+  return child;
+}
+
+async function waitForCoordinatorStatus(config) {
+  const { readCoordinatorStatus } = await import('../lib/federation-host.mjs');
+  for (let attempt = 0; attempt < 80; attempt++) {
+    const status = readCoordinatorStatus(config);
+    if (status && status.status !== 'listening') return status;
+    if (status?.public_url) return status;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return readCoordinatorStatus(config);
+}
+
+async function cmdHost(argv) {
+  const { flags, positional } = parseFlags(argv, ['tunnel', 'port']);
+  if (positional.length > 0) fail('usage: waspflow federation host [--tunnel ngrok|url:<https://address>|lan] [--port <number>]');
+  const { ensureHostState, parseTunnel, resolveLanUrl, saveReachability, readCollectiveToken } = await import('../lib/federation-host.mjs');
+  const port = flags.port === undefined ? 8787 : Number(flags.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) fail('--port must be a number between 1 and 65535');
+  let { config, paths } = ensureHostState({ port });
+  let reachability = flags.tunnel ? parseTunnel(flags.tunnel) : config.reachability;
+  if (!reachability) reachability = await chooseReachability();
+  if (reachability.kind === 'lan') reachability = { ...reachability, publicUrl: resolveLanUrl({ port: config.port }) };
+  if (reachability.kind === 'ngrok') {
+    reachability = {
+      ...reachability,
+      runtime_path: await prepareNgrokRuntime(paths),
+      token_path: await storeNgrokToken(paths),
+    };
+  }
+  config = saveReachability(config, reachability);
+  try { fs.unlinkSync(config.status_path); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+
+  let checkoutChild = null;
+  if (coordinatorServiceInstalled()) {
+    const service = await startPackagedCoordinator(config);
+    if (!service.started) fail(`could not start the coordinator service: ${service.detail}`);
+  } else {
+    checkoutChild = startCheckoutCoordinator(config);
+  }
+  const status = await waitForCoordinatorStatus(config);
+  if (!status) fail('the coordinator did not report ready status; check the coordinator logs and run host again to resume.');
+  if (status.status === 'ngrok_unavailable') fail(`${status.error}\nInstall the ngrok agent from https://ngrok.com/download, then run it against local port ${config.port}, or use --tunnel url:<https://your-address>.`);
+  if (status.status === 'ngrok_error' || status.status === 'ngrok_token_missing') fail(status.error || 'the ngrok tunnel could not start');
+  const publicUrl = status.public_url || reachability.publicUrl;
+  if (!publicUrl) fail('the coordinator started but did not provide a reachable address');
+  const invite = (await import('../lib/federation-host.mjs')).createJoinInvite({ coordinatorUrl: publicUrl, collectiveToken: readCollectiveToken(config) });
+  process.stdout.write(`\nYOUR COLLECTIVE IS READY\n${publicUrl}\n\nSend this invite to each member:\n${invite}\n\n`);
+  if (checkoutChild) {
+    process.stdout.write('This source-checkout coordinator is running in this terminal. Keep it open; packaged installs run it as a systemd user service.\n');
+    await new Promise((resolve) => checkoutChild.on('exit', resolve));
+  }
+}
+
+async function cmdInvite(argv) {
+  const { flags, positional } = parseFlags(argv, ['url', 'name']);
+  if (positional.length > 0) fail('usage: waspflow federation invite [--url <http(s)://address>] [--name <collective>]');
+  const { coordinatorHome, hostPaths, createJoinInvite, readCollectiveToken, readCoordinatorStatus } = await import('../lib/federation-host.mjs');
+  const paths = hostPaths(coordinatorHome());
+  if (!fs.existsSync(paths.config)) fail(`no hosted collective found at ${paths.config}. Run: waspflow federation host`);
+  const config = JSON.parse(fs.readFileSync(paths.config, 'utf8'));
+  const status = readCoordinatorStatus(config);
+  const coordinatorUrl = flags.url || status?.public_url || config.reachability?.publicUrl;
+  if (!coordinatorUrl) fail('the public coordinator URL is not known yet; run: waspflow federation host');
+  const invite = createJoinInvite({ coordinatorUrl, collectiveToken: readCollectiveToken(config), collectiveName: flags.name });
+  process.stdout.write(`${invite}\n`);
 }
 
 // --- contribute --------------------------------------------------------------
@@ -674,6 +853,8 @@ async function main() {
     case 'status': return cmdStatus(rest);
     case 'trust': return cmdTrust(rest);
     case 'approve': return cmdApprove(rest);
+    case 'host': return cmdHost(rest);
+    case 'invite': return cmdInvite(rest);
     case 'daemon': {
       const { runDaemon } = await import('../lib/federation-daemon.mjs');
       return runDaemon(rest);
@@ -685,7 +866,7 @@ async function main() {
       return;
     }
     default:
-      process.stderr.write(`usage: waspflow federation <doctor|join|contribute|submit|status|trust|approve|daemon|ui> ...\n`);
+      process.stderr.write(`usage: waspflow federation <host|invite|doctor|join|contribute|submit|status|trust|approve|daemon|ui> ...\n`);
       process.exit(1);
   }
 }

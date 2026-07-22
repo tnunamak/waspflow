@@ -6,7 +6,9 @@
  * already uses for long-lived processes (this script does not daemonize
  * itself, matching waspflow-federation-injector's style).
  *
- * Configuration is env-only, no flags, to keep this trivially scriptable:
+ * Raw operation is env-only to keep it trivially scriptable. The managed host
+ * flow invokes `--host-config <host.json>`, which supplies those same values
+ * from a private, generated state directory and may attach an ngrok tunnel:
  *   WASPFLOW_FEDERATION_COORDINATOR_PORT       default 8787
  *   WASPFLOW_FEDERATION_COORDINATOR_HOST       default 127.0.0.1
  *   WASPFLOW_FEDERATION_COORDINATOR_DATA_DIR   default ~/.waspflow/federation-coordinator/tasks
@@ -76,10 +78,25 @@ function watchRosterFile(rosterFile, liveRoster) {
 async function main() {
   const { startCoordinator } = await import('../lib/federation-coordinator.mjs');
 
-  const token = process.env.WASPFLOW_FEDERATION_COLLECTIVE_TOKEN;
+  const hostConfigFlag = process.argv.slice(2);
+  const hostConfigIndex = hostConfigFlag.indexOf('--host-config');
+  const hostConfigFile = hostConfigIndex === -1 ? null : hostConfigFlag[hostConfigIndex + 1];
+  if (hostConfigIndex !== -1 && (!hostConfigFile || hostConfigFlag.length !== 2)) {
+    fail('usage: waspflow-federation-coordinator [--host-config <host.json>]');
+  }
+  let hostConfig = null;
+  if (hostConfigFile) {
+    try { hostConfig = JSON.parse(fs.readFileSync(hostConfigFile, 'utf8')); } catch (error) {
+      fail(`could not read host configuration ${hostConfigFile}: ${error.message}`);
+    }
+  }
+
+  const token = hostConfig
+    ? fs.readFileSync(hostConfig.collective_token_path, 'utf8').trim()
+    : process.env.WASPFLOW_FEDERATION_COLLECTIVE_TOKEN;
   if (!token) fail('WASPFLOW_FEDERATION_COLLECTIVE_TOKEN is required (shared-secret collective gate)');
 
-  const rosterFile = process.env.WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE;
+  const rosterFile = hostConfig?.roster_path || process.env.WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE;
   if (!rosterFile) fail('WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE is required (JSON file mapping key_id -> public key PEM)');
   let entries;
   try {
@@ -90,27 +107,74 @@ async function main() {
   const roster = new Map(entries);
   watchRosterFile(rosterFile, roster);
 
-  const port = Number(process.env.WASPFLOW_FEDERATION_COORDINATOR_PORT || 8787);
+  const port = Number(hostConfig?.port || process.env.WASPFLOW_FEDERATION_COORDINATOR_PORT || 8787);
   if (!Number.isInteger(port) || port < 0 || port > 65535) fail('WASPFLOW_FEDERATION_COORDINATOR_PORT must be a valid port number');
-  const host = process.env.WASPFLOW_FEDERATION_COORDINATOR_HOST || '127.0.0.1';
-  const dataDir = process.env.WASPFLOW_FEDERATION_COORDINATOR_DATA_DIR
+  const host = hostConfig?.reachability?.kind === 'lan'
+    ? '0.0.0.0'
+    : process.env.WASPFLOW_FEDERATION_COORDINATOR_HOST || '127.0.0.1';
+  const dataDir = hostConfig?.data_dir || process.env.WASPFLOW_FEDERATION_COORDINATOR_DATA_DIR
     || path.join(os.homedir(), '.waspflow', 'federation-coordinator', 'tasks');
 
   const server = await startCoordinator({ dataDir, token, roster, port, host });
   const address = server.address();
-  process.stdout.write(JSON.stringify({
+  const statusFile = hostConfig?.status_path;
+  let tunnel = null;
+  let status = {
     status: 'listening',
     host: address.address,
     port: address.port,
     data_dir: dataDir,
     roster_size: roster.size,
-  }) + '\n');
+  };
+  if (hostConfig?.reachability?.kind === 'url') status.public_url = hostConfig.reachability.publicUrl;
+  if (hostConfig?.reachability?.kind === 'lan') status.public_url = hostConfig.reachability.publicUrl;
+
+  if (hostConfig?.reachability?.kind === 'ngrok') {
+    let authtoken;
+    try { authtoken = fs.readFileSync(hostConfig.reachability.token_path, 'utf8').trim(); } catch (error) {
+      status = { ...status, status: 'ngrok_token_missing', error: error.message };
+      writeStatus(statusFile, status);
+      fail(`could not read ngrok token: ${error.message}`);
+    }
+    try {
+      const { startNgrokTunnel, loadNgrokSdkFromRuntime } = await import('../lib/federation-coordinator-hosting.mjs');
+      tunnel = await startNgrokTunnel({
+        port: address.port,
+        authtoken,
+        loadSdk: () => loadNgrokSdkFromRuntime(hostConfig.reachability.runtime_path),
+      });
+      status = { ...status, status: 'public_listening', public_url: tunnel.url };
+    } catch (error) {
+      const { NgrokUnavailableError } = await import('../lib/federation-coordinator-hosting.mjs');
+      status = {
+        ...status,
+        status: error instanceof NgrokUnavailableError ? 'ngrok_unavailable' : 'ngrok_error',
+        error: error.message,
+      };
+      writeStatus(statusFile, status);
+      fail(status.status === 'ngrok_unavailable'
+        ? 'ngrok’s built-in connector is unavailable on this platform; install the ngrok agent from https://ngrok.com/download, then run it against the local coordinator port, or restart with --tunnel url:<https://your-address>.'
+        : error.message);
+    }
+  }
+  writeStatus(statusFile, status);
+  process.stdout.write(JSON.stringify(status) + '\n');
 
   const shutdown = () => {
-    server.close(() => process.exit(0));
+    Promise.resolve(tunnel?.close()).catch(() => {}).finally(() => server.close(() => process.exit(0)));
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+}
+
+function writeStatus(file, status) {
+  if (!file) return;
+  const dir = path.dirname(file);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmp = path.join(dir, `.${path.basename(file)}.${process.pid}.tmp`);
+  fs.writeFileSync(tmp, JSON.stringify(status, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+  fs.chmodSync(file, 0o600);
 }
 
 main().catch((error) => fail(error && error.message ? error.message : String(error)));

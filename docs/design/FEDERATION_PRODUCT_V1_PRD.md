@@ -76,6 +76,12 @@ Owner (thinking out loud, consistent with earlier design discussions): likely **
 Linear / Trello / GitHub Issues** so teams externalize task creation/prioritization; possibly
 **crypto bounties or credits** later (undecided).
 
+A product-run coordinator alias service is also a roadmap possibility: it could give a collective a
+memorable, managed rendezvous address without making every operator own a domain. It is deliberately
+not part of v1 or the local host flow; the first host experience must work with an operator-owned HTTPS
+address, a local network, or a guided third-party tunnel, and must not create an implicit hosted-service
+dependency.
+
 **Architecture-fit audit of what v1 is building (verified, not asserted):**
 - **External task sources fit the existing model**: tasks are signed envelopes published to a dumb
   coordinator — an integration adapter (Linear issue → task envelope) is just another author.

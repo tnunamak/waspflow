@@ -23,6 +23,8 @@ contents:
     dst: /usr/bin/waspflow
   - src: ./assets/waspflow-federation-daemon.service
     dst: /usr/lib/systemd/user/waspflow-federation-daemon.service
+  - src: ./assets/waspflow-federation-coordinator.service
+    dst: /usr/lib/systemd/user/waspflow-federation-coordinator.service
   - src: ./assets/waspflow-federation-tray.desktop
     dst: /etc/xdg/autostart/waspflow-federation-tray.desktop
 

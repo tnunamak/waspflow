@@ -40,6 +40,16 @@ dispatcher, so both `waspflow-federation doctor` and `waspflow federation
 doctor` work. The dispatcher intentionally rejects non-Federation commands;
 it is not a partial copy of the main Waspflow CLI.
 
+The package also includes a `waspflow-federation-coordinator.service` systemd
+**user** unit. `waspflow federation host` uses it for a hosted collective,
+because it is the same user-scoped lifecycle primitive already packaged for
+the local daemon: no root service, no hand-managed PID, and restart on
+failure. The optional `@ngrok/ngrok` SDK is declared only in
+`coordinator/package.json`; the package stages that tiny manifest but not its
+`node_modules`. A host installs the SDK into its own private coordinator state
+only after selecting ngrok, so a contributor never downloads native tunnel
+binaries and the member `.deb` stays small.
+
 For a disposable package journey, run:
 
 ```bash
