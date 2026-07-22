@@ -21,6 +21,7 @@
       input:focus, textarea:focus { border-color: var(--focus); }
       p { line-height: 1.55; }
       h2, h3 { text-wrap: balance; }
+      .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
       h2 { margin: 0; font-size: 1.25rem; letter-spacing: -.016em; }
       h3 { margin: 22px 0 8px; font-size: 1rem; }
       .app-header { width: min(1080px, calc(100% - 40px)); margin: 0 auto; min-height: 74px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
@@ -32,6 +33,8 @@
       .primary-nav a[aria-current="page"] { color: #105338; background: #e0eee5; }
       .content, .notice { width: min(790px, calc(100% - 40px)); margin-left: auto; margin-right: auto; }
       .content { margin-top: 42px; margin-bottom: 80px; }
+      .skip-link { position: fixed; left: 12px; top: -60px; z-index: 10; padding: 10px; border-radius: 8px; background: #fff; }
+      .skip-link:focus { top: 12px; }
       .view-stack { display: grid; gap: 16px; }
       .panel { padding: 24px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
       .panel-heading { margin-bottom: 18px; }
@@ -39,6 +42,7 @@
       .muted, .detail, .field-help { color: var(--muted); }
       .detail { white-space: pre-wrap; }
       .notice { margin-top: 18px; padding: 12px 14px; border-radius: 9px; background: var(--danger-bg); color: var(--danger); line-height: 1.45; }
+      .inline-notice { width: auto; margin: 16px 0 0; }
       .actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 20px; }
       .contribution-state { display: flex; align-items: flex-start; gap: 14px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
       .status-dot { width: 13px; height: 13px; flex: 0 0 auto; margin-top: 7px; border-radius: 50%; background: #8c9b92; }
@@ -124,7 +128,8 @@
     </style>
   </head>
   <body>
-    <main id="app" aria-live="polite">Loading Waspflow Federation…</main>
+    <div id="federation-status" class="sr-only" aria-live="polite"></div>
+    <main id="app">Loading Waspflow Federation…</main>
     <script>
       const app = document.createElement('script');
       app.type = 'module';

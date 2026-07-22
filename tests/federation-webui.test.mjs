@@ -9,12 +9,16 @@ test('web UI document loads its browser module', async () => {
   assert.match(index, /app\.src = `\/app\.mjs\?token=/);
 });
 
-test('idle contributor UI offers task choice and collapses an empty queue to quiet copy', async () => {
+test('idle contributor UI requires a task-specific consent decision and never auto-runs an empty queue', async () => {
   const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
   assert.match(app, /Choose a task/);
   assert.match(app, /Contribute this/);
   assert.match(app, /Contribute next available/);
-  assert.match(app, /No tasks are waiting\. Leave contributing on/);
+  assert.match(app, /No tasks are waiting right now\. Nothing will run automatically/);
+  assert.match(app, /Review next available task/);
+  assert.match(app, /Prompt: \$\{promptFirstLine/);
+  assert.match(app, /Run this/);
+  assert.match(app, /Skip/);
   assert.doesNotMatch(app, /disabled: choices\.length === 0/);
   assert.match(app, /optionalRequest\('\/tasks', \[\]\)/);
 });
@@ -36,6 +40,8 @@ test('web UI maps daemon states to the join, status, and auth views', () => {
   assert.deepEqual(viewForStatus({ state: 'paused' }), { name: 'status', title: 'Paused', control: 'start' });
   assert.deepEqual(viewForStatus({ state: 'idle' }), { name: 'status', title: 'Ready when you are', control: 'start' });
   assert.deepEqual(viewForStatus({ state: 'pending_approval' }), { name: 'pending' });
+  assert.deepEqual(viewForStatus({ state: 'approval_revoked' }), { name: 'approval_revoked' });
+  assert.deepEqual(viewForStatus({ state: 'pausing' }), { name: 'status', title: 'Pausing after current task…', control: 'pause' });
   assert.deepEqual(
     viewForStatus({ state: 'action_needed', action: { kind: 'awaiting_browser', url: 'https://auth.example' } }),
     { name: 'action', action: { kind: 'awaiting_browser', url: 'https://auth.example' } },
@@ -56,7 +62,7 @@ test('web UI renders approval waiting, collective-first personalization, and con
   assert.match(app, /You’re joining/);
   assert.match(app, /collectiveName \? element\('p', \{ className: 'collective-line'/);
   assert.match(app, /completed this week/);
-  assert.match(app, /Sign in to Docker/);
+  assert.match(app, /Sign in to \$\{provider\}/);
   assert.match(app, /Confirmation code/);
 });
 
@@ -86,7 +92,7 @@ test('web UI keeps a neutral first-load screen, backs off failed optional fetche
 
 test('product UI contains all five surfaces and the Wave A compatible task, result, identity, and schedule affordances', async () => {
   const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
-  for (const label of ['Contribute', 'Requests', 'Activity', 'Settings', 'Help', 'Download result', 'Accounts in use', 'Limit to certain hours', 'capacity you’re not using']) {
+  for (const label of ['Contribute', 'Requests', 'Activity', 'Settings', 'Help', 'Download result', 'Accounts in use', 'Limit to certain hours', 'Capacity guard']) {
     assert.match(app, new RegExp(label));
   }
   assert.match(app, /optionalRequest\(`\/tasks\/\$\{encodeURIComponent\(selectedDigest\.replace\(\/\^sha256:\/, ''\)\)\}`, null\)/);
@@ -110,7 +116,7 @@ test('identity capacity kind drives provider wording without assuming one capaci
   assert.match(app, /identity\/signin/);
 });
 
-test('activity rows use a whole-row plain control and stale sessions stop after repeated unauthorized polls', async () => {
+test('activity rows use a whole-row plain control and recovery states do not expose transport errors', async () => {
   const [app, index] = await Promise.all([
     readFile(new URL('../public/app.mjs', import.meta.url), 'utf8'),
     readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
@@ -120,6 +126,15 @@ test('activity rows use a whole-row plain control and stale sessions stop after 
   assert.match(app, /SESSION_EXPIRED_MESSAGE/);
   assert.match(app, /unauthorizedPolls >= 2/);
   assert.match(app, /window\.clearInterval\(pollTimer\)/);
+  assert.match(app, /Reconnect Federation/);
+  assert.match(app, /Federation is not running on this computer/);
+  assert.match(app, /Your collective is unreachable right now/);
+  assert.match(app, /Stop now abandons the current task\. Waspflow records it as returned/);
+  assert.match(app, /Sign in to \$\{displayName\}/);
+  assert.match(app, /settingsDraft/);
+  assert.match(app, /Schedule times are in/);
+  assert.match(app, /Skip to content/);
+  assert.doesNotMatch(index, /<main id="app" aria-live/);
   assert.match(app, /docker_status === 'failed'/);
   assert.match(app, /Checking…/);
   assert.match(index, /\.history-select \{[^}]*background: transparent/s);

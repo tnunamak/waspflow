@@ -27,7 +27,7 @@
       "status": "PASS"
     },
     {
-      "name": "Contribution controls are present and enabled without mutating the rig",
+      "name": "Contribution controls require a consented task without mutating the rig",
       "status": "PASS"
     },
     {

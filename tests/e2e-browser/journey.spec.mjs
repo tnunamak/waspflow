@@ -54,7 +54,7 @@ async function main() {
         await assertEnabled(taskButtons.first());
       } else {
         assert.equal(await next.count(), 0, 'empty queues must not show a disabled contribute button');
-        await assertText(page, 'No tasks are waiting. Leave contributing on');
+        await assertText(page, 'No tasks are waiting right now. Nothing will run automatically');
       }
     });
 
@@ -97,9 +97,8 @@ async function main() {
       await page.screenshot({ path: path.join(artifactDir, 'activity-settings.png'), fullPage: true });
     });
 
-    await check('Contribution controls are present and enabled without mutating the rig', async () => {
+    await check('Contribution controls require a consented task without mutating the rig', async () => {
       await page.getByRole('link', { name: 'Contribute' }).click();
-      await assertEnabled(page.getByRole('button', { name: 'Start contributing' }));
       const next = page.getByRole('button', { name: 'Contribute next available' });
       if (await page.getByRole('button', { name: 'Contribute this' }).count()) await assertEnabled(next);
       else assert.equal(await next.count(), 0);
@@ -116,7 +115,10 @@ async function main() {
       });
       try {
         await stalePage.goto(targetUrl.toString(), { waitUntil: 'networkidle', timeout: 15_000 });
-        await assertText(stalePage, 'This session expired. Reopen Federation from Waspflow');
+        await assertText(stalePage, 'This local link has expired; no task or account change was made');
+        await assertEnabled(stalePage.getByRole('button', { name: 'Reconnect Federation' }));
+        await stalePage.setViewportSize({ width: 390, height: 844 });
+        await stalePage.screenshot({ path: path.join(artifactDir, 'session-expired-390.png'), fullPage: true });
         await stalePage.waitForTimeout(3_500);
         assert.equal(statusRequests, 2, 'the stale tab must stop status polling after repeated 401 responses');
         assert.equal(staleErrors.length, 2, 'the browser may report the two real 401 responses, but it must not keep emitting them');

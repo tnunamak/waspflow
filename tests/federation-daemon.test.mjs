@@ -125,13 +125,15 @@ test('approval polling keeps a newly joined member pending, rejects contribution
   try {
     const pending = statusBody(await request(base, '/status', { token: 'test-session-token' }));
     assert.equal(pending.state, 'pending_approval');
-    assert.equal(pending.detail, "Waiting for the collective owner to approve you — you'll start automatically once approved.");
+    assert.equal(pending.detail, 'Waiting for the collective owner to approve this machine. No work can start until then.');
     const blocked = await request(base, '/contribute/start', { method: 'POST', token: 'test-session-token' });
     assert.equal(blocked.status, 409);
-    assert.equal(JSON.parse(blocked.text).error, "Waiting for the collective owner to approve you — you'll start automatically once approved.");
+    assert.equal(JSON.parse(blocked.text).error, 'Waiting for the collective owner to approve this machine. No work can start until then.');
 
     approved = true;
     await waitFor(async () => statusBody(await request(base, '/status', { token: 'test-session-token' })).state === 'idle');
+    approved = false;
+    await waitFor(async () => statusBody(await request(base, '/status', { token: 'test-session-token' })).state === 'approval_revoked');
   } finally {
     await daemon.close();
     await rm(directory, { recursive: true, force: true });
@@ -176,8 +178,9 @@ test('completed contribution appends a private ledger entry and exposes its week
     const entries = JSON.parse(ledger.text);
     assert.equal(entries.length, 1);
     assert.deepEqual(entries[0], {
-      display_id: 'Fix onboarding', coordinator: 'http://coordinator.example', finished_at: entries[0].finished_at,
+      display_id: 'Fix onboarding', coordinator: 'http://coordinator.example', outcome: 'completed', status: 'Completed', started_at: entries[0].started_at, finished_at: entries[0].finished_at,
       task_digest: 'a'.repeat(64),
+      task_reference: 'a'.repeat(64),
       receipt: {
         schema_version: 1, task_digest: 'a'.repeat(64), harness_id: 'claude-code-subscription', capacity_kind: 'subscription', model: 'claude-fable-5',
         usage: { input_tokens: 12, output_tokens: 4 }, duration_ms: 1200,
@@ -285,9 +288,11 @@ test('GET /status exposes every daemon state and auth handoff payloads', async (
     assert.equal(children[0].args[0], process.execPath);
     assert.deepEqual(children[0].args[1], ['/real/path/to/bin/waspflow-federation', 'contribute', '--json']);
 
-    const paused = statusBody(await request(base, '/contribute/stop', { method: 'POST', token }));
-    assert.equal(paused.state, 'paused');
-    assert.equal(children[0].child.killed, true);
+    const pausing = statusBody(await request(base, '/contribute/pause', { method: 'POST', token }));
+    assert.equal(pausing.state, 'pausing');
+    assert.equal(children[0].child.killed, undefined);
+    children[0].child.emit('close', 0);
+    assert.equal(statusBody(await request(base, '/status', { token })).state, 'paused');
 
     await request(base, '/contribute/start', { method: 'POST', token });
     children[1].child.stdout.emit('data', Buffer.from(JSON.stringify({
@@ -300,7 +305,7 @@ test('GET /status exposes every daemon state and auth handoff payloads', async (
     children[1].child.emit('close', 1);
     const actionNeeded = statusBody(await request(base, '/status', { token }));
     assert.equal(actionNeeded.state, 'action_needed');
-    assert.deepEqual(actionNeeded.action, { kind: 'awaiting_browser', url: 'https://auth.example/login' });
+    assert.deepEqual(actionNeeded.action, { kind: 'awaiting_browser', service: 'codex', url: 'https://auth.example/login' });
 
     await request(base, '/contribute/start', { method: 'POST', token });
     children[2].child.stdout.emit('data', Buffer.from(JSON.stringify({
@@ -314,7 +319,7 @@ test('GET /status exposes every daemon state and auth handoff payloads', async (
     children[2].child.emit('close', 1);
     const manualAction = statusBody(await request(base, '/status', { token }));
     assert.equal(manualAction.state, 'action_needed');
-    assert.deepEqual(manualAction.action, { kind: 'auth_required_manual', instruction: 'Run the supplied login command.' });
+    assert.deepEqual(manualAction.action, { kind: 'auth_required_manual', service: 'claude', instruction: 'Run the supplied login command.' });
 
     await request(base, '/contribute/start', { method: 'POST', token });
     children[3].child.stdout.emit('data', Buffer.from(JSON.stringify({
@@ -426,7 +431,7 @@ test('daemon immediately exposes awaiting_browser for a host-url-flow and never 
       url: 'https://claude.com/cai/oauth/authorize?state=abc',
     }) + '\n'));
     const waiting = statusBody(await request(base, '/status', { token: 'test-session-token' }));
-    assert.deepEqual(waiting.action, { kind: 'awaiting_browser', url: 'https://claude.com/cai/oauth/authorize?state=abc' });
+    assert.deepEqual(waiting.action, { kind: 'awaiting_browser', service: 'claude-code-subscription', url: 'https://claude.com/cai/oauth/authorize?state=abc' });
     assert.notEqual(waiting.action.kind, 'auth_required_manual');
 
     children[0].child.stdout.emit('data', Buffer.from(JSON.stringify({
@@ -456,11 +461,11 @@ test('GET /tasks passes through claimable tasks and POST /contribute/start deleg
 
     const listed = await request(base, '/tasks', { token: 'test-session-token' });
     assert.equal(listed.status, 200);
-    assert.deepEqual(JSON.parse(listed.text), tasks);
-    assert.deepEqual(coordinatorCalls, [{
-      url: 'http://coordinator.example/tasks',
-      options: { headers: { authorization: 'Bearer collective-token' } },
-    }]);
+    assert.deepEqual(JSON.parse(listed.text), [{ ...tasks[0], source_bytes: 12 }]);
+    assert.deepEqual(coordinatorCalls, [
+      { url: 'http://coordinator.example/tasks', options: { headers: { authorization: 'Bearer collective-token' } } },
+      { url: `http://coordinator.example/artifacts/${'c'.repeat(64)}`, options: { headers: { authorization: 'Bearer collective-token' } } },
+    ]);
 
     const started = await request(base, '/contribute/start', {
       method: 'POST',
@@ -471,20 +476,19 @@ test('GET /tasks passes through claimable tasks and POST /contribute/start deleg
     assert.deepEqual(children[0].args[1], [
       '/real/path/to/bin/waspflow-federation', 'contribute', '--task-digest', digest, '--json',
     ]);
-    assert.deepEqual(JSON.parse(started.text).contribution, { selection: 'chosen', task_digest: digest, display_id: 'Fix the login test' });
-    assert.deepEqual(statusBody(await request(base, '/status', { token: 'test-session-token' })).contribution, {
-      selection: 'chosen', task_digest: digest, display_id: 'Fix the login test',
-    });
+    assert.deepEqual(JSON.parse(started.text).contribution, { selection: 'chosen', task_digest: digest, display_id: 'Fix the login test', started_at: JSON.parse(started.text).contribution.started_at });
+    const activeContribution = statusBody(await request(base, '/status', { token: 'test-session-token' })).contribution;
+    assert.deepEqual(activeContribution, { selection: 'chosen', task_digest: digest, display_id: 'Fix the login test', started_at: activeContribution.started_at });
   });
 });
 
 test('schedule settings persist behind the daemon token and roster is a token-gated coordinator passthrough', async () => {
   await withDaemon(async ({ base, coordinatorCalls, setConfig, setTaskListResponse, settingsPath }) => {
     const settings = await request(base, '/settings', { method: 'POST', token: 'test-session-token', body: {
-      schedule: { enabled: true, start: '18:00', end: '08:00', days: 'Weekdays' },
+      schedule: { enabled: true, start: '18:00', end: '08:00', days: 'Weekdays', timezone: 'Australia/Brisbane' },
     } });
     assert.equal(settings.status, 200);
-    assert.deepEqual(JSON.parse(settings.text), { schedule: { enabled: true, start: '18:00', end: '08:00', days: 'Weekdays' } });
+    assert.deepEqual(JSON.parse(settings.text), { schedule: { enabled: true, start: '18:00', end: '08:00', days: 'Weekdays', timezone: 'Australia/Brisbane' } });
     assert.deepEqual(JSON.parse((await request(base, '/settings', { token: 'test-session-token' })).text), JSON.parse(settings.text));
     assert.equal((await stat(settingsPath)).mode & 0o777, 0o600);
 
@@ -598,9 +602,9 @@ test('settings persist a locally edited collective name without changing the inv
   await withDaemon(async ({ base, setConfig }) => {
     setConfig({ coordinator_url: 'http://coordinator.example', collective_name: 'Invite collective' });
     const response = await request(base, '/settings', {
-      method: 'POST', token: 'test-session-token', body: { collective_name: 'Local collective', schedule: { enabled: false, start: '', end: '', days: '' } },
+      method: 'POST', token: 'test-session-token', body: { collective_name: 'Local collective', schedule: { enabled: false, start: '', end: '', days: '', timezone: '' } },
     });
-    assert.deepEqual(JSON.parse(response.text), { collective_name: 'Local collective', schedule: { enabled: false, start: '', end: '', days: '' } });
+    assert.deepEqual(JSON.parse(response.text), { collective_name: 'Local collective', schedule: { enabled: false, start: '', end: '', days: '', timezone: '' } });
     assert.equal(JSON.parse((await request(base, '/status', { token: 'test-session-token' })).text).collective_name, 'Local collective');
   });
 });
