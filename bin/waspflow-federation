@@ -217,94 +217,30 @@ function printResult(json, humanLines, structured, type) {
 // here and at the start of contribute/submit — no pasting required for them.
 async function cmdJoin(argv) {
   const { flags, positional } = parseFlags(argv, ['key-id', 'collective-name']);
-  let [coordinatorUrl, inviteToken] = positional;
-  if (positional.length === 1 && /^(?:waspflow|https?):\/\//i.test(positional[0])) {
-    const { parseJoinInvite } = await import('../lib/federation-daemon.mjs');
-    const parsed = parseJoinInvite(positional[0]);
-    coordinatorUrl = parsed.coordinatorUrl;
-    inviteToken = parsed.token;
-    if (!flags['collective-name'] && parsed.collectiveName) flags['collective-name'] = parsed.collectiveName;
-  }
-  if (!coordinatorUrl || !inviteToken) {
+  const [first, second] = positional;
+  if (!first || (positional.length > 1 && !second)) {
     fail('usage: waspflow federation join <coordinator-url> <invite-token> | <https://coordinator/join#token> | <waspflow://join?...> [--key-id <name>] [--json]');
   }
-
-  const { loadConfig, saveConfig, generateAndStoreKeypair, configPath } = await import('../lib/federation-config.mjs');
-
-  const existing = loadConfig();
-  if (existing && existing.coordinator_url === coordinatorUrl) {
-    if (existing.collective_token !== inviteToken) {
-      await verifyInviteToken(coordinatorUrl, inviteToken);
-      existing.collective_token = inviteToken;
-      if (flags['collective-name']) existing.collective_name = flags['collective-name'];
-      saveConfig(existing);
+  const invite = positional.length === 2 ? `waspflow federation join ${first} ${second}` : first;
+  const { joinFederation } = await import('../lib/federation-join.mjs');
+  const { configPath } = await import('../lib/federation-config.mjs');
+  const result = await joinFederation({ invite, keyId: flags['key-id'] || os.userInfo().username, collectiveName: flags['collective-name'] });
+  const structured = { status: result.status, key_id: result.keyId, coordinator_url: result.coordinatorUrl, config_path: configPath(), auto_approved: result.autoApproved };
+  if (result.status === 'joined') {
+    const joined = { ...structured, peers_auto_fetched: result.peersAutoFetched, roster_snippet: result.rosterSnippet, next_step: result.nextStep };
+    if (result.autoApproved) {
+      printResult(flags.json, [`Joined ${result.coordinatorUrl}. This computer was approved because it hosts this collective.`], joined, 'joined');
+    } else {
       printResult(flags.json, [
-        `updated the collective token for ${coordinatorUrl}`,
-        `saved configuration: ${configPath()}`,
-      ], { status: 'rejoined', key_id: existing.key_id, coordinator_url: existing.coordinator_url, config_path: configPath() }, 'rejoined');
-      return;
+        `Joined ${result.coordinatorUrl}.`,
+        'Send this approval request to your operator any way you like:',
+        result.approvalRequest,
+        'Your request is with the collective operator. Contributions start once you are approved.',
+      ], { ...joined, approval_request: result.approvalRequest }, 'joined');
     }
-    if (flags['collective-name'] && existing.collective_name !== flags['collective-name']) {
-      existing.collective_name = flags['collective-name'];
-      saveConfig(existing);
-    }
-    printResult(flags.json, [
-      `already joined as ${existing.key_id}`,
-      `coordinator: ${existing.coordinator_url}`,
-    ], { status: 'already_joined', key_id: existing.key_id, coordinator_url: existing.coordinator_url, config_path: configPath() }, 'already_joined');
     return;
   }
-
-  // Check the coordinator is actually reachable and the invite token is
-  // accepted BEFORE generating a keypair and saving config — a mistyped URL
-  // or token should surface here, not silently later the first time
-  // contribute/submit tries to talk to the coordinator.
-  await verifyInviteToken(coordinatorUrl, inviteToken);
-
-  const keyId = flags['key-id'] || os.userInfo().username || 'member';
-  const { privateKeyPath, publicKeyPem } = generateAndStoreKeypair(keyId);
-
-  // The invite token IS the collective bearer token in v0 — there is no
-  // separate invite-exchange step (no registration endpoint exists to
-  // exchange it against; see the module doc above). Naming the CLI arg
-  // "invite-token" rather than "collective-token" is deliberate UX: to the
-  // non-technical user this is "the code someone sent me to join", not a
-  // credential they need to understand as a bearer token.
-  let config = {
-    coordinator_url: coordinatorUrl,
-    collective_token: inviteToken,
-    key_id: keyId,
-    private_key_path: privateKeyPath,
-    ...(flags['collective-name'] ? { collective_name: flags['collective-name'] } : {}),
-  };
-  saveConfig(config);
-
-  // Auto-fetch whoever the coordinator already has on its roster (e.g. the
-  // operator themself, or any other already-approved member) — this member
-  // never needs to `trust` those peers by hand. It cannot fetch THIS
-  // member's own key back yet, since the operator hasn't added it to the
-  // roster file at this point in the flow — that's the one snippet still
-  // printed below.
-  config = await refreshRosterCache(config);
-
-  const snippet = JSON.stringify({ [keyId]: publicKeyPem });
-  const peerCount = Object.keys(config.roster || {}).length;
-  printResult(flags.json, [
-    `joined ${coordinatorUrl} as '${keyId}'`,
-    `saved configuration: ${configPath()}`,
-    `existing member keys: ${peerCount}`,
-    'send this public key to the coordinator operator:',
-    snippet,
-    'run: waspflow federation contribute',
-  ], {
-    status: 'joined',
-    key_id: keyId,
-    coordinator_url: coordinatorUrl,
-    config_path: configPath(),
-    peers_auto_fetched: peerCount,
-    roster_snippet: { [keyId]: publicKeyPem },
-    next_step: 'send roster_snippet to the coordinator operator, then run: waspflow federation contribute',
-  }, 'joined');
+  printResult(flags.json, [result.status === 'already_joined' ? `Already joined ${result.coordinatorUrl}.` : `Updated your invite for ${result.coordinatorUrl}.`], structured, result.status);
 }
 
 // --- host / invite (operator journey) --------------------------------------
@@ -328,6 +264,12 @@ function runCommand(command, args) {
 
 async function ask(question) {
   if (!process.stdin.isTTY) fail(`${question}\nRun again with --tunnel ngrok, --tunnel url:<https://address>, or --tunnel lan.`);
+  const prompt = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try { return (await prompt.question(question)).trim(); } finally { prompt.close(); }
+}
+
+async function askOptional(question) {
+  if (!process.stdin.isTTY) return '';
   const prompt = readline.createInterface({ input: process.stdin, output: process.stdout });
   try { return (await prompt.question(question)).trim(); } finally { prompt.close(); }
 }
@@ -421,11 +363,11 @@ async function waitForCoordinatorStatus(config) {
 }
 
 async function cmdHost(argv) {
-  const { flags, positional } = parseFlags(argv, ['tunnel', 'port'], ['rotate-token']);
+  const { flags, positional } = parseFlags(argv, ['tunnel', 'port', 'domain'], ['rotate-token']);
   if (positional.length > 0 || (flags['rotate-token'] && (flags.tunnel || flags.port))) {
-    fail('usage: waspflow federation host [--tunnel ngrok|url:<https://address>|lan] [--port <number>] | --rotate-token');
+    fail('usage: waspflow federation host [--tunnel ngrok|url:<https://address>|lan] [--domain <name>] [--port <number>] | --rotate-token');
   }
-  const { ensureHostState, parseTunnel, resolveLanUrl, saveReachability, readCollectiveToken, readCoordinatorStatus, rotateCollectiveToken, writeCollectiveToken } = await import('../lib/federation-host.mjs');
+  const { ensureHostState, normalizeNgrokDomain, parseTunnel, resolveLanUrl, saveReachability, readCollectiveToken, readCoordinatorStatus, rotateCollectiveToken, writeCollectiveToken } = await import('../lib/federation-host.mjs');
   const port = flags.port === undefined ? 8787 : Number(flags.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) fail('--port must be a number between 1 and 65535');
   let { config, paths } = ensureHostState({ port });
@@ -470,16 +412,25 @@ async function cmdHost(argv) {
     return;
   }
 
+  const previousStatus = readCoordinatorStatus(config);
   let reachability = flags.tunnel ? parseTunnel(flags.tunnel) : config.reachability;
   if (!reachability) reachability = await chooseReachability();
   if (reachability.kind === 'lan') reachability = { ...reachability, publicUrl: resolveLanUrl({ port: config.port }) };
   if (reachability.kind === 'ngrok') {
+    let domain = flags.domain ? normalizeNgrokDomain(flags.domain) : reachability.domain;
+    if (!domain && process.stdin.isTTY) {
+      const pasted = await askOptional('For a permanent address, copy your free static domain from https://dashboard.ngrok.com/domains and paste it (Enter to skip): ');
+      domain = pasted ? normalizeNgrokDomain(pasted) : '';
+    }
     reachability = {
       ...reachability,
       runtime_path: await prepareNgrokRuntime(paths),
       token_path: await storeNgrokToken(paths),
+      ...(domain ? { domain } : {}),
+      ...(previousStatus?.public_url ? { previous_public_url: previousStatus.public_url } : {}),
     };
   }
+  if (flags.domain && reachability.kind !== 'ngrok') fail('--domain can only be used with ngrok');
   config = saveReachability(config, reachability);
   try { fs.unlinkSync(config.status_path); } catch (error) { if (error.code !== 'ENOENT') throw error; }
 
@@ -610,8 +561,8 @@ async function cmdContribute(argv) {
     const match = /signer key_id "([^"]+)"/.exec(result.stderr || '');
     if (/is not in --roster-file/.test(result.stderr) && match) {
       fail(
-        `you haven't trusted '${match[1]}' yet, so this task's authenticity can't be verified.\n` +
-        `Ask them for their public key, then run: waspflow federation trust ${match[1]} <their-pubkey-file-or-string>`
+        `Waspflow cannot verify a task from '${match[1]}' yet.\n` +
+        'Ask your collective operator to approve that member, then try again.'
       );
     }
     fail(`contribute failed (task ${taskDigest}) — see output above`);
@@ -640,27 +591,8 @@ async function cmdContribute(argv) {
 // fetch, or from manual `trust`) may still be sufficient, and the actual
 // claim/submit step will fail on its own with a clear error if it isn't.
 async function refreshRosterCache(config) {
-  const { saveConfig } = await import('../lib/federation-config.mjs');
-  let res;
-  try {
-    res = await fetch(`${config.coordinator_url}/roster`, {
-      headers: { authorization: `Bearer ${config.collective_token}` },
-    });
-  } catch {
-    return config; // coordinator unreachable — proceed with whatever cache already exists
-  }
-  if (!res.ok) return config; // e.g. an older coordinator without GET /roster yet — degrade silently to the existing cache
-  const body = await res.json().catch(() => null);
-  if (!body || !Array.isArray(body.roster)) return config;
-
-  config.roster = config.roster || {};
-  for (const entry of body.roster) {
-    if (entry && typeof entry.key_id === 'string' && typeof entry.public_key_pem === 'string') {
-      config.roster[entry.key_id] = entry.public_key_pem;
-    }
-  }
-  saveConfig(config);
-  return config;
+  const { refreshRosterCache: refresh } = await import('../lib/federation-join.mjs');
+  return refresh(config);
 }
 
 // The pull protocol deals in a digest, while the contributor-facing ledger
@@ -746,13 +678,23 @@ async function cmdTrust(argv) {
 // adding a network-reachable registration surface.
 async function cmdApprove(argv) {
   const { flags, positional } = parseFlags(argv, ['roster-file']);
-  const [keyId, publicKeyFile] = positional;
-  if (!keyId || !publicKeyFile) {
-    fail('usage: waspflow federation approve <key_id> <public_key_pem_file|-> [--roster-file <path>] [--json]');
-  }
+  let [keyId, publicKeyFile] = positional;
+  let publicKeyPem;
+  if (positional.length === 1) {
+    if (keyId.trim().startsWith('{')) {
+      let legacy;
+      try { legacy = JSON.parse(keyId); } catch { fail('that approval request is not valid'); }
+      const entries = Object.entries(legacy || {});
+      if (entries.length !== 1 || typeof entries[0][0] !== 'string' || typeof entries[0][1] !== 'string') fail('that approval request is not valid');
+      ([keyId, publicKeyPem] = entries[0]);
+    } else {
+      const { parseApprovalRequest } = await import('../lib/federation-approval-request.mjs');
+      ({ keyId, publicKeyPem } = parseApprovalRequest(keyId));
+    }
+  } else if (!keyId || !publicKeyFile) fail('usage: waspflow federation approve <approval-request> | <key_id> <public_key_file|-> [--roster-file <path>] [--json]');
   const rosterFile = flags['roster-file'] || process.env.WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE;
   if (!rosterFile) fail('approve requires --roster-file or WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE');
-  const publicKeyPem = publicKeyFile === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(publicKeyFile, 'utf8');
+  if (!publicKeyPem) publicKeyPem = publicKeyFile === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(publicKeyFile, 'utf8');
   if (!publicKeyPem.includes('BEGIN PUBLIC KEY')) fail('that does not look like a PEM public key (expected "-----BEGIN PUBLIC KEY-----")');
   let roster;
   try {
@@ -825,8 +767,8 @@ async function cmdSubmit(argv) {
     const match = /signer key_id "([^"]+)"/.exec(result.stderr || '');
     if (/is not in the roster/.test(result.stderr) && match) {
       fail(
-        `you haven't trusted '${match[1]}' yet, so this task's result can't be verified as theirs.\n` +
-        `Ask them for their public key, then run: waspflow federation trust ${match[1]} <their-pubkey-file-or-string>`
+        `Waspflow cannot verify a result from '${match[1]}' yet.\n` +
+        'Ask your collective operator to approve that member, then try again.'
       );
     }
     process.exit(result.status || 1);

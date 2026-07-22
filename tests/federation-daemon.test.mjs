@@ -71,6 +71,7 @@ async function withDaemon(fn, daemonOptions = {}) {
     startProviderSignIn: daemonOptions.startProviderSignIn,
     identityProbe: daemonOptions.identityProbe || (async () => ({ docker_account: null, providers: [] })),
     gitVisibilityProbe: daemonOptions.gitVisibilityProbe,
+    joinFederation: daemonOptions.joinFederation,
     now: daemonOptions.now,
   });
   const base = `http://127.0.0.1:${daemon.info.port}`;
@@ -129,10 +130,10 @@ test('approval polling keeps a newly joined member pending, rejects contribution
   try {
     const pending = statusBody(await request(base, '/status', { token: 'test-session-token' }));
     assert.equal(pending.state, 'pending_approval');
-    assert.equal(pending.detail, 'Waiting for the collective owner to approve this machine. No work can start until then.');
+    assert.equal(pending.detail, 'Your request is with the collective operator; you can close this — contributions start once you’re approved.');
     const blocked = await request(base, '/contribute/start', { method: 'POST', token: 'test-session-token' });
     assert.equal(blocked.status, 409);
-    assert.equal(JSON.parse(blocked.text).error, 'Waiting for the collective owner to approve this machine. No work can start until then.');
+    assert.equal(JSON.parse(blocked.text).error, 'Your request is with the collective operator; you can close this — contributions start once you’re approved.');
 
     approved = true;
     await waitFor(async () => statusBody(await request(base, '/status', { token: 'test-session-token' })).state === 'idle');
@@ -505,7 +506,8 @@ test('schedule settings persist behind the daemon token and roster is a token-ga
   });
 });
 
-test('POST /join accepts an invite and shells out to the guided join verb', async () => {
+test('POST /join accepts an invite through the shared join operation', async () => {
+  const received = [];
   await withDaemon(async ({ base, children, setConfig }) => {
     const response = await request(base, '/join', {
       method: 'POST',
@@ -513,19 +515,12 @@ test('POST /join accepts an invite and shells out to the guided join verb', asyn
       body: { invite: 'waspflow://join?coordinator=http%3A%2F%2Fcoordinator.example&token=invite-token&name=Oshin%27s%20Collective' },
     });
     assert.equal(response.status, 202);
-    assert.deepEqual(children[0].args[1], ['/real/path/to/bin/waspflow-federation', 'join', 'http://coordinator.example', 'invite-token', '--collective-name', "Oshin's Collective", '--json']);
-    setConfig({ coordinator_url: 'http://coordinator.example' });
-    children[0].child.stdout.emit('data', Buffer.from(JSON.stringify({
-      schema_version: 1,
-      type: 'already_joined',
-      status: 'already_joined',
-      key_id: 'member',
-      coordinator_url: 'http://coordinator.example',
-      config_path: '/tmp/config.json',
-    }) + '\n'));
-    children[0].child.emit('close', 0);
-    assert.equal(statusBody(await request(base, '/status', { token: 'test-session-token' })).state, 'idle');
-  });
+    await waitFor(() => received.length === 1);
+    assert.equal(received[0].invite, 'waspflow://join?coordinator=http%3A%2F%2Fcoordinator.example&token=invite-token&name=Oshin%27s%20Collective');
+    assert.equal(children.length, 0);
+    setConfig({ coordinator_url: 'http://coordinator.example', collective_token: 'invite-token', key_id: 'member', approval_request: 'wfapr1.example' });
+    await waitFor(async () => statusBody(await request(base, '/status', { token: 'test-session-token' })).state === 'pending_approval');
+  }, { joinFederation: async (input) => { received.push(input); return { status: 'joined' }; } });
 });
 
 test('POST /submit supervises the guided submit verb and GET /submit/status proxies its JSON lifecycle', async () => {
@@ -875,10 +870,14 @@ test('parseJoinInvite normalizes deep links, pasted commands, and raw tokens', (
     { coordinatorUrl: 'http://127.0.0.1:8787', token: 'command-token' },
   );
   assert.deepEqual(
+    parseJoinInvite('https://coordinator.example raw-token'),
+    { coordinatorUrl: 'https://coordinator.example', token: 'raw-token' },
+  );
+  assert.deepEqual(
     parseJoinInvite('raw-token', 'https://coordinator.example/'),
     { coordinatorUrl: 'https://coordinator.example', token: 'raw-token' },
   );
-  assert.throws(() => parseJoinInvite('raw-token'), /previously known coordinator/);
+  assert.throws(() => parseJoinInvite('raw-token'), /complete invite link/);
 });
 
 test('openFederationUi opens the tokenized local URL for a running daemon', async () => {

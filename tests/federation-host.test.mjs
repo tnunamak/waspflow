@@ -9,12 +9,14 @@ import { startCoordinator } from '../lib/federation-coordinator.mjs';
 import {
   createJoinInvite,
   ensureHostState,
+  normalizeNgrokDomain,
   parseTunnel,
   readCollectiveToken,
   resolveLanUrl,
 } from '../lib/federation-host.mjs';
 import { NgrokUnavailableError, ngrokUnavailableGuidance, startNgrokTunnel } from '../lib/federation-coordinator-hosting.mjs';
 import { parseJoinInvite } from '../lib/federation-daemon.mjs';
+import { joinFederation } from '../lib/federation-join.mjs';
 
 const execFileAsync = promisify(execFile);
 const CLI = join(process.cwd(), 'bin', 'waspflow-federation');
@@ -45,6 +47,8 @@ test('host reachability flags parse strictly and LAN uses the discovered local a
   assert.deepEqual(parseTunnel('url:https://collective.example/'), { kind: 'url', publicUrl: 'https://collective.example' });
   assert.throws(() => parseTunnel('url:http://not-secure.example'), /https origin/);
   assert.throws(() => parseTunnel('other'), /--tunnel must be/);
+  assert.equal(normalizeNgrokDomain('Quiet-Otter.Ngrok-Free.Dev'), 'quiet-otter.ngrok-free.dev');
+  assert.throws(() => normalizeNgrokDomain('https://quiet-otter.ngrok-free.dev'), /domain name/);
   assert.equal(resolveLanUrl({ port: 8787, networkInterfaces: { eth0: [{ family: 'IPv4', internal: false, address: '192.168.4.10' }] } }), 'http://192.168.4.10:8787');
 });
 
@@ -158,9 +162,7 @@ test('the coordinator tunnel uses an injected SDK and gives a guided fallback fo
   assert.match(ngrokUnavailableGuidance(), /Install the ngrok agent/);
 });
 
-test('the tunnel pins a previously assigned domain and falls back unpinned when ngrok rejects it', async () => {
-  // Stable public URL across coordinator restarts: the recorded hostname is
-  // passed as `domain`; a rejected pin retries unpinned rather than staying down.
+test('the tunnel uses an explicitly configured permanent domain and falls back when ngrok rejects it', async () => {
   const forwarded = [];
   const pinned = await startNgrokTunnel({
     port: 8787,
@@ -191,4 +193,31 @@ test('the tunnel pins a previously assigned domain and falls back unpinned when 
   assert.equal(fallback.url, 'https://fresh-crab.ngrok-free.dev');
   assert.equal(fallback.domainFellBack, true);
   assert.match(fallback.domainError, /not allowed/);
+});
+
+test('joining a collective hosted on this machine approves the member locally', async () => {
+  const hostHome = await mkdtemp(join(tmpdir(), 'wf-fed-self-host-'));
+  const memberHome = await mkdtemp(join(tmpdir(), 'wf-fed-self-member-'));
+  const oldMemberHome = process.env.WASPFLOW_FEDERATION_HOME;
+  const oldCoordinatorHome = process.env.WASPFLOW_FEDERATION_COORDINATOR_HOME;
+  const state = ensureHostState({ home: hostHome, port: 0 });
+  const roster = new Map(Object.entries(JSON.parse(await readFile(state.config.roster_path, 'utf8'))));
+  const server = await startCoordinator({ dataDir: state.config.data_dir, token: readCollectiveToken(state.config), roster, port: 0 });
+  try {
+    const { port } = server.address();
+    state.config.port = port;
+    await writeFile(join(hostHome, 'host.json'), JSON.stringify(state.config));
+    process.env.WASPFLOW_FEDERATION_HOME = memberHome;
+    process.env.WASPFLOW_FEDERATION_COORDINATOR_HOME = hostHome;
+    const result = await joinFederation({ invite: `http://127.0.0.1:${port}/join#${readCollectiveToken(state.config)}`, keyId: 'local-member', hostHome });
+    assert.equal(result.autoApproved, true);
+    assert.ok(JSON.parse(await readFile(state.config.roster_path, 'utf8'))['local-member']);
+    assert.equal(result.approvalRequest, undefined);
+  } finally {
+    if (oldMemberHome === undefined) delete process.env.WASPFLOW_FEDERATION_HOME; else process.env.WASPFLOW_FEDERATION_HOME = oldMemberHome;
+    if (oldCoordinatorHome === undefined) delete process.env.WASPFLOW_FEDERATION_COORDINATOR_HOME; else process.env.WASPFLOW_FEDERATION_COORDINATOR_HOME = oldCoordinatorHome;
+    await new Promise((resolve) => server.close(resolve));
+    await rm(hostHome, { recursive: true, force: true });
+    await rm(memberHome, { recursive: true, force: true });
+  }
 });

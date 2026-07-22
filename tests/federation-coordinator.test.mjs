@@ -113,8 +113,8 @@ test('browser navigation receives the public landing and join pages without expo
     const join = await fetch(`${base}/join`, { headers: { accept: 'text/html' } });
     assert.equal(join.status, 200);
     const joinBody = await join.text();
-    assert.match(joinBody, /You’re invited to a Waspflow Federation collective/);
-    assert.match(joinBody, /waspflow federation join/);
+    assert.match(joinBody, /You’re invited to Waspflow Federation/);
+    assert.match(joinBody, /Copy invite link/);
     assert.match(joinBody, /location\.href/);
     assert.doesNotMatch(joinBody, new RegExp(TOKEN));
 

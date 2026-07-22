@@ -126,17 +126,13 @@ function runCli(args, { home, cwd = process.cwd(), env = {} } = {}) {
   });
 }
 
-test('join: auto-generates a keypair and persists config with no PEM/roster/digest exposed to the human path', async () => {
+test('join: generates a private identity and gives the member one approval request', async () => {
   await withCoordinator(async ({ coordinatorUrl }) => {
     await withMemberHome(async (home) => {
       const { stdout } = await runCli(['join', coordinatorUrl, 'test-invite-token', '--key-id', 'tim-author'], { home });
-      assert.match(stdout, /joined .* as 'tim-author'/);
-      assert.match(stdout, /send this public key to the coordinator operator/);
-      // The printed snippet is a roster line, not a raw command the human
-      // has to construct or a private key — the actual pain point being
-      // fixed (see bin/waspflow-federation-submit's old --private-key-file
-      // flag surface).
-      assert.match(stdout, /"tim-author":"-----BEGIN PUBLIC KEY/);
+      assert.match(stdout, /Send this approval request to your operator any way you like:/);
+      assert.match(stdout, /wfapr1\./);
+      assert.doesNotMatch(stdout, /PUBLIC KEY|PEM|roster/i);
 
       const config = JSON.parse(await readFile(join(home, 'config.json'), 'utf8'));
       assert.equal(config.coordinator_url, coordinatorUrl);
@@ -153,7 +149,7 @@ test('join: running it twice against the same coordinator is idempotent, not a s
       await runCli(['join', coordinatorUrl, 'test-invite-token', '--key-id', 'tim-author'], { home });
       const before = await readFile(join(home, 'config.json'), 'utf8');
       const { stdout } = await runCli(['join', coordinatorUrl, 'test-invite-token', '--key-id', 'tim-author'], { home });
-      assert.match(stdout, /already joined/);
+      assert.match(stdout, /Already joined/);
       const after = await readFile(join(home, 'config.json'), 'utf8');
       assert.equal(before, after);
     });
@@ -190,6 +186,28 @@ test('approve: accepts the coordinator roster path from WASPFLOW_FEDERATION_COOR
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('approve: accepts a compact approval request', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'wf-fed-approve-request-'));
+  const rosterFile = join(directory, 'roster.json');
+  try {
+    await writeFile(rosterFile, JSON.stringify({ owner: '-----BEGIN PUBLIC KEY-----\nowner\n-----END PUBLIC KEY-----\n' }));
+    const request = `wfapr1.${Buffer.from(JSON.stringify({ key_id: 'oshin', public_key_pem: '-----BEGIN PUBLIC KEY-----\\nmember\\n-----END PUBLIC KEY-----\\n' })).toString('base64url')}`;
+    await runCli(['approve', request, '--roster-file', rosterFile]);
+    assert.match(JSON.parse(await readFile(rosterFile, 'utf8')).oshin, /BEGIN PUBLIC KEY/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('approve: accepts the legacy one-line member record', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'wf-fed-approve-legacy-'));
+  const rosterFile = join(directory, 'roster.json');
+  const member = { oshin: '-----BEGIN PUBLIC KEY-----\nlegacy-member\n-----END PUBLIC KEY-----\n' };
+  try {
+    await writeFile(rosterFile, JSON.stringify({ owner: '-----BEGIN PUBLIC KEY-----\nowner\n-----END PUBLIC KEY-----\n' }));
+    await runCli(['approve', JSON.stringify(member), '--roster-file', rosterFile]);
+    assert.deepEqual(JSON.parse(await readFile(rosterFile, 'utf8')), { owner: '-----BEGIN PUBLIC KEY-----\nowner\n-----END PUBLIC KEY-----\n', ...member });
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test('status: reports "not joined" before join, and the joined identity after', async () => {
@@ -288,7 +306,7 @@ test('join: auto-populates the local roster cache from the coordinator\'s GET /r
       // The human-relay snippet is still printed (membership approval stays
       // a real human step) and the concise copy must still state the actual
       // number of already-known peers.
-      assert.match(stdout, /existing member keys: 1/);
+      assert.match(stdout, /Send this approval request/);
 
       const config = JSON.parse(await readFile(join(home, 'config.json'), 'utf8'));
       assert.equal(config.roster[PRE_REGISTERED_AUTHOR_KEY_ID], preRegisteredAuthorPublicKeyPem);

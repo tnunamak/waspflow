@@ -142,28 +142,24 @@ async function main() {
       writeStatus(statusFile, status);
       fail(`could not read ngrok token: ${error.message}`);
     }
-    // The assigned hostname from the first successful dial is pinned for
-    // every later one; without it a free-plan restart gets a session-random
-    // URL and silently invalidates every outstanding invite.
-    const domainPath = path.join(path.dirname(hostConfig.reachability.token_path), 'ngrok-domain');
-    let pinnedDomain = null;
-    try { pinnedDomain = fs.readFileSync(domainPath, 'utf8').trim() || null; } catch { /* first run */ }
+    let previousPublicUrl = hostConfig.reachability.previous_public_url || null;
+    try { previousPublicUrl = previousPublicUrl || JSON.parse(fs.readFileSync(hostConfig.status_path, 'utf8')).public_url || null; } catch { /* first run */ }
+    const configuredDomain = hostConfig.reachability.domain || null;
     try {
       const { startNgrokTunnel, loadNgrokSdkFromRuntime } = await import('../lib/federation-coordinator-hosting.mjs');
       tunnel = await startNgrokTunnel({
         port: address.port,
         authtoken,
-        domain: pinnedDomain,
+        domain: configuredDomain,
         loadSdk: () => loadNgrokSdkFromRuntime(hostConfig.reachability.runtime_path),
       });
       status = { ...status, status: 'public_listening', public_url: tunnel.url };
       const assignedHost = new URL(tunnel.url).hostname;
-      if (pinnedDomain && (tunnel.domainFellBack || assignedHost !== pinnedDomain)) {
+      if ((configuredDomain && (tunnel.domainFellBack || assignedHost !== configuredDomain)) || (!configuredDomain && previousPublicUrl && previousPublicUrl !== tunnel.url)) {
         status.public_url_changed = true;
-        status.previous_public_url = `https://${pinnedDomain}`;
-        process.stderr.write(`warning: the collective's public address changed from https://${pinnedDomain} to ${tunnel.url}; invites sent before this restart no longer work — send fresh ones with: waspflow federation invite\n`);
+        status.previous_public_url = configuredDomain ? `https://${configuredDomain}` : previousPublicUrl;
+        process.stderr.write(`warning: the collective's public address changed from ${status.previous_public_url} to ${tunnel.url}; invites sent before this restart no longer work — send fresh ones with: waspflow federation invite\n`);
       }
-      try { fs.writeFileSync(domainPath, `${assignedHost}\n`, { mode: 0o600 }); } catch { /* pinning is best-effort */ }
     } catch (error) {
       const { NgrokUnavailableError } = await import('../lib/federation-coordinator-hosting.mjs');
       status = {
