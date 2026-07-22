@@ -30,7 +30,7 @@ local daemon and browser UI. The complete contributor journey is below.
 **Install on Linux (first-class):**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tnunamak/waspflow/main/bin/federation-install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/tnunamak/waspflow/waspflow/fedgui-e2e/bin/federation-install.sh | sh
 ```
 
 The installer downloads the latest Linux `.deb` when it can install one, or a
