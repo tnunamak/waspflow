@@ -1,0 +1,219 @@
+{
+  "task_id": "20260722-033500-list",
+  "series": "C",
+  "profile": "code-change",
+  "query": "list",
+  "status": "packed",
+  "created_at": "2026-07-22T03:35:00Z",
+  "repo_root": "/home/tnunamak/code/waspflow-fedgui-e2e",
+  "workspace": "/home/tnunamak/code/waspflow-fedgui-e2e/devspecs/tasks/20260722-033500-list",
+  "artifacts": {
+    "series": "C",
+    "index": "C00-index.md",
+    "first_slice": "C01-list-plan.md",
+    "result": "C01-list-result.md",
+    "slices": [
+      {
+        "id": "C01",
+        "title": "list",
+        "plan": "C01-list-plan.md",
+        "result": "C01-list-result.md",
+        "kind": "slice"
+      }
+    ]
+  },
+  "predicted_context": {
+    "relevant_areas": [
+      "docs",
+      "public"
+    ],
+    "primary_files": [
+      {
+        "path": "public/app.mjs",
+        "title": "public/app.mjs (javascript)",
+        "kind": "source_context",
+        "role": "implementation_surface",
+        "evidence": [
+          "query term match in body: list"
+        ]
+      }
+    ],
+    "docs_plans_config": [
+      {
+        "path": "docs/design/FEDERATION_V0_CONFORMANCE_MATRIX.md",
+        "title": "Federation v0 Docker Sandboxes conformance matrix",
+        "kind": "design",
+        "role": "background_decisions",
+        "evidence": [
+          "section-packed context: Federation v0 Docker Sandboxes conformance matrix \u003e Gate table; Federation v0 Docker Sandboxes conformance matrix \u003e Adversarial acceptance suite coverage (host-side assertions)",
+          "query term match in body: list",
+          "authority prior: canonical design path",
+          "authority prior: classifier confidence",
+          "authority prior: classifier design/proposal authority"
+        ]
+      },
+      {
+        "path": "docs/design/FEDERATION_VMVERIFY_REPORT.md",
+        "title": "Federation VM verification report",
+        "kind": "design",
+        "role": "background_decisions",
+        "evidence": [
+          "section-packed context: Federation VM verification report \u003e Journey evidence",
+          "query term match in body: list",
+          "authority prior: canonical design path",
+          "authority prior: classifier confidence",
+          "authority prior: classifier design/proposal authority"
+        ]
+      }
+    ],
+    "noise_risks": [
+      {
+        "path": "docs/design/FEDERATION_V0_UAT_REPORT.md",
+        "title": "Federation v0 UAT report — Docker Sandboxes backend",
+        "kind": "design",
+        "role": "excluded_noise",
+        "evidence": [
+          "section-packed context: Federation v0 UAT report — Docker Sandboxes backend \u003e Autonomous fix loop: entrypoints, headless execution, and real containment results; Federation v0 UAT report — Docker Sandboxes backend \u003e Autonomous fix loop: entrypoints, headless execution, and real containment results \u003e Real containment results from graduation gates B, C, E, F, G, run against a live sandbox; Federation v0 UAT report — Docker Sandboxes backend \u003e Install UX \u003e `DockerSbxBackend` (`lib/federation-docker-backend.mjs`)",
+          "authority prior: current intent anchor because current decision context is present",
+          "query term match in body: list",
+          "authority prior: canonical design path",
+          "authority prior: blocked, closed, stale, or superseded"
+        ]
+      },
+      {
+        "path": "docs/design/PRODUCT_SYNTHESIS.md",
+        "title": "Waspflow Product Synthesis",
+        "kind": "design",
+        "role": "excluded_noise",
+        "evidence": [
+          "section-packed context: Waspflow Product Synthesis \u003e Exact UX \u003e Status/List Output",
+          "indexed section match: Waspflow Product Synthesis \u003e Exact UX \u003e Status/List Output lines 144-153",
+          "query term match in body: list",
+          "authority prior: canonical design path",
+          "authority prior: blocked, closed, stale, or superseded"
+        ]
+      }
+    ],
+    "related_git_receipts": [
+      {
+        "sha": "4afda53d9a08ea06794f487c8df01b6b1bc77f75",
+        "short_sha": "4afda53",
+        "committed_at": "2026-07-21",
+        "subject": "feat(federation): Wave B product IA — Contribute/Requests/Activity/Settings/Help (lane output)",
+        "matched_paths": [
+          "public/app.mjs"
+        ],
+        "signals": [
+          "touched 1 packed path(s)"
+        ]
+      },
+      {
+        "sha": "28ae952fc3ea9d01ebf3493cba69de334b3577f3",
+        "short_sha": "28ae952",
+        "committed_at": "2026-07-21",
+        "subject": "fix(federation-webui): stop the status poll from wiping user input (join was impossible)",
+        "matched_paths": [
+          "public/app.mjs"
+        ],
+        "matched_terms": [
+          "list"
+        ],
+        "signals": [
+          "touched 1 packed path(s)",
+          "matched query anchors"
+        ]
+      },
+      {
+        "sha": "df069324f0ccf1099b7474a5c542ed3638e03dd4",
+        "short_sha": "df06932",
+        "committed_at": "2026-07-21",
+        "subject": "fix(federation-webui): honest submit-form labels + task-card age",
+        "matched_paths": [
+          "public/app.mjs"
+        ],
+        "signals": [
+          "touched 1 packed path(s)"
+        ]
+      }
+    ]
+  },
+  "advisory_files": [
+    {
+      "path": "docs/design/FEDERATION_WAVEA_REPORT.md",
+      "kind": "prior-source",
+      "source": "checkpoint_fact",
+      "evidence": [
+        "task 20260722-030727-integrate-federation-wave-a-observability-with-w checkpoint cp_20260722T031108Z_b02_validated read `docs/design/FEDERATION_WAVEA_REPORT.md`"
+      ],
+      "agent_check": "Verify this prior source lead before choosing an edit target."
+    },
+    {
+      "path": "tests/federation-webui.test.mjs",
+      "kind": "prior-test",
+      "source": "checkpoint_fact",
+      "evidence": [
+        "task 20260722-030727-integrate-federation-wave-a-observability-with-w checkpoint cp_20260722T031108Z_b02_validated read test `tests/federation-webui.test.mjs`"
+      ],
+      "agent_check": "Verify this prior test lead before editing."
+    },
+    {
+      "path": "lib/federation-coordinator.mjs",
+      "kind": "prior-noise",
+      "source": "checkpoint_fact",
+      "evidence": [
+        "task 20260722-030727-integrate-federation-wave-a-observability-with-w checkpoint cp_20260722T031100Z_b01_validated called distracting `lib/federation-coordinator.mjs`"
+      ],
+      "agent_check": "Treat as possible noise or reference-only context unless this task verifies it."
+    },
+    {
+      "path": "docs/design/FEDERATION_WAVEB_REPORT.md",
+      "kind": "prior-source",
+      "source": "checkpoint_fact",
+      "evidence": [
+        "task 20260722-030727-integrate-federation-wave-a-observability-with-w checkpoint cp_20260722T031108Z_b02_validated read `docs/design/FEDERATION_WAVEB_REPORT.md`",
+        "task 20260722-030727-integrate-federation-wave-a-observability-with-w checkpoint cp_20260722T031108Z_b02_validated edited `docs/design/FEDERATION_WAVEB_REPORT.md`"
+      ],
+      "agent_check": "Verify this prior source lead before choosing an edit target."
+    },
+    {
+      "path": "public/app.mjs",
+      "kind": "prior-source",
+      "source": "checkpoint_fact",
+      "evidence": [
+        "task 20260722-030727-integrate-federation-wave-a-observability-with-w checkpoint cp_20260722T031108Z_b02_validated read `public/app.mjs`",
+        "task 20260722-030727-integrate-federation-wave-a-observability-with-w checkpoint cp_20260722T031108Z_b02_validated edited `public/app.mjs`",
+        "task 20260722-030727-integrate-federation-wave-a-observability-with-w checkpoint cp_20260722T031100Z_b01_validated read `public/app.mjs`"
+      ],
+      "agent_check": "Verify this prior source lead before choosing an edit target."
+    }
+  ],
+  "risk_cards": [
+    {
+      "id": "prior-noise",
+      "title": "Prior checkpoint recorded distracting context",
+      "severity": "low",
+      "source": "checkpoint_fact",
+      "evidence": [
+        "task 20260722-030727-integrate-federation-wave-a-observability-with-w checkpoint cp_20260722T031100Z_b01_validated called distracting `lib/federation-coordinator.mjs`",
+        "task 20260722-030727-integrate-federation-wave-a-observability-with-w checkpoint cp_20260722T031100Z_b01_validated called distracting `lib/federation-harnesses.mjs`"
+      ],
+      "agent_check": "Keep that family as reference-only unless this task verifies it.",
+      "count": 2
+    }
+  ],
+  "confidence": {
+    "primary_file_confidence": "medium",
+    "test_coverage_confidence": "low",
+    "docs_config_confidence": "high",
+    "git_receipt_confidence": "high",
+    "noise_risk": "medium",
+    "pack_completeness": "low",
+    "why": [
+      "found 1 likely primary file(s)",
+      "test companion coverage was not evident from the initial pack",
+      "found 3 related Git receipt(s)",
+      "2 file(s) were downgraded as likely noise"
+    ],
+    "agent_instruction": "Validate the test and integration surface before editing. Record critical misses and distracting inclusions in the slice result or a task checkpoint."
+  }
+}

@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openFederationUi, parseJoinInvite, startFederationDaemon } from '../lib/federation-daemon.mjs';
+import { configHome } from '../lib/federation-config.mjs';
 
 function fakeChild() {
   const child = new EventEmitter();
@@ -37,6 +38,8 @@ async function withDaemon(fn, daemonOptions = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'wf-federation-daemon-'));
   const ledgerPath = join(directory, 'ledger.json');
   const settingsPath = join(directory, 'settings.json');
+  const sourcePath = join(directory, 'source');
+  await mkdir(sourcePath);
   let config = null;
   const children = [];
   const coordinatorCalls = [];
@@ -62,7 +65,7 @@ async function withDaemon(fn, daemonOptions = {}) {
       });
     },
     startDockerLogin: daemonOptions.startDockerLogin,
-    identityProbe: daemonOptions.identityProbe,
+    identityProbe: daemonOptions.identityProbe || (async () => ({ docker_account: null, providers: [] })),
     now: daemonOptions.now,
   });
   const base = `http://127.0.0.1:${daemon.info.port}`;
@@ -74,6 +77,7 @@ async function withDaemon(fn, daemonOptions = {}) {
       coordinatorCalls,
       ledgerPath,
       settingsPath,
+      sourcePath,
       setConfig: (value) => { config = value; },
       setTaskListResponse: (value) => { taskListResponse = value; },
     });
@@ -208,7 +212,7 @@ test('GET /ledger returns completed entries newest first', async () => {
   }
 });
 
-test('identity, task detail, and verified result endpoints keep identities private and cache slow identity probes', async () => {
+test('identity, task detail, and verified result endpoints keep identities private and cache identity probes', async () => {
   const digest = 'a'.repeat(64);
   const artifactBytes = Buffer.from('result artifact bytes');
   const artifactDigest = (await import('node:crypto')).createHash('sha256').update(artifactBytes).digest('hex');
@@ -235,7 +239,7 @@ test('identity, task detail, and verified result endpoints keep identities priva
     const secondIdentity = await request(base, '/identity', { token: 'test-session-token' });
     assert.deepEqual(JSON.parse(firstIdentity.text), {
       docker_account: 'oshin', providers: [{ service: 'anthropic', capacity_kind: 'subscription', account_email: 'oshin@example.test', tier: 'max', authed: true }],
-      key_id: 'oshin', coordinator_url: 'http://coordinator.example', collective_name: 'Friends',
+      key_id: 'oshin', coordinator_url: 'http://coordinator.example', collective_name: 'Friends', refreshing: false,
     });
     assert.equal(identityCalls, 1);
     assert.equal(secondIdentity.status, 200);
@@ -515,17 +519,17 @@ test('POST /join accepts an invite and shells out to the guided join verb', asyn
 });
 
 test('POST /submit supervises the guided submit verb and GET /submit/status proxies its JSON lifecycle', async () => {
-  await withDaemon(async ({ base, children, setConfig }) => {
+  await withDaemon(async ({ base, children, setConfig, sourcePath }) => {
     setConfig({ coordinator_url: 'http://coordinator.example' });
     const response = await request(base, '/submit', {
       method: 'POST',
       token: 'test-session-token',
-      body: { source: '/work/project', prompt: 'Fix the test failure.', display_id: 'oshin' },
+      body: { source: sourcePath, prompt: 'Fix the test failure.', display_id: 'oshin' },
     });
     assert.equal(response.status, 202);
     assert.deepEqual(children[0].args[1], [
       '/real/path/to/bin/waspflow-federation', 'submit', '--display-id', 'oshin',
-      '--source', '/work/project', '--prompt', 'Fix the test failure.',
+      '--source', sourcePath, '--prompt', 'Fix the test failure.',
     ]);
 
     const digest = `sha256:${'a'.repeat(64)}`;
@@ -550,6 +554,66 @@ test('POST /submit supervises the guided submit verb and GET /submit/status prox
     assert.equal(taskStatus.status, 200);
     assert.equal(JSON.parse(taskStatus.text).status, 'CLAIMED');
     assert.equal(statusBody(await request(base, '/status', { token: 'test-session-token' })).submission.state, 'claimed');
+  });
+});
+
+test('daemon refuses the real ledger path under a Node test context', async () => {
+  await assert.rejects(
+    startFederationDaemon({
+      token: 'test-session-token',
+      ledgerPath: join(configHome(), 'ledger.json'),
+      environment: { NODE_TEST_CONTEXT: 'tests/federation-daemon.test.mjs' },
+    }),
+    /refusing to use the real Federation ledger/,
+  );
+});
+
+test('GET /identity returns cached or partial data immediately while a slow probe refreshes in the background', async () => {
+  let release;
+  const probe = new Promise((resolve) => { release = resolve; });
+  await withDaemon(async ({ base }) => {
+    const started = Date.now();
+    const response = await request(base, '/identity', { token: 'test-session-token' });
+    assert.ok(Date.now() - started < 100, 'identity response must not await its probe');
+    assert.deepEqual(JSON.parse(response.text), { docker_account: null, providers: [], key_id: null, coordinator_url: null, refreshing: true });
+    release({ docker_account: 'oshin', providers: [] });
+    await waitFor(async () => JSON.parse((await request(base, '/identity', { token: 'test-session-token' })).text).docker_account === 'oshin');
+  }, { identityProbe: () => probe });
+});
+
+test('GET /requests returns only the local author history and merges the active local submission', async () => {
+  const digest = 'a'.repeat(64);
+  await withDaemon(async ({ base, children, setConfig, sourcePath, coordinatorCalls }) => {
+    setConfig({ coordinator_url: 'http://coordinator.example', collective_token: 'collective-token', key_id: 'tim-author' });
+    const response = await request(base, '/submit', { method: 'POST', token: 'test-session-token', body: { source: sourcePath, prompt: 'Fix it', display_id: 'Local request' } });
+    assert.equal(response.status, 202);
+    children[0].child.stdout.emit('data', Buffer.from(`task_digest=sha256:${digest} status=QUEUED\n`));
+    const requests = await request(base, '/requests', { token: 'test-session-token' });
+    assert.deepEqual(JSON.parse(requests.text), [{ task_digest: `sha256:${digest}`, display_id: 'Local request', status: 'queued', published_at: null, has_result: false }]);
+    assert.ok(coordinatorCalls.some((call) => call.url === 'http://coordinator.example/requests?author=tim-author'));
+  }, { fetchImpl: async (url) => {
+    if (url.endsWith('/roster')) return new Response(JSON.stringify({ roster: [{ key_id: 'tim-author' }] }), { status: 200 });
+    if (url.includes('/requests?')) return new Response(JSON.stringify([{ task_digest: 'b'.repeat(64), author: 'other', display_id: 'Not mine', status: 'SETTLED', published_at: '2026-07-21T00:00:00.000Z', has_result: true }]), { status: 200 });
+    return new Response(JSON.stringify([]), { status: 200 });
+  } });
+});
+
+test('daemon serves a token-exempt favicon and surfaces child stderr for contribution and submission failures', async () => {
+  await withDaemon(async ({ base, children, setConfig, sourcePath }) => {
+    const icon = await request(base, '/favicon.ico');
+    assert.equal(icon.status, 204);
+    setConfig({ coordinator_url: 'http://coordinator.example' });
+    await request(base, '/contribute/start', { method: 'POST', token: 'test-session-token' });
+    children[0].child.stderr.emit('data', Buffer.from('first detail\nactual contribution failure\n'));
+    children[0].child.emit('close', 1);
+    assert.equal(statusBody(await request(base, '/status', { token: 'test-session-token' })).detail, 'actual contribution failure');
+    await request(base, '/submit', { method: 'POST', token: 'test-session-token', body: { source: sourcePath, prompt: 'Fix it', display_id: 'Broken request' } });
+    children[1].child.stderr.emit('data', Buffer.from('actual submission failure\n'));
+    children[1].child.emit('close', 1);
+    assert.equal(statusBody(await request(base, '/status', { token: 'test-session-token' })).submission.detail, 'actual submission failure');
+    const invalid = await request(base, '/submit', { method: 'POST', token: 'test-session-token', body: { source: join(sourcePath, 'missing'), prompt: 'Fix it', display_id: 'Missing folder' } });
+    assert.equal(invalid.status, 400);
+    assert.match(JSON.parse(invalid.text).error, /source folder does not exist/);
   });
 });
 

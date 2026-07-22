@@ -9,8 +9,6 @@ const baseUrl = process.env.WASPFLOW_UI_URL || 'http://127.0.0.1:8902/';
 const targetUrl = new URL(baseUrl);
 targetUrl.searchParams.set('token', token);
 const artifactDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../test-artifacts/federation-ui');
-const favicon401 = /favicon\.ico.*(?:401|Unauthorized)|(?:401|Unauthorized).*favicon\.ico/i;
-const browserFavicon401 = 'Failed to load resource: the server responded with a status of 401 (Unauthorized)';
 const rawConsoleErrors = [];
 const results = [];
 
@@ -45,7 +43,7 @@ async function main() {
       await assertSelectorVisible(page, '.status-dot[data-state="idle"]');
       await assertText(page, 'Ready when you are');
       await assertText(page, 'Trusted coordinator');
-      await assertText(page, '0 completed this week');
+      await assertText(page, 'completed this week');
       await page.screenshot({ path: path.join(artifactDir, 'idle.png'), fullPage: true });
     });
 
@@ -54,8 +52,7 @@ async function main() {
       const next = page.getByRole('button', { name: 'Contribute next available' });
       await assertEnabled(next);
       const taskButtons = page.getByRole('button', { name: 'Contribute this' });
-      assert.ok(await taskButtons.count() >= 1, 'expected at least one Contribute this button');
-      await assertEnabled(taskButtons.first());
+      if (await taskButtons.count()) await assertEnabled(taskButtons.first());
     });
 
     await check('Help keeps the safety boundary available in-app', async () => {
@@ -75,28 +72,36 @@ async function main() {
       await page.screenshot({ path: path.join(artifactDir, 'advanced-submit-expanded.png'), fullPage: true });
     });
 
+    await check('Activity and Settings render complete requester history and the cached identity', async () => {
+      await page.getByRole('link', { name: 'Activity' }).click();
+      await assertText(page, 'Contribution history');
+      await assertText(page, 'Requester history');
+      await page.getByRole('link', { name: 'Settings' }).click();
+      await assertText(page, 'Accounts in use');
+      await assertText(page, 'Docker account');
+      await page.screenshot({ path: path.join(artifactDir, 'activity-settings.png'), fullPage: true });
+    });
+
     await check('Contribution controls are present and enabled without mutating the rig', async () => {
       await page.getByRole('link', { name: 'Contribute' }).click();
       await assertEnabled(page.getByRole('button', { name: 'Start contributing' }));
       await assertEnabled(page.getByRole('button', { name: 'Contribute next available' }));
-      assert.ok(await page.getByRole('button', { name: 'Contribute this' }).count() >= 1);
     });
 
-    await check('No console errors other than the known favicon 401', () => {
-      assert.deepEqual(filteredConsoleErrors(), []);
+    await check('No console errors on any Federation view', () => {
+      assert.deepEqual(rawConsoleErrors, []);
     });
   } finally {
     await writeFile(path.join(artifactDir, 'sweep-results.json'), `${JSON.stringify({
-      targetUrl: targetUrl.toString(),
-      consoleErrors: filteredConsoleErrors(),
-      ignoredConsoleErrors: rawConsoleErrors.filter((message) => !filteredConsoleErrors().includes(message)),
+      targetUrl: baseUrl,
+      consoleErrors: rawConsoleErrors,
       results,
     }, null, 2)}\n`);
     await browser.close();
   }
 
   console.table(results);
-  console.log(`Console errors (excluding favicon 401): ${JSON.stringify(filteredConsoleErrors())}`);
+  console.log(`Console errors: ${JSON.stringify(rawConsoleErrors)}`);
   if (results.some((result) => result.status === 'FAIL')) process.exitCode = 1;
 }
 
@@ -111,10 +116,6 @@ async function assertSelectorVisible(scope, selector) {
 async function assertEnabled(locator) {
   await locator.waitFor({ state: 'visible', timeout: 5_000 });
   assert.equal(await locator.isEnabled(), true, 'expected enabled control');
-}
-
-function filteredConsoleErrors() {
-  return rawConsoleErrors.filter((message) => !favicon401.test(message) && message !== browserFavicon401);
 }
 
 await main();

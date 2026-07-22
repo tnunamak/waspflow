@@ -376,6 +376,24 @@ test('GET /tasks requires the bearer token because it discovers tasks across the
   });
 });
 
+test('GET /requests returns every lifecycle state authored by the requested key and hides other authors', async () => {
+  await withServer(async ({ base }) => {
+    const ownQueued = await (await publish(base, signTask({ display_id: 'own queued' }))).json();
+    const ownSettled = await (await publish(base, signTask({ display_id: 'own settled' }))).json();
+    const other = await (await publish(base, signTask({ display_id: 'other task', author_key: EXECUTOR_KEY_ID }, { privateKey: executorPrivateKey, keyId: EXECUTOR_KEY_ID }))).json();
+    const claimResult = await (await claim(base, ownSettled.task_digest, { executor_key: EXECUTOR_KEY_ID, lease_seconds: 3600 })).json();
+    await submit(base, ownSettled.task_digest, { envelope: signResult(ownSettled.task_digest), claim_generation: claimResult.claim_generation, lease_token: claimResult.lease_token });
+
+    const response = await fetch(`${base}/requests?author=ed25519%3Aauthor`, { headers: authed() });
+    assert.equal(response.status, 200);
+    const requests = await response.json();
+    assert.deepEqual(requests.map((task) => task.task_digest).sort(), [ownQueued.task_digest, ownSettled.task_digest].sort());
+    assert.ok(requests.every((task) => task.author === 'ed25519:author'));
+    assert.equal(requests.find((task) => task.task_digest === ownSettled.task_digest).has_result, true);
+    assert.ok(!requests.some((task) => task.task_digest === other.task_digest));
+  });
+});
+
 test('GET /tasks returns every claimable task, lazily requeues expired claims, and excludes live claims and settled tasks', async () => {
   await withServer(async ({ base }) => {
     const queuedEnvelope = signTask({ display_id: 'queued' });

@@ -194,6 +194,12 @@ test('receipt parsers capture only the fields emitted by Claude, Codex, and Gemi
     modelUsage: { 'claude-fable-5': { inputTokens: 15166, outputTokens: 63 } },
   }));
   assert.deepEqual(claude, { model: 'claude-fable-5', usage: { input_tokens: 15166, output_tokens: 63 } });
+  assert.deepEqual(parseHarnessExecutionResult('claude-code-subscription', JSON.stringify({
+    model: 'claude-sonnet-4-5', usage: { input_tokens: 3, output_tokens: 2 }, modelUsage: { 'claude-haiku-4-5': {} },
+  })), { model: 'claude-sonnet-4-5', usage: { input_tokens: 3, output_tokens: 2 } });
+  assert.deepEqual(parseHarnessExecutionResult('claude-code-subscription', JSON.stringify({
+    usage: { input_tokens: 3, output_tokens: 2 }, modelUsage: { 'claude-haiku-4-5': {}, 'claude-sonnet-4-5': {} },
+  })), { model: 'claude-haiku-4-5, claude-sonnet-4-5', usage: { input_tokens: 3, output_tokens: 2 } });
 
   const codex = parseHarnessExecutionResult('codex', [
     JSON.stringify({ type: 'thread.started', thread_id: 'abc' }),

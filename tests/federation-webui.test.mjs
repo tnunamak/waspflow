@@ -28,6 +28,7 @@ test('web UI routes each persistent navigation destination and defaults safely t
 });
 
 test('web UI maps daemon states to the join, status, and auth views', () => {
+  assert.deepEqual(viewForStatus(null), { name: 'loading' });
   assert.deepEqual(viewForStatus({ state: 'not_joined' }), { name: 'join' });
   assert.deepEqual(viewForStatus({ state: 'contributing' }), { name: 'status', title: 'Contributing', control: 'pause' });
   assert.deepEqual(viewForStatus({ state: 'paused' }), { name: 'status', title: 'Paused', control: 'start' });
@@ -73,12 +74,20 @@ test('request lifecycle has no phantom selection and preserves all four task sta
   );
 });
 
+test('web UI keeps a neutral first-load screen, backs off failed optional fetches, and only renders a stepper for a real digest', async () => {
+  const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
+  assert.match(app, /Checking Federation status/);
+  assert.match(app, /failedRequests/);
+  assert.match(app, /nextAttemptAt/);
+  assert.match(app, /\^sha256:\[a-f0-9\]\{64\}/);
+});
+
 test('product UI contains all five surfaces and the Wave A compatible task, result, identity, and schedule affordances', async () => {
   const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
   for (const label of ['Contribute', 'Requests', 'Activity', 'Settings', 'Help', 'Download result', 'Accounts in use', 'Pause schedule', 'Only spare capacity is used']) {
     assert.match(app, new RegExp(label));
   }
-  assert.match(app, /optionalRequest\(`\/tasks\/\$\{encodeURIComponent\(selectedDigest\)\}`, null\)/);
+  assert.match(app, /optionalRequest\(`\/tasks\/\$\{encodeURIComponent\(selectedDigest\.replace\(\/\^sha256:\/, ''\)\)\}`, null\)/);
   assert.match(app, /`\/result\/\$\{encodeURIComponent\(selectedDigest\)\}\?token=/);
   assert.match(app, /optionalRequest\('\/identity', null\)/);
   assert.match(app, /optionalRequest\('\/settings', null\)/);

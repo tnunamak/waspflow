@@ -11,7 +11,8 @@ export function routeFromHash(hash = '') {
 }
 
 export function viewForStatus(status) {
-  if (!status || status.state === 'not_joined') return { name: 'join' };
+  if (!status) return { name: 'loading' };
+  if (status.state === 'not_joined') return { name: 'join' };
   if (status.state === 'pending_approval') return { name: 'pending' };
   if (status.state === 'action_needed') return { name: 'action', action: status.action || {} };
   if (status.state === 'setup_required') return { name: 'setup', checks: status.action?.checks || [] };
@@ -121,6 +122,7 @@ function banner(message) {
 }
 
 function authOrJoinView(view, status, control) {
+  if (view.name === 'loading') return panel('Checking Federation status', 'Loading your local Federation state before showing a setup or contribution action.');
   if (view.name === 'join') {
     const invite = element('textarea', { id: 'invite', placeholder: 'Paste an invite link, join command, or token', required: true });
     return panel('Join your collective', 'One paste is all it takes to get set up.',
@@ -208,7 +210,7 @@ function tokenUsage(metadata = {}) {
 }
 
 function taskDetail(task, selectedDigest, resultHref) {
-  if (!selectedDigest) return null;
+  if (!selectedDigest || !/^sha256:[a-f0-9]{64}$/i.test(selectedDigest)) return null;
   const detail = task || { task_digest: selectedDigest, status: 'queued' };
   const result = detail.result_address || detail.result_ref || detail.status?.toLowerCase?.() === 'settled';
   return element('div', { className: 'view-stack' },
@@ -312,6 +314,7 @@ function helpView(identity) {
 function createApplication(root) {
   const token = new URLSearchParams(window.location.search).get('token');
   let status = null; let availableTasks = []; let ledger = []; let requests = []; let identity = null; let settings = null; let roster = []; let selectedDigest = null; let selectedTask = null; let message = ''; let pollBusy = false; let lastRenderSignature = null;
+  const failedRequests = new Map();
 
   async function request(path, options = {}) {
     if (!token) throw new Error('This link is missing its Waspflow session token. Open Federation again from Waspflow.');
@@ -321,12 +324,24 @@ function createApplication(root) {
     return body;
   }
 
-  async function optionalRequest(path, fallback) { try { return await request(path); } catch { return fallback; } }
+  async function optionalRequest(path, fallback) {
+    const failure = failedRequests.get(path);
+    if (failure && Date.now() < failure.nextAttemptAt) return fallback;
+    try {
+      const result = await request(path);
+      failedRequests.delete(path);
+      return result;
+    } catch {
+      const attempts = (failure?.attempts || 0) + 1;
+      failedRequests.set(path, { attempts, nextAttemptAt: Date.now() + Math.min(30_000, 1_500 * (2 ** attempts)) });
+      return fallback;
+    }
+  }
   async function control(path, body) { message = ''; try { status = await request(path, { method: 'POST', body: body ? JSON.stringify(body) : undefined }); } catch (error) { message = error.message; } render(); }
-  async function submit(body) { const result = await request('/submit', { method: 'POST', body: JSON.stringify(body) }); status = result; selectedDigest = result.submission?.task_digest || selectedDigest; window.location.hash = '#/requests'; render(); }
+  async function submit(body) { const result = await request('/submit', { method: 'POST', body: JSON.stringify(body) }); status = result; selectedDigest = /^sha256:[a-f0-9]{64}$/i.test(result.submission?.task_digest || '') ? result.submission.task_digest : selectedDigest; window.location.hash = '#/requests'; render(); }
   async function saveSettings(body) { settings = await request('/settings', { method: 'POST', body: JSON.stringify(body) }); render(); }
   function select(digest) { selectedDigest = digest; selectedTask = null; window.location.hash = '#/requests'; void refreshTask(); render(); }
-  async function refreshTask() { if (!selectedDigest) return; selectedTask = await optionalRequest(`/tasks/${encodeURIComponent(selectedDigest)}`, null) || await optionalRequest(`/submit/status?task_digest=${encodeURIComponent(selectedDigest)}`, null); render(); }
+  async function refreshTask() { if (!selectedDigest || !/^sha256:[a-f0-9]{64}$/i.test(selectedDigest)) return; selectedTask = await optionalRequest(`/tasks/${encodeURIComponent(selectedDigest.replace(/^sha256:/, ''))}`, null) || await optionalRequest(`/submit/status?task_digest=${encodeURIComponent(selectedDigest)}`, null); render(); }
   function requesterEntries(entries, localIdentity) {
     return entries.filter((entry) => entry.author === 'me' || entry.role === 'requester' || entry.requester === true
       || (localIdentity && (entry.author_key === localIdentity || entry.author === localIdentity)));
@@ -342,7 +357,7 @@ function createApplication(root) {
       availableTasks = data[0]; ledger = Array.isArray(data[1]) ? data[1] : []; identity = data[2] || { key_id: status.key_id, coordinator_url: status.coordinator_url, collective_name: status.collective_name }; settings = data[3]; roster = Array.isArray(data[4]?.roster) ? data[4].roster : Array.isArray(data[4]) ? data[4] : [];
       requests = Array.isArray(baseRequests) ? baseRequests : requesterEntries(ledger, identity?.key_id);
       const submission = status.submission;
-      if (submission?.task_digest && !selectedDigest) selectedDigest = submission.task_digest;
+      if (submission?.task_digest && /^sha256:[a-f0-9]{64}$/i.test(submission.task_digest) && !selectedDigest) selectedDigest = submission.task_digest;
       if (selectedDigest) void refreshTask();
       message = '';
     } catch (error) { message = error.message === 'Failed to fetch' ? 'Waspflow is not running. Open Federation again from Waspflow.' : error.message; }

@@ -36,8 +36,11 @@ test('sanitizedEnv strips SSH agent and DOCKER_HOST exactly', () => {
   assert.equal(out.KEEP_ME, 'yes');
 });
 
-test('parseDockerAccount reads the Docker account from ANSI-formatted sbx diagnose output and returns null when absent', () => {
+test('parseDockerAccount reads account variants from ANSI-formatted sbx diagnose output and returns null when absent', () => {
   assert.equal(parseDockerAccount('\u001b[32mSigned in as oshin\u001b[0m'), 'oshin');
+  assert.equal(parseDockerAccount('Authentication — authenticated as timodl'), 'timodl');
+  assert.equal(parseDockerAccount('Docker account: timodl'), 'timodl');
+  assert.equal(parseDockerAccount('You are signed in [username: timodl]'), 'timodl');
   assert.equal(parseDockerAccount('Docker authentication required'), null);
 });
 
