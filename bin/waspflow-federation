@@ -38,6 +38,28 @@ function fail(message) {
   process.exit(1);
 }
 
+// Bind-probe on all interfaces: the strictest check, since a service holding
+// either 0.0.0.0:<port> or a single interface makes the coordinator's own
+// listen fail with EADDRINUSE.
+function localPortInUse(port) {
+  return new Promise((resolve) => {
+    const probe = require('node:net').createServer();
+    probe.once('error', () => resolve(true));
+    probe.listen({ port, host: '0.0.0.0' }, () => probe.close(() => resolve(false)));
+  });
+}
+
+function pickFreeLocalPort() {
+  return new Promise((resolve, reject) => {
+    const probe = require('node:net').createServer();
+    probe.once('error', reject);
+    probe.listen({ port: 0, host: '0.0.0.0' }, () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
 function log(message) {
   process.stderr.write(`waspflow federation: ${message}\n`);
 }
@@ -367,7 +389,7 @@ async function cmdHost(argv) {
   if (positional.length > 0 || (flags['rotate-token'] && (flags.tunnel || flags.port))) {
     fail('usage: waspflow federation host [--tunnel ngrok|url:<https://address>|lan] [--domain <name>] [--port <number>] | --rotate-token');
   }
-  const { ensureHostState, normalizeNgrokDomain, parseTunnel, resolveLanUrl, saveReachability, readCollectiveToken, readCoordinatorStatus, rotateCollectiveToken, writeCollectiveToken } = await import('../lib/federation-host.mjs');
+  const { ensureHostState, normalizeNgrokDomain, parseTunnel, resolveLanUrl, savePort, saveReachability, readCollectiveToken, readCoordinatorStatus, rotateCollectiveToken, writeCollectiveToken } = await import('../lib/federation-host.mjs');
   const port = flags.port === undefined ? 8787 : Number(flags.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) fail('--port must be a number between 1 and 65535');
   let { config, paths } = ensureHostState({ port });
@@ -413,10 +435,28 @@ async function cmdHost(argv) {
   }
 
   const previousStatus = readCoordinatorStatus(config);
+
+  // Check the local port BEFORE any prompting: a live tester typed a whole
+  // ngrok flow only to hit EADDRINUSE at the very end (another program owned
+  // the default port). An unavailable default just moves to a free port; an
+  // explicitly requested one fails fast, before the operator invests effort.
+  if (await localPortInUse(config.port)) {
+    if (flags.port !== undefined) {
+      fail(`port ${config.port} is already in use by another program on this machine — choose a different one with --port.`);
+    }
+    const moved = await pickFreeLocalPort();
+    config = savePort(config, moved);
+    log(`port ${flags.port === undefined ? 8787 : flags.port} is used by another program on this machine; your collective will use port ${moved} instead.`);
+  }
+
   let reachability = flags.tunnel ? parseTunnel(flags.tunnel) : config.reachability;
   if (!reachability) reachability = await chooseReachability();
   if (reachability.kind === 'lan') reachability = { ...reachability, publicUrl: resolveLanUrl({ port: config.port }) };
   if (reachability.kind === 'ngrok') {
+    // Account and authtoken first: a new operator has no dashboard yet, so
+    // asking for a static domain before sign-up reads backwards.
+    const runtimePath = await prepareNgrokRuntime(paths);
+    const tokenPath = await storeNgrokToken(paths);
     let domain = flags.domain ? normalizeNgrokDomain(flags.domain) : reachability.domain;
     if (!domain && process.stdin.isTTY) {
       const pasted = await askOptional('For a permanent address, copy your free static domain from https://dashboard.ngrok.com/domains and paste it (Enter to skip): ');
@@ -424,8 +464,8 @@ async function cmdHost(argv) {
     }
     reachability = {
       ...reachability,
-      runtime_path: await prepareNgrokRuntime(paths),
-      token_path: await storeNgrokToken(paths),
+      runtime_path: runtimePath,
+      token_path: tokenPath,
       ...(domain ? { domain } : {}),
       ...(previousStatus?.public_url ? { previous_public_url: previousStatus.public_url } : {}),
     };
@@ -442,7 +482,11 @@ async function cmdHost(argv) {
     checkoutChild = startCheckoutCoordinator(config);
   }
   const status = await waitForCoordinatorStatus(config);
-  if (!status) fail('the coordinator did not report ready status; check the coordinator logs and run host again to resume.');
+  if (!status) {
+    fail(checkoutChild
+      ? 'the coordinator could not start — the reason is printed just above. Fix it, then run: waspflow federation host'
+      : 'the coordinator service did not become ready. See its recent log: journalctl --user -u waspflow-federation-coordinator -n 20 — then run: waspflow federation host');
+  }
   if (status.status === 'ngrok_unavailable') fail(`${status.error}\nInstall the ngrok agent from https://ngrok.com/download, then run it against local port ${config.port}, or use --tunnel url:<https://your-address>.`);
   if (status.status === 'ngrok_error' || status.status === 'ngrok_token_missing') fail(status.error || 'the ngrok tunnel could not start');
   const publicUrl = status.public_url || reachability.publicUrl;
