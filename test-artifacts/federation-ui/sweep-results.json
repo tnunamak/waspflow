@@ -27,7 +27,19 @@
       "status": "PASS"
     },
     {
+      "name": "Settings shows a provider-start failure in the page instead of surfacing a transport error",
+      "status": "PASS"
+    },
+    {
       "name": "Contribution controls require a consented task without mutating the rig",
+      "status": "PASS"
+    },
+    {
+      "name": "Active contribution polls preserve a text selection for over ten seconds",
+      "status": "PASS"
+    },
+    {
+      "name": "Requester task detail renders the bounded execution transcript",
       "status": "PASS"
     },
     {

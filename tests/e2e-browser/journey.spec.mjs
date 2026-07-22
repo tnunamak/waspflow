@@ -97,11 +97,85 @@ async function main() {
       await page.screenshot({ path: path.join(artifactDir, 'activity-settings.png'), fullPage: true });
     });
 
+    await check('Settings shows a provider-start failure in the page instead of surfacing a transport error', async () => {
+      const attentionPage = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
+      await attentionPage.route('**/status', async (route) => route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ schema_version: 1, type: 'daemon_status', state: 'idle', detail: 'OpenAI sign-in could not start. An existing OpenAI OAuth credential needs attention before another sign-in can start.', coordinator_unavailable: false, ledger_summary: { count_7d: 0 } }),
+      }));
+      await attentionPage.route('**/identity', async (route) => route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ docker_status: 'detected', providers: [{ service: 'openai', authed: false, capacity_kind: 'subscription' }] }),
+      }));
+      try {
+        await attentionPage.goto(targetUrl.toString(), { waitUntil: 'networkidle', timeout: 15_000 });
+        await attentionPage.getByRole('link', { name: 'Settings' }).click();
+        await assertText(attentionPage, 'Sign-in needs attention');
+        await assertText(attentionPage, 'existing OpenAI OAuth credential needs attention');
+        await attentionPage.screenshot({ path: path.join(artifactDir, 'openai-signin-attention.png'), fullPage: true });
+      } finally {
+        await attentionPage.close();
+      }
+    });
+
     await check('Contribution controls require a consented task without mutating the rig', async () => {
       await page.getByRole('link', { name: 'Contribute' }).click();
       const next = page.getByRole('button', { name: 'Contribute next available' });
       if (await page.getByRole('button', { name: 'Contribute this' }).count()) await assertEnabled(next);
       else assert.equal(await next.count(), 0);
+    });
+
+    await check('Active contribution polls preserve a text selection for over ten seconds', async () => {
+      const activePage = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
+      await activePage.route('**/status', async (route) => route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ schema_version: 1, type: 'daemon_status', state: 'contributing', detail: 'Contribution is running.', contribution: { display_id: 'render-stability-check', started_at: new Date().toISOString() }, coordinator_unavailable: false, ledger_summary: { count_7d: 0 } }),
+      }));
+      try {
+        await activePage.goto(targetUrl.toString(), { waitUntil: 'networkidle', timeout: 15_000 });
+        await assertSelectorVisible(activePage, '.guard strong');
+        const selected = await activePage.locator('.guard strong').evaluate((node) => {
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          const selection = window.getSelection();
+          selection.removeAllRanges();
+          selection.addRange(range);
+          window.__waspflowSelectedNode = node;
+          return selection.toString();
+        });
+        await activePage.waitForTimeout(10_500);
+        const after = await activePage.evaluate(() => ({
+          selection: window.getSelection().toString(),
+          sameNode: window.__waspflowSelectedNode === document.querySelector('.guard strong'),
+        }));
+        assert.equal(after.selection, selected, 'polling must not clear a live text selection');
+        assert.equal(after.sameNode, true, 'polling must not replace the selected DOM node');
+        await activePage.screenshot({ path: path.join(artifactDir, 'active-selection-stable.png'), fullPage: true });
+      } finally {
+        await activePage.close();
+      }
+    });
+
+    await check('Requester task detail renders the bounded execution transcript', async () => {
+      const logPage = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
+      const digest = 'a'.repeat(64);
+      await logPage.route('**/status', async (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ schema_version: 1, type: 'daemon_status', state: 'idle', detail: 'Ready to contribute.', coordinator_unavailable: false, ledger_summary: { count_7d: 0 } }) }));
+      await logPage.route('**/requests', async (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{ task_digest: `sha256:${digest}`, display_id: 'transcript-check', status: 'SETTLED', published_at: '2026-07-22T00:00:00.000Z' }]) }));
+      await logPage.route(`**/tasks/${digest}/log`, async (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task_digest: `sha256:${digest}`, output: ['[stdout] task started', '[stderr] harness progress', ''].join('\n'), truncated: false }) }));
+      await logPage.route(`**/tasks/${digest}`, async (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task_digest: digest, display_id: 'transcript-check', author: 'ed25519:requester', status: 'SETTLED', execution_log_available: true, prompt: 'Render the transcript.' }) }));
+      try {
+        await logPage.goto(targetUrl.toString(), { waitUntil: 'networkidle', timeout: 15_000 });
+        await logPage.getByRole('link', { name: 'Requests' }).click();
+        await logPage.getByRole('button', { name: 'transcript-check' }).click();
+        await logPage.getByRole('button', { name: 'View execution log' }).click();
+        await assertText(logPage.locator('.execution-log'), 'harness progress');
+        await logPage.screenshot({ path: path.join(artifactDir, 'execution-log.png'), fullPage: true });
+      } finally {
+        await logPage.close();
+      }
     });
 
     await check('Expired sessions stop polling after two unauthorized status responses', async () => {

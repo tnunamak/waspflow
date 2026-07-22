@@ -39,6 +39,7 @@ async function withDaemon(fn, daemonOptions = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'wf-federation-daemon-'));
   const ledgerPath = join(directory, 'ledger.json');
   const settingsPath = join(directory, 'settings.json');
+  const logsDir = join(directory, 'logs');
   const sourcePath = join(directory, 'source');
   await mkdir(sourcePath);
   let config = null;
@@ -50,6 +51,7 @@ async function withDaemon(fn, daemonOptions = {}) {
     infoPath: join(directory, 'daemon.json'),
     ledgerPath,
     settingsPath,
+    logsDir,
     cliPath: '/real/path/to/bin/waspflow-federation',
     configLoader: () => config,
     spawnProcess: (...args) => {
@@ -79,6 +81,7 @@ async function withDaemon(fn, daemonOptions = {}) {
       coordinatorCalls,
       ledgerPath,
       settingsPath,
+      logsDir,
       sourcePath,
       setConfig: (value) => { config = value; },
       setTaskListResponse: (value) => { taskListResponse = value; },
@@ -598,6 +601,49 @@ test('POST /identity/signin exposes the existing browser auth handoff for an una
   }, { startProviderSignIn: async () => ({ status: 'awaiting-browser', url: 'https://auth.example/signin', code: 'ABCD-EFGH', waitForCompletion: async () => completion, cancel() {} }) });
 });
 
+test('provider sign-in replaces a stale flow and returns a clear UI state instead of a gateway error', async () => {
+  let starts = 0;
+  let cancelled = 0;
+  await withDaemon(async ({ base, setConfig }) => {
+    setConfig({ coordinator_url: 'http://coordinator.example' });
+    const first = await request(base, '/identity/signin', { method: 'POST', token: 'test-session-token', body: { service: 'openai' } });
+    assert.equal(first.status, 202, first.text);
+    const replacement = await request(base, '/identity/signin', { method: 'POST', token: 'test-session-token', body: { service: 'openai' } });
+    assert.equal(replacement.status, 202, replacement.text);
+    assert.equal(cancelled, 1, 'the stale auth listener must be cancelled before retrying');
+  }, { startProviderSignIn: async () => ({ status: 'awaiting-browser', url: `https://auth.example/${++starts}`, waitForCompletion: async () => new Promise(() => {}), cancel() { cancelled += 1; } }) });
+
+  await withDaemon(async ({ base, setConfig }) => {
+    setConfig({ coordinator_url: 'http://coordinator.example' });
+    const response = await request(base, '/identity/signin', { method: 'POST', token: 'test-session-token', body: { service: 'openai' } });
+    assert.equal(response.status, 202, response.text);
+    const body = JSON.parse(response.text);
+    assert.equal(body.state, 'idle');
+    assert.match(body.detail, /OpenAI sign-in could not start/);
+  }, { startProviderSignIn: async () => { throw new Error('the sandbox is still starting'); } });
+});
+
+test('contribution output is stored as a token-gated bounded local execution log', async () => {
+  const digest = 'a'.repeat(64);
+  await withDaemon(async ({ base, children, logsDir, setConfig }) => {
+    setConfig({ coordinator_url: 'http://coordinator.example' });
+    await request(base, '/contribute/start', { method: 'POST', token: 'test-session-token', body: { task_digest: digest } });
+    children[0].child.stdout.emit('data', Buffer.alloc(300 * 1024, 'x'));
+    children[0].child.stdout.emit('data', Buffer.from('{"schema_version":1,"type":"contributed","status":"settled","task_digest":"' + digest + '"}\n'));
+    children[0].child.stderr.emit('data', Buffer.from('harness progress\n'));
+    children[0].child.emit('close', 0);
+    const log = await request(base, `/tasks/${digest}/log`, { token: 'test-session-token' });
+    assert.equal(log.status, 200, log.text);
+    const logBody = JSON.parse(log.text);
+    assert.match(logBody.output, /harness progress/);
+    assert.equal(logBody.truncated, true);
+    const logStat = statSync(join(logsDir, `${digest}.log`));
+    assert.equal(logStat.mode & 0o777, 0o600);
+    assert.ok(logStat.size <= 256 * 1024, 'the persisted transcript must stay bounded');
+    assert.equal((await request(base, `/tasks/${digest}/log`, { token: 'wrong-token' })).status, 401);
+  });
+});
+
 test('settings persist a locally edited collective name without changing the invite-backed identity contract', async () => {
   await withDaemon(async ({ base, setConfig }) => {
     setConfig({ coordinator_url: 'http://coordinator.example', collective_name: 'Invite collective' });
@@ -640,6 +686,37 @@ test('GET /identity reports a failed Docker probe separately from an empty cache
     assert.equal(identity.docker_account, null);
     assert.equal(identity.docker_status, 'failed');
   }, { identityProbe: async () => { throw new Error('docker unavailable'); } });
+});
+
+test('identity keeps a last-confirmed provider through probe gaps and requires three negatives before sign-in is shown', async () => {
+  let current = Date.parse('2026-07-22T00:00:00.000Z');
+  const observations = [
+    { docker_account: 'ocean', providers: [{ service: 'anthropic', authed: true, capacity_kind: 'subscription' }] },
+    new Error('probe restart'),
+    { docker_account: 'ocean', providers: [{ service: 'anthropic', authed: false, capacity_kind: 'subscription' }] },
+    { docker_account: 'ocean', providers: [{ service: 'anthropic', authed: false, capacity_kind: 'subscription' }] },
+    { docker_account: 'ocean', providers: [{ service: 'anthropic', authed: false, capacity_kind: 'subscription' }] },
+  ];
+  await withDaemon(async ({ base }) => {
+    await waitFor(async () => JSON.parse((await request(base, '/identity', { token: 'test-session-token' })).text).providers[0]?.authed === true);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      current += 61_000;
+      await request(base, '/identity', { token: 'test-session-token' });
+      await waitFor(async () => {
+        const account = JSON.parse((await request(base, '/identity', { token: 'test-session-token' })).text).providers[0];
+        return attempt < 3 ? account?.checking === true : account?.authed === false;
+      });
+      const account = JSON.parse((await request(base, '/identity', { token: 'test-session-token' })).text).providers[0];
+      if (attempt < 3) assert.equal(account.authed, true, 'a transient negative must not erase the confirmed sign-in');
+    }
+  }, {
+    now: () => new Date(current),
+    identityProbe: async () => {
+      const next = observations.shift();
+      if (next instanceof Error) throw next;
+      return next;
+    },
+  });
 });
 
 test('GET /requests returns only the local author history and merges the active local submission', async () => {

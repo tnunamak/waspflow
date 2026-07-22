@@ -422,7 +422,8 @@ test('GET /tasks returns every claimable task, lazily requeues expired claims, a
     assert.deepEqual(body.map((task) => task.task_digest).sort(), [expired.task_digest, queued.task_digest].sort());
 
     const queuedTask = body.find((task) => task.task_digest === queued.task_digest);
-    assert.deepEqual(Object.keys(queuedTask).sort(), ['display_id', 'network', 'prompt', 'published_at', 'source', 'task_digest']);
+    assert.deepEqual(Object.keys(queuedTask).sort(), ['author', 'display_id', 'network', 'prompt', 'published_at', 'source', 'task_digest']);
+    assert.equal(queuedTask.author, queuedEnvelope.payload.author_key);
     assert.equal(queuedTask.network, queuedEnvelope.payload.network);
     assert.deepEqual(queuedTask.source, queuedEnvelope.payload.source);
     assert.deepEqual(queuedTask.prompt, queuedEnvelope.payload.prompt);

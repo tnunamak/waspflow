@@ -49,6 +49,45 @@ test('startAuthFlow scrapes Codex host OAuth URL and proves completion through t
   assert.equal((await flow.waitForCompletion()).status, 'complete');
 });
 
+test('startAuthFlow accepts a provider URL emitted on stderr', async () => {
+  const state = join(await mkdtemp(join(tmpdir(), 'wf-auth-state-')), 'ready');
+  const sbxBin = await stubSbx(`
+    if [ "$1" = exec ]; then
+      if [ -f '${state}' ]; then echo 'SBX_CRED_OPENAI_MODE=oauth'; else echo 'SBX_CRED_OPENAI_MODE=none'; fi
+      exit 0
+    fi
+    echo 'Open this URL to sign in to Codex OAuth:' >&2
+    echo 'https://auth.openai.com/oauth/authorize?client_id=stderr&state=xyz' >&2
+    touch '${state}'
+  `);
+  const flow = await startAuthFlow(CODEX_HARNESS, { sbxBin, sandboxId: 'codex-job', completionTimeoutMs: 2_000 });
+  assert.equal(flow.url, 'https://auth.openai.com/oauth/authorize?client_id=stderr&state=xyz');
+  assert.equal((await flow.waitForCompletion()).status, 'complete');
+});
+
+test('startAuthFlow gives a clear error instead of waiting on an existing OAuth overwrite prompt', async () => {
+  const sbxBin = await stubSbx(`
+    if [ "$1" = exec ]; then echo 'SBX_CRED_OPENAI_MODE=none'; exit 0; fi
+    echo 'OPENAI OAuth token already exists. Overwrite? (y/N): Cancelled'
+  `);
+  await assert.rejects(
+    startAuthFlow(CODEX_HARNESS, { sbxBin, sandboxId: 'codex-job' }),
+    /existing OpenAI OAuth credential needs attention/,
+  );
+});
+
+test('startAuthFlow publishes a cancellable handle before a slow URL is available', async () => {
+  const sbxBin = await stubSbx(`
+    if [ "$1" = exec ]; then echo 'SBX_CRED_OPENAI_MODE=none'; exit 0; fi
+    sleep 10
+  `);
+  let handle;
+  const starting = startAuthFlow(CODEX_HARNESS, { sbxBin, sandboxId: 'codex-job', urlTimeoutMs: 20_000, onHandle: (value) => { handle = value; } });
+  while (!handle) await new Promise((resolve) => setTimeout(resolve, 5));
+  handle.cancel();
+  await assert.rejects(starting, /exited|login URL|cancelled/);
+});
+
 test('startAuthFlow runs Claude login inside the job sandbox, scrapes visit: URL, and waits for loggedIn:true', async () => {
   const stateDir = await mkdtemp(join(tmpdir(), 'wf-auth-state-'));
   const state = join(stateDir, 'ready');

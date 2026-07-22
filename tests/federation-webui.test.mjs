@@ -15,7 +15,7 @@ test('idle contributor UI requires a task-specific consent decision and never au
   assert.match(app, /Contribute this/);
   assert.match(app, /Contribute next available/);
   assert.match(app, /No tasks are waiting right now\. Nothing will run automatically/);
-  assert.match(app, /Review next available task/);
+  assert.match(app, /Review this task/);
   assert.match(app, /Prompt: \$\{promptFirstLine/);
   assert.match(app, /Run this/);
   assert.match(app, /Skip/);
@@ -92,13 +92,14 @@ test('web UI keeps a neutral first-load screen, backs off failed optional fetche
 
 test('product UI contains all five surfaces and the Wave A compatible task, result, identity, and schedule affordances', async () => {
   const app = await readFile(new URL('../public/app.mjs', import.meta.url), 'utf8');
-  for (const label of ['Contribute', 'Requests', 'Activity', 'Settings', 'Help', 'Download result', 'Accounts in use', 'Limit to certain hours', 'Capacity guard']) {
+  for (const label of ['Contribute', 'Requests', 'Activity', 'Settings', 'Help', 'Download result', 'Accounts in use', 'Limit to certain hours', 'You approve every task before it runs', 'View execution log']) {
     assert.match(app, new RegExp(label));
   }
   assert.match(app, /optionalRequest\(`\/tasks\/\$\{encodeURIComponent\(selectedDigest\.replace\(\/\^sha256:\/, ''\)\)\}`, null\)/);
   assert.match(app, /`\/result\/\$\{encodeURIComponent\(selectedDigest\)\}\?token=/);
   assert.match(app, /optionalRequest\('\/identity', null\)/);
   assert.match(app, /optionalRequest\('\/settings', null\)/);
+  assert.doesNotMatch(app, /Capacity guard|schedule-only|usage is not available/);
 });
 
 test('identity capacity kind drives provider wording without assuming one capacity source', async () => {
@@ -131,12 +132,17 @@ test('activity rows use a whole-row plain control and recovery states do not exp
   assert.match(app, /Your collective is unreachable right now/);
   assert.match(app, /Stop now abandons the current task\. Waspflow records it as returned/);
   assert.match(app, /Sign in to \$\{displayName\}/);
+  assert.match(app, /Sign-in needs attention/);
+  assert.match(app, /sign-in could not start/i);
   assert.match(app, /settingsDraft/);
   assert.match(app, /Schedule times are in/);
   assert.match(app, /Skip to content/);
   assert.doesNotMatch(index, /<main id="app" aria-live/);
   assert.match(app, /docker_status === 'failed'/);
   assert.match(app, /Checking…/);
+  assert.match(app, /lastLayoutSignature/);
+  assert.match(app, /updateLiveBindings/);
+  assert.match(app, /data-live/);
   assert.match(index, /\.history-select \{[^}]*background: transparent/s);
   assert.match(index, /\.receipt-chip \{[^}]*color: #245139/s);
 });

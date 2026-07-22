@@ -154,6 +154,19 @@ function banner(message) {
   return message ? element('div', { className: 'notice', role: 'alert', text: message }) : null;
 }
 
+function contributionDetail(status, view) {
+  const activeTask = status?.contribution?.display_id;
+  const requester = status?.contribution?.requester || status?.contribution?.author;
+  const completion = status?.last_completed?.display_id;
+  if (view.control === 'pause' && activeTask) return `Working on '${activeTask}'${requester ? ` for ${requester}` : ''}`;
+  if (status?.state === 'idle' && completion) return `Last completed '${completion}'.`;
+  return status?.state === 'idle' ? '' : status?.detail || 'Waspflow checks for a safe next task.';
+}
+
+function guardCopy(settings) {
+  return `You approve every task before it runs. Pause anytime.${settings?.schedule?.enabled ? ' · Limited to your schedule.' : ''}`;
+}
+
 function authOrJoinView(view, status, control) {
   if (view.name === 'loading') return panel('Checking Federation status', 'Loading your local Federation state before showing a setup or contribution action.');
   if (view.name === 'join') {
@@ -192,21 +205,13 @@ function contributionStatus(status, view, control, settings, coordinatorUnavaila
   const controlLabel = isContributing ? 'Pause after current task' : status?.state === 'paused' ? 'Choose a task to resume' : 'Choose a task below';
   const count = status?.ledger_summary?.count_7d || 0;
   const collectiveName = settings?.collective_name || status?.collective_name;
-  const activeTask = status?.contribution?.display_id;
-  const requester = status?.contribution?.requester || status?.contribution?.author;
   const completion = status?.last_completed?.display_id;
-  const detail = isContributing && activeTask
-    ? `Working on '${activeTask}'${requester ? ` for ${requester}` : ''}`
-    : status?.state === 'idle' && completion
-      ? `Last completed '${completion}'.`
-      : status?.state === 'idle'
-        ? ''
-        : status?.detail || 'Waspflow checks for a safe next task.';
+  const detail = contributionDetail(status, view);
   return panel('Your contribution', null,
     collectiveName ? element('p', { className: 'collective-line', text: `Collective: ${collectiveName}` }) : null,
     element('div', { className: 'contribution-state' },
-      element('div', { className: 'status-dot', 'data-state': status?.state || 'idle' }),
-      element('div', {}, element('p', { className: 'status-label', text: view.title }), detail ? element('p', { className: 'detail', text: detail }) : null),
+      element('div', { className: 'status-dot', 'data-live': 'contribution-dot', 'data-state': status?.state || 'idle' }),
+      element('div', {}, element('p', { className: 'status-label', 'data-live': 'contribution-title', text: view.title }), element('p', { className: 'detail', 'data-live': 'contribution-detail', hidden: !detail, text: detail })),
     ),
     coordinatorUnavailable ? element('p', { className: 'notice inline-notice', role: 'status', text: 'Your collective is unreachable right now — tasks will resume when it returns.' }) : null,
     element('div', { className: 'actions' }, button(controlLabel, () => isContributing && control('/contribute/pause'), isContributing ? 'secondary' : '', { disabled: !isContributing })),
@@ -215,8 +220,8 @@ function contributionStatus(status, view, control, settings, coordinatorUnavaila
         ? [element('p', { className: 'detail', text: 'Stop now abandons the current task. Waspflow records it as returned; requester confirmation is not available yet.' }), button('Stop now', () => control('/contribute/stop', { confirm: true }), 'secondary'), button('Keep working', () => setShowStopNow(false), 'secondary')]
         : button('Stop now', () => setShowStopNow(true), 'secondary'),
     ) : null,
-    completion ? element('a', { className: 'ledger-link', href: '#/activity', text: `Finished '${completion}' · View activity` }) : element('a', { className: 'ledger-link', href: '#/activity', text: `${count} completed this week · View activity` }),
-    element('div', { className: 'guard' }, element('strong', { text: 'Capacity guard: schedule-only; usage is not available. You choose each task before it runs.' })),
+    !isContributing && (completion ? element('a', { className: 'ledger-link', href: '#/activity', text: `Finished '${completion}' · View activity` }) : element('a', { className: 'ledger-link', href: '#/activity', text: `${count} completed this week · View activity` })),
+    element('div', { className: 'guard' }, element('strong', { 'data-live': 'guard-copy', text: guardCopy(settings) })),
   );
 }
 
@@ -227,9 +232,9 @@ function taskChoices(tasks, contribute, pendingNext, setPendingNext) {
   }
   const nextTask = pendingNext || choices[0];
   return panel('Choose a task', 'Pick a request that suits your capacity.',
-    pendingNext ? panel('Review next available task', 'Nothing has been claimed yet.',
+    pendingNext ? panel('Review this task', 'Nothing runs until you approve.',
       element('p', { text: `Task: ${nextTask.display_id || 'Untitled task'}` }),
-      element('p', { text: `From: ${nextTask.author || 'Not reported'}` }),
+      element('p', { text: `From: ${nextTask.author || 'Unknown requester'}` }),
       element('p', { className: 'prompt-preview', text: `Prompt: ${promptFirstLine(nextTask.prompt_preview || nextTask.prompt)}` }),
       element('div', { className: 'actions' }, button('Run this', () => contribute(nextTask.task_digest)), button('Skip', () => setPendingNext(null), 'secondary')),
     ) : element('div', { className: 'actions' }, button('Contribute next available', () => setPendingNext(nextTask), 'secondary')),
@@ -273,7 +278,14 @@ function tokenUsage(metadata = {}) {
   return input !== undefined || output !== undefined ? `${input || 0} tokens in · ${output || 0} tokens out` : '';
 }
 
-function taskDetail(task, selectedDigest, resultHref) {
+function executionLogPanel(log) {
+  if (!log) return null;
+  return panel('Execution log', log.truncated ? 'Earlier output was truncated to keep this local log bounded.' : 'Captured from the task harness on this machine.',
+    element('pre', { className: 'execution-log', text: log.output || 'No output was captured.' }),
+  );
+}
+
+function taskDetail(task, selectedDigest, resultHref, executionLog, loadExecutionLog) {
   if (!selectedDigest || !/^sha256:[a-f0-9]{64}$/i.test(selectedDigest)) return null;
   const detail = task || { task_digest: selectedDigest, status: 'queued' };
   const result = detail.result_address || detail.result_ref || detail.status?.toLowerCase?.() === 'settled';
@@ -287,6 +299,11 @@ function taskDetail(task, selectedDigest, resultHref) {
       detail.source ? element('p', { className: 'detail', text: `Source: ${typeof detail.source === 'string' ? detail.source : detail.source.name || 'Task source'}` }) : null,
     ),
     panel('Execution receipt', 'Shared execution metadata never includes the contributor’s account identities.', receipt(detail)),
+    panel('Execution transcript', 'This local daemon keeps the harness output for tasks it ran.',
+      button('View execution log', () => loadExecutionLog(selectedDigest), 'secondary'),
+      detail.execution_log_available === false ? element('p', { className: 'field-help', text: 'This task did not run on this machine, so its local execution log is unavailable here.' }) : null,
+    ),
+    executionLogPanel(executionLog),
     result ? panel('Result', 'The task has settled.',
       element('div', { className: 'actions' }, element('a', { className: 'button-link', href: resultHref, text: 'Download result' }), button('Copy reference', () => copyText(detail.result_address || `result:${selectedDigest}`), 'secondary')),
     ) : null,
@@ -328,11 +345,11 @@ function submitForm(submit, formState) {
   return panel('Submit a request', 'Describe the outcome for your collective.', form);
 }
 
-function requestsView(requests, selectedDigest, selectedTask, submit, select, resultHref, formState) {
-  return element('div', { className: 'view-stack' }, submitForm(submit, formState), requestList(requests, selectedDigest, select), taskDetail(selectedTask, selectedDigest, resultHref));
+function requestsView(requests, selectedDigest, selectedTask, submit, select, resultHref, formState, executionLog, loadExecutionLog) {
+  return element('div', { className: 'view-stack' }, submitForm(submit, formState), requestList(requests, selectedDigest, select), taskDetail(selectedTask, selectedDigest, resultHref, executionLog, loadExecutionLog));
 }
 
-function activityDetail(entry) {
+function activityDetail(entry, executionLog, loadExecutionLog) {
   if (!entry) return null;
   const receipt = entry.receipt || entry;
   const unavailable = (label, value) => value ? String(value) : `${label} unavailable for this legacy task.`;
@@ -355,10 +372,12 @@ function activityDetail(entry) {
     entry.source ? element('p', { className: 'detail', text: `Source: ${typeof entry.source === 'string' ? entry.source : entry.source.name || JSON.stringify(entry.source)}` }) : null,
     entry.reason ? element('p', { className: 'detail', text: `Reason: ${entry.reason}` }) : null,
     entry.requester_notice ? element('p', { className: 'detail', text: `Requester was told: ${entry.requester_notice}` }) : null,
+    entry.task_digest ? button('View execution log', () => loadExecutionLog(entry.task_digest), 'secondary') : null,
+    executionLogPanel(executionLog),
   );
 }
 
-function activityView(ledger, requests, select, selectedContribution, selectContribution) {
+function activityView(ledger, requests, select, selectedContribution, selectContribution, executionLog, loadExecutionLog) {
   const contributionRows = ledger.filter((entry) => entry.role !== 'requester' && entry.author !== 'me');
   const contributionList = contributionRows.length
     ? element('ul', { className: 'history-list contribution-list' }, ...contributionRows.map((entry) => element('li', {},
@@ -374,12 +393,15 @@ function activityView(ledger, requests, select, selectedContribution, selectCont
     : element('div', { className: 'empty-state' }, element('strong', { text: 'Your contribution history will appear here.' }));
   return element('div', { className: 'view-stack' },
     panel('Contribution history', 'Private receipts for every completed or returned attempt.', contributionList),
-    activityDetail(selectedContribution),
+    activityDetail(selectedContribution, executionLog, loadExecutionLog),
     panel('Requester history', 'Requests and results.', requests.length ? element('ul', { className: 'history-list' }, ...requests.map((entry) => element('li', {}, element('button', { type: 'button', className: 'text-button', onclick: () => select(entry.task_digest), text: entry.display_id || 'Untitled task' }), statusChip(entry.status)))) : element('div', { className: 'empty-state' }, element('strong', { text: 'No requester activity yet.' }))),
   );
 }
 
 function providerSignInCard(status) {
+  if (status?.state === 'idle' && /sign-in could not start/i.test(status.detail || '')) {
+    return panel('Sign-in needs attention', status.detail);
+  }
   const action = status?.action;
   if (status?.state !== 'action_needed' || action?.kind !== 'awaiting_browser' || !action.service) return null;
   return panel(`Sign in to ${action.service}`, 'Finish this step in your browser.',
@@ -393,13 +415,14 @@ function providerAccountCard(account, signIn) {
   const displayName = providerDisplayName(service);
   const unauthenticated = (account.authenticated ?? account.authed) === false;
   const managed = !unauthenticated && String(service).toLowerCase().includes('anthropic');
+  const checking = Boolean(account.checking);
   return element('li', { className: 'provider-card' },
     element('div', { className: 'provider-account-copy' },
       element('strong', { text: displayName }),
-      element('span', { className: 'provider-account-meta', text: `${readableCapacityKind(capacityKind(account))} · ${unauthenticated ? 'Needs sign-in' : 'Signed in'}` }),
+      element('span', { className: 'provider-account-meta', text: `${readableCapacityKind(capacityKind(account))} · ${checking ? 'Checking…' : unauthenticated ? 'Needs sign-in' : 'Signed in'}` }),
       account.account_email || account.email ? element('span', { className: 'field-help', text: account.account_email || account.email }) : null,
     ),
-    unauthenticated
+    unauthenticated && !checking
       ? button(`Sign in to ${displayName}`, () => signIn(String(account.service || account.provider || service).toLowerCase()), 'secondary')
       : managed ? element('span', { className: 'provider-managed', text: 'Managed automatically' }) : null,
   );
@@ -460,7 +483,7 @@ function helpView(identity) {
 
 function createApplication(root) {
   const token = new URLSearchParams(window.location.search).get('token');
-  let status = null; let availableTasks = []; let ledger = []; let requests = []; let identity = null; let settings = null; let roster = []; let selectedDigest = null; let selectedTask = null; let selectedContribution = null; let message = ''; let pollBusy = false; let lastRenderSignature = null; let unauthorizedPolls = 0; let sessionExpired = false; let daemonUnavailable = false; let coordinatorUnavailable = false; let lastKnownAt = null; let pollTimer = null; let pendingNext = null; let showStopNow = false;
+  let status = null; let availableTasks = []; let ledger = []; let requests = []; let identity = null; let settings = null; let roster = []; let selectedDigest = null; let selectedTask = null; let selectedTaskRevision = 0; let selectedContribution = null; let selectedExecutionLog = null; let executionLogRevision = 0; let message = ''; let pollBusy = false; let lastLayoutSignature = null; let unauthorizedPolls = 0; let sessionExpired = false; let daemonUnavailable = false; let coordinatorUnavailable = false; let lastKnownAt = null; let pollTimer = null; let pendingNext = null; let showStopNow = false;
   const requestForm = { display_id: '', prompt: '', source: '', error: '' };
   const failedRequests = new Map();
   const settingsDraft = { value: { schedule: { enabled: false, start: '', end: '', days: '', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone } }, dirty: false, saved: false };
@@ -500,9 +523,22 @@ function createApplication(root) {
   async function submit(body) { const result = await request('/submit', { method: 'POST', body: JSON.stringify(body) }); requestForm.display_id = ''; requestForm.prompt = ''; requestForm.source = ''; requestForm.error = ''; status = result; selectedDigest = /^sha256:[a-f0-9]{64}$/i.test(result.submission?.task_digest || '') ? result.submission.task_digest : selectedDigest; window.location.hash = '#/requests'; render(); }
   async function saveSettings(body) { settings = await request('/settings', { method: 'POST', body: JSON.stringify(body) }); settingsDraft.value = structuredClone(settings); render(); }
   async function signIn(service) { message = ''; try { status = await request('/identity/signin', { method: 'POST', body: JSON.stringify({ service }) }); } catch (error) { message = error.message; } render(); }
-  function select(digest) { selectedDigest = digest; selectedTask = null; window.location.hash = '#/requests'; void refreshTask(); render(); }
-  function selectContribution(entry) { selectedContribution = entry; render(); }
-  async function refreshTask() { if (!selectedDigest || !/^sha256:[a-f0-9]{64}$/i.test(selectedDigest)) return; selectedTask = await optionalRequest(`/tasks/${encodeURIComponent(selectedDigest.replace(/^sha256:/, ''))}`, null) || await optionalRequest(`/submit/status?task_digest=${encodeURIComponent(selectedDigest)}`, null); render(); }
+  function select(digest) { selectedDigest = digest; selectedTask = null; selectedTaskRevision += 1; selectedExecutionLog = null; executionLogRevision += 1; window.location.hash = '#/requests'; void refreshTask(); render(); }
+  function selectContribution(entry) { selectedContribution = entry; selectedExecutionLog = null; executionLogRevision += 1; render(); }
+  async function refreshTask() {
+    if (!selectedDigest || !/^sha256:[a-f0-9]{64}$/i.test(selectedDigest)) return;
+    const next = await optionalRequest(`/tasks/${encodeURIComponent(selectedDigest.replace(/^sha256:/, ''))}`, null) || await optionalRequest(`/submit/status?task_digest=${encodeURIComponent(selectedDigest)}`, null);
+    if (JSON.stringify(next) !== JSON.stringify(selectedTask)) { selectedTask = next; selectedTaskRevision += 1; }
+    render();
+  }
+  async function loadExecutionLog(digest) {
+    const bareDigest = String(digest || '').replace(/^sha256:/, '');
+    if (!/^[a-f0-9]{64}$/i.test(bareDigest)) return;
+    try { selectedExecutionLog = await request(`/tasks/${encodeURIComponent(bareDigest)}/log`); }
+    catch (error) { selectedExecutionLog = { output: error.message || 'The execution log is unavailable on this machine.', truncated: false }; }
+    executionLogRevision += 1;
+    render();
+  }
   function requesterEntries(entries, localIdentity) {
     return entries.filter((entry) => entry.author === 'me' || entry.role === 'requester' || entry.requester === true
       || (localIdentity && (entry.author_key === localIdentity || entry.author === localIdentity)));
@@ -540,6 +576,21 @@ function createApplication(root) {
     }
     finally { pollBusy = false; render(); }
   }
+  function updateText(selector, value) {
+    const node = root.querySelector(selector);
+    if (node && node.textContent !== value) node.textContent = value;
+  }
+  function updateLiveBindings(view) {
+    const dot = root.querySelector('[data-live="contribution-dot"]');
+    if (!dot) return;
+    const detail = contributionDetail(status, view);
+    updateText('[data-live="contribution-title"]', view.title || 'Checking status');
+    updateText('[data-live="contribution-detail"]', detail);
+    const detailNode = root.querySelector('[data-live="contribution-detail"]');
+    if (detailNode) detailNode.hidden = !detail;
+    if (dot.getAttribute('data-state') !== (status?.state || 'idle')) dot.setAttribute('data-state', status?.state || 'idle');
+    updateText('[data-live="guard-copy"]', guardCopy(settings));
+  }
   function render() {
     const active = routeFromHash(window.location.hash); const view = viewForStatus(status);
     const content = [...header(active), banner(message), element('section', { className: 'content', id: 'main-content' })]; const main = content.at(-1);
@@ -549,13 +600,19 @@ function createApplication(root) {
     else if (active === 'contribute') main.append(contributeView(status, availableTasks, view, control, settings, coordinatorUnavailable, pendingNext, (task) => { pendingNext = task; render(); }, showStopNow, (value) => { showStopNow = value; render(); }));
     else if (active === 'requests') {
       const resultHref = selectedDigest ? `/result/${encodeURIComponent(selectedDigest)}?token=${encodeURIComponent(token || '')}` : '#/requests';
-      main.append(requestsView(requests, selectedDigest, selectedTask, submit, select, resultHref, requestForm));
+      main.append(requestsView(requests, selectedDigest, selectedTask, submit, select, resultHref, requestForm, selectedExecutionLog, loadExecutionLog));
     }
-    else if (active === 'activity') main.append(activityView(ledger, requests, select, selectedContribution, selectContribution));
+    else if (active === 'activity') main.append(activityView(ledger, requests, select, selectedContribution, selectContribution, selectedExecutionLog, loadExecutionLog));
     else if (active === 'settings') main.append(settingsView(identity, settings, roster, saveSettings, signIn, status, settingsDraft));
     else main.append(helpView(identity));
-    const signature = JSON.stringify({ active, status, availableTasks, ledger, requests, identity, settings, roster, selectedDigest, selectedTask, selectedContribution, message, sessionExpired, daemonUnavailable, coordinatorUnavailable, pendingNext, showStopNow, settingsDraft });
-    if (signature === lastRenderSignature) return; lastRenderSignature = signature; root.replaceChildren(...content.filter(Boolean));
+    // Polls are intentionally data-only updates. Replacing the app root on
+    // each poll destroys selection, focus, and in-progress interaction; only
+    // a true layout transition earns a DOM rebuild. The live contribution
+    // bindings below update the handful of changing nodes in place.
+    const layoutSignature = JSON.stringify({ active, view: view.name, control: view.control, state: status?.state, action: status?.action?.kind, taskIds: status?.state === 'idle' ? availableTasks.map((task) => task.task_digest) : [], selectedDigest, selectedTaskRevision, selectedContribution, executionLogRevision, message, sessionExpired, daemonUnavailable, coordinatorUnavailable, pendingNext: pendingNext?.task_digest, showStopNow, scheduleEnabled: settings?.schedule?.enabled });
+    if (layoutSignature === lastLayoutSignature) { updateLiveBindings(view); return; }
+    lastLayoutSignature = layoutSignature;
+    root.replaceChildren(...content.filter(Boolean));
   }
   window.addEventListener('hashchange', render); render(); void refresh(); pollTimer = window.setInterval(refresh, POLL_INTERVAL_MS);
 }
