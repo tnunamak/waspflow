@@ -62,9 +62,30 @@ EOF
 
 need curl
 need tar
-need node
+
+node_help() {
+  printf '%s\n' \
+    "  Waspflow Federation needs Node.js 20 or newer, which this machine does not have." \
+    "  Install it with your preferred method, then re-run this installer. Two common options:" \
+    "" \
+    "    Ubuntu/Debian (NodeSource):" \
+    "      curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs" \
+    "" \
+    "    Any Linux, no root (nvm):" \
+    "      curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash" \
+    "      . \"\$HOME/.nvm/nvm.sh\" && nvm install 22" \
+    >&2
+  exit 1
+}
+
+if ! command -v node >/dev/null 2>&1; then
+  node_help
+fi
 node_major="$(node -p 'process.versions.node.split(".")[0]')"
-[ "$node_major" -ge 20 ] || die "Node.js 20 or newer is required (found $(node --version))"
+if [ "$node_major" -lt 20 ]; then
+  warn "found Node.js $(node --version), but 20 or newer is required"
+  node_help
+fi
 
 case "$(uname -s)" in
   Linux) ;;
