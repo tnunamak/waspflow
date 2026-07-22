@@ -33,19 +33,19 @@ async function main() {
   page.on('pageerror', (error) => rawConsoleErrors.push(`pageerror: ${error.message}`));
 
   try {
-    await check('Page loads with the Federation heading', async () => {
+    await check('Page loads with persistent Federation navigation', async () => {
       const response = await page.goto(targetUrl.toString(), { waitUntil: 'networkidle', timeout: 15_000 });
       assert.ok(response?.ok(), `navigation returned ${response?.status()}`);
-      await assertText(page.locator('h1'), 'Waspflow Federation');
+      await assertText(page.locator('.brand'), 'Waspflow Federation');
+      for (const label of ['Contribute', 'Requests', 'Activity', 'Settings', 'Help']) await assertText(page.locator('.primary-nav'), label);
       await page.screenshot({ path: path.join(artifactDir, 'initial.png'), fullPage: true });
     });
 
     await check('Idle contributor view and ledger copy', async () => {
-      await assertSelectorVisible(page, '[data-state="idle"]');
-      await assertText(page, 'Ready to contribute.');
-      await assertText(page, 'Coordinator: trusted');
-      await assertText(page, "You're helping:");
-      await assertText(page, "You've completed 0 tasks this week.");
+      await assertSelectorVisible(page, '.status-dot[data-state="idle"]');
+      await assertText(page, 'Ready when you are');
+      await assertText(page, 'Trusted coordinator');
+      await assertText(page, '0 completed this week');
       await page.screenshot({ path: path.join(artifactDir, 'idle.png'), fullPage: true });
     });
 
@@ -58,27 +58,25 @@ async function main() {
       await assertEnabled(taskButtons.first());
     });
 
-    await check('Safety accordion stays expanded across two poll cycles', async () => {
-      const safety = page.locator('details').filter({ has: page.getByText('How this works / Is this safe?', { exact: true }) });
-      await safety.locator('summary').click();
-      await assertText(safety, 'Everything else is blocked');
-      await page.waitForTimeout(4_000);
-      assert.equal(await safety.evaluate((element) => element.open), true, 'safety accordion collapsed during polling');
+    await check('Help keeps the safety boundary available in-app', async () => {
+      await page.getByRole('link', { name: 'Help' }).click();
+      await assertText(page, 'Your safety boundary');
+      await assertText(page, 'Everything else is blocked');
       await page.screenshot({ path: path.join(artifactDir, 'safety-expanded.png'), fullPage: true });
     });
 
-    await check('Advanced-submit accordion stays expanded across two poll cycles', async () => {
-      const submit = page.locator('details').filter({ has: page.getByText('Submit a task (advanced)', { exact: true }) });
-      await submit.locator('summary').click();
-      await assertSelectorVisible(submit, '#source');
-      await assertSelectorVisible(submit, '#prompt');
-      await assertSelectorVisible(submit, '#display-id');
+    await check('Requester form is a dedicated Requests view and survives polling', async () => {
+      await page.getByRole('link', { name: 'Requests' }).click();
+      await assertSelectorVisible(page, '#task-name');
+      await assertSelectorVisible(page, '#task-prompt');
+      await assertSelectorVisible(page, '#task-folder');
       await page.waitForTimeout(4_000);
-      assert.equal(await submit.evaluate((element) => element.open), true, 'advanced-submit accordion collapsed during polling');
+      await assertSelectorVisible(page, '#task-name');
       await page.screenshot({ path: path.join(artifactDir, 'advanced-submit-expanded.png'), fullPage: true });
     });
 
     await check('Contribution controls are present and enabled without mutating the rig', async () => {
+      await page.getByRole('link', { name: 'Contribute' }).click();
       await assertEnabled(page.getByRole('button', { name: 'Start contributing' }));
       await assertEnabled(page.getByRole('button', { name: 'Contribute next available' }));
       assert.ok(await page.getByRole('button', { name: 'Contribute this' }).count() >= 1);
