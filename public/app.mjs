@@ -49,14 +49,14 @@ function Q() {
   }
 }
 function Le(t, e, r, a, s, i, d, l, p, c, u) {
-  var h, o, _, f, b, w, k, v = a && a.__k || K, m = e.length;
-  for (p = rt(r, e, v, p, m), h = 0; h < m; h++) (_ = r.__k[h]) != null && (o = _.__i != -1 && v[_.__i] || V, _.__i = h, w = he(t, _, o, s, i, d, l, p, c, u), f = _.__e, _.ref && o.ref != _.ref && (o.ref && me(o.ref, null, _), u.push(_.ref, _.__c || f, _)), b == null && f != null && (b = f), (k = !!(4 & _.__u)) || o.__k === _.__k ? (p = We(_, p, t, k), k && o.__e && (o.__e = null)) : typeof _.type == "function" && w !== void 0 ? p = w : f && (p = f.nextSibling), _.__u &= -7);
+  var m, o, _, f, b, w, k, v = a && a.__k || K, h = e.length;
+  for (p = rt(r, e, v, p, h), m = 0; m < h; m++) (_ = r.__k[m]) != null && (o = _.__i != -1 && v[_.__i] || V, _.__i = m, w = he(t, _, o, s, i, d, l, p, c, u), f = _.__e, _.ref && o.ref != _.ref && (o.ref && me(o.ref, null, _), u.push(_.ref, _.__c || f, _)), b == null && f != null && (b = f), (k = !!(4 & _.__u)) || o.__k === _.__k ? (p = We(_, p, t, k), k && o.__e && (o.__e = null)) : typeof _.type == "function" && w !== void 0 ? p = w : f && (p = f.nextSibling), _.__u &= -7);
   return r.__e = b, p;
 }
 function rt(t, e, r, a, s) {
-  var i, d, l, p, c, u = r.length, h = u, o = 0;
-  for (t.__k = new Array(s), i = 0; i < s; i++) (d = e[i]) != null && typeof d != "boolean" && typeof d != "function" ? (typeof d == "string" || typeof d == "number" || typeof d == "bigint" || d.constructor == String ? d = t.__k[i] = G(null, d, null, null, null) : re(d) ? d = t.__k[i] = G(T, { children: d }, null, null, null) : d.constructor === void 0 && d.__b > 0 ? d = t.__k[i] = G(d.type, d.props, d.key, d.ref ? d.ref : null, d.__v) : t.__k[i] = d, p = i + o, d.__ = t, d.__b = t.__b + 1, l = null, (c = d.__i = it(d, r, p, h)) != -1 && (h--, (l = r[c]) && (l.__u |= 2)), l == null || l.__v == null ? (c == -1 && (s > u ? o-- : s < u && o++), typeof d.type != "function" && (d.__u |= 4)) : c != p && (c == p - 1 ? o-- : c == p + 1 ? o++ : (c > p ? o-- : o++, d.__u |= 4))) : t.__k[i] = null;
-  if (h) for (i = 0; i < u; i++) (l = r[i]) != null && (2 & l.__u) == 0 && (l.__e == a && (a = L(l)), je(l, l));
+  var i, d, l, p, c, u = r.length, m = u, o = 0;
+  for (t.__k = new Array(s), i = 0; i < s; i++) (d = e[i]) != null && typeof d != "boolean" && typeof d != "function" ? (typeof d == "string" || typeof d == "number" || typeof d == "bigint" || d.constructor == String ? d = t.__k[i] = G(null, d, null, null, null) : re(d) ? d = t.__k[i] = G(T, { children: d }, null, null, null) : d.constructor === void 0 && d.__b > 0 ? d = t.__k[i] = G(d.type, d.props, d.key, d.ref ? d.ref : null, d.__v) : t.__k[i] = d, p = i + o, d.__ = t, d.__b = t.__b + 1, l = null, (c = d.__i = it(d, r, p, m)) != -1 && (m--, (l = r[c]) && (l.__u |= 2)), l == null || l.__v == null ? (c == -1 && (s > u ? o-- : s < u && o++), typeof d.type != "function" && (d.__u |= 4)) : c != p && (c == p - 1 ? o-- : c == p + 1 ? o++ : (c > p ? o-- : o++, d.__u |= 4))) : t.__k[i] = null;
+  if (m) for (i = 0; i < u; i++) (l = r[i]) != null && (2 & l.__u) == 0 && (l.__e == a && (a = L(l)), ze(l, l));
   return a;
 }
 function We(t, e, r, a) {
@@ -82,7 +82,7 @@ function it(t, e, r, a) {
 function ye(t, e, r) {
   e[0] == "-" ? t.setProperty(e, r ?? "") : t[e] = r == null ? "" : typeof r != "number" || et.test(e) ? r : r + "px";
 }
-function z(t, e, r, a, s) {
+function j(t, e, r, a, s) {
   var i, d;
   e: if (e == "style") if (typeof r == "string") t.style.cssText = r;
   else {
@@ -111,31 +111,31 @@ function ke(t) {
   };
 }
 function he(t, e, r, a, s, i, d, l, p, c) {
-  var u, h, o, _, f, b, w, k, v, m, g, x, q, P, R, U, $ = e.type;
+  var u, m, o, _, f, b, w, k, v, h, g, x, q, P, R, U, $ = e.type;
   if (e.constructor !== void 0) return null;
   128 & r.__u && (p = !!(32 & r.__u), i = [l = e.__e = r.__e]), (u = y.__b) && u(e);
   e: if (typeof $ == "function") {
-    h = d.length;
+    m = d.length;
     try {
-      if (v = e.props, m = $.prototype && $.prototype.render, g = (u = $.contextType) && a[u.__c], x = u ? g ? g.props.value : u.__ : a, r.__c ? k = (o = e.__c = r.__c).__ = o.__E : (m ? e.__c = o = new $(v, x) : (e.__c = o = new Y(v, x), o.constructor = $, o.render = ot), g && g.sub(o), o.state || (o.state = {}), o.__n = a, _ = o.__d = !0, o.__h = [], o._sb = []), m && o.__s == null && (o.__s = o.state), m && $.getDerivedStateFromProps != null && (o.__s == o.state && (o.__s = I({}, o.__s)), I(o.__s, $.getDerivedStateFromProps(v, o.__s))), f = o.props, b = o.state, o.__v = e, _) m && $.getDerivedStateFromProps == null && o.componentWillMount != null && o.componentWillMount(), m && o.componentDidMount != null && o.__h.push(o.componentDidMount);
+      if (v = e.props, h = $.prototype && $.prototype.render, g = (u = $.contextType) && a[u.__c], x = u ? g ? g.props.value : u.__ : a, r.__c ? k = (o = e.__c = r.__c).__ = o.__E : (h ? e.__c = o = new $(v, x) : (e.__c = o = new Y(v, x), o.constructor = $, o.render = ot), g && g.sub(o), o.state || (o.state = {}), o.__n = a, _ = o.__d = !0, o.__h = [], o._sb = []), h && o.__s == null && (o.__s = o.state), h && $.getDerivedStateFromProps != null && (o.__s == o.state && (o.__s = I({}, o.__s)), I(o.__s, $.getDerivedStateFromProps(v, o.__s))), f = o.props, b = o.state, o.__v = e, _) h && $.getDerivedStateFromProps == null && o.componentWillMount != null && o.componentWillMount(), h && o.componentDidMount != null && o.__h.push(o.componentDidMount);
       else {
-        if (m && $.getDerivedStateFromProps == null && v !== f && o.componentWillReceiveProps != null && o.componentWillReceiveProps(v, x), e.__v == r.__v || !o.__e && o.shouldComponentUpdate != null && o.shouldComponentUpdate(v, o.__s, x) === !1) {
+        if (h && $.getDerivedStateFromProps == null && v !== f && o.componentWillReceiveProps != null && o.componentWillReceiveProps(v, x), e.__v == r.__v || !o.__e && o.shouldComponentUpdate != null && o.shouldComponentUpdate(v, o.__s, x) === !1) {
           e.__v != r.__v && (o.props = v, o.state = o.__s, o.__d = !1), e.__e = r.__e, e.__k = r.__k, e.__k.some(function(F) {
             F && (F.__ = e);
           }), K.push.apply(o.__h, o._sb), o._sb = [], o.__h.length && d.push(o);
           break e;
         }
-        o.componentWillUpdate != null && o.componentWillUpdate(v, o.__s, x), m && o.componentDidUpdate != null && o.__h.push(function() {
+        o.componentWillUpdate != null && o.componentWillUpdate(v, o.__s, x), h && o.componentDidUpdate != null && o.__h.push(function() {
           o.componentDidUpdate(f, b, w);
         });
       }
-      if (o.context = x, o.props = v, o.__P = t, o.__e = !1, q = y.__r, P = 0, m) o.state = o.__s, o.__d = !1, q && q(e), u = o.render(o.props, o.state, o.context), K.push.apply(o.__h, o._sb), o._sb = [];
+      if (o.context = x, o.props = v, o.__P = t, o.__e = !1, q = y.__r, P = 0, h) o.state = o.__s, o.__d = !1, q && q(e), u = o.render(o.props, o.state, o.context), K.push.apply(o.__h, o._sb), o._sb = [];
       else do
         o.__d = !1, q && q(e), u = o.render(o.props, o.state, o.context), o.state = o.__s;
       while (o.__d && ++P < 25);
-      o.state = o.__s, o.getChildContext != null && (a = I(I({}, a), o.getChildContext())), m && !_ && o.getSnapshotBeforeUpdate != null && (w = o.getSnapshotBeforeUpdate(f, b)), R = u != null && u.type === T && u.key == null ? ze(u.props.children) : u, l = Le(t, re(R) ? R : [R], e, r, a, s, i, d, l, p, c), o.base = e.__e, e.__u &= -161, o.__h.length && d.push(o), k && (o.__E = o.__ = null);
+      o.state = o.__s, o.getChildContext != null && (a = I(I({}, a), o.getChildContext())), h && !_ && o.getSnapshotBeforeUpdate != null && (w = o.getSnapshotBeforeUpdate(f, b)), R = u != null && u.type === T && u.key == null ? je(u.props.children) : u, l = Le(t, re(R) ? R : [R], e, r, a, s, i, d, l, p, c), o.base = e.__e, e.__u &= -161, o.__h.length && d.push(o), k && (o.__E = o.__ = null);
     } catch (F) {
-      if (d.length = h, e.__v = null, p || i != null) {
+      if (d.length = m, e.__v = null, p || i != null) {
         if (F.then) {
           for (e.__u |= p ? 160 : 128; l && l.nodeType == 8 && l.nextSibling; ) l = l.nextSibling;
           i != null && (i[i.indexOf(l)] = null), e.__e = l;
@@ -161,11 +161,11 @@ function Oe(t, e, r) {
     }
   });
 }
-function ze(t) {
-  return typeof t != "object" || t == null || t.__b > 0 ? t : re(t) ? t.map(ze) : t.constructor !== void 0 ? null : I({}, t);
+function je(t) {
+  return typeof t != "object" || t == null || t.__b > 0 ? t : re(t) ? t.map(je) : t.constructor !== void 0 ? null : I({}, t);
 }
 function at(t, e, r, a, s, i, d, l, p) {
-  var c, u, h, o, _, f, b, w = r.props || V, k = e.props, v = e.type;
+  var c, u, m, o, _, f, b, w = r.props || V, k = e.props, v = e.type;
   if (v == "svg" ? s = "http://www.w3.org/2000/svg" : v == "math" ? s = "http://www.w3.org/1998/Math/MathML" : s || (s = "http://www.w3.org/1999/xhtml"), i != null) {
     for (c = 0; c < i.length; c++) if ((_ = i[c]) && "setAttribute" in _ == !!v && (v ? _.localName == v : _.nodeType == 3)) {
       t = _, i[c] = null;
@@ -179,11 +179,11 @@ function at(t, e, r, a, s, i, d, l, p) {
   if (v == null) w === k || l && t.data == k || (t.data = k);
   else {
     if (i = v == "textarea" && k.defaultValue != null ? null : i && ne.call(t.childNodes), !l && i != null) for (w = {}, c = 0; c < t.attributes.length; c++) w[(_ = t.attributes[c]).name] = _.value;
-    for (c in w) _ = w[c], c == "dangerouslySetInnerHTML" ? h = _ : c == "children" || c in k || c == "value" && "defaultValue" in k || c == "checked" && "defaultChecked" in k || z(t, c, null, _, s);
-    for (c in k) _ = k[c], c == "children" ? o = _ : c == "dangerouslySetInnerHTML" ? u = _ : c == "value" ? f = _ : c == "checked" ? b = _ : l && typeof _ != "function" || w[c] === _ || z(t, c, _, w[c], s);
-    if (u) l || h && (u.__html == h.__html || u.__html == t.innerHTML) || (t.innerHTML = u.__html), e.__k = [];
-    else if (h && (t.innerHTML = ""), Le(e.type == "template" ? t.content : t, re(o) ? o : [o], e, r, a, v == "foreignObject" ? "http://www.w3.org/1999/xhtml" : s, i, d, i ? i[0] : r.__k && L(r, 0), l, p), i != null) for (c = i.length; c--; ) _e(i[c]);
-    l && v != "textarea" || (c = "value", v == "progress" && f == null ? t.removeAttribute("value") : f != null && (f !== t[c] || v == "progress" && !f || v == "option" && f != w[c]) && z(t, c, f, w[c], s), c = "checked", b != null && b != t[c] && z(t, c, b, w[c], s));
+    for (c in w) _ = w[c], c == "dangerouslySetInnerHTML" ? m = _ : c == "children" || c in k || c == "value" && "defaultValue" in k || c == "checked" && "defaultChecked" in k || j(t, c, null, _, s);
+    for (c in k) _ = k[c], c == "children" ? o = _ : c == "dangerouslySetInnerHTML" ? u = _ : c == "value" ? f = _ : c == "checked" ? b = _ : l && typeof _ != "function" || w[c] === _ || j(t, c, _, w[c], s);
+    if (u) l || m && (u.__html == m.__html || u.__html == t.innerHTML) || (t.innerHTML = u.__html), e.__k = [];
+    else if (m && (t.innerHTML = ""), Le(e.type == "template" ? t.content : t, re(o) ? o : [o], e, r, a, v == "foreignObject" ? "http://www.w3.org/1999/xhtml" : s, i, d, i ? i[0] : r.__k && L(r, 0), l, p), i != null) for (c = i.length; c--; ) _e(i[c]);
+    l && v != "textarea" || (c = "value", v == "progress" && f == null ? t.removeAttribute("value") : f != null && (f !== t[c] || v == "progress" && !f || v == "option" && f != w[c]) && j(t, c, f, w[c], s), c = "checked", b != null && b != t[c] && j(t, c, b, w[c], s));
   }
   return t;
 }
@@ -197,7 +197,7 @@ function me(t, e, r) {
     y.__e(s, r);
   }
 }
-function je(t, e, r) {
+function ze(t, e, r) {
   var a, s;
   if (y.unmount && y.unmount(t), (a = t.ref) && (a.current && a.current != t.__e || me(a, null, e)), (a = t.__c) != null) {
     if (a.componentWillUnmount) try {
@@ -207,7 +207,7 @@ function je(t, e, r) {
     }
     a.base = a.__P = a.__n = null;
   }
-  if (a = t.__k) for (s = 0; s < a.length; s++) a[s] && je(a[s], e, r || typeof t.type != "function");
+  if (a = t.__k) for (s = 0; s < a.length; s++) a[s] && ze(a[s], e, r || typeof t.type != "function");
   r || _e(t.__e), t.__c = t.__ = t.__e = void 0;
 }
 function ot(t, e, r) {
@@ -258,18 +258,18 @@ function ct(t, e, r) {
   }], a.__c = N, !N.__f)) {
     var s = function(l, p, c) {
       if (!a.__c.__H) return !0;
-      var u = !1, h = a.__c.props !== l;
+      var u = !1, m = a.__c.props !== l;
       if (a.__c.__H.__.some(function(_) {
         if (_.__N) {
           u = !0;
           var f = _.__[0];
-          _.__ = _.__N, _.__N = void 0, f !== _.__[0] && (h = !0);
+          _.__ = _.__N, _.__N = void 0, f !== _.__[0] && (m = !0);
         }
       }), i) {
         var o = i.call(this, l, p, c);
-        return u ? o || h : o;
+        return u ? o || m : o;
       }
-      return !u || h;
+      return !u || m;
     };
     N.__f = !0;
     var i = N.shouldComponentUpdate, d = N.componentWillUpdate;
@@ -291,7 +291,7 @@ function dt(t, e) {
   var r = fe(M++, 7);
   return Ge(r.__H, e) && (r.__ = t(), r.__H = e, r.__h = t), r.__;
 }
-function j(t, e) {
+function z(t, e) {
   return X = 8, dt(function() {
     return t;
   }, e);
@@ -504,7 +504,7 @@ function E({ children: t }) {
   return /* @__PURE__ */ n("main", { id: "main-content", className: "full-bleed", children: t });
 }
 function Nt({ status: t, settings: e, tasks: r, identity: a, coordinatorUnavailable: s, control: i, goTask: d, beginGitHub: l }) {
-  const p = ue(t), [c, u] = A(null), [h, o] = A(!1);
+  const p = ue(t), [c, u] = A(null), [m, o] = A(!1);
   if (p.name !== "status") return /* @__PURE__ */ n(Qe, { view: p, status: t, control: i });
   const _ = p.control === "pause", f = t?.contribution || {}, b = c || r[0];
   return /* @__PURE__ */ n("div", { className: "view-stack", children: [
@@ -525,7 +525,7 @@ function Nt({ status: t, settings: e, tasks: r, identity: a, coordinatorUnavaila
         _ ? /* @__PURE__ */ n("button", { type: "button", className: "secondary", onClick: () => i("/contribute/pause"), children: "Pause after this task" }) : null,
         _ && f.task_digest ? /* @__PURE__ */ n("button", { type: "button", className: "secondary", onClick: () => d(f.task_digest), children: "Watch what it’s doing →" }) : null
       ] }),
-      _ && /* @__PURE__ */ n("div", { className: "stop-now", children: h ? /* @__PURE__ */ n(T, { children: [
+      _ && /* @__PURE__ */ n("div", { className: "stop-now", children: m ? /* @__PURE__ */ n(T, { children: [
         /* @__PURE__ */ n("p", { children: "Stop now abandons the current task. Waspflow records it as returned." }),
         /* @__PURE__ */ n("button", { type: "button", className: "secondary", onClick: () => i("/contribute/stop", { confirm: !0 }), children: "Stop now" }),
         /* @__PURE__ */ n("button", { type: "button", className: "secondary", onClick: () => o(!1), children: "Keep working" })
@@ -673,7 +673,7 @@ function At({ form: t, setForm: e, submit: r, probeGit: a }) {
         " · ",
         l.size,
         " bytes ",
-        /* @__PURE__ */ n("button", { type: "button", className: "secondary", onClick: () => e((c) => ({ ...c, files: c.files.filter((u, h) => h !== p) })), children: "Remove" })
+        /* @__PURE__ */ n("button", { type: "button", className: "secondary", onClick: () => e((c) => ({ ...c, files: c.files.filter((u, m) => m !== p) })), children: "Remove" })
       ] })) }),
       /* @__PURE__ */ n("details", { children: [
         /* @__PURE__ */ n("summary", { children: "Advanced" }),
@@ -749,8 +749,8 @@ function It({ section: t, identity: e, settings: r, roster: a, save: s, signIn: 
       " Contribute on a schedule"
     ] }),
     /* @__PURE__ */ n("div", { className: "day-chips", children: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((u) => /* @__PURE__ */ n("button", { type: "button", className: String(l.days || "").split(",").includes(u) ? "selected" : "", onClick: () => {
-      const h = new Set(String(l.days || "").split(",").filter(Boolean));
-      h.has(u) ? h.delete(u) : h.add(u), p({ ...l, days: [...h].join(",") });
+      const m = new Set(String(l.days || "").split(",").filter(Boolean));
+      m.has(u) ? m.delete(u) : m.add(u), p({ ...l, days: [...m].join(",") });
     }, children: u })) }),
     /* @__PURE__ */ n("label", { children: [
       "Start",
@@ -807,8 +807,8 @@ function Ut({ identity: t }) {
   ] });
 }
 function Ht() {
-  const t = new URLSearchParams(location.search).get("token") || "", [e, r] = A({ status: null, tasks: [], requests: [], ledger: [], identity: null, settings: null, roster: [], coordinatorUnavailable: !1, sessionExpired: !1, daemonUnavailable: !1, message: "", submission: null }), [a, s] = A(Re), [i, d] = A(() => Pe(location.hash)), [l, p] = A(null), [c, u] = A(null), h = j(async (m, g = {}) => {
-    const x = await fetch(m, { ...g, headers: { "x-waspflow-session-token": t, ...g.body ? { "content-type": "application/json" } : {} } });
+  const t = new URLSearchParams(location.search).get("token") || "", [e, r] = A({ status: null, tasks: [], requests: [], ledger: [], identity: null, settings: null, roster: [], coordinatorUnavailable: !1, sessionExpired: !1, daemonUnavailable: !1, message: "", submission: null }), [a, s] = A(Re), [i, d] = A(() => Pe(location.hash)), [l, p] = A(null), [c, u] = A(null), m = z(async (h, g = {}) => {
+    const x = await fetch(h, { ...g, headers: { "x-waspflow-session-token": t, ...g.body ? { "content-type": "application/json" } : {} } });
     let q = {};
     try {
       q = await x.json();
@@ -819,57 +819,57 @@ function Ht() {
       throw P.status = x.status, P;
     }
     return q;
-  }, [t]), o = j(async () => {
+  }, [t]), o = z(async () => {
     try {
-      const m = await h("/status"), g = !m.coordinator_unavailable, [x, q, P, R, U, $, F] = await Promise.all([m.state === "idle" ? h("/tasks").catch(() => []) : Promise.resolve([]), h("/ledger").catch(() => []), h("/identity").catch(() => null), h("/settings").catch(() => null), g ? h("/roster").catch(() => []) : Promise.resolve([]), g ? h("/activity").catch(() => []) : Promise.resolve([]), g ? h("/requests").catch(() => null) : Promise.resolve(null)]);
-      r((Ze) => ({ ...Ze, status: m, tasks: D(x), ledger: D(q), identity: P || { key_id: m.key_id, coordinator_url: m.coordinator_url }, settings: R, roster: D(U?.roster || U), requests: F ? D(F) : D(q).filter((ie) => ie.author === "me" || ie.role === "requester" || ie.requester === !0), coordinatorUnavailable: !!m.coordinator_unavailable, daemonUnavailable: !1 }));
-    } catch (m) {
-      m.status === 401 ? r((g) => ({ ...g, sessionExpired: !0 })) : r((g) => ({ ...g, daemonUnavailable: !0 }));
+      const h = await m("/status"), g = !h.coordinator_unavailable && h.state !== "not_joined", [x, q, P, R, U, $, F] = await Promise.all([h.state === "idle" ? m("/tasks").catch(() => []) : Promise.resolve([]), m("/ledger").catch(() => []), m("/identity").catch(() => null), m("/settings").catch(() => null), g ? m("/roster").catch(() => []) : Promise.resolve([]), g ? m("/activity").catch(() => []) : Promise.resolve([]), g ? m("/requests").catch(() => null) : Promise.resolve(null)]);
+      r((Ze) => ({ ...Ze, status: h, tasks: D(x), ledger: D(q), identity: P || { key_id: h.key_id, coordinator_url: h.coordinator_url }, settings: R, roster: D(U?.roster || U), requests: F ? D(F) : D(q).filter((ie) => ie.author === "me" || ie.role === "requester" || ie.requester === !0), coordinatorUnavailable: !!h.coordinator_unavailable, daemonUnavailable: !1 }));
+    } catch (h) {
+      h.status === 401 ? r((g) => ({ ...g, sessionExpired: !0 })) : r((g) => ({ ...g, daemonUnavailable: !0 }));
     }
-  }, [h]);
+  }, [m]);
   Z(() => {
-    const m = () => d(Pe(location.hash));
-    if (addEventListener("hashchange", m), e.sessionExpired) return () => removeEventListener("hashchange", m);
+    const h = () => d(Pe(location.hash));
+    if (addEventListener("hashchange", h), e.sessionExpired) return () => removeEventListener("hashchange", h);
     o();
     const g = setInterval(o, bt);
     return () => {
-      removeEventListener("hashchange", m), clearInterval(g);
+      removeEventListener("hashchange", h), clearInterval(g);
     };
   }, [o, e.sessionExpired]);
-  const _ = async (m, g) => {
+  const _ = async (h, g) => {
     try {
-      const x = await h(m, { method: "POST", body: g ? JSON.stringify(g) : void 0 });
+      const x = await m(h, { method: "POST", body: g ? JSON.stringify(g) : void 0 });
       r((q) => ({ ...q, status: x, message: "" }));
     } catch (x) {
       r((q) => ({ ...q, message: x.message }));
     }
-  }, f = async (m) => {
+  }, f = async (h) => {
     try {
-      const g = await Promise.all(m.files.map(xt));
+      const g = await Promise.all(h.files.map(xt));
       if (g.reduce((R, U) => R + Math.floor(U.data_base64.length * 3 / 4), 0) > 20 * 1024 * 1024) throw new Error("Attachments are limited to 20 MB. Choose fewer or smaller files.");
-      const q = { ...m, attachments: g, network: m.git_url || m.network ? "enabled" : "disabled" };
+      const q = { ...h, attachments: g, network: h.git_url || h.network ? "enabled" : "disabled" };
       delete q.files;
-      const P = await h("/submit", { method: "POST", body: JSON.stringify(q) });
+      const P = await m("/submit", { method: "POST", body: JSON.stringify(q) });
       s(Re), r((R) => ({ ...R, status: P, submission: P.submission, message: "" })), location.hash = "#/requests";
     } catch (g) {
       s((x) => ({ ...x, error: g.message }));
     }
-  }, b = j(async (m) => {
-    if (m)
+  }, b = z(async (h) => {
+    if (h)
       try {
-        const g = await h(`/tasks/${encodeURIComponent(Ae(m))}`);
+        const g = await m(`/tasks/${encodeURIComponent(Ae(h))}`);
         p(g);
       } catch {
         p(null);
       }
-  }, [h]), w = j(async (m) => {
+  }, [m]), w = z(async (h) => {
     try {
-      const g = await h(`/tasks/${encodeURIComponent(Ae(m))}/log?since=0`);
+      const g = await m(`/tasks/${encodeURIComponent(Ae(h))}/log?since=0`);
       u(g);
     } catch {
       u(null);
     }
-  }, [h]), k = i.name === "tasks" ? decodeURIComponent(i.parts[0] || "") : "";
+  }, [m]), k = i.name === "tasks" ? decodeURIComponent(i.parts[0] || "") : "";
   if (Z(() => {
     k && b(k);
   }, [k, b]), e.sessionExpired) return /* @__PURE__ */ n(E, { children: /* @__PURE__ */ n(C, { title: "This local link has expired", lead: _t, children: /* @__PURE__ */ n("button", { type: "button", onClick: () => {
@@ -882,13 +882,13 @@ function Ht() {
   ] });
   if (i.name === "compose") return /* @__PURE__ */ n(T, { children: [
     /* @__PURE__ */ n(se, { route: "requests" }),
-    /* @__PURE__ */ n("main", { id: "main-content", children: /* @__PURE__ */ n(At, { form: a, setForm: s, submit: f, probeGit: (m) => h("/git/probe", { method: "POST", body: JSON.stringify({ git_url: m }) }) }) })
+    /* @__PURE__ */ n("main", { id: "main-content", children: /* @__PURE__ */ n(At, { form: a, setForm: s, submit: f, probeGit: (h) => m("/git/probe", { method: "POST", body: JSON.stringify({ git_url: h }) }) }) })
   ] });
   if (i.name === "contribute" && ue(e.status).name !== "status") return /* @__PURE__ */ n(Qe, { view: ue(e.status), status: e.status, control: _ });
-  const v = i.name === "contribute" ? /* @__PURE__ */ n(Nt, { ...e, control: _, goTask: (m) => {
-    location.hash = `#/tasks/${encodeURIComponent(m)}`;
+  const v = i.name === "contribute" ? /* @__PURE__ */ n(Nt, { ...e, control: _, goTask: (h) => {
+    location.hash = `#/tasks/${encodeURIComponent(h)}`;
   }, beginGitHub: () => _("/identity/signin", { service: "github" }) }) : i.name === "requests" ? /* @__PURE__ */ n(Rt, { requests: e.requests, submission: e.submission, form: a, setForm: s, submit: f, probeGit: () => {
-  }, acknowledge: () => _("/submit/ack") }) : i.name === "activity" ? /* @__PURE__ */ n(Ft, { ledger: e.ledger, requests: e.requests }) : i.name === "settings" ? /* @__PURE__ */ n(It, { section: i.parts[0] || "device", identity: e.identity, settings: e.settings, roster: e.roster, save: (m) => h("/settings", { method: "POST", body: JSON.stringify(m) }).then((g) => r((x) => ({ ...x, settings: g }))), signIn: (m) => _("/identity/signin", { service: m }), status: e.status }) : /* @__PURE__ */ n(Ut, { identity: e.identity });
+  }, acknowledge: () => _("/submit/ack") }) : i.name === "activity" ? /* @__PURE__ */ n(Ft, { ledger: e.ledger, requests: e.requests }) : i.name === "settings" ? /* @__PURE__ */ n(It, { section: i.parts[0] || "device", identity: e.identity, settings: e.settings, roster: e.roster, save: (h) => m("/settings", { method: "POST", body: JSON.stringify(h) }).then((g) => r((x) => ({ ...x, settings: g }))), signIn: (h) => _("/identity/signin", { service: h }), status: e.status }) : /* @__PURE__ */ n(Ut, { identity: e.identity });
   return /* @__PURE__ */ n(T, { children: [
     /* @__PURE__ */ n(se, { route: i.name }),
     /* @__PURE__ */ n("main", { id: "main-content", children: [
