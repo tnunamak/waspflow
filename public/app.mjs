@@ -238,7 +238,7 @@ function taskChoices(tasks, contribute, pendingNext, setPendingNext) {
         element('div', { className: 'task-title' }, element('strong', { text: task.display_id || 'Untitled task' }), task.author ? element('span', { className: 'muted', text: `by ${task.author}` }) : null),
         element('p', { className: 'muted', text: taskAge(task.published_at) }),
         element('p', { className: 'prompt-preview', text: `Prompt: ${promptFirstLine(task.prompt_preview || task.prompt)}` }),
-        task.network !== undefined ? element('p', { className: 'network', text: `Network: ${task.network ? 'on' : 'off'}` }) : null,
+        task.network !== undefined ? element('p', { className: 'network', text: `Internet access: ${task.network === 'enabled' ? 'on' : 'off'}` }) : null,
       ),
       button('Contribute this', () => contribute(task.task_digest), 'secondary'),
     ))),
