@@ -120,18 +120,20 @@ test('host --rotate-token updates a running managed coordinator and fresh invite
   }
 });
 
-test('host --rotate-token refuses when the managed coordinator cannot be updated', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'wf-fed-host-rotate-refused-'));
+test('host --rotate-token rotates the file directly when the coordinator is not running', async () => {
+  // A stopped coordinator has no live state to update — its token file is the
+  // only token source at startup, so refusing here (the old behavior) just
+  // trapped the operator with a leaked token and a stale status file.
+  const home = await mkdtemp(join(tmpdir(), 'wf-fed-host-rotate-stopped-'));
   try {
     const state = ensureHostState({ home, port: 8787 });
     const oldToken = readCollectiveToken(state.config);
-    await assert.rejects(execFileAsync(process.execPath, [CLI, 'host', '--rotate-token'], {
+    const { stdout } = await execFileAsync(process.execPath, [CLI, 'host', '--rotate-token'], {
       env: { ...process.env, WASPFLOW_FEDERATION_COORDINATOR_HOME: home },
-    }), (error) => {
-      assert.match(error.stderr, /cannot rotate the collective token because the managed coordinator is not running/);
-      return true;
     });
-    assert.equal(readCollectiveToken(state.config), oldToken);
+    assert.match(stdout, /Collective token rotated\. Your coordinator is not running/);
+    assert.match(stdout, /Old invites are dead/);
+    assert.notEqual(readCollectiveToken(state.config), oldToken);
   } finally {
     await rm(home, { recursive: true, force: true });
   }
