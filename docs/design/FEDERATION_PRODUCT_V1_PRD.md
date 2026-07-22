@@ -70,3 +70,23 @@ contributor support (sbx limitation), mobile-native apps (responsive web is the 
 - **Wave C (error voices):** stderr surfacing, submit pre-validation, stepper only-with-submission,
   test-ledger isolation.
 - **Gate:** P6 evidence run; iterate waves until pass; then (and only then) owner sees it.
+
+## Horizon (v2+, owner-directional 2026-07-21 — shapes v1 architecture, NOT v1 scope)
+Owner (thinking out loud, consistent with earlier design discussions): likely **integrations with
+Linear / Trello / GitHub Issues** so teams externalize task creation/prioritization; possibly
+**crypto bounties or credits** later (undecided).
+
+**Architecture-fit audit of what v1 is building (verified, not asserted):**
+- **External task sources fit the existing model**: tasks are signed envelopes published to a dumb
+  coordinator — an integration adapter (Linear issue → task envelope) is just another author.
+  v1 keeps payloads versioned/extensible; a future optional `external_ref` {system, id, url} field
+  is additive. Do NOT bake submit-form assumptions into the coordinator.
+- **Externalized prioritization fits client-side choice**: the coordinator deliberately does not
+  pick tasks; clients list-and-choose. Integration-fed priority metadata later just enriches the
+  listing — no coordinator redesign.
+- **Receipts (Wave A) are the metering primitive for any future credits/bounties**: per-task
+  model/tokens/duration inside the **signed** result envelope (`execution_metadata`) makes usage
+  claims executor-signed and tamper-evident — exactly what settlement would need. The coordinator's
+  reserved (deferred) settlement/escrow slots remain reserved.
+- Guardrail: v1 ships NONE of this — no integration stubs, no credit UI — but v1 must not make any
+  of it harder (reviewed at the evidence gate).
