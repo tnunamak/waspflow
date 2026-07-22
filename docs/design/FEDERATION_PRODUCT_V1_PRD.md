@@ -107,3 +107,10 @@ the ToS-clean tier already in the vision). Consequences for v1:
   account", "your API key", "your local model").
 - HarnessSpec's auth strategies already encode most of this; v1 must not collapse it in
   receipts, guard, or copy.
+
+## v1.x backlog (owner first-contact review, 2026-07-22)
+- File/folder UPLOAD widget for requests (multi-select, zipped client-side) replacing the path field — also enables phone-based submits.
+- Git-URL as a task source kind (public repos immediately; private via task-scoped credentials per FEDERATION_CAPABILITY_MATCHING.md — never the contributor's personal git account, per containment).
+- Live requester view of a RUNNING task (running-since now; streamed progress later).
+- Per-task external credential requirements (Linear/MCP etc.) — design exists (capability matching); build post-v1.
+- Tray: visual verification on the owner's Plasma desktop pending (process runs; StatusNotifier rendering is desktop-dependent).
