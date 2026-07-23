@@ -44,6 +44,9 @@ test('sanitizedEnv strips every personal-credential/state variable and keeps har
     AZURE_CLIENT_SECRET: 'fake-azure-secret',
     GIT_ASKPASS: '/usr/local/bin/git-askpass-fake',
     GH_TOKEN: 'ghp_fakefakefakefakefakefakefakefake',
+    // Desktop session bus: with it, sbx's credential store reaches the
+    // operator's keyring (wallet unlock prompts from background daemon work).
+    DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
   };
 
   const cleaned = backend.sanitizedEnv(dirtyEnv);
@@ -51,7 +54,7 @@ test('sanitizedEnv strips every personal-credential/state variable and keeps har
   const mustBeAbsent = [
     'SSH_AUTH_SOCK', 'DOCKER_HOST', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY',
     'AWS_ACCESS_KEY_ID', 'GCP_SERVICE_ACCOUNT', 'AZURE_CLIENT_SECRET',
-    'GIT_ASKPASS', 'GH_TOKEN',
+    'GIT_ASKPASS', 'GH_TOKEN', 'DBUS_SESSION_BUS_ADDRESS',
   ];
   for (const key of mustBeAbsent) {
     assert.equal(Object.hasOwn(cleaned, key), false, `${key} must not be a key in the sanitized env, not merely falsy`);
