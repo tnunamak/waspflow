@@ -497,7 +497,7 @@ codex_refresh_runtime_settings() {
   }
   rollout="$(lane_get "$lane" rollout)"
   if [[ -z "$rollout" || ! -f "$rollout" ]]; then
-    rollout="$(find "$CODEX_SESSIONS_DIR" -type f -name "*${sid}.jsonl" 2>/dev/null | head -1)"
+    rollout="$(find "$CODEX_SESSIONS_DIR" -type f -name "*${sid}.jsonl" 2>/dev/null | head -1 || true)"
   fi
   [[ -n "$rollout" && -f "$rollout" ]] || {
     _codex_runtime_refresh_health unknown missing-rollout

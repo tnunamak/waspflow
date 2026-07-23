@@ -68,7 +68,7 @@ selection_edge_label() {
   local provider="$1" model="$2"
   [[ -n "${OPS_POLICY_JSON:-}" ]] || ops_load
   jq -r --arg p "$provider" --arg m "$model" '
-    .preferred_over_live // [] as $edges |
+    (.preferred_over_live // []) as $edges |
     if any($edges[]; .over.provider == $p and .over.model == $m) then "deprecated_by_edge"
     elif any($edges[]; .prefer.provider == $p and .prefer.model == $m) then "preferred" else "none" end' <<<"$OPS_POLICY_JSON"
 }

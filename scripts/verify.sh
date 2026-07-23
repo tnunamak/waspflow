@@ -1646,6 +1646,7 @@ FAKE
   chmod +x "$resumebin/codex" "$resumebin/claude"
   export PATH="$resumebin:$PATH" ARGV_FILE="$argvfile" ENV_FILE="$envfile"
   export WASPFLOW_HOME="$resumehome"
+  export CODEX_SESSIONS_DIR="$resumebin/missing-sessions"
   # shellcheck disable=SC1090
   source "$root/lib/core.sh"
   tmux_window_exists() { return 1; }
