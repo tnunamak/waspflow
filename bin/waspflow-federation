@@ -755,8 +755,18 @@ async function cmdApprove(argv) {
       ({ keyId, publicKeyPem } = parseApprovalRequest(keyId));
     }
   } else if (!keyId || !publicKeyFile) fail('usage: waspflow federation approve <approval-request> | <key_id> <public_key_file|-> [--roster-file <path>] [--json]');
-  const rosterFile = flags['roster-file'] || process.env.WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE;
-  if (!rosterFile) fail('approve requires --roster-file or WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE');
+  // The machine hosting a collective knows its own roster; an operator
+  // pasting an approval request must not need a file path (found live: the
+  // guided host flow ended in "approve requires --roster-file").
+  let rosterFile = flags['roster-file'] || process.env.WASPFLOW_FEDERATION_COORDINATOR_ROSTER_FILE;
+  if (!rosterFile) {
+    const { coordinatorHome, hostPaths } = await import('../lib/federation-host.mjs');
+    const hosted = hostPaths(coordinatorHome());
+    if (fs.existsSync(hosted.config)) {
+      rosterFile = JSON.parse(fs.readFileSync(hosted.config, 'utf8')).roster_path;
+    }
+  }
+  if (!rosterFile) fail('this machine does not host a collective. Run approve where you ran: waspflow federation host (or pass --roster-file).');
   if (!publicKeyPem) publicKeyPem = publicKeyFile === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(publicKeyFile, 'utf8');
   if (!publicKeyPem.includes('BEGIN PUBLIC KEY')) fail('that does not look like a PEM public key (expected "-----BEGIN PUBLIC KEY-----")');
   let roster;
