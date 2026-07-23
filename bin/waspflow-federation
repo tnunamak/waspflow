@@ -890,11 +890,15 @@ async function cmdFirstRun() {
   } else {
     let reachable = false;
     try {
-      await fetch(`${configured.coordinator_url}/tasks/next`, {
+      const probe = await fetch(`${configured.coordinator_url}/tasks/next`, {
         headers: configured.collective_token ? { authorization: `Bearer ${configured.collective_token}` } : {},
         signal: AbortSignal.timeout(2_000),
       });
-      reachable = true;
+      // A dead ngrok tunnel still answers from ngrok's edge (404 with an
+      // ngrok-error-code header, e.g. ERR_NGROK_3200), which fooled this
+      // probe into calling a gone collective reachable (found live). Only a
+      // response from the coordinator itself counts.
+      reachable = !probe.headers.get('ngrok-error-code') && probe.status < 500;
     } catch { /* the UI still gives this member a path forward */ }
     if (reachable) {
       process.stdout.write(`Federation is configured for ${configured.coordinator_url}. Opening the local UI...\n`);
