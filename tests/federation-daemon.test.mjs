@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openFederationUi, parseJoinInvite, startFederationDaemon } from '../lib/federation-daemon.mjs';
+import { federationDaemonEnv, openFederationUi, parseJoinInvite, startFederationDaemon } from '../lib/federation-daemon.mjs';
 import { configHome } from '../lib/federation-config.mjs';
 
 function fakeChild() {
@@ -948,6 +948,19 @@ test('parseJoinInvite normalizes deep links, pasted commands, and raw tokens', (
     { coordinatorUrl: 'https://coordinator.example', token: 'raw-token' },
   );
   assert.throws(() => parseJoinInvite('raw-token'), /complete invite link/);
+});
+
+test('federationDaemonEnv keeps harmless variables but removes the desktop session bus', () => {
+  const env = federationDaemonEnv({
+    PATH: '/usr/bin',
+    HOME: '/home/federation',
+    DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+  });
+
+  assert.deepEqual(env, {
+    PATH: '/usr/bin',
+    HOME: '/home/federation',
+  });
 });
 
 test('openFederationUi opens the tokenized local URL for a running daemon', async () => {
