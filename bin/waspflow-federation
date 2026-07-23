@@ -259,7 +259,10 @@ async function cmdJoin(argv) {
     (flags.json ? process.stderr : process.stdout).write(line);
   }
   const result = await joinFederation({ invite, keyId: flags['key-id'] || os.userInfo().username, collectiveName: flags['collective-name'] });
-  if (result.status !== 'already_joined' && !(await reloadRunningFederationDaemon())) {
+  // The restart nudge is only for a registered daemon that refused the
+  // reload; with no daemon running there is nothing to refresh, and a
+  // successful reload needs no user action.
+  if (result.status !== 'already_joined' && (await reloadRunningFederationDaemon()) === 'failed') {
     const line = 'restart the Federation app to finish switching: systemctl --user restart waspflow-federation-daemon.service or waspflow federation ui\n';
     (flags.json ? process.stderr : process.stdout).write(line);
   }
