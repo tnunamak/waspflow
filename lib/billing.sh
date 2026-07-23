@@ -23,6 +23,7 @@ billing_report_auth() {
   else
     echo "  [ok]   grok auth: no XAI_API_KEY in environment; billing follows configured Grok CLI auth (OAuth cache or login)"
   fi
+  echo "  [info] antigravity auth: agy OAuth/quota path is provider-owned (heuristic only)"
 }
 
 billing_preflight_provider() {
@@ -31,6 +32,7 @@ billing_preflight_provider() {
     claude) billing_preflight_claude ;;
     codex) billing_preflight_codex ;;
     grok) billing_preflight_grok ;;
+    antigravity) billing_preflight_antigravity ;;
     *) return 0 ;;
   esac
 }
@@ -63,6 +65,8 @@ billing_preflight_grok() {
   warn "grok billing notice: XAI_API_KEY is set; verify whether Grok will use API pay-as-you-go billing before fleet use."
   return 0
 }
+
+billing_preflight_antigravity() { return 0; }
 
 # Emit BillingPath v1. This is observational only: an uncertain billing path
 # never changes whether a lane may launch. Args: provider endpoint_profile raw_args
@@ -100,6 +104,7 @@ billing_path_v1() {
       if [[ -n "${XAI_API_KEY:-}" ]]; then path="api_key_env"; evidence="env:XAI_API_KEY"
       else path="oauth_env_heuristic"; evidence="absence_of_XAI_API_KEY"; fi
       ;;
+    antigravity) path="oauth_quota_heuristic"; evidence="agy_provider_owned_auth" ;;
   esac
   jq -cn --arg path "$path" --arg evidence "$evidence" --arg detail "$detail" \
     '{schema_version:1,path:$path,evidence:$evidence,detail:$detail}'
@@ -113,7 +118,7 @@ billing_auth_principal() {
 
 billing_cost_currency() {
   case "$1" in
-    chatgpt_subscription|subscription_env_heuristic|oauth_env_heuristic) printf 'quota\n' ;;
+    chatgpt_subscription|subscription_env_heuristic|oauth_env_heuristic|oauth_quota_heuristic) printf 'quota\n' ;;
     api_key|auth_token|access_token_env|api_key_env) printf 'usd\n' ;;
     *) printf 'unknown\n' ;;
   esac
@@ -123,7 +128,7 @@ billing_cost_currency() {
 # narrow and checked at the parsing boundary; it is never a launch gate.
 quota_observation_v1() {
   local provider="$1" provider_key raw version usage_error stale state reason source observation
-  case "$provider" in codex) provider_key=openai ;; claude) provider_key=claude ;; *)
+  case "$provider" in codex) provider_key=openai ;; claude) provider_key=claude ;; antigravity) provider_key=antigravity ;; *)
     jq -cn '{schema_version:1,state:"absent",reason:"clawmeter has no provider mapping",stale:false,source:"",observation:null}'
     return 0 ;;
   esac

@@ -8,7 +8,7 @@ Planned tool surface (thin wrappers over the existing scripts — no new logic):
 
 | MCP tool | Wraps |
 |---|---|
-| `orchestrate_spawn` `{provider, lane, task, model?, mcp?, cwd?, isolate?}` | `waspflow spawn` |
+| `orchestrate_spawn` `{provider, lane, task, model?, effort?, mcp?, cwd?, isolate?}` | `waspflow spawn` |
 | `orchestrate_list` | `waspflow list` (structured) |
 | `orchestrate_status` `{lane}` | `waspflow status` (JSON passthrough) |
 | `orchestrate_peek` `{lane, lines?}` | `waspflow peek` |
@@ -19,6 +19,12 @@ Planned tool surface (thin wrappers over the existing scripts — no new logic):
 Design rule: the MCP server SHALL contain no orchestration logic of its own — it
 parses arguments, invokes the engine, and serializes results. Anything the MCP
 face can do, the CLI can already do, and vice versa (parity).
+
+Provider policy remains conservative. Antigravity (`agy`) is a headless durable
+lane provider, uses OAuth/quota billing, discovers models through `agy models`,
+and exposes no provider-native completion or runtime-attestation guarantee.
+Because `agy` has no verified MCP-disable flag, `auto` inherits provider
+configuration with a warning and explicit `none` fails closed.
 
 Prior art to evaluate before building: Maniple
 (github.com/Martian-Engineering/maniple) — an MCP tmux orchestrator supporting

@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 #
-# waspflow — turnkey live orchestration of Claude/Codex/Grok agents in tmux.
+# waspflow — turnkey live orchestration of Claude/Codex/Grok/Antigravity agents in tmux.
 #
-# An orchestrating session (itself Claude, Codex, or Grok, in ANY project dir)
+# An orchestrating session (itself Claude, Codex, Grok, or Antigravity, in ANY project dir)
 # uses this to spawn an agent of any supported provider into a tmux window,
 # watch it stream, steer/revise it live or after teardown, wait for it to go
 # idle, and reap it — all surviving the orchestrator's own compaction (the
 # windows + lane state persist on disk).
 #
 # Verbs:
-#   spawn   --provider <claude|codex|grok> | --op <id> --lane <name> [opts] -- <task>
-#   exec    --provider <claude|codex|grok> [opts] [-o FILE] -- <task prompt>
+#   spawn   --provider <claude|codex|grok|antigravity> | --op <id> --lane <name> [opts] -- <task>
+#   exec    --provider <claude|codex|grok|antigravity> [opts] [-o FILE] -- <task prompt>
 #   ops     list|explain|resolve|path     operating-point resolver (not a picker)
 #   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
-#   demo    --provider <claude|codex|grok> [--run]            guided first lane
+#   demo    --provider <claude|codex|grok|antigravity> [--run] guided first lane
 #   list    [--status S,...] [--lifecycle-state S,...] [--project DIR] [--limit N] [--json]
 #   status  <lane>                        one lane's state (json)
 #   peek    <lane> [--lines N]            de-escaped tail of the live pane
@@ -80,7 +80,7 @@ load_event_reader() {
 
 usage() {
   cat <<EOF
-waspflow — turnkey live orchestration of Claude/Codex/Grok agents in tmux.
+waspflow — turnkey live orchestration of Claude/Codex/Grok/Antigravity agents in tmux.
 
 First successful run:
   waspflow doctor
@@ -88,11 +88,11 @@ First successful run:
   waspflow demo --provider codex --run
 
 Verbs:
-  spawn   --provider <claude|codex|grok> | --op <id> --lane <name> [opts] -- <task>
-  exec    --provider <claude|codex|grok> | --op <id> [--model M] [--auto] [--accept-provider-default] [--effort L] [--mcp P] [--cwd DIR] [-o FILE] -- <task prompt>
+  spawn   --provider <claude|codex|grok|antigravity> | --op <id> --lane <name> [opts] -- <task>
+  exec    --provider <claude|codex|grok|antigravity> | --op <id> [--model M] [--auto] [--accept-provider-default] [--effort L] [--mcp P] [--cwd DIR] [-o FILE] -- <task prompt>
   ops     list|explain|resolve|path     operating-point resolver (decision cards)
   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
-  demo    --provider <claude|codex|grok> [--run]            guided first lane
+  demo    --provider <claude|codex|grok|antigravity> [--run] guided first lane
   list    [--status S,...] [--lifecycle-state S,...] [--project DIR] [--limit N] [--json]
                                           show the durable global lane index
   receipts summary [--json]               outcome ledger: arms, verify results, stats-eligible fraction
@@ -259,7 +259,7 @@ cmd_spawn() {
     [[ "$accept_provider_default" == true ]] && model=""
   fi
 
-  [[ -n "$provider" ]] || die "spawn: --provider or --op is required (claude|codex|grok)"
+  [[ -n "$provider" ]] || die "spawn: --provider or --op is required (claude|codex|grok|antigravity)"
   is_known_provider "$provider" || die "spawn: unknown provider '$provider'"
   [[ -n "$lane" ]] || die "spawn: --lane is required"
   validate_lane_name "$lane"
@@ -342,6 +342,9 @@ cmd_spawn() {
   local model_validation_scope
   model_validation_scope="$(model_validation_scope "$provider" "${extra[@]}")"
   validate_model "$provider" "$model" spawn "$model_validation_scope"
+  if declare -F "${provider}_validate_model_effort" >/dev/null; then
+    "${provider}_validate_model_effort" "$model" "$effort" || die "spawn: incompatible model and effort"
+  fi
   validate_mcp_extra "$provider" "$mcp" "${extra[@]}"
   "${provider}_preflight" || die "spawn aborted: $provider preflight failed"
 
@@ -608,7 +611,7 @@ cmd_demo() {
       --run) run=1; shift ;;
       -h|--help)
         cat <<'EOF'
-waspflow demo --provider <claude|codex|grok> [--run] [--lane NAME] [--cwd DIR]
+waspflow demo --provider <claude|codex|grok|antigravity> [--run] [--lane NAME] [--cwd DIR]
 
 Without --run, prints a safe first-run walkthrough.
 With --run, performs spawn -> wait -> peek -> reap using a tiny no-edit task.
@@ -623,7 +626,8 @@ EOF
     if command -v codex >/dev/null 2>&1; then provider="codex"
     elif command -v claude >/dev/null 2>&1; then provider="claude"
     elif command -v grok >/dev/null 2>&1; then provider="grok"
-    else die "demo: no provider found on PATH (install codex, claude, or grok, or pass --provider)"
+    elif command -v agy >/dev/null 2>&1; then provider="antigravity"
+    else die "demo: no provider found on PATH (install codex, claude, grok, or agy, or pass --provider)"
     fi
   fi
   is_known_provider "$provider" || die "demo: unknown provider '$provider'"
@@ -1512,10 +1516,10 @@ cmd_doctor() {
   done
   command -v curl >/dev/null 2>&1 || ok=0
   command -v uuidgen >/dev/null 2>&1 || [[ -r /proc/sys/kernel/random/uuid ]] || ok=0
-  for c in claude codex grok curl uuidgen; do
+  for c in claude codex grok agy curl uuidgen; do
     if command -v "$c" >/dev/null 2>&1; then
       echo "  [ok]   $c"
-      [[ "$c" == "claude" || "$c" == "codex" || "$c" == "grok" ]] && agent_ok=1
+      [[ "$c" == "claude" || "$c" == "codex" || "$c" == "grok" || "$c" == "agy" ]] && agent_ok=1
     elif [[ "$c" == "curl" || "$c" == "uuidgen" ]]; then
       echo "  [MISS] $c (required on systems without an equivalent)"
     else
@@ -1540,6 +1544,13 @@ cmd_doctor() {
       echo "  [warn] clawmeter codex envelope: $(jq -r '.reason' <<<"$quota_check")"
     else
       echo "  [ok]   clawmeter codex envelope shape"
+    fi
+    quota_check="$(quota_observation_v1 antigravity)"
+    quota_state="$(jq -r '.state' <<<"$quota_check")"
+    if [[ "$quota_state" == ok || "$quota_state" == stale ]]; then
+      echo "  [ok]   clawmeter antigravity quota mapping: $quota_state"
+    else
+      echo "  [warn] clawmeter antigravity quota mapping: $quota_state ($(jq -r '.reason // "unavailable"' <<<"$quota_check"))"
     fi
   fi
   # Policy edges rot by design (they are dated judgments); surface staleness

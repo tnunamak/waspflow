@@ -1,7 +1,7 @@
 ---
 name: waspflow-orchestrate
 description: >-
-  Spawn, watch, steer, and reap Claude/Codex/Grok coding-agent workers live in
+  Spawn, watch, steer, and reap Claude/Codex/Grok/Antigravity coding-agent workers live in
   tmux from any project dir. Use when you (an agent) delegate a sub-task AND want
   live control — stream it, revise mid-run or after teardown, wait for idle,
   reap. Lanes persist on disk, so you survive your own compaction.
@@ -10,7 +10,7 @@ description: >-
 # waspflow — live cross-provider agent orchestration
 
 You are an orchestrating agent. `waspflow` runs **worker** agents (Claude Code,
-Codex, or Grok) in tmux windows you watch and steer, then reap. Lane state is on
+Codex, Grok, or Antigravity) in tmux windows you watch and steer, then reap. Lane state is on
 disk: if you compact mid-task, `waspflow list` recovers everything.
 
 Use it to delegate a sub-task while keeping the ability to **course-correct it
@@ -27,7 +27,7 @@ waspflow check --no-fail # repo/process gate: worktrees, dirty state, lanes, pro
 
 If `doctor` warns the **Codex model proxy** is down (only when
 `WASPFLOW_CODEX_BACKEND_HEALTH_URL` is set), start it before spawning Codex;
-Claude and Grok need no backend gate. First-time user: `waspflow demo --provider
+Claude, Grok, and Antigravity need no backend gate. First-time user: `waspflow demo --provider
 codex [--run]`. Serious repo needing policy: `waspflow init --profile serious-repo`.
 
 ## The core loop
@@ -47,7 +47,7 @@ prompt, result).
 
 ## Choosing provider / model / effort
 
-Raw flags are canonical: `--provider claude|codex|grok`, `--model <id>` (omit for
+Raw flags are canonical: `--provider claude|codex|grok|antigravity`, `--model <id>` (omit for
 default), `--effort <none|minimal|low|medium|high|xhigh|max>` (provider-specific;
 unsupported hard-fails; never silently demoted — Codex `xhigh` is real),
 `--mcp auto|none|inherit` (default `auto`, MCP-minimal where supported), and
@@ -171,9 +171,9 @@ waspflow revise <lane> --out /tmp/reply.txt -- "Summarize what you changed."
 
 ## Trust `wait`, etiquette
 
-`wait` polls the provider's session log for turn-end (Claude `end_turn`; Codex
-`task_complete`; Grok `turn_ended`) — no need to poll `peek` to know an agent is
-done. Exit codes: `0` idle (done), `1` timeout, `4` **stalled** — the worker produced
+`wait` polls durable turn-end evidence (Claude `end_turn`; Codex `task_complete`;
+Grok `turn_ended`; Antigravity's Waspflow-owned process receipt) — no need to
+poll `peek` to know an agent is done. Exit codes: `0` idle (done), `1` timeout, `4` **stalled** — the worker produced
 no output for `WASPFLOW_STALL_SECONDS` (default 45) while its turn hadn't ended.
 That usually means it's waiting on a mid-run interactive prompt (a quota/model-
 downgrade offer, a security check, a y/n) but can also be a hang or a very slow tool.

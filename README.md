@@ -6,8 +6,8 @@
 
 Give your main agent a live workflow for managing worker agents.
 
-Waspflow is an agent-operable control loop for Claude Code, Codex, and Grok
-workers: spawn a worker, watch its live stream, steer it with another
+Waspflow is an agent-operable control loop for Claude Code, Codex, Grok, and
+Antigravity workers: spawn a worker, watch its live stream, steer it with another
 instruction, preserve the transcript and diff, and reap the lane deliberately.
 Humans can use the same CLI directly; the deeper point is that an orchestrating
 agent gets a small, durable tool surface instead of fire-and-forget subprocesses
@@ -32,8 +32,8 @@ waspflow demo --provider codex
 waspflow demo --provider codex --run
 ```
 
-Use `--provider claude` or `--provider grok` if that is the agent CLI you have
-installed.
+Use `--provider claude`, `--provider grok`, or `--provider antigravity` if that
+is the agent CLI you have installed. Antigravity uses the `agy` executable.
 
 ## Selection gate
 
@@ -45,7 +45,7 @@ launching anything. `--auto` selects an op fallback and requires `--op`;
 `--ack-deprecated` applies only to that selector path.
 
 You need `tmux`, `jq`, `git`, `curl`, `uuidgen`, and at least one agent CLI:
-`codex`, `claude`, or `grok`. If something is missing, `waspflow doctor` tells
+`codex`, `claude`, `grok`, or `agy`. If something is missing, `waspflow doctor` tells
 you what to install. See [docs/prerequisites.md](docs/prerequisites.md) for links.
 
 ## The Loop
@@ -210,11 +210,11 @@ config shape.
 
 | Command | What it does |
 |---|---|
-| `spawn --provider <claude\|codex\|grok> --lane <name> [opts] -- <task>` | Start a durable worker lane |
-| `exec --provider <claude\|codex\|grok> [opts] [-o FILE] -- <task>` | Headless one-shot: run, return, leave no lane |
-| `demo --provider <claude\|codex\|grok> [--run]` | Show or run a safe first demo |
+| `spawn --provider <claude\|codex\|grok\|antigravity> --lane <name> [opts] -- <task>` | Start a durable worker lane |
+| `exec --provider <claude\|codex\|grok\|antigravity> [opts] [-o FILE] -- <task>` | Headless one-shot: run, return, leave no lane |
+| `demo --provider <claude\|codex\|grok\|antigravity> [--run]` | Show or run a safe first demo |
 | `wait <lane> [--reap]` | Poll the provider log until a worker finishes; `--reap` then returns the final reap result |
-| `events <lane> [--lines N] [--json]` | Safe, normalized provider-event tail for Codex, Claude, or Grok |
+| `events <lane> [--lines N] [--json]` | Safe, normalized provider-event tail for all supported providers |
 | `inspect [<lane>] --json` | Read-only lane facts and explainable cleanup classifications |
 | `peek <lane> [--events]` | Pane/transcript capture for UI diagnosis; `--events` is the structured tail |
 | `revise <lane> -- <message>` | Send another instruction to the same session; nonzero means live submission was not confirmed |
@@ -242,16 +242,16 @@ Useful `spawn` options:
 - `--prepare <cmd>` runs setup before that oracle; `--verify-timeout <seconds>` bounds both commands.
 - `--verify-strength <suite|smoke>` declares receipt comparability; it is never inferred.
 - `--model <id>` selects a provider model.
-- `--effort <none|minimal|low|medium|high|xhigh|max>` passes reasoning effort **exactly** where supported (never silent demotion; Codex accepts `xhigh`).
+- `--effort <none|minimal|low|medium|high|xhigh|max>` passes reasoning effort **exactly** where supported (never silent demotion; Antigravity supports `low`, `medium`, and `high`).
 - `--mcp <auto|none|inherit>` controls worker MCP exposure. `auto` is the default and is MCP-minimal where the provider supports it; use `inherit` only when the task needs the current provider configuration.
 - `--op <id>` expands a task-shaped operating point (`waspflow ops list`); explicit flags win over expansion.
 - `--cwd <dir>` starts the worker in another directory.
 - `--arg <flag>` passes an extra flag to the underlying agent CLI.
 
-MCP policy by provider: Claude and Codex resolve `auto` to `none`; Grok
-currently resolves `auto` to `inherit` with a warning because its CLI has no
-verified empty-MCP launch boundary. Explicit Grok `--mcp none` fails before
-launch. Under Claude/Codex isolation, pass-through MCP config (and Codex config
+MCP policy by provider: Claude and Codex resolve `auto` to `none`; Grok and
+Antigravity resolve `auto` to `inherit` with a warning because their CLIs have no
+verified empty-MCP launch boundary. Explicit `--mcp none` fails before launch for
+those providers. Under Claude/Codex isolation, pass-through MCP config (and Codex config
 profiles) is rejected; choose `inherit` explicitly when a task needs it.
 
 ## Exec: Headless One-Shot Work
@@ -276,6 +276,38 @@ waspflow exec --provider claude --accept-provider-default -- "List the public fu
 # Same shape for Grok:
 waspflow exec --provider grok --accept-provider-default -- "List the public functions in lib/core.sh."
 ```
+
+## Antigravity
+
+Antigravity support is for headless durable lanes through the `agy` executable.
+The provider uses the OAuth account and quota pools already configured for
+`agy`; it is not an API-key billing path. List the models available to that
+account before selecting one:
+
+```bash
+agy models
+```
+
+Use model IDs exactly as printed by `agy models`. Gemini models and the Claude/GPT
+pool are separate quota pools; `low`, `medium`, and `high` are the supported
+effort values. For example:
+
+```bash
+waspflow spawn --provider antigravity --model gemini-3.6-flash-low --effort low \
+  --lane gemini-review -- "Review the API changes"
+waspflow spawn --provider antigravity --model claude-sonnet-4-6 --effort medium \
+  --lane claude-review -- "Review the API changes"
+waspflow spawn --provider antigravity --model gpt-oss-120b-medium --effort medium \
+  --lane gpt-review -- "Summarize the test failures"
+```
+
+Model names vary by account and installation; replace these examples with IDs
+from `agy models`. When a model ID ends in `-low`, `-medium`, or `-high`,
+`--effort` must match that suffix. Antigravity lanes use honest MCP behavior: `--mcp auto`
+inherits provider configuration with a warning because `agy` has no verified
+MCP-disable flag; `--mcp none` fails closed. Waspflow's
+durable lane state and log polling remain the completion contract; do not infer
+provider-native completion events or runtime model/effort attestation.
 
 Options mirror `spawn` where they apply: `--model`, `--effort`, `--mcp`, `--cwd`, and
 `-o <file>` (omit `-o` to print to stdout). Because `exec` runs the same provider
@@ -422,7 +454,8 @@ Waspflow is shell around tmux plus provider adapters:
 
 - `bin/waspflow` routes CLI commands.
 - `lib/core.sh` owns lane state, tmux helpers, and provider dispatch.
-- `lib/providers/claude.sh`, `codex.sh`, and `grok.sh` adapt each CLI.
+- Provider adapters under `lib/providers/` adapt Claude, Codex, Grok, and
+  Antigravity (`agy`) to the common lane contract.
 - `lib/worktree.sh` handles git worktree isolation.
 - `lib/project.sh` implements `init` and `check`.
 - `skill/SKILL.md` teaches an orchestrating agent how to use the CLI.

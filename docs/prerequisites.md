@@ -39,6 +39,10 @@ OS, but `waspflow doctor` tells you exactly what is missing.
 - Grok Build CLI (`grok`).
   Installs to `~/.grok/bin/grok` by default; ensure that directory is on `PATH`.
 
+- Antigravity CLI (`agy`).
+  Sign in with `agy` and use `agy models` to inspect the model IDs available to
+  the account. Antigravity uses OAuth and provider quota, not an API key.
+
 ## Verify
 
 ```bash
@@ -52,4 +56,5 @@ waspflow demo --provider codex
 waspflow demo --provider codex --run
 ```
 
-Swap `codex` for `claude` or `grok` if that is the agent CLI you have installed.
+Swap `codex` for `claude`, `grok`, or `antigravity` if that is the agent CLI you
+have installed. Antigravity uses `agy` as its executable.

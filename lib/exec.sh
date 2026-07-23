@@ -77,12 +77,14 @@ exec_run() {
     [[ "$accept_provider_default" == true ]] && model=""
   fi
 
-  [[ -n "$provider" ]] || die "exec: --provider is required (claude|codex|grok; or use --op)"
+  [[ -n "$provider" ]] || die "exec: --provider is required (claude|codex|grok|antigravity; or use --op)"
   is_known_provider "$provider" || die "exec: unknown provider '$provider'"
   [[ -n "$prompt" ]] || die "exec: a task prompt is required after '--'"
   cwd="$(cd "$cwd" && pwd)" || die "exec: --cwd does not exist"
   guard_cwd "$cwd"   # never run a worker with cwd '/' silently (known crash class)
-  if [[ -n "$effort" && ! "$effort" =~ ^(none|minimal|low|medium|high|xhigh|max)$ ]]; then
+  if [[ "$provider" == antigravity && -n "$effort" && ! "$effort" =~ ^(low|medium|high)$ ]]; then
+    die "exec/antigravity: unsupported effort '$effort' (valid: low|medium|high)"
+  elif [[ -n "$effort" && ! "$effort" =~ ^(none|minimal|low|medium|high|xhigh|max)$ ]]; then
     die "exec: --effort must be one of none|minimal|low|medium|high|xhigh|max (got: $effort)"
   fi
 
@@ -125,6 +127,7 @@ exec_run() {
     codex)  _exec_codex "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
     claude) _exec_claude "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
     grok)   _exec_grok "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
+    antigravity) _exec_antigravity "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
     *)      die "exec: unsupported provider '$provider'" ;;
   esac
 
@@ -152,6 +155,15 @@ exec_run() {
     cat "$output_path"
     rm -f "$output_path"
   fi
+}
+
+_exec_antigravity() {
+  local cwd="$1" model="$2" effort="$3" prompt="$4" output_path="$5"
+  local -a model_args=() effort_args=()
+  antigravity_validate_model_effort "$model" "$effort" || return 1
+  [[ -n "$model" ]] && model_args=(--model "$model")
+  [[ -n "$effort" ]] && effort_args=(--effort "$effort")
+  (cd "$cwd" && agy --print "$prompt" "${model_args[@]}" "${effort_args[@]}" --mode accept-edits --dangerously-skip-permissions) >"$output_path"
 }
 
 # Reject an output file that is too small to be real, blank once stripped, or is

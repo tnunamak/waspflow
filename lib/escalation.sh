@@ -77,7 +77,7 @@ escalate_select_target() {
   if [[ -n "$requested" ]]; then
     local is_op=false is_literal=false provider model effort observation
     jq -e --arg id "$requested" '.operating_points[] | select(.id==$id)' <<<"$OPS_POLICY_JSON" >/dev/null 2>&1 && is_op=true
-    [[ "$requested" =~ ^(claude|codex|grok)/[^/]+(/(none|minimal|low|medium|high|xhigh|max))?$ ]] && is_literal=true
+    [[ "$requested" =~ ^(claude|codex|grok|antigravity)/[^/]+(/(none|minimal|low|medium|high|xhigh|max))?$ ]] && is_literal=true
     if [[ "$is_op" == true && "$is_literal" == true ]]; then
       ESC_REASON="--to '$requested' collides with an operating-point id and an arm literal"; ESC_CODE=1; return 1
     fi

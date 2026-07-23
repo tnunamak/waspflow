@@ -135,6 +135,7 @@ The target is aligned with current leading-agent products:
 - `check --explain` is useful but intentionally generic; future versions should
   attach advice to the exact failing checks.
 - There is no browser or TUI dashboard for lanes.
-- Gemini/cloud-agent adapters are not implemented.
+- Antigravity (`agy`) is supported for headless durable lanes; model discovery
+  is `agy models`, with OAuth/quota billing and conservative MCP defaults.
 
 These are productization gaps, not architecture blockers.

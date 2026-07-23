@@ -585,6 +585,14 @@ printf '%s\n' "$init_print" | jq -e '.mutexes[0].name == "live-stack"' >/dev/nul
 demo_preview="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" demo --provider codex --lane preview-only)"
 grep -q "waspflow spawn --provider codex --accept-provider-default --lane preview-only" <<<"$demo_preview"
 
+# Antigravity integration: literal escalation targets and PATH auto-detection
+# must remain aligned with the provider adapter's canonical name.
+grep -Eq '\^\(claude\|codex\|grok\|antigravity\)/' "$root/lib/escalation.sh"
+demo_body="$(sed -n '/^cmd_demo()/,/^}/p' "$root/bin/waspflow")"
+grep -q 'command -v agy' <<<"$demo_body"
+grep -q 'provider="antigravity"' <<<"$demo_body"
+grep -q 'install codex, claude, grok, or agy' <<<"$demo_body"
+
 set +e
 missing_provider="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" exec -- "hello" 2>&1)"
 rc=$?
@@ -1360,7 +1368,7 @@ deadp_spawn() {
   return 1
 }   # window up, task never confirmed submitted
 PROV
-  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok)/WASPFLOW_PROVIDERS=(claude codex grok deadp)/' "$deadlib/core.sh"
+  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok antigravity)/WASPFLOW_PROVIDERS=(claude codex grok antigravity deadp)/' "$deadlib/core.sh"
   dead_home="$(mktemp -d "$scratch/waspflow-deadhome-XXXXXX")"
   dead_work="$(mktemp -d "$scratch/waspflow-deadwork-XXXXXX")"
   ( cd "$dead_work" && git init -q )
@@ -1764,7 +1772,7 @@ mcpp_spawn() {
   tmux_create_owned_lane_window "$lane" "$cwd" "exec sleep 60" >/dev/null
 }
 PROV
-  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok)/WASPFLOW_PROVIDERS=(claude codex grok mcpp)/' "$mcplib/core.sh"
+  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok antigravity)/WASPFLOW_PROVIDERS=(claude codex grok antigravity mcpp)/' "$mcplib/core.sh"
   mcphome="$(mktemp -d "$scratch/waspflow-mcp-home-XXXXXX")"
   mcpdir="$(mktemp -d "$scratch/waspflow-mcp-cwd-XXXXXX")"; (cd "$mcpdir" && git init -q)
   set +e
@@ -2213,7 +2221,7 @@ scopep_revise() {
     -- "$pid_file" "$pid_file" "$out_file" "$report"
 }
 PROV
-  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok)/WASPFLOW_PROVIDERS=(claude codex grok scopep)/' "$scopelib/core.sh"
+  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok antigravity)/WASPFLOW_PROVIDERS=(claude codex grok antigravity scopep)/' "$scopelib/core.sh"
   scopehome="$(mktemp -d "$scratch/waspflow-scope-home-XXXXXX")"
   scopework="$(mktemp -d "$scratch/waspflow-scope-work-XXXXXX")"; ( cd "$scopework" && git init -q )
   scopesession="waspflow-scope-$$"
@@ -3193,6 +3201,81 @@ JSON
   availability='{"schema_version":1,"provider":"codex","model":"","state":"not_applicable","evidence_source":"none","query_scope":"not_applicable","observed_at":null,"detail":""}'
   artifacts_emit_exec_receipt_v1 "$(new_uuid)" codex "" "" standard "$billing" "$availability" 1 2 succeeded 0
   jq -e 'select(.receipt_kind == "exec") | (.exec_id|type == "string") and (has("lane")|not) and (.result == "succeeded") and (.exit_code == 0) and (.quota_observation.reason == "not_sampled_for_exec") and (.ineligibility_reasons == ["surface_exec"])' "$WASPFLOW_HOME/receipts.jsonl" >/dev/null
+
+  # Antigravity central integration: use a deterministic fake agy and the real
+  # adapter/exec/event/billing boundaries. The fake records argv without any
+  # network or provider state.
+  source "$root/lib/billing.sh"
+  source "$root/lib/providers/antigravity.sh"
+  source "$root/lib/events.sh"
+  agy_fake="$fixture/agy"; agy_args="$fixture/agy.args"
+  cat >"$agy_fake" <<'AGY'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"${AGY_ARGS:?}"
+if [[ "${1:-}" == models ]]; then printf 'test-model\n'; exit 0; fi
+all_args="$*"
+log_file=""; conversation=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --log-file) log_file="${2:-}"; shift 2 ;;
+    --conversation) conversation="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ -n "$log_file" && -z "$conversation" && "${AGY_FAIL:-0}" != 1 ]]; then
+  printf 'Created conversation 123e4567-e89b-12d3-a456-426614174000\n' >"$log_file"
+fi
+[[ "${AGY_FAIL:-0}" != 1 ]] || exit 9
+case " $all_args " in *" --print "*) printf 'agy test output\n' ;; *) exit 2 ;; esac
+AGY
+  chmod +x "$agy_fake"
+  export AGY_ARGS="$agy_args"; PATH="$fixture:$PATH"
+  export WASPFLOW_SELECTION_GATE=off
+  exec_out="$fixture/agy.out"
+  "$root/bin/waspflow" exec --provider antigravity --model test-model --effort medium -o "$exec_out" -- "deterministic prompt"
+  grep -Fq -- '--print deterministic prompt --model test-model --effort medium --mode accept-edits --dangerously-skip-permissions' "$agy_args"
+  set +e; "$root/bin/waspflow" exec --provider antigravity --effort xhigh -o "$fixture/bad.out" -- x >/dev/null 2>&1; agy_bad_rc=$?; set -e
+  [[ "$agy_bad_rc" -eq 1 ]]
+  ! antigravity_validate_model_effort gpt-test-medium low
+
+  agy_lifecycle=agy-lifecycle
+  lane_set "$agy_lifecycle" provider antigravity status live cwd "$fixture" model test-model effort medium
+  agy_cmd="$(_antigravity_shell "$agy_lifecycle" test-model medium "" "first turn" spawn)"
+  bash -c "$agy_cmd" >"$fixture/agy-lifecycle.out"
+  [[ "$(lane_get "$agy_lifecycle" session_id)" == 123e4567-e89b-12d3-a456-426614174000 ]]
+  antigravity_is_idle "$agy_lifecycle"
+  antigravity_session_resumable "$agy_lifecycle"
+  [[ "$(antigravity_turn_mark "$agy_lifecycle")" -eq 1 ]]
+  ! find "$(lane_dir "$agy_lifecycle")" -maxdepth 1 -name '.agy-log.*' | grep -q .
+
+  agy_cmd="$(_antigravity_shell "$agy_lifecycle" test-model medium "$(lane_get "$agy_lifecycle" session_id)" "second turn" revise)"
+  bash -c "$agy_cmd" >"$fixture/agy-revise.out"
+  [[ "$(antigravity_turn_mark "$agy_lifecycle")" -eq 2 ]]
+
+  agy_failed=agy-failed
+  lane_set "$agy_failed" provider antigravity status live cwd "$fixture" model test-model effort medium
+  agy_cmd="$(_antigravity_shell "$agy_failed" test-model medium "" "failing turn" spawn)"
+  set +e; AGY_FAIL=1 bash -c "$agy_cmd" >"$fixture/agy-failed.out"; agy_failed_rc=$?; set -e
+  [[ "$agy_failed_rc" -eq 9 ]]
+  antigravity_is_idle "$agy_failed"
+  jq -e 'select(.phase=="completion" and .outcome=="failed" and .exit_code==9)' "$(_antigravity_receipt_file "$agy_failed")" >/dev/null
+  ! find "$(lane_dir "$agy_failed")" -maxdepth 1 -name '.agy-log.*' | grep -q .
+
+  agy_lane=agy-events; lane_set "$agy_lane" provider antigravity status live cwd "$fixture"
+  agy_receipt="$(_antigravity_receipt_file "$agy_lane")"
+  printf '%s\n' '{"phase":"invocation","outcome":"started","prompt_kind":"spawn","prompt":"must not escape"}' '{"phase":"completion","outcome":"succeeded","prompt_kind":"spawn","body":"must not escape"}' >"$agy_receipt"
+  agy_events="$(provider_event_tail "$agy_lane" 9)"
+  jq -e '.source.kind == "agy-receipt-jsonl" and [.events[].event_type] == ["turn_started","turn_completed"] and ([.events[] | keys[]] | any(. == "prompt" or . == "body") | not)' <<<"$agy_events" >/dev/null
+  jq -e '([.events[].event_type] | index("turn_started")) != null and ([.events[].event_type] | index("turn_completed")) != null' <<<"$agy_events" >/dev/null
+  [[ "$(billing_path_v1 antigravity | jq -r .path)" == oauth_quota_heuristic ]]
+  clawmeter() { cat <<'JSON'
+{"schema_version":1,"providers":{"antigravity":{"usage":{"windows":[{"name":"daily","utilization":12,"resets_at":"2099-01-01T00:00:00Z"}],"stale":false,"fetched_at":"2026-07-23T00:00:00Z"},"forecast":{"windows":{"daily":{"projected_pct":20}}}}}}
+JSON
+  }
+  [[ "$(quota_observation_v1 antigravity | jq -r '.state + ":" + .observation.provider_key')" == ok:antigravity ]]
+  unset -f clawmeter
+  grep -q 'antigravity' <<<"$("$root/bin/waspflow" --help)"
+  grep -q 'agy' <<<"$("$root/bin/waspflow" doctor 2>&1 || true)"
 )
 
 echo "waspflow verify: ok"
