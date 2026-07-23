@@ -245,8 +245,24 @@ async function cmdJoin(argv) {
   }
   const invite = positional.length === 2 ? `waspflow federation join ${first} ${second}` : first;
   const { joinFederation } = await import('../lib/federation-join.mjs');
-  const { configPath } = await import('../lib/federation-config.mjs');
+  const { parseJoinInvite } = await import('../lib/federation-invite.mjs');
+  const { configPath, loadConfig } = await import('../lib/federation-config.mjs');
+  const existing = loadConfig();
+  const next = parseJoinInvite(invite, existing?.coordinator_url || process.env.WASPFLOW_FEDERATION_COORDINATOR_URL);
+  const switching = Boolean(existing?.coordinator_url && existing.coordinator_url !== next.coordinatorUrl);
+  const { federationDaemonIsBusy, reloadRunningFederationDaemon } = await import('../lib/federation-daemon.mjs');
+  if (switching && await federationDaemonIsBusy()) {
+    fail('Federation is still finishing work. Switch after it finishes.');
+  }
+  if (switching) {
+    const line = `This machine was in ${existing.coordinator_url}; joining ${next.coordinatorUrl} instead.\n`;
+    (flags.json ? process.stderr : process.stdout).write(line);
+  }
   const result = await joinFederation({ invite, keyId: flags['key-id'] || os.userInfo().username, collectiveName: flags['collective-name'] });
+  if (result.status !== 'already_joined' && !(await reloadRunningFederationDaemon())) {
+    const line = 'restart the Federation app to finish switching: systemctl --user restart waspflow-federation-daemon.service or waspflow federation ui\n';
+    (flags.json ? process.stderr : process.stdout).write(line);
+  }
   const structured = { status: result.status, key_id: result.keyId, coordinator_url: result.coordinatorUrl, config_path: configPath(), auto_approved: result.autoApproved };
   if (result.status === 'joined') {
     const joined = { ...structured, peers_auto_fetched: result.peersAutoFetched, roster_snippet: result.rosterSnippet, next_step: result.nextStep };
@@ -869,7 +885,20 @@ async function cmdFirstRun() {
     await sandboxPreflight({ report: true });
     process.stdout.write('\nStarting the local Federation onboarding UI...\n');
   } else {
-    process.stdout.write(`Federation is configured for ${configured.coordinator_url}. Opening the local UI...\n`);
+    let reachable = false;
+    try {
+      await fetch(`${configured.coordinator_url}/tasks/next`, {
+        headers: configured.collective_token ? { authorization: `Bearer ${configured.collective_token}` } : {},
+        signal: AbortSignal.timeout(2_000),
+      });
+      reachable = true;
+    } catch { /* the UI still gives this member a path forward */ }
+    if (reachable) {
+      process.stdout.write(`Federation is configured for ${configured.coordinator_url}. Opening the local UI...\n`);
+    } else {
+      process.stdout.write(`Your collective at ${configured.coordinator_url} is not reachable right now.\n`);
+      process.stdout.write('To join a different collective, paste its invite in Settings or run: waspflow federation join <invite>.\n');
+    }
   }
 
   const { openFederationUi } = await import('../lib/federation-daemon.mjs');

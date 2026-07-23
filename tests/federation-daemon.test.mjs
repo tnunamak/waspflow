@@ -42,7 +42,7 @@ async function withDaemon(fn, daemonOptions = {}) {
   const logsDir = join(directory, 'logs');
   const sourcePath = join(directory, 'source');
   await mkdir(sourcePath);
-  let config = null;
+  let config = daemonOptions.configState?.value || null;
   const children = [];
   const coordinatorCalls = [];
   let taskListResponse = { status: 200, body: [] };
@@ -53,7 +53,7 @@ async function withDaemon(fn, daemonOptions = {}) {
     settingsPath,
     logsDir,
     cliPath: '/real/path/to/bin/waspflow-federation',
-    configLoader: () => config,
+    configLoader: () => daemonOptions.configState ? daemonOptions.configState.value : config,
     spawnProcess: (...args) => {
       const child = fakeChild();
       children.push({ args, child });
@@ -85,7 +85,7 @@ async function withDaemon(fn, daemonOptions = {}) {
       settingsPath,
       logsDir,
       sourcePath,
-      setConfig: (value) => { config = value; },
+      setConfig: (value) => { config = value; if (daemonOptions.configState) daemonOptions.configState.value = value; },
       setTaskListResponse: (value) => { taskListResponse = value; },
     });
   } finally {
@@ -521,6 +521,76 @@ test('POST /join accepts an invite through the shared join operation', async () 
     setConfig({ coordinator_url: 'http://coordinator.example', collective_token: 'invite-token', key_id: 'member', approval_request: 'wfapr1.example' });
     await waitFor(async () => statusBody(await request(base, '/status', { token: 'test-session-token' })).state === 'pending_approval');
   }, { joinFederation: async (input) => { received.push(input); return { status: 'joined' }; } });
+});
+
+test('POST /join switches the running daemon to the new collective without a restart', async () => {
+  const configState = { value: null };
+  await withDaemon(async ({ base, setConfig }) => {
+    setConfig({ coordinator_url: 'http://coordinator-a.example', collective_token: 'token-a', key_id: 'member-a' });
+    const before = statusBody(await request(base, '/status', { token: 'test-session-token' }));
+    assert.equal(before.coordinator_url, 'http://coordinator-a.example');
+
+    const response = await request(base, '/join', {
+      method: 'POST',
+      token: 'test-session-token',
+      body: { invite: 'waspflow://join?coordinator=http%3A%2F%2Fcoordinator-b.example&token=token-b' },
+    });
+    assert.equal(response.status, 202);
+    await waitFor(async () => statusBody(await request(base, '/status', { token: 'test-session-token' })).coordinator_url === 'http://coordinator-b.example');
+    const after = statusBody(await request(base, '/status', { token: 'test-session-token' }));
+    assert.equal(after.coordinator_url, 'http://coordinator-b.example');
+    assert.equal(after.coordinator_unavailable, false);
+  }, {
+    configState,
+    joinFederation: async () => {
+      configState.value = { coordinator_url: 'http://coordinator-b.example', collective_token: 'token-b', key_id: 'member-b' };
+      return { status: 'joined' };
+    },
+    fetchImpl: async (url) => new Response(JSON.stringify({ roster: [{ key_id: url.includes('coordinator-b') ? 'member-b' : 'member-a' }] }), { status: 200 }),
+  });
+});
+
+test('a collective switch waits for active work and keeps its receipt with the original collective', async () => {
+  await withDaemon(async ({ base, children, setConfig, ledgerPath }) => {
+    setConfig({ coordinator_url: 'http://coordinator-a.example' });
+    const started = await request(base, '/contribute/start', { method: 'POST', token: 'test-session-token' });
+    assert.equal(started.status, 202);
+    const child = children.at(-1).child;
+
+    setConfig({ coordinator_url: 'http://coordinator-b.example' });
+    assert.equal(statusBody(await request(base, '/status', { token: 'test-session-token' })).coordinator_url, 'http://coordinator-a.example');
+    const switchAttempt = await request(base, '/join', {
+      method: 'POST', token: 'test-session-token', body: { invite: 'waspflow://join?coordinator=http%3A%2F%2Fcoordinator-b.example&token=token-b' },
+    });
+    assert.equal(switchAttempt.status, 409);
+    assert.equal(JSON.parse(switchAttempt.text).error, 'Finish the current work before switching collectives.');
+
+    child.stdout.emit('data', Buffer.from(`${JSON.stringify({ type: 'contributed', task_digest: 'a'.repeat(64), display_id: 'collective-a-task' })}\n`));
+    child.emit('close', 0);
+    const ledger = JSON.parse((await readFile(ledgerPath, 'utf8')));
+    assert.equal(ledger.at(-1).coordinator, 'http://coordinator-a.example');
+    assert.equal(statusBody(await request(base, '/status', { token: 'test-session-token' })).coordinator_url, 'http://coordinator-b.example');
+  });
+});
+
+test('stopping active work lets the daemon switch to the next collective', async () => {
+  const configState = { value: { coordinator_url: 'http://coordinator-a.example' } };
+  await withDaemon(async ({ base, setConfig }) => {
+    setConfig(configState.value);
+    assert.equal((await request(base, '/contribute/start', { method: 'POST', token: 'test-session-token' })).status, 202);
+    assert.equal((await request(base, '/contribute/stop', { method: 'POST', token: 'test-session-token', body: { confirm: true } })).status, 200);
+    const response = await request(base, '/join', {
+      method: 'POST', token: 'test-session-token', body: { invite: 'waspflow://join?coordinator=http%3A%2F%2Fcoordinator-b.example&token=token-b' },
+    });
+    assert.equal(response.status, 202);
+    await waitFor(async () => statusBody(await request(base, '/status', { token: 'test-session-token' })).coordinator_url === 'http://coordinator-b.example');
+  }, {
+    configState,
+    joinFederation: async () => {
+      configState.value = { coordinator_url: 'http://coordinator-b.example' };
+      return { status: 'joined' };
+    },
+  });
 });
 
 test('POST /submit supervises the guided submit verb and GET /submit/status proxies its JSON lifecycle', async () => {

@@ -22,7 +22,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { generateKeyPairSync } from 'node:crypto';
 import { mkdtemp, readFile, writeFile, chmod, rm } from 'node:fs/promises';
@@ -34,6 +34,27 @@ import { buildTaskPayload } from '../lib/federation-submit.mjs';
 
 const execFileAsync = promisify(execFile);
 const CLI = join(process.cwd(), 'bin', 'waspflow-federation');
+
+const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function daemonInfo(home) {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    try {
+      const info = JSON.parse(await readFile(join(home, 'daemon.json'), 'utf8'));
+      if (info.port && info.token) return info;
+    } catch { /* the daemon has not written its record yet */ }
+    await sleep(50);
+  }
+  throw new Error('timed out waiting for the Federation daemon');
+}
+
+async function stopDaemon(child) {
+  child.kill('SIGTERM');
+  await Promise.race([
+    new Promise((resolve) => child.once('exit', resolve)),
+    sleep(1_000),
+  ]);
+}
 
 // A real, already-approved author identity — simulates the coordinator
 // operator having already added this key_id to their roster file (the one
@@ -150,9 +171,81 @@ test('join: running it twice against the same coordinator is idempotent, not a s
       const before = await readFile(join(home, 'config.json'), 'utf8');
       const { stdout } = await runCli(['join', coordinatorUrl, 'test-invite-token', '--key-id', 'tim-author'], { home });
       assert.match(stdout, /Already joined/);
+      assert.doesNotMatch(stdout, /joining .* instead\./);
+      assert.doesNotMatch(stdout, /restart the Federation app/);
       const after = await readFile(join(home, 'config.json'), 'utf8');
       assert.equal(before, after);
     });
+  });
+});
+
+test('join: states a switch before joining a different coordinator', async () => {
+  await withCoordinator(async ({ coordinatorUrl: coordinatorA }) => {
+    await withCoordinator(async ({ coordinatorUrl: coordinatorB }) => {
+      await withMemberHome(async (home) => {
+        await runCli(['join', coordinatorA, 'test-invite-token', '--key-id', 'tim-author'], { home });
+        const { stdout } = await runCli(['join', coordinatorB, 'test-invite-token', '--key-id', 'tim-author'], { home });
+        assert.match(stdout, new RegExp(`This machine was in ${coordinatorA}; joining ${coordinatorB} instead\\.`));
+        const config = JSON.parse(await readFile(join(home, 'config.json'), 'utf8'));
+        assert.equal(config.coordinator_url, coordinatorB);
+      });
+    });
+  });
+});
+
+test('join: keeps JSON stdout machine-readable when it states a switch', async () => {
+  await withCoordinator(async ({ coordinatorUrl: coordinatorA }) => {
+    await withCoordinator(async ({ coordinatorUrl: coordinatorB }) => {
+      await withMemberHome(async (home) => {
+        await runCli(['join', coordinatorA, 'test-invite-token', '--key-id', 'tim-author'], { home });
+        const { stdout, stderr } = await runCli(['join', coordinatorB, 'test-invite-token', '--key-id', 'tim-author', '--json'], { home });
+        assert.equal(JSON.parse(stdout).coordinator_url, coordinatorB);
+        assert.match(stderr, new RegExp(`This machine was in ${coordinatorA}; joining ${coordinatorB} instead\\.`));
+      });
+    });
+  });
+});
+
+test('join: tells a running daemon to use the new collective', async () => {
+  await withCoordinator(async ({ coordinatorUrl: coordinatorA }) => {
+    await withCoordinator(async ({ coordinatorUrl: coordinatorB }) => {
+      await withMemberHome(async (home) => {
+        await runCli(['join', coordinatorA, 'test-invite-token', '--key-id', 'tim-author'], { home });
+        const { stubBinDir, stubPath, commandPath } = await stubSbx();
+        const daemon = spawn(process.execPath, [CLI, 'daemon'], {
+          cwd: process.cwd(),
+          env: { ...process.env, NODE_TEST_CONTEXT: '', WASPFLOW_FEDERATION_HOME: home, WASPFLOW_SBX_BIN: stubPath, PATH: commandPath },
+          stdio: 'ignore',
+        });
+        try {
+          const before = await daemonInfo(home);
+          const { stdout } = await runCli(['join', coordinatorB, 'test-invite-token', '--key-id', 'tim-author'], { home, env: { WASPFLOW_SBX_BIN: stubPath, PATH: commandPath } });
+          assert.doesNotMatch(stdout, /restart the Federation app/);
+          const status = await fetch(`http://127.0.0.1:${before.port}/status?token=${encodeURIComponent(before.token)}`).then((response) => response.json());
+          assert.equal(status.coordinator_url, coordinatorB);
+        } finally {
+          await stopDaemon(daemon);
+          await rm(stubBinDir, { recursive: true, force: true });
+        }
+      });
+    });
+  });
+});
+
+test('no-argument Federation names an unreachable collective and the switch path', async () => {
+  await withMemberHome(async (home) => {
+    await writeFile(join(home, 'config.json'), JSON.stringify({ coordinator_url: 'http://127.0.0.1:1', collective_token: 'dead-token', key_id: 'tim-author' }));
+    const { stubBinDir, stubPath, commandPath } = await stubSbx();
+    try {
+      const { stdout } = await runCli([], { home, env: { NODE_TEST_CONTEXT: '', WASPFLOW_SBX_BIN: stubPath, PATH: commandPath } });
+      assert.match(stdout, /Your collective at http:\/\/127\.0\.0\.1:1 is not reachable right now\./);
+      assert.match(stdout, /To join a different collective, paste its invite in Settings or run: waspflow federation join <invite>\./);
+      const info = await daemonInfo(home);
+      try { process.kill(info.pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+      await sleep(100);
+    } finally {
+      await rm(stubBinDir, { recursive: true, force: true });
+    }
   });
 });
 

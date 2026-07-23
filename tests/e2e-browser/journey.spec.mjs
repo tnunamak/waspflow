@@ -52,7 +52,7 @@ async function main() {
     await check('Activity lenses and split settings render', async () => {
       await page.getByRole('link', { name: 'Activity' }).click(); await text(page, 'What I did'); await text(page, 'What I asked for');
       await page.getByRole('link', { name: 'Settings' }).click(); await text(page, 'Device & accounts'); await text(page, 'Docker account');
-      await page.goto(`${targetUrl.toString()}#/settings/collective`, { waitUntil: 'networkidle' }); await text(page, 'Collective'); await text(page, 'Technical details');
+      await page.goto(`${targetUrl.toString()}#/settings/collective`, { waitUntil: 'networkidle' }); await text(page, 'Collective'); await text(page, 'Technical details'); await text(page, 'Join a different collective'); await visible(page, '#switch-invite');
       await page.screenshot({ path: path.join(artifactDir, 'activity-settings.png'), fullPage: true });
     });
     await check('One shared task route renders live-watch details', async () => {
