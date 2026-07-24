@@ -179,7 +179,7 @@ test('join: running it twice against the same coordinator is idempotent, not a s
   });
 });
 
-test('join: states a switch before joining a different coordinator', async () => {
+test('join: keeps the previous collective when activating a different coordinator', async () => {
   await withCoordinator(async ({ coordinatorUrl: coordinatorA }) => {
     await withCoordinator(async ({ coordinatorUrl: coordinatorB }) => {
       await withMemberHome(async (home) => {
@@ -188,6 +188,28 @@ test('join: states a switch before joining a different coordinator', async () =>
         assert.match(stdout, new RegExp(`This machine was in ${coordinatorA}; joining ${coordinatorB} instead\\.`));
         const config = JSON.parse(await readFile(join(home, 'config.json'), 'utf8'));
         assert.equal(config.coordinator_url, coordinatorB);
+        assert.equal(config.collectives.length, 2);
+        assert.equal(config.collectives[0].coordinator_url, coordinatorA);
+        assert.equal(config.collectives.find((collective) => collective.coordinator_url === coordinatorB).id, config.active_collective_id);
+      });
+    });
+  });
+});
+
+test('switch and leave select or remove one known collective', async () => {
+  await withCoordinator(async ({ coordinatorUrl: coordinatorA }) => {
+    await withCoordinator(async ({ coordinatorUrl: coordinatorB }) => {
+      await withMemberHome(async (home) => {
+        await runCli(['join', coordinatorA, 'test-invite-token', '--key-id', 'tim-author'], { home });
+        await runCli(['join', coordinatorB, 'test-invite-token', '--key-id', 'tim-author'], { home });
+        const config = JSON.parse(await readFile(join(home, 'config.json'), 'utf8'));
+        const a = config.collectives.find((collective) => collective.coordinator_url === coordinatorA);
+        await runCli(['switch', a.id], { home });
+        assert.equal(JSON.parse(await readFile(join(home, 'config.json'), 'utf8')).coordinator_url, coordinatorA);
+        await runCli(['leave', a.id], { home });
+        const after = JSON.parse(await readFile(join(home, 'config.json'), 'utf8'));
+        assert.equal(after.coordinator_url, coordinatorB);
+        assert.equal(after.collectives.length, 1);
       });
     });
   });
@@ -221,8 +243,11 @@ test('join: tells a running daemon to use the new collective', async () => {
           const before = await daemonInfo(home);
           const { stdout } = await runCli(['join', coordinatorB, 'test-invite-token', '--key-id', 'tim-author'], { home, env: { WASPFLOW_SBX_BIN: stubPath, PATH: commandPath } });
           assert.doesNotMatch(stdout, /restart the Federation app/);
-          const status = await fetch(`http://127.0.0.1:${before.port}/status?token=${encodeURIComponent(before.token)}`).then((response) => response.json());
+          let status = await fetch(`http://127.0.0.1:${before.port}/status?token=${encodeURIComponent(before.token)}`).then((response) => response.json());
           assert.equal(status.coordinator_url, coordinatorB);
+          await runCli(['join', coordinatorA, 'test-invite-token', '--key-id', 'tim-author'], { home, env: { WASPFLOW_SBX_BIN: stubPath, PATH: commandPath } });
+          status = await fetch(`http://127.0.0.1:${before.port}/status?token=${encodeURIComponent(before.token)}`).then((response) => response.json());
+          assert.equal(status.coordinator_url, coordinatorA);
         } finally {
           await stopDaemon(daemon);
           await rm(stubBinDir, { recursive: true, force: true });

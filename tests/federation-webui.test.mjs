@@ -54,9 +54,14 @@ test('source is Preact/Vite, preserves API paths, and removes manual DOM churn m
   assert.match(source, /What I did/);
   assert.match(source, /Accept and run/);
   assert.match(source, /\/identity\/signin/);
-  assert.match(source, /Join a different collective/);
+  assert.match(source, /Your collectives/);
+  assert.match(source, /One is active at a time for now/);
   assert.match(source, /switch-invite/);
   assert.match(source, /Finish the current work before switching collectives/);
+  assert.match(source, /\/collectives\/\$\{encodeURIComponent\(id\)\}\/switch/);
+  assert.match(source, /Send this approval request to your operator/);
+  assert.match(source, /View collectives/);
+  assert.match(source, /one-time-code-wrap/);
   assert.match(source, /disabled=\{switchingBlocked\}/);
   assert.match(source, /join=\{\(invite\) => control\('\/join'/);
   assert.doesNotMatch(source, /replaceChildren|lastLayoutSignature|updateLiveBindings/);

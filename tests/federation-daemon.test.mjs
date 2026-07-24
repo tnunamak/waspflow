@@ -72,6 +72,8 @@ async function withDaemon(fn, daemonOptions = {}) {
     identityProbe: daemonOptions.identityProbe || (async () => ({ docker_account: null, providers: [] })),
     gitVisibilityProbe: daemonOptions.gitVisibilityProbe,
     joinFederation: daemonOptions.joinFederation,
+    switchFederationCollective: daemonOptions.switchFederationCollective,
+    leaveFederationCollective: daemonOptions.leaveFederationCollective,
     now: daemonOptions.now,
   });
   const base = `http://127.0.0.1:${daemon.info.port}`;
@@ -548,6 +550,47 @@ test('POST /join switches the running daemon to the new collective without a res
     },
     fetchImpl: async (url) => new Response(JSON.stringify({ roster: [{ key_id: url.includes('coordinator-b') ? 'member-b' : 'member-a' }] }), { status: 200 }),
   });
+});
+
+test('collective endpoints expose no credentials and switch or leave through the active config', async () => {
+  const configState = { value: {
+    coordinator_url: 'http://coordinator-a.example', collective_token: 'secret-a', key_id: 'member-a', active_collective_id: 'a',
+    collectives: [
+      { id: 'a', coordinator_url: 'http://coordinator-a.example', collective_token: 'secret-a', key_id: 'member-a' },
+      { id: 'b', coordinator_url: 'http://coordinator-b.example', collective_token: 'secret-b', key_id: 'member-b' },
+    ],
+  } };
+  const activate = (id) => {
+    const collective = configState.value.collectives.find((entry) => entry.id === id);
+    configState.value = { ...configState.value, ...collective, active_collective_id: id };
+  };
+  await withDaemon(async ({ base }) => {
+    const listed = await request(base, '/collectives', { token: 'test-session-token' });
+    assert.equal(listed.status, 200);
+    assert.equal(JSON.parse(listed.text).collectives.length, 2);
+    assert.doesNotMatch(listed.text, /secret-[ab]/);
+    assert.equal((await request(base, '/collectives/b/switch', { method: 'POST', token: 'test-session-token' })).status, 200);
+    assert.equal(statusBody(await request(base, '/status', { token: 'test-session-token' })).coordinator_url, 'http://coordinator-b.example');
+    assert.equal((await request(base, '/collectives/b/leave', { method: 'POST', token: 'test-session-token' })).status, 200);
+    assert.equal(statusBody(await request(base, '/status', { token: 'test-session-token' })).coordinator_url, 'http://coordinator-a.example');
+  }, {
+    configState,
+    switchFederationCollective: activate,
+    leaveFederationCollective: (id) => {
+      configState.value.collectives = configState.value.collectives.filter((entry) => entry.id !== id);
+      activate(configState.value.collectives[0].id);
+    },
+  });
+});
+
+test('switching an inactive collective waits for active work', async () => {
+  const configState = { value: { coordinator_url: 'http://coordinator-a.example', active_collective_id: 'a', collectives: [{ id: 'a', coordinator_url: 'http://coordinator-a.example' }, { id: 'b', coordinator_url: 'http://coordinator-b.example' }] } };
+  await withDaemon(async ({ base }) => {
+    assert.equal((await request(base, '/contribute/start', { method: 'POST', token: 'test-session-token' })).status, 202);
+    const response = await request(base, '/collectives/b/switch', { method: 'POST', token: 'test-session-token' });
+    assert.equal(response.status, 409);
+    assert.equal(JSON.parse(response.text).error, 'Finish the current work before switching collectives.');
+  }, { configState, switchFederationCollective: () => { throw new Error('must not switch while work is active'); } });
 });
 
 test('a collective switch waits for active work and keeps its receipt with the original collective', async () => {

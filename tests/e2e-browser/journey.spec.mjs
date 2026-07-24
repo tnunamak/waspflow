@@ -52,7 +52,7 @@ async function main() {
     await check('Activity lenses and split settings render', async () => {
       await page.getByRole('link', { name: 'Activity' }).click(); await text(page, 'What I did'); await text(page, 'What I asked for');
       await page.getByRole('link', { name: 'Settings' }).click(); await text(page, 'Device & accounts'); await text(page, 'Docker account');
-      await page.goto(`${targetUrl.toString()}#/settings/collective`, { waitUntil: 'networkidle' }); await text(page, 'Collective'); await text(page, 'Technical details'); await text(page, 'Join a different collective'); await visible(page, '#switch-invite');
+      await page.goto(`${targetUrl.toString()}#/settings/collective`, { waitUntil: 'networkidle' }); await text(page, 'Your collectives'); await text(page, 'One is active at a time for now'); await text(page, 'Join another collective'); await visible(page, '#switch-invite');
       await page.screenshot({ path: path.join(artifactDir, 'activity-settings.png'), fullPage: true });
     });
     await check('One shared task route renders live-watch details', async () => {
@@ -71,6 +71,12 @@ async function main() {
       const github = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
       await github.route('**/status', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ schema_version: 1, type: 'daemon_status', state: 'action_needed', detail: 'Finish github sign-in in your browser.', action: { kind: 'awaiting_browser', service: 'github', url: 'https://github.com/login/device', code: 'TEST-1234' }, coordinator_unavailable: false }) }));
       try { await github.goto(targetUrl.toString(), { waitUntil: 'networkidle' }); await text(github, 'Sign in to GitHub'); await text(github, 'Confirmation code:'); await text(github, 'TEST-1234'); await github.getByRole('button', { name: 'Copy code' }).click(); await github.screenshot({ path: path.join(artifactDir, 'github-device-flow.png'), fullPage: true }); } finally { await github.close(); }
+    });
+    await check('Pending approval contains its request and routes an unavailable collective to the switcher', async () => {
+      const pending = await browser.newPage({ viewport: { width: 390, height: 844 } });
+      await pending.route('**/status', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ schema_version: 1, type: 'daemon_status', state: 'pending_approval', collective_name: 'Offline collective', coordinator_unavailable: true, approval_request: `wfapr1.${'a'.repeat(900)}` }) }));
+      await pending.route('**/collectives', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ collectives: [{ id: 'offline', collective_name: 'Offline collective', active: true, reachable: false }] }) }));
+      try { await pending.goto(targetUrl.toString(), { waitUntil: 'networkidle' }); await text(pending, 'Send this approval request to your operator'); await text(pending, 'Collective unavailable'); const box = await pending.locator('.one-time-code').boundingBox(); assert.ok(box && box.x >= 0 && box.x + box.width <= 390, 'approval request must stay inside a 390px viewport'); await pending.screenshot({ path: path.join(artifactDir, 'pending-unreachable-390.png'), fullPage: true }); await pending.getByRole('link', { name: 'View collectives' }).click(); await text(pending, 'Your collectives'); } finally { await pending.close(); }
     });
     await check('Contribute controls never start a task without review', async () => {
       await page.goto(targetUrl.toString(), { waitUntil: 'networkidle' }); const review = page.getByRole('button', { name: 'Review the next task' });

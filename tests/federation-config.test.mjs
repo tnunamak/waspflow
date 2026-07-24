@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -41,11 +41,42 @@ test('requireConfig throws a clear "run join first" message when absent', async 
   });
 });
 
-test('saveConfig then loadConfig round-trips exactly', async () => {
+test('saveConfig then loadConfig keeps the active scalar config and its membership list in sync', async () => {
   await withConfigHome(async ({ saveConfig, loadConfig }) => {
     const config = { coordinator_url: 'http://example.test:8787', collective_token: 'tok', key_id: 'tim-author', private_key_path: '/tmp/x.pem' };
     saveConfig(config);
-    assert.deepEqual(loadConfig(), config);
+    const loaded = loadConfig();
+    assert.equal(loaded.coordinator_url, config.coordinator_url);
+    assert.equal(loaded.collectives.length, 1);
+    assert.equal(loaded.collectives[0].coordinator_url, config.coordinator_url);
+    assert.equal(loaded.active_collective_id, loaded.collectives[0].id);
+  });
+});
+
+test('loadConfig migrates a legacy scalar config into one active membership without dropping scalar fields', async () => {
+  await withConfigHome(async ({ configHome, configPath, loadConfig }) => {
+    const legacy = { coordinator_url: 'http://legacy.test', collective_token: 'tok', key_id: 'tim', private_key_path: '/tmp/tim.pem' };
+    await mkdir(configHome(), { recursive: true });
+    await writeFile(configPath(), JSON.stringify(legacy));
+    const config = loadConfig();
+    assert.equal(config.coordinator_url, legacy.coordinator_url);
+    assert.equal(config.collectives.length, 1);
+    assert.equal(config.collectives[0].key_id, legacy.key_id);
+    assert.equal(JSON.parse(await readFile(configPath(), 'utf8')).active_collective_id, config.active_collective_id);
+  });
+});
+
+test('switchCollective and leaveCollective preserve the selected scalar membership', async () => {
+  await withConfigHome(async ({ saveConfig, loadConfig, switchCollective, leaveCollective }) => {
+    saveConfig({ coordinator_url: 'http://a.test', collective_token: 'a', key_id: 'a', collectives: [
+      { id: 'a', coordinator_url: 'http://a.test', collective_token: 'a', key_id: 'a' },
+      { id: 'b', coordinator_url: 'http://b.test', collective_token: 'b', key_id: 'b' },
+    ], active_collective_id: 'a' });
+    switchCollective('b');
+    assert.equal(loadConfig().coordinator_url, 'http://b.test');
+    leaveCollective('b');
+    assert.equal(loadConfig().coordinator_url, 'http://a.test');
+    assert.equal(loadConfig().collectives.length, 1);
   });
 });
 

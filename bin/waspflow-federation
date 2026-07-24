@@ -262,7 +262,7 @@ async function cmdJoin(argv) {
   // The restart nudge is only for a registered daemon that refused the
   // reload; with no daemon running there is nothing to refresh, and a
   // successful reload needs no user action.
-  if (result.status !== 'already_joined' && (await reloadRunningFederationDaemon()) === 'failed') {
+  if ((switching || result.status !== 'already_joined') && (await reloadRunningFederationDaemon()) === 'failed') {
     const line = 'restart the Federation app to finish switching: systemctl --user restart waspflow-federation-daemon.service or waspflow federation ui\n';
     (flags.json ? process.stderr : process.stdout).write(line);
   }
@@ -282,6 +282,36 @@ async function cmdJoin(argv) {
     return;
   }
   printResult(flags.json, [result.status === 'already_joined' ? `Already joined ${result.coordinatorUrl}.` : `Updated your invite for ${result.coordinatorUrl}.`], structured, result.status);
+}
+
+async function cmdSwitch(argv) {
+  const { flags, positional } = parseFlags(argv, []);
+  const [id] = positional;
+  if (!id || positional.length !== 1) fail('usage: waspflow federation switch <collective-id> [--json]');
+  const { switchCollective } = await import('../lib/federation-config.mjs');
+  const { federationDaemonIsBusy, reloadRunningFederationDaemon } = await import('../lib/federation-daemon.mjs');
+  if (await federationDaemonIsBusy()) fail('Federation is still finishing work. Switch after it finishes.');
+  const config = switchCollective(id);
+  if ((await reloadRunningFederationDaemon()) === 'failed') log('restart the Federation app to finish switching.');
+  printResult(flags.json, [`Active collective: ${config.coordinator_url}.`], { status: 'switched', collective_id: id, coordinator_url: config.coordinator_url }, 'switched');
+}
+
+async function cmdLeave(argv) {
+  const { flags, positional } = parseFlags(argv, []);
+  const [id] = positional;
+  if (!id || positional.length !== 1) fail('usage: waspflow federation leave <collective-id> [--json]');
+  const { leaveCollective, loadConfig } = await import('../lib/federation-config.mjs');
+  const config = loadConfig();
+  if (config?.active_collective_id === id) {
+    const { federationDaemonIsBusy } = await import('../lib/federation-daemon.mjs');
+    if (await federationDaemonIsBusy()) fail('Federation is still finishing work. Leave after it finishes.');
+  }
+  const next = leaveCollective(id);
+  if (config?.active_collective_id === id) {
+    const { reloadRunningFederationDaemon } = await import('../lib/federation-daemon.mjs');
+    if ((await reloadRunningFederationDaemon()) === 'failed') log('restart the Federation app to finish leaving.');
+  }
+  printResult(flags.json, [`Left collective '${id}'.${next ? ` Active collective: ${next.coordinator_url}.` : ''}`], { status: 'left', collective_id: id, ...(next ? { coordinator_url: next.coordinator_url } : {}) }, 'left');
 }
 
 // --- host / invite (operator journey) --------------------------------------
@@ -881,7 +911,8 @@ async function cmdStatus(argv) {
     `joined as '${config.key_id}'`,
     `coordinator: ${config.coordinator_url}`,
     `config: ${configPath()}`,
-  ], { status: 'joined', key_id: config.key_id, coordinator_url: config.coordinator_url, config_path: configPath() }, 'member_status');
+    ...(config.collectives.length > 1 ? [`collectives: ${config.collectives.map((entry) => `${entry.id}${entry.id === config.active_collective_id ? ' (active)' : ''}`).join(', ')}`] : []),
+  ], { status: 'joined', key_id: config.key_id, coordinator_url: config.coordinator_url, config_path: configPath(), collectives: config.collectives.map(({ id, coordinator_url, collective_name, joined_at, last_seen }) => ({ id, coordinator_url, collective_name: collective_name || null, joined_at, last_seen, active: id === config.active_collective_id })) }, 'member_status');
 }
 
 // `waspflow federation` is deliberately an entry point, not a second help
@@ -932,6 +963,8 @@ async function main() {
   switch (verb) {
     case 'doctor': return cmdDoctor(rest);
     case 'join': return cmdJoin(rest);
+    case 'switch': return cmdSwitch(rest);
+    case 'leave': return cmdLeave(rest);
     case 'contribute': return cmdContribute(rest);
     case 'submit': return cmdSubmit(rest);
     case 'status': return cmdStatus(rest);
@@ -950,7 +983,7 @@ async function main() {
       return;
     }
     default:
-      process.stderr.write(`usage: waspflow federation <host|invite|doctor|join|contribute|submit|status|trust|approve|daemon|ui> ...\n`);
+      process.stderr.write(`usage: waspflow federation <host|invite|doctor|join|switch|leave|contribute|submit|status|trust|approve|daemon|ui> ...\n`);
       process.exit(1);
   }
 }
