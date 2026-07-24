@@ -91,6 +91,25 @@ func VisualStateForDaemonState(state string) VisualState {
 	}
 }
 
+// SetupStatusTitle is the honest menu title when the daemon IS running but is
+// not yet contributing (VisualSetup + reachable). It translates the daemon's
+// own state into plain language with a next step, instead of the old blanket
+// "daemon is not running" lie. Unknown states fall back to a neutral truth.
+func SetupStatusTitle(daemonState string) string {
+	switch daemonState {
+	case "pending_approval":
+		return "Waiting for the collective operator to approve you"
+	case "not_joined":
+		return "Not in a collective yet — open Federation to join"
+	case "approval_revoked":
+		return "Approval was revoked — open Federation to rejoin"
+	case "setup_required":
+		return "Setup required — open Federation to continue"
+	default:
+		return "Open Federation to continue setup"
+	}
+}
+
 // TooltipForVisualState gives every visual state an accessible text equivalent.
 func TooltipForVisualState(state VisualState) string {
 	switch state {

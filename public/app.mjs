@@ -10,16 +10,16 @@ function tt(t, e, r) {
   var a, s, i, d = {};
   for (i in e) i == "key" ? a = e[i] : i == "ref" ? s = e[i] : d[i] = e[i];
   if (arguments.length > 2 && (d.children = arguments.length > 3 ? ne.call(arguments, 2) : r), typeof t == "function" && t.defaultProps != null) for (i in t.defaultProps) d[i] === void 0 && (d[i] = t.defaultProps[i]);
-  return G(t, d, a, s, null);
+  return J(t, d, a, s, null);
 }
-function G(t, e, r, a, s) {
+function J(t, e, r, a, s) {
   var i = { type: t, props: e, key: r, ref: a, __k: null, __: null, __b: 0, __e: null, __c: null, constructor: void 0, __v: s ?? ++Fe, __i: -1, __u: 0 };
   return s == null && k.vnode != null && k.vnode(i), i;
 }
 function T(t) {
   return t.children;
 }
-function J(t, e) {
+function G(t, e) {
   this.props = t, this.context = e;
 }
 function L(t, e) {
@@ -55,7 +55,7 @@ function Le(t, e, r, a, s, i, d, c, p, l, h) {
 }
 function rt(t, e, r, a, s) {
   var i, d, c, p, l, h = r.length, f = h, o = 0;
-  for (t.__k = new Array(s), i = 0; i < s; i++) (d = e[i]) != null && typeof d != "boolean" && typeof d != "function" ? (typeof d == "string" || typeof d == "number" || typeof d == "bigint" || d.constructor == String ? d = t.__k[i] = G(null, d, null, null, null) : re(d) ? d = t.__k[i] = G(T, { children: d }, null, null, null) : d.constructor === void 0 && d.__b > 0 ? d = t.__k[i] = G(d.type, d.props, d.key, d.ref ? d.ref : null, d.__v) : t.__k[i] = d, p = i + o, d.__ = t, d.__b = t.__b + 1, c = null, (l = d.__i = it(d, r, p, f)) != -1 && (f--, (c = r[l]) && (c.__u |= 2)), c == null || c.__v == null ? (l == -1 && (s > h ? o-- : s < h && o++), typeof d.type != "function" && (d.__u |= 4)) : l != p && (l == p - 1 ? o-- : l == p + 1 ? o++ : (l > p ? o-- : o++, d.__u |= 4))) : t.__k[i] = null;
+  for (t.__k = new Array(s), i = 0; i < s; i++) (d = e[i]) != null && typeof d != "boolean" && typeof d != "function" ? (typeof d == "string" || typeof d == "number" || typeof d == "bigint" || d.constructor == String ? d = t.__k[i] = J(null, d, null, null, null) : re(d) ? d = t.__k[i] = J(T, { children: d }, null, null, null) : d.constructor === void 0 && d.__b > 0 ? d = t.__k[i] = J(d.type, d.props, d.key, d.ref ? d.ref : null, d.__v) : t.__k[i] = d, p = i + o, d.__ = t, d.__b = t.__b + 1, c = null, (l = d.__i = it(d, r, p, f)) != -1 && (f--, (c = r[l]) && (c.__u |= 2)), c == null || c.__v == null ? (l == -1 && (s > h ? o-- : s < h && o++), typeof d.type != "function" && (d.__u |= 4)) : l != p && (l == p - 1 ? o-- : l == p + 1 ? o++ : (l > p ? o-- : o++, d.__u |= 4))) : t.__k[i] = null;
   if (f) for (i = 0; i < h; i++) (c = r[i]) != null && (2 & c.__u) == 0 && (c.__e == a && (a = L(c)), ze(c, c));
   return a;
 }
@@ -111,17 +111,17 @@ function ke(t) {
   };
 }
 function he(t, e, r, a, s, i, d, c, p, l) {
-  var h, f, o, u, g, _, y, w, b, m, v, x, q, R, A, U, $ = e.type;
+  var h, f, o, u, g, _, y, w, b, m, v, x, q, R, I, U, $ = e.type;
   if (e.constructor !== void 0) return null;
   128 & r.__u && (p = !!(32 & r.__u), i = [c = e.__e = r.__e]), (h = k.__b) && h(e);
   e: if (typeof $ == "function") {
     f = d.length;
     try {
-      if (b = e.props, m = $.prototype && $.prototype.render, v = (h = $.contextType) && a[h.__c], x = h ? v ? v.props.value : h.__ : a, r.__c ? w = (o = e.__c = r.__c).__ = o.__E : (m ? e.__c = o = new $(b, x) : (e.__c = o = new J(b, x), o.constructor = $, o.render = ot), v && v.sub(o), o.state || (o.state = {}), o.__n = a, u = o.__d = !0, o.__h = [], o._sb = []), m && o.__s == null && (o.__s = o.state), m && $.getDerivedStateFromProps != null && (o.__s == o.state && (o.__s = F({}, o.__s)), F(o.__s, $.getDerivedStateFromProps(b, o.__s))), g = o.props, _ = o.state, o.__v = e, u) m && $.getDerivedStateFromProps == null && o.componentWillMount != null && o.componentWillMount(), m && o.componentDidMount != null && o.__h.push(o.componentDidMount);
+      if (b = e.props, m = $.prototype && $.prototype.render, v = (h = $.contextType) && a[h.__c], x = h ? v ? v.props.value : h.__ : a, r.__c ? w = (o = e.__c = r.__c).__ = o.__E : (m ? e.__c = o = new $(b, x) : (e.__c = o = new G(b, x), o.constructor = $, o.render = ot), v && v.sub(o), o.state || (o.state = {}), o.__n = a, u = o.__d = !0, o.__h = [], o._sb = []), m && o.__s == null && (o.__s = o.state), m && $.getDerivedStateFromProps != null && (o.__s == o.state && (o.__s = F({}, o.__s)), F(o.__s, $.getDerivedStateFromProps(b, o.__s))), g = o.props, _ = o.state, o.__v = e, u) m && $.getDerivedStateFromProps == null && o.componentWillMount != null && o.componentWillMount(), m && o.componentDidMount != null && o.__h.push(o.componentDidMount);
       else {
         if (m && $.getDerivedStateFromProps == null && b !== g && o.componentWillReceiveProps != null && o.componentWillReceiveProps(b, x), e.__v == r.__v || !o.__e && o.shouldComponentUpdate != null && o.shouldComponentUpdate(b, o.__s, x) === !1) {
-          e.__v != r.__v && (o.props = b, o.state = o.__s, o.__d = !1), e.__e = r.__e, e.__k = r.__k, e.__k.some(function(I) {
-            I && (I.__ = e);
+          e.__v != r.__v && (o.props = b, o.state = o.__s, o.__d = !1), e.__e = r.__e, e.__k = r.__k, e.__k.some(function(A) {
+            A && (A.__ = e);
           }), K.push.apply(o.__h, o._sb), o._sb = [], o.__h.length && d.push(o);
           break e;
         }
@@ -133,15 +133,15 @@ function he(t, e, r, a, s, i, d, c, p, l) {
       else do
         o.__d = !1, q && q(e), h = o.render(o.props, o.state, o.context), o.state = o.__s;
       while (o.__d && ++R < 25);
-      o.state = o.__s, o.getChildContext != null && (a = F(F({}, a), o.getChildContext())), m && !u && o.getSnapshotBeforeUpdate != null && (y = o.getSnapshotBeforeUpdate(g, _)), A = h != null && h.type === T && h.key == null ? je(h.props.children) : h, c = Le(t, re(A) ? A : [A], e, r, a, s, i, d, c, p, l), o.base = e.__e, e.__u &= -161, o.__h.length && d.push(o), w && (o.__E = o.__ = null);
-    } catch (I) {
+      o.state = o.__s, o.getChildContext != null && (a = F(F({}, a), o.getChildContext())), m && !u && o.getSnapshotBeforeUpdate != null && (y = o.getSnapshotBeforeUpdate(g, _)), I = h != null && h.type === T && h.key == null ? je(h.props.children) : h, c = Le(t, re(I) ? I : [I], e, r, a, s, i, d, c, p, l), o.base = e.__e, e.__u &= -161, o.__h.length && d.push(o), w && (o.__E = o.__ = null);
+    } catch (A) {
       if (d.length = f, e.__v = null, p || i != null) {
-        if (I.then) {
+        if (A.then) {
           for (e.__u |= p ? 160 : 128; c && c.nodeType == 8 && c.nextSibling; ) c = c.nextSibling;
           i != null && (i[i.indexOf(c)] = null), e.__e = c;
         } else if (i != null) for (U = i.length; U--; ) _e(i[U]);
       } else e.__e = r.__e;
-      e.__k == null && (e.__k = r.__k || []), I.then || Me(e), k.__e(I, e, r);
+      e.__k == null && (e.__k = r.__k || []), A.then || Me(e), k.__e(A, e, r);
     }
   } else i == null && e.__v == r.__v ? (e.__k = r.__k, e.__e = r.__e) : c = e.__e = at(r.__e, e, r, a, s, i, d, p, l);
   return (h = k.diffed) && h(e), 128 & e.__u ? void 0 : c;
@@ -224,12 +224,12 @@ ne = K.slice, k = { __e: function(t, e, r, a) {
     t = c;
   }
   throw t;
-} }, Fe = 0, J.prototype.setState = function(t, e) {
+} }, Fe = 0, G.prototype.setState = function(t, e) {
   var r;
   r = this.__s != null && this.__s != this.state ? this.__s : this.__s = F({}, this.state), typeof t == "function" && (t = t(F({}, r), this.props)), t && F(r, t), t != null && this.__v && (e && this._sb.push(e), be(this));
-}, J.prototype.forceUpdate = function(t) {
+}, G.prototype.forceUpdate = function(t) {
   this.__v && (this.__e = !0, t && this.__h.push(t), be(this));
-}, J.prototype.render = T, H = [], Ue = typeof Promise == "function" ? Promise.prototype.then.bind(Promise.resolve()) : setTimeout, He = function(t, e) {
+}, G.prototype.render = T, H = [], Ue = typeof Promise == "function" ? Promise.prototype.then.bind(Promise.resolve()) : setTimeout, He = function(t, e) {
   return t.__v.__b - e.__v.__b;
 }, Q.__r = 0, ae = Math.random().toString(8), B = "__d" + ae, M = "__a" + ae, Ee = /(PointerCapture)$|Capture$/i, pe = 0, le = ke(!1), ce = ke(!0);
 var lt = 0;
@@ -248,11 +248,11 @@ function fe(t, e) {
   return t >= r.__.length && r.__.push({}), r.__[t];
 }
 function P(t) {
-  return X = 1, ct(Je, t);
+  return X = 1, ct(Ge, t);
 }
 function ct(t, e, r) {
   var a = fe(O++, 2);
-  if (a.t = t, !a.__c && (a.__ = [Je(void 0, e), function(c) {
+  if (a.t = t, !a.__c && (a.__ = [Ge(void 0, e), function(c) {
     var p = a.__N ? a.__N[0] : a.__[0], l = a.t(p, c);
     p !== l && (a.__N = [l, a.__[1]], a.__c.setState({}));
   }], a.__c = N, !N.__f)) {
@@ -285,11 +285,11 @@ function ct(t, e, r) {
 }
 function Z(t, e) {
   var r = fe(O++, 3);
-  !S.__s && Ge(r.__H, e) && (r.__ = t, r.u = e, N.__H.__h.push(r));
+  !S.__s && Je(r.__H, e) && (r.__ = t, r.u = e, N.__H.__h.push(r));
 }
 function dt(t, e) {
   var r = fe(O++, 7);
-  return Ge(r.__H, e) && (r.__ = t(), r.__H = e, r.__h = t), r.__;
+  return Je(r.__H, e) && (r.__ = t(), r.__H = e, r.__h = t), r.__;
 }
 function z(t, e) {
   return X = 8, dt(function() {
@@ -360,12 +360,12 @@ function de(t) {
   var e = N;
   t.__c = t.__(), N = e;
 }
-function Ge(t, e) {
+function Je(t, e) {
   return !t || t.length !== e.length || e.some(function(r, a) {
     return r !== t[a];
   });
 }
-function Je(t, e) {
+function Ge(t, e) {
   return typeof e == "function" ? e(t) : e;
 }
 const _t = "This local link has expired; no task or account change was made.", ht = /* @__PURE__ */ new Set(["contribute", "requests", "compose", "activity", "help", "settings", "tasks"]);
@@ -407,7 +407,7 @@ function Ke(t) {
 const vt = ':root{--ink:#17212b;--muted:#5d6b76;--line:#d9e0e5;--surface:#fff;--page:#f7f9fa;--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:24px;--space-6:32px;--active:#19597e;--active-bg:#e6f0f7;--ready:#176a46;--ready-bg:#e1f3e8;--attention:#b37d17;--attention-bg:#fff4dc;--problem:#8b3513;--problem-bg:#fff0eb;font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:var(--ink);background:var(--page)}*{box-sizing:border-box}body{margin:0;background:var(--page)}button,input,textarea{font:inherit}button,.button-link{border:0;border-radius:8px;padding:10px 14px;background:#19597e;color:#fff;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:6px}button.secondary,.button-link.secondary{background:#fff;color:#19597e;border:1px solid #9fb4c2}button:disabled{opacity:.55;cursor:not-allowed}a{color:#19597e}#app>main,#main-content{width:min(1040px,calc(100% - 32px));margin:var(--space-6) auto}.app-header{min-height:64px;padding:0 max(16px,calc((100vw - 1040px)/2));display:flex;align-items:center;gap:var(--space-5);background:#fff;border-bottom:1px solid var(--line)}.brand{display:flex;gap:var(--space-2);color:var(--ink);text-decoration:none;font-weight:760;white-space:nowrap}.brand-mark{width:24px;height:24px;display:grid;place-items:center;border-radius:7px;color:#fff;background:#19597e}.primary-nav{margin-left:auto;display:flex;gap:var(--space-4)}.primary-nav a{padding:22px 0 18px;color:var(--muted);text-decoration:none;border-bottom:3px solid transparent}.primary-nav a[aria-current=page]{color:var(--ink);border-color:#19597e;font-weight:700}.gear{font-size:20px;color:var(--ink);text-decoration:none}.skip-link{position:absolute;left:-999px}.skip-link:focus{left:8px;top:8px;z-index:3;background:#fff;padding:8px}.view-stack{display:grid;gap:var(--space-4)}.panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:var(--space-5)}.panel-heading{margin-bottom:var(--space-4)}.panel h2{font-size:1.125rem;margin:0 0 var(--space-1)}.panel h3{margin-top:var(--space-5)}.muted,.detail,.quiet-note,.field-help{color:var(--muted)}.contribution-state{display:flex;gap:var(--space-3);align-items:flex-start}.status-label{font-size:1.5rem;line-height:1.2;margin:0;font-weight:760}.status-dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--ready)}.status-dot.large{margin-top:8px;width:14px;height:14px}.status-dot[data-status=active]{background:var(--active)}.status-dot[data-status=ready]{background:var(--ready)}.status-dot[data-status=attention]{background:var(--attention)}.status-dot[data-status=problem]{background:var(--problem)}.collective-line{font-weight:650}.actions{display:flex;flex-wrap:wrap;gap:var(--space-2);margin:var(--space-4) 0}.guard{padding:var(--space-3);background:var(--ready-bg);color:var(--ready);border-radius:8px}.notice{margin:0 0 var(--space-4);padding:var(--space-3);border:1px solid var(--problem);background:var(--problem-bg);color:var(--problem);border-radius:8px}.notice[data-status=attention]{border-color:var(--attention);background:var(--attention-bg);color:#77530d}.empty-state{padding:var(--space-4);background:#fff;border:1px dashed #afbec8;border-radius:8px}.empty-state strong{display:block}.task-list,.request-list,.history-list,.roster,.file-list{list-style:none;padding:0;margin:var(--space-4) 0 0}.task-row,.request-list li,.history-list li,.roster li{padding:var(--space-3) 0;border-top:1px solid var(--line)}.task-row,.request-select,.history-list li,.roster li{display:flex;justify-content:space-between;gap:var(--space-4);align-items:flex-start}.request-select{color:inherit;text-decoration:none;display:flex;width:100%}.request-select small{display:block;color:var(--muted);margin-top:var(--space-1)}.receipt-chips{display:flex;gap:var(--space-2);flex-wrap:wrap}.receipt-chip,.role-chip{padding:3px 7px;border-radius:999px;background:#edf1f3;font-size:.85rem}.consent-card{border-color:#b2cad8;box-shadow:0 4px 14px #17324f12}.full-prompt{white-space:pre-wrap;line-height:1.5}.chip{display:inline-flex;align-items:center;gap:6px;width:fit-content;padding:3px 8px;border-radius:999px;font-size:.85rem;font-weight:650;color:var(--ready);background:var(--ready-bg)}.chip[data-status=active]{color:var(--active);background:var(--active-bg)}.chip[data-status=attention]{color:#77530d;background:var(--attention-bg)}.chip[data-status=problem]{color:var(--problem);background:var(--problem-bg)}.timeline{padding:0;list-style:none;display:flex;gap:0;overflow:auto}.timeline li{min-width:130px;position:relative;padding:24px 12px 0 0;color:var(--muted)}.timeline li:before{content:"";position:absolute;top:7px;left:0;width:100%;height:2px;background:var(--line)}.timeline li:first-child:before{width:100%}.timeline li:after{content:"";position:absolute;top:1px;left:0;width:14px;height:14px;border-radius:50%;background:#fff;border:2px solid #a6b3bb}.timeline li.complete:after,.timeline li.current:after{border-color:var(--active);background:var(--active)}.timeline li strong,.timeline li span{display:block}.timeline li span{font-size:.85rem;margin-top:var(--space-1)}.execution-log{white-space:pre-wrap;overflow:auto;padding:var(--space-3);background:#17212b;color:#e9f0f4;border-radius:8px;max-height:400px}.receipt{display:grid;grid-template-columns:140px 1fr;gap:var(--space-2) var(--space-3)}.receipt dt{font-weight:700}.receipt dd{margin:0}.back-link{display:block;margin-bottom:calc(var(--space-4) * -1)}.segmented{display:flex;gap:var(--space-1);padding:var(--space-1);width:fit-content;border-radius:8px;background:#edf1f3}.segmented button{color:var(--muted);background:transparent;padding:7px 10px}.segmented button[aria-selected=true]{background:#fff;color:var(--ink);box-shadow:0 1px 2px #0002}.history-list li span,.roster li small{color:var(--muted)}.provider-card{padding:var(--space-3);border:1px solid var(--line);border-radius:8px;margin-top:var(--space-2)}.day-chips{display:flex;gap:var(--space-2);flex-wrap:wrap;margin:var(--space-2) 0}.day-chips button{background:#fff;color:var(--ink);border:1px solid var(--line);padding:8px 10px}.day-chips button.selected{background:var(--active-bg);color:var(--active);border-color:var(--active)}form{display:grid;gap:var(--space-2)}label{font-weight:650;display:grid;gap:var(--space-1)}input,textarea{width:100%;padding:9px;border:1px solid #aebdc7;border-radius:7px;background:#fff}input[type=checkbox]{width:auto;margin-right:var(--space-1)}textarea{min-height:120px;resize:vertical}.form-feedback{min-height:1.5rem;color:var(--problem)}.one-time-code-wrap{display:inline-flex;gap:var(--space-2);align-items:center}.one-time-code{padding:4px 6px;background:#eef1f3;border-radius:4px;cursor:pointer}.full-bleed{display:grid;place-items:center;min-height:100vh;margin:0!important;width:100%!important}.full-bleed .panel{max-width:600px;width:calc(100% - 32px)}.stop-now{margin:var(--space-3) 0}@media(max-width:700px){.app-header{gap:var(--space-2);flex-wrap:wrap;padding:var(--space-2) var(--space-4)}.primary-nav{margin-left:0;order:3;width:100%;gap:var(--space-3);overflow:auto}.primary-nav a{padding:var(--space-2) 0}.brand{font-size:.95rem}#app>main,#main-content{width:min(100% - 24px,1040px);margin:var(--space-4) auto}.panel{padding:var(--space-4)}.timeline li{min-width:108px}.task-row,.history-list li{flex-direction:column;gap:var(--space-2)}.receipt{grid-template-columns:1fr;gap:var(--space-1)}.receipt dd{margin-bottom:var(--space-2)}}', bt = 1500, Re = { display_id: "", prompt: "", source: "", git_url: "", git_ref: "", git_probe: "", github_access_required: !1, files: [], network: !1, error: "" }, yt = [["contribute", "Contribute"], ["requests", "Requests"], ["activity", "Activity"], ["help", "Help"]], D = (t) => Array.isArray(t) ? t : [], ge = (t) => {
   const e = new Date(t || "");
   return Number.isFinite(e.getTime()) ? new Intl.DateTimeFormat(void 0, { dateStyle: "medium", timeStyle: "short" }).format(e) : "Not captured";
-}, kt = (t) => typeof t == "number" ? `${Math.max(0, Math.round(t / 1e3))} seconds` : t || "Not captured — the harness did not report a duration.", wt = (t) => String(t || "").split(/\r?\n/).map((e) => e.trim()).find(Boolean) || "Prompt preview is not available.", Ae = (t) => String(t || "").replace(/^sha256:/, ""), xt = async (t) => {
+}, kt = (t) => typeof t == "number" ? `${Math.max(0, Math.round(t / 1e3))} seconds` : t || "Not captured — the harness did not report a duration.", wt = (t) => String(t || "").split(/\r?\n/).map((e) => e.trim()).find(Boolean) || "Prompt preview is not available.", Ie = (t) => String(t || "").replace(/^sha256:/, ""), xt = async (t) => {
   const e = new Uint8Array(await t.arrayBuffer());
   let r = "";
   for (let a = 0; a < e.length; a += 32768) r += String.fromCharCode(...e.subarray(a, a + 32768));
@@ -432,7 +432,7 @@ function te({ value: t }) {
 function W({ status: t = "problem", children: e }) {
   return e ? /* @__PURE__ */ n("div", { className: "notice", "data-status": t, role: "status", children: e }) : null;
 }
-function Ie({ value: t }) {
+function Ae({ value: t }) {
   const e = () => {
     navigator.clipboard?.writeText(t);
   };
@@ -470,10 +470,16 @@ function Qe({ view: t, status: e, control: r }) {
     /* @__PURE__ */ n("p", { children: "You can close this — contributions start once you’re approved." }),
     e?.approval_request ? /* @__PURE__ */ n(T, { children: [
       /* @__PURE__ */ n("label", { children: "Approval request" }),
-      /* @__PURE__ */ n(Ie, { value: e.approval_request }),
+      /* @__PURE__ */ n(Ae, { value: e.approval_request }),
       /* @__PURE__ */ n("p", { className: "quiet-note", children: "Send this to your operator any way you like." })
     ] }) : null,
-    /* @__PURE__ */ n(W, { status: "attention", children: e?.coordinator_unavailable ? "Your collective is unreachable right now. Approval will refresh when it returns." : null })
+    e?.coordinator_unavailable ? /* @__PURE__ */ n(T, { children: [
+      /* @__PURE__ */ n(W, { status: "attention", children: "Your collective is offline right now, so your approval can’t complete. This will pick up on its own the moment your operator brings it back online — nothing here is broken." }),
+      /* @__PURE__ */ n("p", { className: "quiet-note", children: [
+        "Waiting on a different collective? ",
+        /* @__PURE__ */ n("a", { href: "#/settings/collective", children: "Join another one →" })
+      ] })
+    ] }) : null
   ] }) });
   if (t.name === "approval_revoked") return /* @__PURE__ */ n(E, { children: /* @__PURE__ */ n(C, { title: "Approval was revoked", lead: "No new work will start on this machine.", children: [
     /* @__PURE__ */ n("p", { children: e?.detail || "Ask your collective owner to approve this machine again." }),
@@ -496,7 +502,7 @@ function Qe({ view: t, status: e, control: r }) {
     ] }),
     i.code && /* @__PURE__ */ n("p", { children: [
       "Confirmation code: ",
-      /* @__PURE__ */ n(Ie, { value: i.code })
+      /* @__PURE__ */ n(Ae, { value: i.code })
     ] })
   ] }) });
 }
@@ -588,7 +594,7 @@ function Ct({ digest: t, task: e, log: r, loadLog: a, resultHref: s }) {
       /* @__PURE__ */ n("h3", { children: "Live transcript" }),
       /* @__PURE__ */ n(Tt, { log: r }),
       /* @__PURE__ */ n("h3", { children: "What was asked" }),
-      /* @__PURE__ */ n("p", { className: "full-prompt", children: e?.prompt || e?.prompt_preview || "Task details are still loading." }),
+      /* @__PURE__ */ n("p", { className: "full-prompt", children: typeof e?.prompt == "string" && e.prompt || e?.prompt_preview || (e ? "The full prompt isn’t shown on this screen — open the task from Contribute to read the whole request." : "Loading…") }),
       i && /* @__PURE__ */ n("details", { children: [
         /* @__PURE__ */ n("summary", { children: "Result and receipt" }),
         /* @__PURE__ */ n($t, { task: e }),
@@ -649,7 +655,7 @@ function Rt({ requests: t, submission: e, form: r, setForm: a, submit: s, probeG
     ] })
   ] });
 }
-function At({ form: t, setForm: e, submit: r, probeGit: a }) {
+function It({ form: t, setForm: e, submit: r, probeGit: a }) {
   const s = (c) => (p) => e((l) => ({ ...l, [c]: p.currentTarget.type === "checkbox" ? p.currentTarget.checked : p.currentTarget.value, error: "" })), i = (c) => e((p) => ({ ...p, files: [...p.files, ...Array.from(c.currentTarget.files || [])], error: "" }));
   return /* @__PURE__ */ n("div", { className: "view-stack", children: [
     /* @__PURE__ */ n("a", { className: "back-link", href: "#/requests", children: "← Requests" }),
@@ -698,7 +704,7 @@ function At({ form: t, setForm: e, submit: r, probeGit: a }) {
     ] }) })
   ] });
 }
-function It({ ledger: t, requests: e }) {
+function At({ ledger: t, requests: e }) {
   const [r, a] = P("did"), s = r === "did" ? t.filter((i) => i.role !== "requester" && i.author !== "me") : e;
   return /* @__PURE__ */ n("div", { className: "view-stack", children: /* @__PURE__ */ n(C, { title: "Activity", children: [
     /* @__PURE__ */ n("div", { className: "segmented", role: "tablist", children: [
@@ -828,8 +834,8 @@ function Ht() {
     return q;
   }, [t]), o = z(async () => {
     try {
-      const m = await f("/status"), v = !m.coordinator_unavailable && m.state !== "not_joined", [x, q, R, A, U, $, I] = await Promise.all([m.state === "idle" ? f("/tasks").catch(() => []) : Promise.resolve([]), f("/ledger").catch(() => []), f("/identity").catch(() => null), f("/settings").catch(() => null), v ? f("/roster").catch(() => []) : Promise.resolve([]), v ? f("/activity").catch(() => []) : Promise.resolve([]), v ? f("/requests").catch(() => null) : Promise.resolve(null)]);
-      r((Ze) => ({ ...Ze, status: m, tasks: D(x), ledger: D(q), identity: R || { key_id: m.key_id, coordinator_url: m.coordinator_url }, settings: A, roster: D(U?.roster || U), requests: I ? D(I) : D(q).filter((ie) => ie.author === "me" || ie.role === "requester" || ie.requester === !0), coordinatorUnavailable: !!m.coordinator_unavailable, daemonUnavailable: !1 }));
+      const m = await f("/status"), v = !m.coordinator_unavailable && m.state !== "not_joined", [x, q, R, I, U, $, A] = await Promise.all([m.state === "idle" ? f("/tasks").catch(() => []) : Promise.resolve([]), f("/ledger").catch(() => []), f("/identity").catch(() => null), f("/settings").catch(() => null), v ? f("/roster").catch(() => []) : Promise.resolve([]), v ? f("/activity").catch(() => []) : Promise.resolve([]), v ? f("/requests").catch(() => null) : Promise.resolve(null)]);
+      r((Ze) => ({ ...Ze, status: m, tasks: D(x), ledger: D(q), identity: R || { key_id: m.key_id, coordinator_url: m.coordinator_url }, settings: I, roster: D(U?.roster || U), requests: A ? D(A) : D(q).filter((ie) => ie.author === "me" || ie.role === "requester" || ie.requester === !0), coordinatorUnavailable: !!m.coordinator_unavailable, daemonUnavailable: !1 }));
     } catch (m) {
       m.status === 401 ? r((v) => ({ ...v, sessionExpired: !0 })) : r((v) => ({ ...v, daemonUnavailable: !0 }));
     }
@@ -853,25 +859,25 @@ function Ht() {
   }, g = async (m) => {
     try {
       const v = await Promise.all(m.files.map(xt));
-      if (v.reduce((A, U) => A + Math.floor(U.data_base64.length * 3 / 4), 0) > 20 * 1024 * 1024) throw new Error("Attachments are limited to 20 MB. Choose fewer or smaller files.");
+      if (v.reduce((I, U) => I + Math.floor(U.data_base64.length * 3 / 4), 0) > 20 * 1024 * 1024) throw new Error("Attachments are limited to 20 MB. Choose fewer or smaller files.");
       const q = { ...m, attachments: v, network: m.git_url || m.network ? "enabled" : "disabled" };
       delete q.files;
       const R = await f("/submit", { method: "POST", body: JSON.stringify(q) });
-      s(Re), r((A) => ({ ...A, status: R, submission: R.submission, message: "" })), location.hash = "#/requests";
+      s(Re), r((I) => ({ ...I, status: R, submission: R.submission, message: "" })), location.hash = "#/requests";
     } catch (v) {
       s((x) => ({ ...x, error: v.message }));
     }
   }, _ = z(async (m) => {
     if (m)
       try {
-        const v = await f(`/tasks/${encodeURIComponent(Ae(m))}`);
+        const v = await f(`/tasks/${encodeURIComponent(Ie(m))}`);
         p(v);
       } catch {
         p(null);
       }
   }, [f]), y = z(async (m) => {
     try {
-      const v = await f(`/tasks/${encodeURIComponent(Ae(m))}/log?since=0`);
+      const v = await f(`/tasks/${encodeURIComponent(Ie(m))}/log?since=0`);
       h(v);
     } catch {
       h(null);
@@ -889,13 +895,13 @@ function Ht() {
   ] });
   if (i.name === "compose") return /* @__PURE__ */ n(T, { children: [
     /* @__PURE__ */ n(se, { route: "requests" }),
-    /* @__PURE__ */ n("main", { id: "main-content", children: /* @__PURE__ */ n(At, { form: a, setForm: s, submit: g, probeGit: (m) => f("/git/probe", { method: "POST", body: JSON.stringify({ git_url: m }) }) }) })
+    /* @__PURE__ */ n("main", { id: "main-content", children: /* @__PURE__ */ n(It, { form: a, setForm: s, submit: g, probeGit: (m) => f("/git/probe", { method: "POST", body: JSON.stringify({ git_url: m }) }) }) })
   ] });
   if (i.name === "contribute" && ue(e.status).name !== "status") return /* @__PURE__ */ n(Qe, { view: ue(e.status), status: e.status, control: u });
   const b = i.name === "contribute" ? /* @__PURE__ */ n(Nt, { ...e, control: u, goTask: (m) => {
     location.hash = `#/tasks/${encodeURIComponent(m)}`;
   }, beginGitHub: () => u("/identity/signin", { service: "github" }) }) : i.name === "requests" ? /* @__PURE__ */ n(Rt, { requests: e.requests, submission: e.submission, form: a, setForm: s, submit: g, probeGit: () => {
-  }, acknowledge: () => u("/submit/ack") }) : i.name === "activity" ? /* @__PURE__ */ n(It, { ledger: e.ledger, requests: e.requests }) : i.name === "settings" ? /* @__PURE__ */ n(Ft, { section: i.parts[0] || "device", identity: e.identity, settings: e.settings, roster: e.roster, save: (m) => f("/settings", { method: "POST", body: JSON.stringify(m) }).then((v) => r((x) => ({ ...x, settings: v }))), signIn: (m) => u("/identity/signin", { service: m }), join: (m) => u("/join", { invite: m }), status: e.status, message: e.message }) : /* @__PURE__ */ n(Ut, { identity: e.identity });
+  }, acknowledge: () => u("/submit/ack") }) : i.name === "activity" ? /* @__PURE__ */ n(At, { ledger: e.ledger, requests: e.requests }) : i.name === "settings" ? /* @__PURE__ */ n(Ft, { section: i.parts[0] || "device", identity: e.identity, settings: e.settings, roster: e.roster, save: (m) => f("/settings", { method: "POST", body: JSON.stringify(m) }).then((v) => r((x) => ({ ...x, settings: v }))), signIn: (m) => u("/identity/signin", { service: m }), join: (m) => u("/join", { invite: m }), status: e.status, message: e.message }) : /* @__PURE__ */ n(Ut, { identity: e.identity });
   return /* @__PURE__ */ n(T, { children: [
     /* @__PURE__ */ n(se, { route: i.name }),
     /* @__PURE__ */ n("main", { id: "main-content", children: [

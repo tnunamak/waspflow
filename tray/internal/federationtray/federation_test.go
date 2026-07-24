@@ -28,6 +28,26 @@ func TestVisualStateForDaemonState(t *testing.T) {
 	}
 }
 
+func TestSetupStatusTitle(t *testing.T) {
+	// The setup state must never claim the daemon is "not running" — that copy
+	// is reserved for a genuinely unreachable daemon, handled in the tray.
+	tests := map[string]string{
+		"pending_approval": "Waiting for the collective operator to approve you",
+		"not_joined":       "Not in a collective yet — open Federation to join",
+		"approval_revoked": "Approval was revoked — open Federation to rejoin",
+		"setup_required":   "Setup required — open Federation to continue",
+		"unknown_future":   "Open Federation to continue setup",
+	}
+	for daemonState, want := range tests {
+		if got := SetupStatusTitle(daemonState); got != want {
+			t.Errorf("SetupStatusTitle(%q) = %q, want %q", daemonState, got, want)
+		}
+		if got := SetupStatusTitle(daemonState); got == "Federation daemon is not running" {
+			t.Errorf("SetupStatusTitle(%q) falsely claimed the daemon is not running", daemonState)
+		}
+	}
+}
+
 func TestReadDaemonInfo(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "daemon.json")
@@ -87,5 +107,19 @@ func TestClientCarriesTheDaemonSessionToken(t *testing.T) {
 	}
 	if status.State != "contributing" {
 		t.Fatalf("status.State = %q", status.State)
+	}
+}
+
+// TestPendingApprovalNeverLies is the regression guard for the exact live bug:
+// a running daemon at pending_approval used to render "daemon is not running".
+func TestPendingApprovalNeverLies(t *testing.T) {
+	for _, daemonState := range []string{"pending_approval", "not_joined", "approval_revoked", "setup_required"} {
+		if got := VisualStateForDaemonState(daemonState); got != VisualSetup {
+			t.Fatalf("VisualStateForDaemonState(%q) = %q; expected VisualSetup", daemonState, got)
+		}
+		// When the daemon IS up, the tray uses SetupStatusTitle, which must be honest.
+		if title := SetupStatusTitle(daemonState); title == "Federation daemon is not running" {
+			t.Errorf("running daemon at %q would render the false 'not running' title", daemonState)
+		}
 	}
 }

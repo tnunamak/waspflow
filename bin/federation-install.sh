@@ -71,6 +71,39 @@ echo "This Federation install provides only: waspflow federation ..." >&2
 exit 64
 EOF
   chmod 0755 "$INSTALL_ROOT/bin/waspflow-federation" "$INSTALL_ROOT/bin/waspflow"
+  install_tray_autostart "$INSTALL_ROOT/lib/waspflow-federation/waspflow-federation-tray"
+}
+
+# The .deb ships a system-wide autostart entry via /etc/xdg/autostart; a
+# non-root tarball install has no such hook, so without this the ambient tray
+# icon silently never returns after a reboot (found live). Drop a user-level
+# XDG autostart entry pointing at the installed tray binary. Skipped (with a
+# note) when the binary is absent or the desktop session is headless.
+install_tray_autostart() {
+  tray_bin="$1"
+  if [ ! -x "$tray_bin" ]; then
+    say "No tray binary in this bundle; skipping autostart (daemon+UI still work)."
+    return 0
+  fi
+  autostart_dir="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
+  mkdir -p "$autostart_dir"
+  cat > "$autostart_dir/waspflow-federation-tray.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Waspflow Federation
+Comment=Waspflow Federation contributor tray
+Exec=$tray_bin
+Terminal=false
+Categories=Network;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+EOF
+  chmod 0644 "$autostart_dir/waspflow-federation-tray.desktop"
+  say "Installed the tray autostart entry; the icon returns after you log in."
+  # Start it now too, so the user does not have to log out to see it once.
+  if [ -z "${WASPFLOW_FEDERATION_NO_TRAY_LAUNCH:-}" ] && command -v setsid >/dev/null 2>&1; then
+    setsid "$tray_bin" >/dev/null 2>&1 < /dev/null &
+  fi
 }
 
 need curl
