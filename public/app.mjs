@@ -479,12 +479,16 @@ function Ze({ view: t, status: e, control: r }) {
     /* @__PURE__ */ n("p", { children: "Send this approval request to your operator. You can close this after — contributions start once they approve your machine." }),
     e?.approval_request ? /* @__PURE__ */ n(T, { children: [
       /* @__PURE__ */ n("label", { children: "Approval request" }),
-      /* @__PURE__ */ n(Ue, { value: e.approval_request })
+      /* @__PURE__ */ n(Ue, { value: e.approval_request }),
+      /* @__PURE__ */ n("p", { className: "quiet-note", children: "Send this to your operator any way you like." })
     ] }) : null,
-    /* @__PURE__ */ n(W, { status: "attention", children: e?.coordinator_unavailable ? /* @__PURE__ */ n(T, { children: [
-      "Collective unavailable. Switch to another collective, or ask its operator to bring it back online; approval will refresh when it returns.",
-      /* @__PURE__ */ n("div", { className: "actions", children: /* @__PURE__ */ n("a", { className: "button-link secondary", href: "#/settings/collective", children: "View collectives" }) })
-    ] }) : null })
+    e?.coordinator_unavailable ? /* @__PURE__ */ n(T, { children: [
+      /* @__PURE__ */ n(W, { status: "attention", children: "Your collective is offline right now, so your approval can’t complete. This will pick up on its own the moment your operator brings it back online — nothing here is broken." }),
+      /* @__PURE__ */ n("p", { className: "quiet-note", children: [
+        "Waiting on a different collective? ",
+        /* @__PURE__ */ n("a", { href: "#/settings/collective", children: "View collectives →" })
+      ] })
+    ] }) : null
   ] }) });
   if (t.name === "approval_revoked") return /* @__PURE__ */ n(E, { children: /* @__PURE__ */ n(S, { title: "Approval was revoked", lead: "No new work will start on this machine.", children: [
     /* @__PURE__ */ n("p", { children: e?.detail || "Ask your collective owner to approve this machine again." }),
@@ -605,7 +609,7 @@ function Tt({ digest: t, task: e, log: r, loadLog: a, resultHref: l }) {
       /* @__PURE__ */ n("h3", { children: "Live transcript" }),
       /* @__PURE__ */ n(Pt, { log: r }),
       /* @__PURE__ */ n("h3", { children: "What was asked" }),
-      /* @__PURE__ */ n("p", { className: "full-prompt", children: e?.prompt || e?.prompt_preview || "Task details are still loading." }),
+      /* @__PURE__ */ n("p", { className: "full-prompt", children: typeof e?.prompt == "string" && e.prompt || e?.prompt_preview || (e ? "The full prompt isn’t shown on this screen — open the task from Contribute to read the whole request." : "Loading…") }),
       i && /* @__PURE__ */ n("details", { children: [
         /* @__PURE__ */ n("summary", { children: "Result and receipt" }),
         /* @__PURE__ */ n(Rt, { task: e }),
