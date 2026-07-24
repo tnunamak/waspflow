@@ -40,6 +40,12 @@ export function providerDisplayName(value) {
   return names[provider.toLowerCase()] || provider;
 }
 
+export function collectiveDisplayName(name, coordinatorUrl) {
+  const named = String(name || '').trim();
+  if (named) return named;
+  try { return new URL(coordinatorUrl).hostname || 'Unknown collective'; } catch { return 'Unknown collective'; }
+}
+
 export function capacityKind(account = {}) { return account.capacity_kind || account.capacity?.kind || account.kind || account.auth_kind || account.capacity_type || 'not captured'; }
 
 export function providerCapacitySubject(identity) {

@@ -13,6 +13,7 @@ import {
   parseTunnel,
   readCollectiveToken,
   resolveLanUrl,
+  saveCollectiveName,
 } from '../lib/federation-host.mjs';
 import { NgrokUnavailableError, ngrokUnavailableGuidance, startNgrokTunnel } from '../lib/federation-coordinator-hosting.mjs';
 import { parseJoinInvite } from '../lib/federation-daemon.mjs';
@@ -32,6 +33,9 @@ test('host state is private and idempotent: its operator is the only initial ros
     assert.equal(readCollectiveToken(second.config), token, 'resume must not rotate collective access');
     assert.equal(second.config.operator_key_id, 'oshin');
     assert.equal(second.config.port, 9123);
+    const named = saveCollectiveName(second.config, 'Oshin collective');
+    assert.equal(ensureHostState({ home }).config.collective_name, 'Oshin collective', 'rehost preserves the chosen name');
+    assert.equal(named.collective_name, 'Oshin collective');
     assert.equal((await stat(home)).mode & 0o777, 0o700);
     assert.equal((await stat(first.config.collective_token_path)).mode & 0o777, 0o600);
     assert.equal((await stat(first.config.operator_private_key_path)).mode & 0o777, 0o600);
@@ -56,7 +60,7 @@ test('join accepts HTTPS-fragment, legacy scheme, and two-argument invites', asy
   const coordinatorData = await mkdtemp(join(tmpdir(), 'wf-fed-host-coordinator-'));
   const memberHomes = await Promise.all(Array.from({ length: 3 }, () => mkdtemp(join(tmpdir(), 'wf-fed-host-member-'))));
   const roster = new Map([['operator', '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n-----END PUBLIC KEY-----\n']]);
-  const server = await startCoordinator({ dataDir: coordinatorData, token: 'host-token', roster, port: 0 });
+  const server = await startCoordinator({ dataDir: coordinatorData, token: 'host-token', roster, collectiveName: 'Oshin collective', port: 0 });
   try {
     const { port } = server.address();
     const invite = createJoinInvite({ coordinatorUrl: `http://127.0.0.1:${port}`, collectiveToken: 'host-token' });
@@ -78,6 +82,8 @@ test('join accepts HTTPS-fragment, legacy scheme, and two-argument invites', asy
     const config = JSON.parse(await readFile(join(memberHomes[0], 'config.json'), 'utf8'));
     assert.equal(config.coordinator_url, `http://127.0.0.1:${port}`);
     assert.equal(config.collective_token, 'host-token');
+    assert.equal(config.collective_name, 'Oshin collective');
+    assert.equal(config.collectives[0].collective_name, 'Oshin collective');
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(coordinatorData, { recursive: true, force: true });

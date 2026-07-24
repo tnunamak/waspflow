@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { lifecycleStage, providerCapacitySubject, routeFromHash, statusRole, taskTimeline, viewForStatus } from './helpers.js';
+import { collectiveDisplayName, lifecycleStage, providerCapacitySubject, routeFromHash, statusRole, taskTimeline, viewForStatus } from './helpers.js';
 
 test('routes retain dedicated task and settings paths', () => {
   assert.deepEqual(routeFromHash('#/tasks/sha256:abc'), { name: 'tasks', parts: ['sha256:abc'] });
@@ -13,4 +13,10 @@ test('daemon status and timeline stay compatible', () => {
   assert.equal(taskTimeline({ status: 'FAILED' }).at(-1).name, 'failed');
   assert.equal(statusRole('contributing'), 'active');
   assert.equal(providerCapacitySubject({ providers: [{ service: 'openai', capacity_kind: 'api_key' }] }), 'your OpenAI API key');
+});
+
+test('collective labels prefer a name and otherwise expose only a safe host', () => {
+  assert.equal(collectiveDisplayName('Friends', 'https://coordinator.example:8787'), 'Friends');
+  assert.equal(collectiveDisplayName('', 'https://coordinator.example:8787/path'), 'coordinator.example');
+  assert.equal(collectiveDisplayName(null, 'not a URL'), 'Unknown collective');
 });

@@ -121,7 +121,7 @@ async function main() {
   const dataDir = hostConfig?.data_dir || process.env.WASPFLOW_FEDERATION_COORDINATOR_DATA_DIR
     || path.join(os.homedir(), '.waspflow', 'federation-coordinator', 'tasks');
 
-  const server = await startCoordinator({ dataDir, token: activeToken, roster, port, host });
+  const server = await startCoordinator({ dataDir, token: activeToken, roster, collectiveName: hostConfig?.collective_name, port, host });
   const address = server.address();
   const statusFile = hostConfig?.status_path;
   let tunnel = null;
@@ -131,6 +131,7 @@ async function main() {
     port: address.port,
     data_dir: dataDir,
     roster_size: roster.size,
+    ...(hostConfig?.collective_name ? { collective_name: hostConfig.collective_name } : {}),
   };
   if (hostConfig?.reachability?.kind === 'url') status.public_url = hostConfig.reachability.publicUrl;
   if (hostConfig?.reachability?.kind === 'lan') status.public_url = hostConfig.reachability.publicUrl;
@@ -179,7 +180,7 @@ async function main() {
   const shutdown = () => {
     // A stale "public_listening" status after exit misleads liveness readers
     // (host --rotate-token probes, future doctor checks); record the stop.
-    writeStatus(statusFile, { status: 'stopped', port: address.port });
+    writeStatus(statusFile, { status: 'stopped', port: address.port, ...(hostConfig?.collective_name ? { collective_name: hostConfig.collective_name } : {}) });
     Promise.resolve(tunnel?.close()).catch(() => {}).finally(() => server.close(() => process.exit(0)));
   };
   process.on('SIGINT', shutdown);

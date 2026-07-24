@@ -72,9 +72,9 @@ function signResult(taskDigest, overrides = {}, { privateKey = executorPrivateKe
   return signEnvelope(resultPayload(taskDigest, overrides), privateKey, keyId);
 }
 
-async function withServer(fn, { roster = ROSTER } = {}) {
+async function withServer(fn, { roster = ROSTER, collectiveName } = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), 'federation-coordinator-'));
-  const server = await startCoordinator({ dataDir, token: TOKEN, roster, port: 0 });
+  const server = await startCoordinator({ dataDir, token: TOKEN, roster, collectiveName, port: 0 });
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
   try {
@@ -564,11 +564,12 @@ async function roster(base, headers = authed()) {
   return fetch(`${base}/roster`, { headers });
 }
 
-test('GET /roster returns every registered member\'s key_id and public key, nothing else', async () => {
+test('GET /roster returns every registered member\'s public key and the collective name', async () => {
   await withServer(async ({ base }) => {
     const res = await roster(base);
     assert.equal(res.status, 200);
     const body = await res.json();
+    assert.equal(body.collective_name, 'Test collective');
     assert.equal(body.roster.length, 2);
     const byKeyId = Object.fromEntries(body.roster.map((entry) => [entry.key_id, entry.public_key_pem]));
     assert.equal(byKeyId[AUTHOR_KEY_ID], authorPublicKey);
@@ -578,7 +579,7 @@ test('GET /roster returns every registered member\'s key_id and public key, noth
     for (const entry of body.roster) {
       assert.deepEqual(Object.keys(entry).sort(), ['key_id', 'public_key_pem']);
     }
-  });
+  }, { collectiveName: 'Test collective' });
 });
 
 test('GET /roster requires the bearer token — a discovery surface across the whole roster, same gate as GET /tasks/next', async () => {

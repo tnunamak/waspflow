@@ -13,6 +13,15 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function check(name, action) { try { await action(); results.push({ name, status: 'PASS' }); } catch (error) { results.push({ name, status: 'FAIL', detail: error.message }); } }
 async function text(scope, value) { await scope.getByText(value, { exact: false }).first().waitFor({ state: 'visible', timeout: 5_000 }); }
 async function visible(scope, selector) { await scope.locator(selector).first().waitFor({ state: 'visible', timeout: 5_000 }); }
+async function stubCollective(page, collective = {}) {
+  const coordinatorUrl = collective.coordinator_url || 'http://192.168.1.7:37257'; const name = collective.collective_name;
+  const body = (value) => JSON.stringify(value);
+  await page.route('**/status', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: body({ state: 'idle', coordinator_url: coordinatorUrl, ...(name ? { collective_name: name } : {}), coordinator_unavailable: false }) }));
+  await page.route('**/collectives', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: body({ collectives: [{ id: 'collective', coordinator_url: coordinatorUrl, ...(name ? { collective_name: name } : {}), active: true, reachable: true }] }) }));
+  for (const path of ['ledger', 'roster', 'activity', 'requests', 'tasks']) await page.route(`**/${path}`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: body(path === 'roster' ? { roster: [] } : []) }));
+  await page.route('**/identity', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: body({ coordinator_url: coordinatorUrl }) }));
+  await page.route('**/settings', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: body({ ...(name ? { collective_name: name } : {}), schedule: {} }) }));
+}
 
 async function main() {
   await mkdir(artifactDir, { recursive: true });
@@ -25,11 +34,10 @@ async function main() {
       const response = await page.goto(targetUrl.toString(), { waitUntil: 'networkidle', timeout: 15_000 }); assert.ok(response?.ok());
       await text(page.locator('.brand'), 'Waspflow Federation');
       for (const label of ['Contribute', 'Requests', 'Activity', 'Help']) await text(page.locator('.primary-nav'), label);
-      await visible(page, '.gear[aria-label="Settings"]'); await page.screenshot({ path: path.join(artifactDir, 'initial.png'), fullPage: true });
+      await visible(page, '.gear[aria-label="Settings"]');
     });
     await check('Idle contributor screen uses the ready status vocabulary', async () => {
       await visible(page, '.status-dot[data-status="ready"], .status-dot[data-status="active"]'); await text(page, 'You approve every task before it starts');
-      await page.screenshot({ path: path.join(artifactDir, 'idle.png'), fullPage: true });
     });
     await check('Task review preserves explicit consent and empty queue safety', async () => {
       const review = page.getByRole('button', { name: 'Review the next task' });
@@ -77,6 +85,13 @@ async function main() {
       await pending.route('**/status', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ schema_version: 1, type: 'daemon_status', state: 'pending_approval', collective_name: 'Offline collective', coordinator_unavailable: true, approval_request: `wfapr1.${'a'.repeat(900)}` }) }));
       await pending.route('**/collectives', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ collectives: [{ id: 'offline', collective_name: 'Offline collective', active: true, reachable: false }] }) }));
       try { await pending.goto(targetUrl.toString(), { waitUntil: 'networkidle' }); await text(pending, 'Send this approval request to your operator'); await text(pending, 'Collective unavailable'); const box = await pending.locator('.one-time-code').boundingBox(); assert.ok(box && box.x >= 0 && box.x + box.width <= 390, 'approval request must stay inside a 390px viewport'); await pending.screenshot({ path: path.join(artifactDir, 'pending-unreachable-390.png'), fullPage: true }); await pending.getByRole('link', { name: 'View collectives' }).click(); await text(pending, 'Your collectives'); } finally { await pending.close(); }
+    });
+    await check('Named and unnamed collectives never render raw coordinator URLs', async () => {
+      const named = await browser.newPage({ viewport: { width: 900, height: 700 } }); const unnamed = await browser.newPage({ viewport: { width: 900, height: 700 } });
+      try {
+        await stubCollective(named, { collective_name: "Tim's Team" }); await named.goto(targetUrl.toString(), { waitUntil: 'networkidle' }); await text(named, "Collective: Tim's Team"); await named.goto(`${targetUrl.toString()}#/settings/collective`, { waitUntil: 'networkidle' }); await text(named, "Tim's Team"); assert.equal((await named.locator('body').textContent()).includes('http://192.168.1.7:37257'), false); await named.screenshot({ path: path.join(artifactDir, 'named-collective.png'), fullPage: true });
+        await stubCollective(unnamed); await unnamed.goto(`${targetUrl.toString()}#/settings/collective`, { waitUntil: 'networkidle' }); await text(unnamed, '192.168.1.7'); assert.equal((await unnamed.locator('body').textContent()).includes('http://192.168.1.7:37257'), false);
+      } finally { await named.close(); await unnamed.close(); }
     });
     await check('Contribute controls never start a task without review', async () => {
       await page.goto(targetUrl.toString(), { waitUntil: 'networkidle' }); const review = page.getByRole('button', { name: 'Review the next task' });
