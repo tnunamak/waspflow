@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -47,7 +48,7 @@ func (app *trayApp) onReady() {
 	systray.AddSeparator()
 	quitItem := systray.AddMenuItem("Quit", "Quit the tray helper")
 
-	app.applyVisualState(federationtray.VisualSetup, statusItem, contributeItem, startItem)
+	app.applyVisualState(federationtray.VisualSetup, false, "", statusItem, contributeItem, startItem)
 	go app.poll(statusItem, contributeItem, startItem)
 	go app.handleMenu(openItem, contributeItem, startItem, quitItem)
 }
@@ -80,16 +81,22 @@ func (app *trayApp) poll(statusItem, contributeItem, startItem *systray.MenuItem
 }
 
 func (app *trayApp) refresh(statusItem, contributeItem, startItem *systray.MenuItem) {
+	// "Daemon unreachable" (no record, or /status errors) is a genuinely
+	// different situation from "daemon up but not yet contributing" — the tray
+	// used to collapse both into VisualSetup and then label everything
+	// "daemon is not running", which lied whenever the daemon was in fact up and
+	// waiting (e.g. pending_approval). Carry daemonUp so the same setup icon can
+	// show honest, situation-specific copy.
 	info, err := federationtray.ReadDaemonInfo(app.infoPath)
 	if err != nil {
-		app.applyVisualState(federationtray.VisualSetup, statusItem, contributeItem, startItem)
+		app.applyVisualState(federationtray.VisualSetup, false, "", statusItem, contributeItem, startItem)
 		return
 	}
 	context, cancel := context.WithTimeout(context.Background(), time.Second)
 	status, err := app.client.Status(context, info)
 	cancel()
 	if err != nil {
-		app.applyVisualState(federationtray.VisualSetup, statusItem, contributeItem, startItem)
+		app.applyVisualState(federationtray.VisualSetup, false, "", statusItem, contributeItem, startItem)
 		return
 	}
 	app.mu.Lock()
@@ -97,13 +104,13 @@ func (app *trayApp) refresh(statusItem, contributeItem, startItem *systray.MenuI
 	previousState := app.state
 	app.mu.Unlock()
 	visualState := federationtray.VisualStateForDaemonState(status.State)
-	app.applyVisualState(visualState, statusItem, contributeItem, startItem)
+	app.applyVisualState(visualState, true, status.State, statusItem, contributeItem, startItem)
 	if visualState == federationtray.VisualAttention && previousState != federationtray.VisualAttention {
 		_ = browser.OpenURL(federationtray.FederationURL(info))
 	}
 }
 
-func (app *trayApp) applyVisualState(state federationtray.VisualState, statusItem, contributeItem, startItem *systray.MenuItem) {
+func (app *trayApp) applyVisualState(state federationtray.VisualState, daemonUp bool, daemonState string, statusItem, contributeItem, startItem *systray.MenuItem) {
 	app.mu.Lock()
 	app.state = state
 	app.mu.Unlock()
@@ -126,10 +133,18 @@ func (app *trayApp) applyVisualState(state federationtray.VisualState, statusIte
 		contributeItem.Disable()
 		startItem.Hide()
 	default:
-		statusItem.SetTitle("Federation daemon is not running")
+		// VisualSetup covers two very different truths. Only offer to start the
+		// daemon when it is actually down; when it is up (setup/pending), say so
+		// and never claim it is "not running".
+		if daemonUp {
+			statusItem.SetTitle(federationtray.SetupStatusTitle(daemonState))
+			startItem.Hide()
+		} else {
+			statusItem.SetTitle("Federation daemon is not running")
+			startItem.Show()
+		}
 		contributeItem.SetTitle("Resume contributing")
 		contributeItem.Disable()
-		startItem.Show()
 	}
 }
 
@@ -161,8 +176,17 @@ func (app *trayApp) toggleContributing() {
 
 // startDaemon uses the installed CLI and deliberately leaves supervision to
 // the daemon itself. The tray never embeds or reimplements its logic.
+//
+// A GUI/autostart-launched tray does not inherit an interactive shell's PATH,
+// so a bare "waspflow" often fails to resolve and the menu item silently does
+// nothing. Resolve the binary explicitly — PATH first, then the standard
+// user-local install dir — and return a real error if it cannot be found.
 func startDaemon() error {
-	command := exec.Command("waspflow", "federation", "daemon")
+	bin, err := waspflowBinary()
+	if err != nil {
+		return err
+	}
+	command := exec.Command(bin, "federation", "daemon")
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
 	if err := command.Start(); err != nil {
@@ -170,4 +194,17 @@ func startDaemon() error {
 	}
 	go func() { _ = command.Wait() }()
 	return nil
+}
+
+func waspflowBinary() (string, error) {
+	if path, err := exec.LookPath("waspflow"); err == nil {
+		return path, nil
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidate := filepath.Join(home, ".local", "bin", "waspflow")
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("waspflow CLI not found on PATH or in ~/.local/bin")
 }
