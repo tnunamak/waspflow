@@ -327,7 +327,8 @@ grok_refresh_runtime_settings() {
   [[ -n "$requested" ]] || requested="$(lane_get "$lane" model)"
   requested_effort="$(lane_get "$lane" effort_requested)"
   [[ -n "$requested_effort" ]] || requested_effort="$(lane_get "$lane" effort)"
-  # Token-boundary containment: alias "opus" matches "claude-opus-4-8", but
+  # Token-boundary containment: alias "opus" matches "claude-opus-5" (the
+  # current default Opus) or older pinned ids like "claude-opus-4-8", but
   # "grok-4" must NOT match "grok-4.5" (that is drift, not an alias). Grok
   # attests BOTH axes, so a requested-but-not-served effort is drift too.
   if [[ -z "$requested" || "$model" == "$requested" || "-$model-" == *"-$requested-"* ]]; then

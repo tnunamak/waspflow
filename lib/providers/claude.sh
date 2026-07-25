@@ -409,7 +409,8 @@ claude_revise() {
 # message. Claude does not expose a per-session effort in the log, so
 # runtime_effort stays empty (receipts record null — observed, not guessed).
 # v1 observes only; no drift comparison (requested aliases like "opus" resolve
-# to canonical ids like "claude-opus-4-8", so naive equality would false-alarm).
+# to canonical ids like "claude-opus-5" — the current default Opus, alongside
+# older pinned ids like "claude-opus-4-8" — so naive equality would false-alarm).
 # The (arm_generation, session_id) snapshot mirrors codex: a refresh that
 # straddles an escalation must never commit stale evidence.
 claude_refresh_runtime_settings() {
@@ -447,12 +448,16 @@ claude_refresh_runtime_settings() {
     return 0
   fi
   model="$models"
-  # Alias-tolerant corroboration: requested "opus" serves as "claude-opus-4-8".
+  # Alias-tolerant corroboration: requested "opus" serves as "claude-opus-5"
+  # (the current default Opus) and equally corroborates against older pinned
+  # ids like "claude-opus-4-8" that a lane may still be running.
   local requested match
   requested="$(lane_get "$lane" model_requested)"
   [[ -n "$requested" ]] || requested="$(lane_get "$lane" model)"
-  # Token-boundary containment: alias "opus" matches "claude-opus-4-8", but
-  # "grok-4" must NOT match "grok-4.5" (that is drift, not an alias).
+  # Token-boundary containment: alias "opus" matches "claude-opus-5" or
+  # "claude-opus-4-8", but "grok-4" must NOT match "grok-4.5" (that is drift,
+  # not an alias) — and a pinned id like "claude-opus-4-8" must NOT match a
+  # different served id like "claude-opus-5" (same rule, opposite direction).
   if [[ -z "$requested" || "$model" == "$requested" || "-$model-" == *"-$requested-"* ]]; then
     match=true
   else

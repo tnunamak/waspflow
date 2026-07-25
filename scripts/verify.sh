@@ -2692,6 +2692,36 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   artifacts_emit_receipt_v1 att-claude verified
   jq -e 'select(.lane == "att-claude") | .arm_attestation.runtime_settings_state == "observed" and .arm_attestation.observed_model == "claude-sonnet-5" and (.ineligibility_reasons | index("attestation_missing") | not)' "$WASPFLOW_HOME/receipts.jsonl" >/dev/null
 
+  # Opus 5 regression (docs/design comments updated 2026-07-25): claude-opus-5
+  # is now the current default Opus the "opus" alias serves. Token-boundary
+  # corroboration already generalizes to it with no logic change — these
+  # fixtures prove alias->opus-5, canonical exact-equality, an older pinned id
+  # still corroborating under the alias, and a NEGATIVE control where a
+  # specific pinned id must NOT accept a different served id (drift).
+  { printf '%s\n' '{"message":{"model":"claude-opus-5"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus5-alias.jsonl"
+  lane_set att-opus5-alias provider claude status live result "" session_id c-sid-opus5-alias model opus model_passed opus model_requested opus
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus5-alias
+  [[ "$(lane_get att-opus5-alias runtime_settings_match_requested)" == true && "$(lane_get att-opus5-alias runtime_model)" == claude-opus-5 ]]
+  { printf '%s\n' '{"message":{"model":"claude-opus-5"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus5-canon.jsonl"
+  lane_set att-opus5-canon provider claude status live result "" session_id c-sid-opus5-canon model claude-opus-5 model_passed claude-opus-5 model_requested claude-opus-5
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus5-canon
+  [[ "$(lane_get att-opus5-canon runtime_settings_match_requested)" == true && "$(lane_get att-opus5-canon runtime_model)" == claude-opus-5 ]]
+  { printf '%s\n' '{"message":{"model":"claude-opus-4-8"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus5-older.jsonl"
+  lane_set att-opus5-older provider claude status live result "" session_id c-sid-opus5-older model opus model_passed opus model_requested opus
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus5-older
+  [[ "$(lane_get att-opus5-older runtime_settings_match_requested)" == true && "$(lane_get att-opus5-older runtime_model)" == claude-opus-4-8 ]]
+  # Negative control: a specific pinned id must NOT silently accept a
+  # different served id. "-claude-opus-5-" does not contain "-claude-opus-4-8-"
+  # (and vice versa), so this is correctly drift, not an alias.
+  { printf '%s\n' '{"message":{"model":"claude-opus-5"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus5-drift.jsonl"
+  lane_set att-opus5-drift provider claude status live result "" session_id c-sid-opus5-drift model claude-opus-4-8 model_passed claude-opus-4-8 model_requested claude-opus-4-8
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus5-drift
+  [[ "$(lane_get att-opus5-drift runtime_settings_match_requested)" == false && "$(lane_get att-opus5-drift runtime_model)" == claude-opus-5 ]]
+
   # receipts summary: aggregates the ledger, tolerates malformed lines,
   # rejects unknown flags, and reports the eligible fraction. Malformed-line
   # tolerance runs against a scratch copy so the shared ledger stays clean.
