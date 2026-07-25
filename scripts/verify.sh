@@ -2692,11 +2692,13 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   artifacts_emit_receipt_v1 att-claude verified
   jq -e 'select(.lane == "att-claude") | .arm_attestation.runtime_settings_state == "observed" and .arm_attestation.observed_model == "claude-sonnet-5" and (.ineligibility_reasons | index("attestation_missing") | not)' "$WASPFLOW_HOME/receipts.jsonl" >/dev/null
 
-  # Opus 5 regression (docs/design comments updated 2026-07-25): claude-opus-5
-  # is now the current default Opus the "opus" alias serves. Token-boundary
-  # corroboration already generalizes to it with no logic change — these
-  # fixtures prove alias->opus-5, canonical exact-equality, an older pinned id
-  # still corroborating under the alias, and a NEGATIVE control where a
+  # Opus 5 regression (comments updated 2026-07-25): "opus" is a provider-owned
+  # family alias that may serve ANY canonical Opus id (the provider decides which;
+  # we do not assert it here). Attestation has observed both "claude-opus-4-8" and
+  # "claude-opus-5" under an "opus" request. Token-boundary corroboration already
+  # generalizes with no logic change — these fixtures prove the alias corroborates
+  # against opus-5 AND against opus-4-8 (both directions, without claiming which is
+  # current), canonical exact-equality for opus-5, and a NEGATIVE control where a
   # specific pinned id must NOT accept a different served id (drift).
   { printf '%s\n' '{"message":{"model":"claude-opus-5"},"type":"assistant"}'
   } >"$att_home/claude-projects/proj/c-sid-opus5-alias.jsonl"
