@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { startCoordinator } from '../lib/federation-coordinator.mjs';
 import {
   createJoinInvite,
@@ -40,6 +40,35 @@ test('host state is private and idempotent: its operator is the only initial ros
     assert.equal((await stat(first.config.collective_token_path)).mode & 0o777, 0o600);
     assert.equal((await stat(first.config.operator_private_key_path)).mode & 0o777, 0o600);
     assert.equal((await stat(first.config.roster_path)).mode & 0o777, 0o600);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('host --collective-name names a headless collective (GUI/non-TTY hosts have no prompt)', async () => {
+  // The interactive name prompt no-ops without a TTY, so a GUI/daemon host would
+  // leave every collective unnamed. The flag is the headless naming path.
+  const home = await mkdtemp(join(tmpdir(), 'wf-fed-host-named-'));
+  try {
+    // Pin an uncommon port so this host never contends with the default 8787 a
+    // concurrent test or a live coordinator may hold.
+    const child = spawn(process.execPath, [CLI, 'host', '--tunnel', 'lan', '--port', '39217', '--collective-name', 'Simon Lab'], {
+      env: { ...process.env, WASPFLOW_FEDERATION_COORDINATOR_HOME: home },
+      stdio: 'ignore',
+    });
+    try {
+      const hostConfigPath = join(home, 'host.json');
+      // The name is persisted before the coordinator binds and blocks; poll briefly.
+      let name = null;
+      for (let attempt = 0; attempt < 40 && name === null; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        try { name = JSON.parse(await readFile(hostConfigPath, 'utf8')).collective_name ?? null; } catch {}
+      }
+      assert.equal(name, 'Simon Lab', 'the flag value is stored as the collective name');
+    } finally {
+      child.kill('SIGTERM');
+      await new Promise((resolve) => child.on('exit', resolve));
+    }
   } finally {
     await rm(home, { recursive: true, force: true });
   }

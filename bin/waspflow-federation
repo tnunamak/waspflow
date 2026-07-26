@@ -434,7 +434,7 @@ async function waitForCoordinatorStatus(config) {
 }
 
 async function cmdHost(argv) {
-  const { flags, positional } = parseFlags(argv, ['tunnel', 'port', 'domain'], ['rotate-token']);
+  const { flags, positional } = parseFlags(argv, ['tunnel', 'port', 'domain', 'collective-name'], ['rotate-token']);
   if (positional.length > 0 || (flags['rotate-token'] && (flags.tunnel || flags.port))) {
     fail('usage: waspflow federation host [--tunnel ngrok|url:<https://address>|lan] [--domain <name>] [--port <number>] | --rotate-token');
   }
@@ -485,7 +485,10 @@ async function cmdHost(argv) {
 
   if (!config.collective_name) {
     const defaultName = `${os.userInfo().username || 'My'}'s collective`;
-    config = saveCollectiveName(config, (await askOptional(`Name your collective [${defaultName}]: `)) || defaultName);
+    // A GUI/headless host has no TTY, so the interactive prompt no-ops; --collective-name
+    // lets those callers name the collective (else every non-interactive host is unnamed).
+    const named = flags['collective-name']?.trim() || (await askOptional(`Name your collective [${defaultName}]: `)) || defaultName;
+    config = saveCollectiveName(config, named);
   }
 
   const previousStatus = readCoordinatorStatus(config);
