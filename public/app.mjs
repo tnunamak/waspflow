@@ -1,4 +1,4 @@
-var re, w, He, H, ye, De, Ee, oe, B, M, Le, pe, se, ce, K = {}, Q = [], nt = /acit|ex(?:s|g|n|p|$)|rph|grid|ows|mnc|ntw|ine[ch]|zoo|^ord|itera/i, ie = Array.isArray;
+var re, w, He, H, ye, De, Ee, oe, z, M, Le, pe, se, ce, K = {}, Q = [], nt = /acit|ex(?:s|g|n|p|$)|rph|grid|ows|mnc|ntw|ine[ch]|zoo|^ord|itera/i, ie = Array.isArray;
 function F(t, e) {
   for (var r in e) t[r] = e[r];
   return t;
@@ -30,7 +30,7 @@ function L(t, e) {
 function it(t) {
   if (t.__P && t.__d) {
     var e = t.__v, r = e.__e, a = [], l = [], i = F({}, e);
-    i.__v = e.__v + 1, w.vnode && w.vnode(i), _e(t.__P, i, e, t.__n, t.__P.namespaceURI, 32 & e.__u ? [r] : null, a, r ?? L(e), !!(32 & e.__u), l), i.__v = e.__v, i.__.__k[i.__i] = i, ze(a, i, l), e.__e = e.__ = null, i.__e != r && We(i);
+    i.__v = e.__v + 1, w.vnode && w.vnode(i), _e(t.__P, i, e, t.__n, t.__P.namespaceURI, 32 & e.__u ? [r] : null, a, r ?? L(e), !!(32 & e.__u), l), i.__v = e.__v, i.__.__k[i.__i] = i, Be(a, i, l), e.__e = e.__ = null, i.__e != r && We(i);
   }
 }
 function We(t) {
@@ -104,8 +104,8 @@ function xe(t) {
   return function(e) {
     if (this.l) {
       var r = this.l[e.type + t];
-      if (e[B] == null) e[B] = pe++;
-      else if (e[B] < r[M]) return;
+      if (e[z] == null) e[z] = pe++;
+      else if (e[z] < r[M]) return;
       return r(w.event ? w.event(e) : e);
     }
   };
@@ -133,7 +133,7 @@ function _e(t, e, r, a, l, i, d, s, h, c) {
       else do
         o.__d = !1, q && q(e), m = o.render(o.props, o.state, o.context), o.state = o.__s;
       while (o.__d && ++R < 25);
-      o.state = o.__s, o.getChildContext != null && (a = F(F({}, a), o.getChildContext())), _ && !u && o.getSnapshotBeforeUpdate != null && (k = o.getSnapshotBeforeUpdate(v, b)), I = m != null && m.type === T && m.key == null ? Be(m.props.children) : m, s = Me(t, ie(I) ? I : [I], e, r, a, l, i, d, s, h, c), o.base = e.__e, e.__u &= -161, o.__h.length && d.push(o), y && (o.__E = o.__ = null);
+      o.state = o.__s, o.getChildContext != null && (a = F(F({}, a), o.getChildContext())), _ && !u && o.getSnapshotBeforeUpdate != null && (k = o.getSnapshotBeforeUpdate(v, b)), I = m != null && m.type === T && m.key == null ? ze(m.props.children) : m, s = Me(t, ie(I) ? I : [I], e, r, a, l, i, d, s, h, c), o.base = e.__e, e.__u &= -161, o.__h.length && d.push(o), y && (o.__E = o.__ = null);
     } catch (A) {
       if (d.length = f, e.__v = null, h || i != null) {
         if (A.then) {
@@ -149,7 +149,7 @@ function _e(t, e, r, a, l, i, d, s, h, c) {
 function je(t) {
   t && (t.__c && (t.__c.__e = !0), t.__k && t.__k.some(je));
 }
-function ze(t, e, r) {
+function Be(t, e, r) {
   for (var a = 0; a < r.length; a++) me(r[a], r[++a], r[++a]);
   w.__c && w.__c(e, t), t.some(function(l) {
     try {
@@ -161,8 +161,8 @@ function ze(t, e, r) {
     }
   });
 }
-function Be(t) {
-  return typeof t != "object" || t == null || t.__b > 0 ? t : ie(t) ? t.map(Be) : t.constructor !== void 0 ? null : F({}, t);
+function ze(t) {
+  return typeof t != "object" || t == null || t.__b > 0 ? t : ie(t) ? t.map(ze) : t.constructor !== void 0 ? null : F({}, t);
 }
 function lt(t, e, r, a, l, i, d, s, h) {
   var c, m, f, o, u, v, b, k = r.props || K, y = e.props, p = e.type;
@@ -215,7 +215,7 @@ function st(t, e, r) {
 }
 function ct(t, e, r) {
   var a, l, i, d;
-  e == document && (e = document.documentElement), w.__ && w.__(t, e), l = (a = !1) ? null : e.__k, i = [], d = [], _e(e, t = e.__k = rt(T, null, [t]), l || K, K, e.namespaceURI, l ? null : e.firstChild ? re.call(e.childNodes) : null, i, l ? l.__e : e.firstChild, a, d), ze(i, t, d), t.props.children = null;
+  e == document && (e = document.documentElement), w.__ && w.__(t, e), l = (a = !1) ? null : e.__k, i = [], d = [], _e(e, t = e.__k = rt(T, null, [t]), l || K, K, e.namespaceURI, l ? null : e.firstChild ? re.call(e.childNodes) : null, i, l ? l.__e : e.firstChild, a, d), Be(i, t, d), t.props.children = null;
 }
 re = Q.slice, w = { __e: function(t, e, r, a) {
   for (var l, i, d; e = e.__; ) if ((l = e.__c) && !l.__) try {
@@ -231,7 +231,7 @@ re = Q.slice, w = { __e: function(t, e, r, a) {
   this.__v && (this.__e = !0, t && this.__h.push(t), ke(this));
 }, G.prototype.render = T, H = [], De = typeof Promise == "function" ? Promise.prototype.then.bind(Promise.resolve()) : setTimeout, Ee = function(t, e) {
   return t.__v.__b - e.__v.__b;
-}, X.__r = 0, oe = Math.random().toString(8), B = "__d" + oe, M = "__a" + oe, Le = /(PointerCapture)$|Capture$/i, pe = 0, se = xe(!1), ce = xe(!0);
+}, X.__r = 0, oe = Math.random().toString(8), z = "__d" + oe, M = "__a" + oe, Le = /(PointerCapture)$|Capture$/i, pe = 0, se = xe(!1), ce = xe(!0);
 var dt = 0;
 function n(t, e, r, a, l, i) {
   e || (e = {});
@@ -291,7 +291,7 @@ function pt(t, e) {
   var r = fe(O++, 7);
   return Je(r.__H, e) && (r.__ = t(), r.__H = e, r.__h = t), r.__;
 }
-function z(t, e) {
+function B(t, e) {
   return Z = 8, pt(function() {
     return t;
   }, e);
@@ -737,7 +737,7 @@ function Ut({ ledger: t, requests: e }) {
   ] }) });
 }
 function Ht({ section: t, identity: e, settings: r, roster: a, collectives: l, save: i, signIn: d, status: s, join: h, switchCollective: c, leaveCollective: m, message: f }) {
-  const [o, u] = P(r?.schedule || { enabled: !1, start: "", end: "", days: "", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }), [v, b] = P(""), k = ["contributing", "pausing", "action_needed"].includes(s?.state) || ["pending", "published"].includes(s?.submission?.state);
+  const [o, u] = P(r?.schedule || { enabled: !1, start: "", end: "", days: "", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }), [v, b] = P(""), k = !!s?.switch_blocked;
   if (ee(() => {
     r?.schedule && u(r.schedule);
   }, [r]), t === "collective") return /* @__PURE__ */ n("div", { className: "view-stack", children: [
@@ -844,7 +844,7 @@ function Dt({ identity: t }) {
   ] });
 }
 function Et() {
-  const t = new URLSearchParams(location.search).get("token") || "", [e, r] = P({ status: null, tasks: [], requests: [], ledger: [], identity: null, settings: null, roster: [], collectives: [], coordinatorUnavailable: !1, sessionExpired: !1, daemonUnavailable: !1, message: "", submission: null }), [a, l] = P(Ae), [i, d] = P(() => Ie(location.hash)), [s, h] = P(null), [c, m] = P(null), f = z(async (_, g = {}) => {
+  const t = new URLSearchParams(location.search).get("token") || "", [e, r] = P({ status: null, tasks: [], requests: [], ledger: [], identity: null, settings: null, roster: [], collectives: [], coordinatorUnavailable: !1, sessionExpired: !1, daemonUnavailable: !1, message: "", submission: null }), [a, l] = P(Ae), [i, d] = P(() => Ie(location.hash)), [s, h] = P(null), [c, m] = P(null), f = B(async (_, g = {}) => {
     const x = await fetch(_, { ...g, headers: { "x-waspflow-session-token": t, ...g.body ? { "content-type": "application/json" } : {} } });
     let q = {};
     try {
@@ -856,7 +856,7 @@ function Et() {
       throw R.status = x.status, R;
     }
     return q;
-  }, [t]), o = z(async () => {
+  }, [t]), o = B(async () => {
     try {
       const _ = await f("/status"), g = !_.coordinator_unavailable && _.state !== "not_joined", [x, q, R, I, U, $, A, be] = await Promise.all([_.state === "idle" ? f("/tasks").catch(() => []) : Promise.resolve([]), f("/ledger").catch(() => []), f("/identity").catch(() => null), f("/settings").catch(() => null), g ? f("/roster").catch(() => []) : Promise.resolve([]), g ? f("/activity").catch(() => []) : Promise.resolve([]), g ? f("/requests").catch(() => null) : Promise.resolve(null), f("/collectives").catch(() => [])]);
       r((tt) => ({ ...tt, status: _, tasks: D(x), ledger: D(q), identity: R || { key_id: _.key_id, coordinator_url: _.coordinator_url }, settings: I, roster: D(U?.roster || U), requests: A ? D(A) : D(q).filter((ae) => ae.author === "me" || ae.role === "requester" || ae.requester === !0), collectives: D(be?.collectives || be), coordinatorUnavailable: !!_.coordinator_unavailable, daemonUnavailable: !1 }));
@@ -891,7 +891,7 @@ function Et() {
     } catch (g) {
       l((x) => ({ ...x, error: g.message }));
     }
-  }, b = z(async (_) => {
+  }, b = B(async (_) => {
     if (_)
       try {
         const g = await f(`/tasks/${encodeURIComponent(Fe(_))}`);
@@ -899,7 +899,7 @@ function Et() {
       } catch {
         h(null);
       }
-  }, [f]), k = z(async (_) => {
+  }, [f]), k = B(async (_) => {
     try {
       const g = await f(`/tasks/${encodeURIComponent(Fe(_))}/log?since=0`);
       m(g);
