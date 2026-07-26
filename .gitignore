@@ -8,3 +8,6 @@
 core.*
 node_modules/
 ui/node_modules/
+
+# Local ds (devspecs) task-slice state — agent workflow, never product
+devspecs/
