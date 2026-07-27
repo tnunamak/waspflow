@@ -1325,6 +1325,18 @@ PROV
   [[ $((t1 - t0)) -lt 25 ]] || { echo "barrier S2: wait nearly false-timed-out ($((t1-t0))s of 30s) — stale-flag bug" >&2; exit 1; }
   [[ "$(lane_get barlane revise_barrier_mark)" == "" ]] || { echo "barrier S2: barrier_mark should be cleared" >&2; exit 1; }
 
+  # --- Case S3: a provider can emit a valid count and still return nonzero when
+  #     its append-only event log ends in a partially written record. Preserve
+  #     the valid count without appending a fallback line that breaks arithmetic.
+  cat >>"$fakelib/providers/faker.sh" <<'PROV'
+faker_turn_mark() { printf '10\n'; return 1; }
+PROV
+  lane_set barlane revise_barrier_mark "9"
+  : > "$ctl/idle"
+  set +e; run_wait 5 >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 0 ]] || { echo "barrier S3: valid nonzero turn mark should clear barrier (want rc0, got $rc)" >&2; exit 1; }
+  [[ "$(lane_get barlane revise_barrier_mark)" == "" ]] || { echo "barrier S3: barrier_mark should be cleared" >&2; exit 1; }
+
   # --- Case: no barrier set (normal wait) -> idle honored immediately.
   lane_set barlane revise_barrier_mark ""
   : > "$ctl/idle"

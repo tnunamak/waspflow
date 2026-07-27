@@ -1052,7 +1052,9 @@ cmd_wait() {
     provider="$(lane_get "$lane" provider)"
     load_provider "$provider"
     if [[ "$barrier_cleared" -eq 0 ]]; then
-      local cur_mark; cur_mark="$("${provider}_turn_mark" "$lane" 2>/dev/null || echo 0)"
+      local cur_mark
+      cur_mark="$("${provider}_turn_mark" "$lane" 2>/dev/null)" || true
+      [[ "$cur_mark" =~ ^[0-9]+$ ]] || cur_mark=0
       if [[ "${cur_mark:-0}" -gt "$barrier_mark" ]]; then
         # New turn appended a session event past the revise mark — barrier satisfied.
         barrier_cleared=1
