@@ -77,12 +77,14 @@ exec_run() {
     [[ "$accept_provider_default" == true ]] && model=""
   fi
 
-  [[ -n "$provider" ]] || die "exec: --provider is required (claude|codex|grok|antigravity; or use --op)"
+  [[ -n "$provider" ]] || die "exec: --provider is required (claude|codex|grok|antigravity|qwen; or use --op)"
   is_known_provider "$provider" || die "exec: unknown provider '$provider'"
   [[ -n "$prompt" ]] || die "exec: a task prompt is required after '--'"
   cwd="$(cd "$cwd" && pwd)" || die "exec: --cwd does not exist"
   guard_cwd "$cwd"   # never run a worker with cwd '/' silently (known crash class)
-  if [[ "$provider" == antigravity && -n "$effort" && ! "$effort" =~ ^(low|medium|high)$ ]]; then
+  if [[ "$provider" == qwen && -n "$effort" ]]; then
+    die "exec/qwen: --effort is not supported by Qwen Code"
+  elif [[ "$provider" == antigravity && -n "$effort" && ! "$effort" =~ ^(low|medium|high)$ ]]; then
     die "exec/antigravity: unsupported effort '$effort' (valid: low|medium|high)"
   elif [[ -n "$effort" && ! "$effort" =~ ^(none|minimal|low|medium|high|xhigh|max)$ ]]; then
     die "exec: --effort must be one of none|minimal|low|medium|high|xhigh|max (got: $effort)"
@@ -128,6 +130,7 @@ exec_run() {
     claude) _exec_claude "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
     grok)   _exec_grok "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
     antigravity) _exec_antigravity "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
+    qwen)   _exec_qwen "$cwd" "$model" "$prompt" "$output_path" || rc=$? ;;
     *)      die "exec: unsupported provider '$provider'" ;;
   esac
 
@@ -164,6 +167,13 @@ _exec_antigravity() {
   [[ -n "$model" ]] && model_args=(--model "$model")
   [[ -n "$effort" ]] && effort_args=(--effort "$effort")
   (cd "$cwd" && agy --print "$prompt" "${model_args[@]}" "${effort_args[@]}" --mode accept-edits --dangerously-skip-permissions) >"$output_path"
+}
+
+_exec_qwen() {
+  local cwd="$1" model="$2" prompt="$3" output_path="$4"
+  local -a model_args=()
+  [[ -n "$model" ]] && model_args=(--model "$model")
+  (cd "$cwd" && qwen -p "$prompt" "${model_args[@]}" --yolo --output-format text </dev/null) >"$output_path"
 }
 
 # Reject an output file that is too small to be real, blank once stripped, or is

@@ -33,6 +33,11 @@ provider_event_tail() {
       source="$(_antigravity_receipt_file "$lane")"
       source_kind="agy-receipt-jsonl"
       ;;
+    qwen)
+      load_provider qwen
+      source="$(_qwen_receipt_file "$lane")"
+      source_kind="qwen-receipt-jsonl"
+      ;;
     *) jq -cn --arg provider "$provider" '{provider:$provider,source:{state:"unknown-provider"},events:[]}'; return 0 ;;
   esac
   if [[ -z "$source" || ! -f "$source" ]]; then
@@ -97,6 +102,12 @@ provider_event_tail() {
           elif .phase == "completion" then {event_time:(.completed_epoch // ""),event_type:"turn_completed",turn_completed_mark:true}
           else empty end' <<<"$parsed")"; then rm -f "$snapshot" "$events_file"; return 1; fi
         ;;
+      qwen)
+        if ! event="$(jq -c '
+          if .phase == "invocation" then {event_time:(.started_epoch // ""),event_type:"turn_started",turn_started_mark:true}
+          elif .phase == "completion" then {event_time:(.completed_epoch // ""),event_type:"turn_completed",turn_completed_mark:true}
+          else empty end' <<<"$parsed")"; then rm -f "$snapshot" "$events_file"; return 1; fi
+        ;;
     esac
     if [[ -n "$event" ]] && ! printf '%s\n' "$event" >>"$events_file"; then rm -f "$snapshot" "$events_file"; return 1; fi
   done <"$snapshot"
@@ -120,7 +131,7 @@ lane_inspection_json() {
   sf="$(lane_state_file "$lane")"
   if ! jq empty "$sf" 2>/dev/null; then jq -cn --arg lane "$lane" '{lane:$lane,classification:"corrupt/unknown",eligibility:"preserve",reasons:["unparseable-state.json"]}'; return 0; fi
   provider="$(lane_get "$lane" provider)"
-  case "$provider" in claude|codex|grok|antigravity) load_provider "$provider" ;; *)
+  case "$provider" in claude|codex|grok|antigravity|qwen) load_provider "$provider" ;; *)
     jq -cn --arg lane "$lane" --arg provider "$provider" '{lane:$lane,provider:$provider,classification:"corrupt/unknown",eligibility:"preserve",reasons:["unknown-provider"]}'
     return 0
   esac
