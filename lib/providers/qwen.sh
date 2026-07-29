@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
 # qwen.sh - waspflow adapter for Qwen Code (qwen CLI).
 #
-# Qwen Code is treated as an opaque headless process, following the
-# antigravity pattern.  Each `qwen -p ... --yolo` invocation is one-shot
-# and exits when done.  Lifecycle truth lives in the Waspflow-owned
-# receipt JSONL; Qwen's internal session logs are used only for session
-# ID discovery and runtime attestation.
+# Qwen Code is treated as an opaque headless process.  Each
+# `qwen -p ... --yolo` invocation is one-shot and exits when done.
+# Lifecycle truth lives in the Waspflow-owned receipt JSONL; Qwen's
+# internal session logs are used only for session ID discovery and
+# runtime attestation.
 #
 # Session IDs cannot be pre-minted (no --session-id flag).  Qwen assigns
 # its own UUID, discovered from the stream-json session_start event or
 # from the filesystem (~/.qwen/projects/<sanitized-cwd>/chats/).
+#
+# A spawn marker file eliminates the unrelated-session race: the marker
+# is touched immediately before qwen starts, and filesystem discovery
+# only adopts chat files newer than the marker.
 
 QWEN_RECEIPTS_NAME="qwen-receipts.jsonl"
+QWEN_MARKER_NAME=".qwen-spawn-marker"
+QWEN_SID_NAME=".qwen-sid"
 
 qwen_valid_models() {
   local settings="$HOME/.qwen/settings.json"
@@ -50,26 +56,55 @@ qwen_preflight() {
   return 0
 }
 
+# Discover the Qwen session ID for a lane.
+#
+# Three-tier fallback chain:
+#   1. lane state   — written by the generated script on completion (primary)
+#   2. .qwen-sid    — written by the generated script immediately after
+#                      extracting the session ID from the stream-json log,
+#                      BEFORE lane_set.  Survives crashes between extraction
+#                      and state persistence.  Deterministic — no race.
+#   3. filesystem   — scans ~/.qwen/projects/<cwd>/chats/ for a single chat
+#                      file newer than the spawn marker.  Last resort for
+#                      crashes that lose both state and the sid file.  Has a
+#                      narrow race window (concurrent same-cwd qwen between
+#                      marker touch and chat-file creation).
 qwen_discover_session() {
-  local lane="$1" sid cwd started chats candidates
+  local lane="$1" sid sid_file cwd marker chats candidates
+
+  # Tier 1: lane state.
   sid="$(lane_get "$lane" session_id)"
   [[ -n "$sid" ]] && { printf '%s\n' "$sid"; return 0; }
 
+  # Tier 2: durable sid file (crash recovery, deterministic).
+  sid_file="$(_qwen_sid_file "$lane")"
+  if [[ -s "$sid_file" ]]; then
+    sid="$(cat "$sid_file")"
+    if [[ -n "$sid" ]]; then
+      lane_set "$lane" session_id "$sid"
+      printf '%s\n' "$sid"
+      return 0
+    fi
+  fi
+
+  # Tier 3: marker-scoped filesystem scan (last resort, narrow race).
+  marker="$(lane_dir "$lane")/$QWEN_MARKER_NAME"
+  [[ -f "$marker" ]] || return 0
+
   cwd="$(lane_get "$lane" cwd)"
   chats="$HOME/.qwen/projects/$(_qwen_sanitized_cwd "${cwd:-$PWD}")/chats"
-  started="$(jq -r 'select(.phase=="invocation") | .started_epoch' "$(_qwen_receipt_file "$lane")" 2>/dev/null | tail -1)"
-  [[ "$started" =~ ^[0-9]+$ && -d "$chats" ]] || return 0
-  candidates="$(
-    find "$chats" -maxdepth 1 -type f -name '*.jsonl' -newermt "@$((started - 1))" -printf '%T@\t%f\n' 2>/dev/null \
-      | sort -rn | cut -f2-
-  )"
+  [[ -d "$chats" ]] || return 0
+
+  candidates="$(find "$chats" -maxdepth 1 -type f -name '*.jsonl' -newer "$marker" 2>/dev/null)"
   [[ "$(awk 'NF { count++ } END { print count + 0 }' <<<"$candidates")" -eq 1 ]] || return 0
-  sid="${candidates%.jsonl}"
+  sid="$(basename "$candidates" .jsonl)"
   lane_set "$lane" session_id "$sid"
   printf '%s\n' "$sid"
 }
 
 _qwen_receipt_file() { printf '%s/%s\n' "$(lane_dir "$1")" "$QWEN_RECEIPTS_NAME"; }
+_qwen_marker_file() { printf '%s/%s\n' "$(lane_dir "$1")" "$QWEN_MARKER_NAME"; }
+_qwen_sid_file() { printf '%s/%s\n' "$(lane_dir "$1")" "$QWEN_SID_NAME"; }
 
 _qwen_receipt() {
   local lane="$1" phase="$2" outcome="$3" rc="$4" sid="$5" started="$6" finished="$7" prompt_kind="$8"
@@ -84,16 +119,28 @@ _qwen_receipt() {
 # Sanitize a cwd to the Qwen project directory name (slashes → dashes).
 _qwen_sanitized_cwd() { printf '%s' "$1" | sed 's|/|-|g'; }
 
-# Build the shell command evaluated inside the lane-owned tmux process.
-# Stream-json output is tee'd to a log file for session ID discovery.
+# Build the shell script evaluated inside the lane-owned tmux process.
+#
+# The generated script:
+#   1. sources core.sh + qwen.sh for receipt/lane helpers
+#   2. touches the spawn marker (discovery race boundary)
+#   3. writes an invocation receipt
+#   4. runs qwen with stream-json output tee'd to a log
+#   5. checks PIPESTATUS for both qwen and tee
+#   6. extracts the session ID from the log
+#   7. writes a completion receipt with the correct outcome
+#   8. persists the session ID to lane state
+#   9. cleans up the log via an EXIT trap
+#
 # API keys are NEVER passed via argv; qwen reads them from the inherited
 # environment.
 _qwen_shell() {
   local lane="$1" model="$2" session_id="$3" prompt="$4" kind="$5"
   shift 5
   local extra=("$@")
-  local log adapter core
+  local log adapter core marker
   log="$(lane_dir "$lane")/.qwen-log.$$"
+  marker="$(_qwen_marker_file "$lane")"
   adapter="${WASPFLOW_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/providers/qwen.sh"
   core="${WASPFLOW_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/core.sh"
   local argv=(qwen -p "$prompt" --yolo --output-format stream-json)
@@ -102,8 +149,46 @@ _qwen_shell() {
   argv+=("${extra[@]}")
   local q a; q=""
   for a in "${argv[@]}"; do q+=" $(printf '%q' "$a")"; done
-  printf 'source %q; source %q; cleanup_log=%q; trap '\''rm -f "$cleanup_log"'\'' EXIT; started=$(date +%%s); _qwen_receipt %q invocation started 0 "" "$started" "$started" %q; set +e; %s 2>&1 | tee %q; pipeline_rc=("${PIPESTATUS[@]}"); set -e; rc=${pipeline_rc[0]}; tee_rc=${pipeline_rc[1]}; sid=$(jq -r '\''select(.type=="system" and .subtype=="session_start") | .session_id // empty'\'' %q 2>/dev/null | head -1 || true); outcome=failed; if [[ "$rc" -eq 0 && "$tee_rc" -ne 0 ]]; then rc="$tee_rc"; elif [[ "$rc" -eq 0 && -z "$sid" ]]; then rc=1; outcome=no_session; elif [[ "$rc" -eq 0 ]]; then outcome=succeeded; fi; finished=$(date +%%s); _qwen_receipt %q completion "$outcome" "$rc" "$sid" "$started" "$finished" %q; if [[ -n "$sid" ]]; then lane_set %q session_id "$sid"; fi; exit "$rc"' \
-    "$core" "$adapter" "$log" "$lane" "$kind" "${q# }" "$log" "$log" "$lane" "$kind" "$lane"
+
+  # Emit the generated script as a readable multi-line string.
+  # All dynamic values are injected via %q-escaped variables at the top;
+  # the body is a quoted heredoc with no further interpolation.
+  printf 'source %q; source %q\n' "$core" "$adapter"
+  cat <<'QWEN_SCRIPT'
+cleanup_log=""
+trap 'rm -f "$cleanup_log"' EXIT
+started=$(date +%s)
+QWEN_SCRIPT
+  printf 'cleanup_log=%q\n' "$log"
+  printf '_qwen_receipt %q invocation started 0 "" "$started" "$started" %q\n' "$lane" "$kind"
+  printf 'touch %q\n' "$marker"
+  cat <<'QWEN_SCRIPT'
+set +e
+QWEN_SCRIPT
+  printf '%s 2>&1 | tee %q\n' "${q# }" "$log"
+  cat <<'QWEN_SCRIPT'
+pipeline_rc=("${PIPESTATUS[@]}")
+set -e
+rc=${pipeline_rc[0]}
+tee_rc=${pipeline_rc[1]}
+sid=$(jq -r 'select(.type=="system" and .subtype=="session_start") | .session_id // empty' "$cleanup_log" 2>/dev/null | head -1 || true)
+outcome=failed
+if [[ "$rc" -eq 0 && "$tee_rc" -ne 0 ]]; then
+  rc="$tee_rc"
+elif [[ "$rc" -eq 0 && -z "$sid" ]]; then
+  rc=1; outcome=no_session
+elif [[ "$rc" -eq 0 ]]; then
+  outcome=succeeded
+fi
+finished=$(date +%s)
+QWEN_SCRIPT
+  printf '_qwen_receipt %q completion "$outcome" "$rc" "$sid" "$started" "$finished" %q\n' "$lane" "$kind"
+  # Persist the session ID to a durable file BEFORE lane_set.  If the
+  # process crashes between here and lane_set, tier-2 discovery recovers
+  # the ID deterministically (no filesystem race).
+  printf 'if [[ -n "$sid" ]]; then printf "%%s" "$sid" > %q; fi\n' "$(_qwen_sid_file "$lane")"
+  printf 'if [[ -n "$sid" ]]; then lane_set %q session_id "$sid"; fi\n' "$lane"
+  printf 'exit "$rc"\n'
 }
 
 qwen_validate_model_effort() {

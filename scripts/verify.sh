@@ -3398,9 +3398,6 @@ sleep "${QWEN_LINGER:-0}"
 QWEN
   chmod +x "$qwen_fake"
   export QWEN_ARGS="$qwen_args"; PATH="$fixture:$PATH"
-  tmux set-environment -g PATH "$PATH"
-  tmux set-environment -g QWEN_ARGS "$QWEN_ARGS"
-  tmux set-environment -g QWEN_LINGER 2
   export WASPFLOW_SELECTION_GATE=off
 
   # Exec test.
@@ -3456,17 +3453,40 @@ QWEN
   WASPFLOW_LANES_DIR="$ordinary_lanes_dir"
 
   # Recover a session from the cwd-scoped chat directory when state persistence
-  # was interrupted after Qwen created exactly one post-invocation session file.
+  # was interrupted after Qwen created exactly one post-marker session file.
+  # The spawn marker eliminates the unrelated-session race.
   qwen_recovery=qwen-recovery
   lane_set "$qwen_recovery" provider qwen status live cwd "$fixture" model test-model
-  recovery_started="$(date +%s)"
-  _qwen_receipt "$qwen_recovery" invocation started 0 "" "$recovery_started" "$recovery_started" spawn
+  recovery_marker="$(_qwen_marker_file "$qwen_recovery")"
+  mkdir -p "$(dirname "$recovery_marker")"
+  touch "$recovery_marker"
   recovery_sid=11111111-2222-3333-4444-555555555555
   recovery_chats="$HOME/.qwen/projects/$(_qwen_sanitized_cwd "$fixture")/chats"
   rm -f "$recovery_chats"/*.jsonl
   mkdir -p "$recovery_chats"
+  sleep 0.1
   printf '{}\n' >"$recovery_chats/$recovery_sid.jsonl"
   [[ "$(qwen_discover_session "$qwen_recovery")" == "$recovery_sid" ]]
+
+  # Tier-2 discovery: .qwen-sid file survives a crash between extraction
+  # and lane_set.  Deterministic — no filesystem race.
+  qwen_sidfile=qwen-sidfile
+  lane_set "$qwen_sidfile" provider qwen status live cwd "$fixture" model test-model
+  sidfile_sid=22222222-3333-4444-5555-666666666666
+  printf '%s' "$sidfile_sid" >"$(_qwen_sid_file "$qwen_sidfile")"
+  [[ "$(qwen_discover_session "$qwen_sidfile")" == "$sidfile_sid" ]]
+  [[ "$(lane_get "$qwen_sidfile" session_id)" == "$sidfile_sid" ]]
+
+  # Attestation: qwen_refresh_runtime_settings reads the model from the
+  # session JSONL and persists it to lane state.
+  qwen_attest=qwen-attest
+  attest_sid=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+  attest_chats="$HOME/.qwen/projects/$(_qwen_sanitized_cwd "$fixture")/chats"
+  mkdir -p "$attest_chats"
+  printf '{"type":"assistant","model":"test-model"}\n' >"$attest_chats/$attest_sid.jsonl"
+  lane_set "$qwen_attest" provider qwen status live cwd "$fixture" model test-model session_id "$attest_sid"
+  qwen_refresh_runtime_settings "$qwen_attest"
+  [[ "$(lane_get "$qwen_attest" runtime_model)" == test-model ]]
 
   # Failure path.
   qwen_failed=qwen-failed
@@ -3522,6 +3542,7 @@ JSON
   grep -q 'Claude/Codex/Grok/Antigravity/Qwen' <<<"$help_text"
   [[ "$(grep -c '<claude|codex|grok|antigravity|qwen>' <<<"$help_text")" -ge 3 ]]
   grep -q 'qwen' <<<"$("$root/bin/waspflow" doctor 2>&1 || true)"
+
 )
 
 echo "waspflow verify: ok"
