@@ -77,7 +77,7 @@ escalate_select_target() {
   if [[ -n "$requested" ]]; then
     local is_op=false is_literal=false provider model effort observation
     jq -e --arg id "$requested" '.operating_points[] | select(.id==$id)' <<<"$OPS_POLICY_JSON" >/dev/null 2>&1 && is_op=true
-    [[ "$requested" =~ ^(claude|codex|grok|antigravity)/[^/]+(/(none|minimal|low|medium|high|xhigh|max))?$ ]] && is_literal=true
+    [[ "$requested" =~ ^(claude|codex|grok|antigravity|qwen)/[^/]+(/(none|minimal|low|medium|high|xhigh|max))?$ ]] && is_literal=true
     if [[ "$is_op" == true && "$is_literal" == true ]]; then
       ESC_REASON="--to '$requested' collides with an operating-point id and an arm literal"; ESC_CODE=1; return 1
     fi
@@ -91,13 +91,18 @@ escalate_select_target() {
       ESC_REASON="--to must be an operating-point id or provider/model[/effort]"; ESC_CODE=1; return 1
     fi
     provider="$(jq -r .provider <<<"$ESC_ARM")"; model="$(jq -r '.model // ""' <<<"$ESC_ARM")"
+    effort="$(jq -r '.effort // ""' <<<"$ESC_ARM")"
     load_provider "$provider"
+    if declare -F "${provider}_validate_model_effort" >/dev/null \
+       && ! "${provider}_validate_model_effort" "$model" "$effort"; then
+      ESC_REASON="target $(escalate_arm_label "$ESC_ARM") has incompatible model/effort"; ESC_CODE=1; return 1
+    fi
     observation="$(selection_observe_availability "$provider" "$model" default)"
     if [[ "$(jq -r .state <<<"$observation")" == unavailable ]]; then
       ESC_REASON="target $(escalate_arm_label "$ESC_ARM") is live-proven unavailable"; ESC_CODE=1; return 1
     fi
   else
-    local cursor row candidate provider model billing
+    local cursor row candidate provider model effort billing
     cursor="$(lane_get "$lane" ladder_cursor)"; [[ -n "$cursor" ]] || cursor="$(lane_get "$lane" op)"
     if [[ -z "$cursor" ]]; then ESC_REASON="selection required: bare-arm lane has no ladder"; ESC_CODE=5; return 1; fi
     while IFS= read -r row; do
@@ -105,7 +110,12 @@ escalate_select_target() {
       candidate="$(jq -c .arm <<<"$row")"
       [[ "$(jq -cS . <<<"$candidate")" == "$(jq -cS . <<<"$(escalate_current_arm "$lane")")" ]] && continue
       provider="$(jq -r .provider <<<"$candidate")"; model="$(jq -r '.model // ""' <<<"$candidate")"
+      effort="$(jq -r '.effort // ""' <<<"$candidate")"
       load_provider "$provider"
+      if declare -F "${provider}_validate_model_effort" >/dev/null \
+         && ! "${provider}_validate_model_effort" "$model" "$effort"; then
+        continue
+      fi
       billing="$(billing_path_v1 "$provider" default false)"
       selection_prepare_op "$(jq -r .id <<<"$row")" "$provider" "$model" default "$billing" "$ack"
       [[ "$(jq -r .auto_selectable <<<"$SELECTION_DISPOSITION")" == true ]] || continue

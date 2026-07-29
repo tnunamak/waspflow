@@ -32,8 +32,9 @@ waspflow demo --provider codex
 waspflow demo --provider codex --run
 ```
 
-Use `--provider claude`, `--provider grok`, or `--provider antigravity` if that
-is the agent CLI you have installed. Antigravity uses the `agy` executable.
+Use `--provider claude`, `--provider grok`, `--provider antigravity`, or
+`--provider qwen` if that is the agent CLI you have installed. Antigravity uses
+the `agy` executable.
 
 ## Selection gate
 
@@ -210,9 +211,9 @@ config shape.
 
 | Command | What it does |
 |---|---|
-| `spawn --provider <claude\|codex\|grok\|antigravity> --lane <name> [opts] -- <task>` | Start a durable worker lane |
-| `exec --provider <claude\|codex\|grok\|antigravity> [opts] [-o FILE] -- <task>` | Headless one-shot: run, return, leave no lane |
-| `demo --provider <claude\|codex\|grok\|antigravity> [--run]` | Show or run a safe first demo |
+| `spawn --provider <claude\|codex\|grok\|antigravity\|qwen> --lane <name> [opts] -- <task>` | Start a durable worker lane |
+| `exec --provider <claude\|codex\|grok\|antigravity\|qwen> [opts] [-o FILE] -- <task>` | Headless one-shot: run, return, leave no lane |
+| `demo --provider <claude\|codex\|grok\|antigravity\|qwen> [--run]` | Show or run a safe first demo |
 | `wait <lane> [--reap]` | Poll the provider log until a worker finishes; `--reap` then returns the final reap result |
 | `events <lane> [--lines N] [--json]` | Safe, normalized provider-event tail for all supported providers |
 | `inspect [<lane>] --json` | Read-only lane facts and explainable cleanup classifications |
@@ -242,17 +243,17 @@ Useful `spawn` options:
 - `--prepare <cmd>` runs setup before that oracle; `--verify-timeout <seconds>` bounds both commands.
 - `--verify-strength <suite|smoke>` declares receipt comparability; it is never inferred.
 - `--model <id>` selects a provider model.
-- `--effort <none|minimal|low|medium|high|xhigh|max>` passes reasoning effort **exactly** where supported (never silent demotion; Antigravity supports `low`, `medium`, and `high`).
+- `--effort <none|minimal|low|medium|high|xhigh|max>` passes reasoning effort **exactly** where supported (never silent demotion; Antigravity supports `low`, `medium`, and `high`; Qwen Code does not support `--effort`).
 - `--mcp <auto|none|inherit>` controls worker MCP exposure. `auto` is the default and is MCP-minimal where the provider supports it; use `inherit` only when the task needs the current provider configuration.
 - `--op <id>` expands a task-shaped operating point (`waspflow ops list`); explicit flags win over expansion.
 - `--cwd <dir>` starts the worker in another directory.
 - `--arg <flag>` passes an extra flag to the underlying agent CLI.
 
-MCP policy by provider: Claude and Codex resolve `auto` to `none`; Grok and
-Antigravity resolve `auto` to `inherit` with a warning because their CLIs have no
-verified empty-MCP launch boundary. Explicit `--mcp none` fails before launch for
-those providers. Under Claude/Codex isolation, pass-through MCP config (and Codex config
-profiles) is rejected; choose `inherit` explicitly when a task needs it.
+MCP policy by provider: Claude and Codex resolve `auto` to `none`; Grok,
+Antigravity, and Qwen resolve `auto` to `inherit` with a warning because their CLIs
+have no verified empty-MCP launch boundary. Explicit `--mcp none` fails before launch
+for those providers. Under Claude/Codex isolation, pass-through MCP config (and Codex
+config profiles) is rejected; choose `inherit` explicitly when a task needs it.
 
 ## Exec: Headless One-Shot Work
 
@@ -312,6 +313,26 @@ provider-native completion events or runtime model/effort attestation.
 Options mirror `spawn` where they apply: `--model`, `--effort`, `--mcp`, `--cwd`, and
 `-o <file>` (omit `-o` to print to stdout). Because `exec` runs the same provider
 preflight as `spawn`, the billing guard below covers it too.
+
+## Qwen Code
+
+Qwen Code support uses the headless `qwen -p ... --yolo` invocation pattern.
+Each spawn or revise is a one-shot process; lifecycle truth lives in
+Waspflow-owned receipt JSONL (the antigravity pattern). Session IDs are
+assigned by Qwen (no `--session-id` flag) and discovered from the
+stream-json `session_start` event.
+
+```bash
+waspflow spawn --provider qwen --model qwen3.8-max-preview \
+  --lane qwen-review -- "Review the API changes"
+```
+
+Qwen Code does not support `--effort`; passing it is an error. Models are
+read from `~/.qwen/settings.json` (`modelProviders.openai[].id`). Auth is
+API-key based: set `BAILIAN_TOKEN_PLAN_API_KEY`, `BAILIAN_CODING_PLAN_API_KEY`,
+or `DASHSCOPE_API_KEY` in the environment. MCP policy follows the
+antigravity pattern: `auto` resolves to `inherit` with a warning; `none`
+fails before launch.
 
 ## Billing Safety
 

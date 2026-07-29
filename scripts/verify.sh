@@ -587,11 +587,16 @@ grep -q "waspflow spawn --provider codex --accept-provider-default --lane previe
 
 # Antigravity integration: literal escalation targets and PATH auto-detection
 # must remain aligned with the provider adapter's canonical name.
-grep -Eq '\^\(claude\|codex\|grok\|antigravity\)/' "$root/lib/escalation.sh"
+grep -Eq '\^\(claude\|codex\|grok\|antigravity\|qwen\)/' "$root/lib/escalation.sh"
 demo_body="$(sed -n '/^cmd_demo()/,/^}/p' "$root/bin/waspflow")"
 grep -q 'command -v agy' <<<"$demo_body"
 grep -q 'provider="antigravity"' <<<"$demo_body"
-grep -q 'install codex, claude, grok, or agy' <<<"$demo_body"
+grep -q 'install codex, claude, grok, agy, or qwen' <<<"$demo_body"
+
+# Qwen integration: escalation targets, PATH auto-detection, and provider array.
+grep -q 'command -v qwen' <<<"$demo_body"
+grep -q 'provider="qwen"' <<<"$demo_body"
+grep -q 'qwen' "$root/lib/core.sh"
 
 set +e
 missing_provider="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" exec -- "hello" 2>&1)"
@@ -1325,6 +1330,18 @@ PROV
   [[ $((t1 - t0)) -lt 25 ]] || { echo "barrier S2: wait nearly false-timed-out ($((t1-t0))s of 30s) — stale-flag bug" >&2; exit 1; }
   [[ "$(lane_get barlane revise_barrier_mark)" == "" ]] || { echo "barrier S2: barrier_mark should be cleared" >&2; exit 1; }
 
+  # --- Case S3: a provider can emit a valid count and still return nonzero when
+  #     its append-only event log ends in a partially written record. Preserve
+  #     the valid count without appending a fallback line that breaks arithmetic.
+  cat >>"$fakelib/providers/faker.sh" <<'PROV'
+faker_turn_mark() { printf '10\n'; return 1; }
+PROV
+  lane_set barlane revise_barrier_mark "9"
+  : > "$ctl/idle"
+  set +e; run_wait 5 >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 0 ]] || { echo "barrier S3: valid nonzero turn mark should clear barrier (want rc0, got $rc)" >&2; exit 1; }
+  [[ "$(lane_get barlane revise_barrier_mark)" == "" ]] || { echo "barrier S3: barrier_mark should be cleared" >&2; exit 1; }
+
   # --- Case: no barrier set (normal wait) -> idle honored immediately.
   lane_set barlane revise_barrier_mark ""
   : > "$ctl/idle"
@@ -1368,7 +1385,7 @@ deadp_spawn() {
   return 1
 }   # window up, task never confirmed submitted
 PROV
-  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok antigravity)/WASPFLOW_PROVIDERS=(claude codex grok antigravity deadp)/' "$deadlib/core.sh"
+  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok antigravity qwen)/WASPFLOW_PROVIDERS=(claude codex grok antigravity qwen deadp)/' "$deadlib/core.sh"
   dead_home="$(mktemp -d "$scratch/waspflow-deadhome-XXXXXX")"
   dead_work="$(mktemp -d "$scratch/waspflow-deadwork-XXXXXX")"
   ( cd "$dead_work" && git init -q )
@@ -1773,7 +1790,7 @@ mcpp_spawn() {
   tmux_create_owned_lane_window "$lane" "$cwd" "exec sleep 60" >/dev/null
 }
 PROV
-  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok antigravity)/WASPFLOW_PROVIDERS=(claude codex grok antigravity mcpp)/' "$mcplib/core.sh"
+  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok antigravity qwen)/WASPFLOW_PROVIDERS=(claude codex grok antigravity qwen mcpp)/' "$mcplib/core.sh"
   mcphome="$(mktemp -d "$scratch/waspflow-mcp-home-XXXXXX")"
   mcpdir="$(mktemp -d "$scratch/waspflow-mcp-cwd-XXXXXX")"; (cd "$mcpdir" && git init -q)
   set +e
@@ -2222,7 +2239,7 @@ scopep_revise() {
     -- "$pid_file" "$pid_file" "$out_file" "$report"
 }
 PROV
-  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok antigravity)/WASPFLOW_PROVIDERS=(claude codex grok antigravity scopep)/' "$scopelib/core.sh"
+  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok antigravity qwen)/WASPFLOW_PROVIDERS=(claude codex grok antigravity qwen scopep)/' "$scopelib/core.sh"
   scopehome="$(mktemp -d "$scratch/waspflow-scope-home-XXXXXX")"
   scopework="$(mktemp -d "$scratch/waspflow-scope-work-XXXXXX")"; ( cd "$scopework" && git init -q )
   scopesession="waspflow-scope-$$"
@@ -2692,6 +2709,38 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   artifacts_emit_receipt_v1 att-claude verified
   jq -e 'select(.lane == "att-claude") | .arm_attestation.runtime_settings_state == "observed" and .arm_attestation.observed_model == "claude-sonnet-5" and (.ineligibility_reasons | index("attestation_missing") | not)' "$WASPFLOW_HOME/receipts.jsonl" >/dev/null
 
+  # Opus 5 regression (comments updated 2026-07-25): "opus" is a provider-owned
+  # family alias that may serve ANY canonical Opus id (the provider decides which;
+  # we do not assert it here). Attestation has observed both "claude-opus-4-8" and
+  # "claude-opus-5" under an "opus" request. Token-boundary corroboration already
+  # generalizes with no logic change — these fixtures prove the alias corroborates
+  # against opus-5 AND against opus-4-8 (both directions, without claiming which is
+  # current), canonical exact-equality for opus-5, and a NEGATIVE control where a
+  # specific pinned id must NOT accept a different served id (drift).
+  { printf '%s\n' '{"message":{"model":"claude-opus-5"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus5-alias.jsonl"
+  lane_set att-opus5-alias provider claude status live result "" session_id c-sid-opus5-alias model opus model_passed opus model_requested opus
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus5-alias
+  [[ "$(lane_get att-opus5-alias runtime_settings_match_requested)" == true && "$(lane_get att-opus5-alias runtime_model)" == claude-opus-5 ]]
+  { printf '%s\n' '{"message":{"model":"claude-opus-5"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus5-canon.jsonl"
+  lane_set att-opus5-canon provider claude status live result "" session_id c-sid-opus5-canon model claude-opus-5 model_passed claude-opus-5 model_requested claude-opus-5
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus5-canon
+  [[ "$(lane_get att-opus5-canon runtime_settings_match_requested)" == true && "$(lane_get att-opus5-canon runtime_model)" == claude-opus-5 ]]
+  { printf '%s\n' '{"message":{"model":"claude-opus-4-8"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus5-older.jsonl"
+  lane_set att-opus5-older provider claude status live result "" session_id c-sid-opus5-older model opus model_passed opus model_requested opus
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus5-older
+  [[ "$(lane_get att-opus5-older runtime_settings_match_requested)" == true && "$(lane_get att-opus5-older runtime_model)" == claude-opus-4-8 ]]
+  # Negative control: a specific pinned id must NOT silently accept a
+  # different served id. "-claude-opus-5-" does not contain "-claude-opus-4-8-"
+  # (and vice versa), so this is correctly drift, not an alias.
+  { printf '%s\n' '{"message":{"model":"claude-opus-5"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus5-drift.jsonl"
+  lane_set att-opus5-drift provider claude status live result "" session_id c-sid-opus5-drift model claude-opus-4-8 model_passed claude-opus-4-8 model_requested claude-opus-4-8
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus5-drift
+  [[ "$(lane_get att-opus5-drift runtime_settings_match_requested)" == false && "$(lane_get att-opus5-drift runtime_model)" == claude-opus-5 ]]
+
   # receipts summary: aggregates the ledger, tolerates malformed lines,
   # rejects unknown flags, and reports the eligible fraction. Malformed-line
   # tolerance runs against a scratch copy so the shared ledger stays clean.
@@ -2868,6 +2917,22 @@ codex_confirm_escalation_submission() {
   WASPFLOW_PROVISIONAL_ROLLOUT=""
 }
 PROV
+  cat >"$esclib/providers/qwen.sh" <<'PROV'
+qwen_spawn() { return 1; }
+qwen_preflight() { :; }
+qwen_discover_session() { lane_get "$1" session_id; }
+qwen_session_resumable() { return 0; }
+qwen_is_idle() { return 0; }
+qwen_turn_mark() { printf '1\n'; }
+qwen_revise() { :; }
+qwen_valid_models() { printf 'source=live_query\ntarget\n'; }
+qwen_mcp_policy() { printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}'; }
+qwen_validate_model_effort() {
+  [[ -z "${2:-}" ]] || { err "qwen: --effort is unsupported by Qwen Code"; return 1; }
+}
+qwen_resume_with_arm() { err "qwen: escalation hooks are unsupported by Qwen Code"; return 1; }
+qwen_confirm_escalation_submission() { err "qwen: escalation confirmation is unsupported by Qwen Code"; return 1; }
+PROV
 
   export WASPFLOW_LIB="$esclib" WASPFLOW_HOME="$eschome"
   # shellcheck disable=SC1090
@@ -2983,6 +3048,22 @@ PROV
   run_escalate esc-crash-receipt-appended --resume-transition >/dev/null
   jq -s --arg uuid esc-crash-receipt-appended-uuid 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane_segment")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
   jq -e --arg id "$durable_receipt_id" '.segment_receipt_id == $id' "$eschome/lanes/esc-crash-receipt-appended/state.json" >/dev/null
+
+  # Qwen rejects effort-bearing escalation targets before mutation, while a
+  # supported-shape target reaches the explicit unsupported provider hook and
+  # leaves the original arm/session recoverable.
+  make_escalation_lane esc-qwen-effort
+  set +e; qwen_effort_json="$(run_escalate esc-qwen-effort --to qwen/target/high --json 2>/dev/null)"; rc=$?; set -e
+  [[ "$rc" -eq 1 ]] || { echo "qwen escalation effort: expected rc1, got $rc" >&2; exit 1; }
+  jq -e '.exit_class == "refused" and (.reason | contains("incompatible model/effort"))' <<<"$qwen_effort_json" >/dev/null
+  jq -e '.provider == "codex" and .model == "old" and .pending_transition == ""' "$eschome/lanes/esc-qwen-effort/state.json" >/dev/null
+
+  make_escalation_lane esc-qwen-unsupported
+  set +e; qwen_unsupported_json="$(run_escalate esc-qwen-unsupported --to qwen/target --json 2>/dev/null)"; rc=$?; set -e
+  [[ "$rc" -eq 2 ]] || { echo "qwen escalation hook: expected rc2, got $rc" >&2; exit 1; }
+  jq -e '.exit_class == "attempt_failed" and (.reason | contains("provider launch/submission confirmation failed"))' <<<"$qwen_unsupported_json" >/dev/null
+  jq -e '.provider == "codex" and .model == "old" and .status == "escalate_failed" and ((.pending_transition | fromjson).phase == "launch_provisioned")' "$eschome/lanes/esc-qwen-unsupported/state.json" >/dev/null
+
   make_escalation_lane esc-crash-launch
   set +e; WASPFLOW_ESCALATION_TEST_CRASH_AFTER=launch_provisioned run_escalate esc-crash-launch --to codex/target/high >/dev/null 2>&1; rc=$?; set -e
   [[ "$rc" -eq 99 ]] || { echo "escalate crash launch: expected rc99" >&2; exit 1; }
@@ -3277,6 +3358,191 @@ JSON
   unset -f clawmeter
   grep -q 'antigravity' <<<"$("$root/bin/waspflow" --help)"
   grep -q 'agy' <<<"$("$root/bin/waspflow" doctor 2>&1 || true)"
+)
+
+# Qwen central integration: deterministic fake qwen CLI, real adapter/exec/
+# event/billing boundaries. Mirrors the antigravity test block above.
+(
+  unset WASPFLOW_LIB
+  state_home="$(mktemp -d "${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}/waspflow-verify-qwen.XXXXXX")"
+  export WASPFLOW_HOME="$state_home"
+  fixture="$state_home/fixture"; mkdir -p "$fixture"
+  source "$root/lib/core.sh"
+  source "$root/lib/billing.sh"
+  source "$root/lib/providers/qwen.sh"
+  source "$root/lib/events.sh"
+
+  # Contract: all 9 required functions exist.
+  for fn in spawn is_idle revise preflight discover_session session_resumable turn_mark valid_models mcp_policy; do
+    declare -F "qwen_${fn}" >/dev/null || { echo "missing qwen_${fn}" >&2; exit 1; }
+  done
+
+  # Fake qwen CLI: records argv, emits stream-json lifecycle events, and writes
+  # the resumable session file that the real adapter contract requires.
+  qwen_fake="$fixture/qwen"; qwen_args="$fixture/qwen.args"
+  cat >"$qwen_fake" <<'QWEN'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"${QWEN_ARGS:?}"
+if [[ "${QWEN_FAIL:-0}" == 1 ]]; then exit 9; fi
+sid="${QWEN_SESSION_ID:-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}"
+if [[ "${QWEN_NO_SESSION:-0}" != 1 ]]; then
+  project="$(printf '%s' "$PWD" | sed 's|/|-|g')"
+  chats="$HOME/.qwen/projects/$project/chats"
+  mkdir -p "$chats"
+  printf '{"type":"assistant","model":"test-model"}\n' >"$chats/$sid.jsonl"
+  printf '{"type":"system","subtype":"session_start","session_id":"%s"}\n' "$sid"
+fi
+printf '{"type":"result","subtype":"success"}\n'
+printf 'qwen test output\n'
+sleep "${QWEN_LINGER:-0}"
+QWEN
+  chmod +x "$qwen_fake"
+  export QWEN_ARGS="$qwen_args"; PATH="$fixture:$PATH"
+  export WASPFLOW_SELECTION_GATE=off
+
+  # Exec test.
+  exec_out="$fixture/qwen.out"
+  "$root/bin/waspflow" exec --provider qwen --model test-model -o "$exec_out" -- "deterministic prompt"
+  grep -Fq -- '-p deterministic prompt --model test-model --yolo --output-format text' "$qwen_args"
+
+  # Effort rejection.
+  set +e; "$root/bin/waspflow" exec --provider qwen --effort high -o "$fixture/bad.out" -- x >/dev/null 2>&1; qwen_bad_rc=$?; set -e
+  [[ "$qwen_bad_rc" -eq 1 ]]
+
+  # Lifecycle via _qwen_shell (the antigravity test pattern): spawn, discover,
+  # idle, turn_mark, revise, turn 2.
+  qwen_lifecycle=qwen-lifecycle
+  lane_set "$qwen_lifecycle" provider qwen status live cwd "$fixture" model test-model
+  qwen_cmd="$(_qwen_shell "$qwen_lifecycle" test-model "" "first turn" spawn)"
+  (cd "$fixture" && bash -c "$qwen_cmd") >"$fixture/qwen-lifecycle.out"
+  [[ "$(lane_get "$qwen_lifecycle" session_id)" == aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee ]]
+  qwen_is_idle "$qwen_lifecycle"
+  qwen_session_resumable "$qwen_lifecycle"
+  [[ "$(qwen_turn_mark "$qwen_lifecycle")" -eq 1 ]]
+  ! find "$(lane_dir "$qwen_lifecycle")" -maxdepth 1 -name '.qwen-log.*' | grep -q .
+
+  qwen_cmd="$(_qwen_shell "$qwen_lifecycle" test-model "$(lane_get "$qwen_lifecycle" session_id)" "second turn" revise)"
+  (cd "$fixture" && bash -c "$qwen_cmd") >"$fixture/qwen-revise.out"
+  [[ "$(qwen_turn_mark "$qwen_lifecycle")" -eq 2 ]]
+
+  # A provider rc=0 without a session event is terminal but not successful or
+  # resumable. This must never advance the completed-turn mark.
+  qwen_no_session=qwen-no-session
+  lane_set "$qwen_no_session" provider qwen status live cwd "$fixture" model test-model
+  qwen_cmd="$(_qwen_shell "$qwen_no_session" test-model "" "missing session" spawn)"
+  set +e; (export QWEN_NO_SESSION=1; cd "$fixture" && bash -c "$qwen_cmd") >"$fixture/qwen-no-session.out"; qwen_no_session_rc=$?; set -e
+  [[ "$qwen_no_session_rc" -ne 0 ]]
+  qwen_is_idle "$qwen_no_session"
+  [[ "$(qwen_turn_mark "$qwen_no_session")" -eq 0 ]]
+  ! qwen_session_resumable "$qwen_no_session"
+  jq -e 'select(.phase=="completion" and .outcome=="no_session" and .session_id==null)' "$(_qwen_receipt_file "$qwen_no_session")" >/dev/null
+
+  # Generated cleanup shell remains valid when the state path contains a quote.
+  ordinary_home="$WASPFLOW_HOME"
+  ordinary_lanes_dir="$WASPFLOW_LANES_DIR"
+  export WASPFLOW_HOME="$state_home/quoted-'path"
+  WASPFLOW_LANES_DIR="$WASPFLOW_HOME/lanes"
+  qwen_quoted=qwen-quoted
+  lane_set "$qwen_quoted" provider qwen status live cwd "$fixture" model test-model
+  qwen_cmd="$(_qwen_shell "$qwen_quoted" test-model "" "quoted path" spawn)"
+  bash -n <<<"$qwen_cmd"
+  (cd "$fixture" && bash -c "$qwen_cmd") >"$fixture/qwen-quoted.out"
+  qwen_is_idle "$qwen_quoted"
+  ! find "$(lane_dir "$qwen_quoted")" -maxdepth 1 -name '.qwen-log.*' | grep -q .
+  export WASPFLOW_HOME="$ordinary_home"
+  WASPFLOW_LANES_DIR="$ordinary_lanes_dir"
+
+  # Recover a session from the cwd-scoped chat directory when state persistence
+  # was interrupted after Qwen created exactly one post-marker session file.
+  # The spawn marker eliminates the unrelated-session race.
+  qwen_recovery=qwen-recovery
+  lane_set "$qwen_recovery" provider qwen status live cwd "$fixture" model test-model
+  recovery_marker="$(_qwen_marker_file "$qwen_recovery")"
+  mkdir -p "$(dirname "$recovery_marker")"
+  touch "$recovery_marker"
+  recovery_sid=11111111-2222-3333-4444-555555555555
+  recovery_chats="$HOME/.qwen/projects/$(_qwen_sanitized_cwd "$fixture")/chats"
+  rm -f "$recovery_chats"/*.jsonl
+  mkdir -p "$recovery_chats"
+  sleep 0.1
+  printf '{}\n' >"$recovery_chats/$recovery_sid.jsonl"
+  [[ "$(qwen_discover_session "$qwen_recovery")" == "$recovery_sid" ]]
+
+  # Tier-2 discovery: .qwen-sid file survives a crash between extraction
+  # and lane_set.  Deterministic — no filesystem race.
+  qwen_sidfile=qwen-sidfile
+  lane_set "$qwen_sidfile" provider qwen status live cwd "$fixture" model test-model
+  sidfile_sid=22222222-3333-4444-5555-666666666666
+  printf '%s' "$sidfile_sid" >"$(_qwen_sid_file "$qwen_sidfile")"
+  [[ "$(qwen_discover_session "$qwen_sidfile")" == "$sidfile_sid" ]]
+  [[ "$(lane_get "$qwen_sidfile" session_id)" == "$sidfile_sid" ]]
+
+  # Attestation: qwen_refresh_runtime_settings reads the model from the
+  # session JSONL and persists it to lane state.
+  qwen_attest=qwen-attest
+  attest_sid=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+  attest_chats="$HOME/.qwen/projects/$(_qwen_sanitized_cwd "$fixture")/chats"
+  mkdir -p "$attest_chats"
+  printf '{"type":"assistant","model":"test-model"}\n' >"$attest_chats/$attest_sid.jsonl"
+  lane_set "$qwen_attest" provider qwen status live cwd "$fixture" model test-model session_id "$attest_sid"
+  qwen_refresh_runtime_settings "$qwen_attest"
+  [[ "$(lane_get "$qwen_attest" runtime_model)" == test-model ]]
+
+  # Failure path.
+  qwen_failed=qwen-failed
+  lane_set "$qwen_failed" provider qwen status live cwd "$fixture" model test-model
+  qwen_cmd="$(_qwen_shell "$qwen_failed" test-model "" "failing turn" spawn)"
+  set +e; (export QWEN_FAIL=1; cd "$fixture" && bash -c "$qwen_cmd") >"$fixture/qwen-failed.out"; qwen_failed_rc=$?; set -e
+  [[ "$qwen_failed_rc" -eq 9 ]]
+  qwen_is_idle "$qwen_failed"
+  jq -e 'select(.phase=="completion" and .outcome=="failed" and .exit_code==9)' "$(_qwen_receipt_file "$qwen_failed")" >/dev/null
+  ! find "$(lane_dir "$qwen_failed")" -maxdepth 1 -name '.qwen-log.*' | grep -q .
+
+  # A failed tee means lifecycle evidence was not persisted reliably, even if
+  # Qwen itself exited zero.
+  qwen_tee_failed=qwen-tee-failed
+  lane_set "$qwen_tee_failed" provider qwen status live cwd "$fixture" model test-model
+  qwen_cmd="$(_qwen_shell "$qwen_tee_failed" test-model "" "tee failure" spawn)"
+  tee() { cat >/dev/null; return 7; }
+  export -f tee
+  set +e; (cd "$fixture" && bash -c "$qwen_cmd") >"$fixture/qwen-tee-failed.out"; qwen_tee_rc=$?; set -e
+  unset -f tee
+  [[ "$qwen_tee_rc" -eq 7 ]]
+  jq -e 'select(.phase=="completion" and .outcome=="failed" and .exit_code==7)' "$(_qwen_receipt_file "$qwen_tee_failed")" >/dev/null
+
+  # Event normalization.
+  qwen_lane=qwen-events; lane_set "$qwen_lane" provider qwen status live cwd "$fixture"
+  qwen_receipt="$(_qwen_receipt_file "$qwen_lane")"
+  printf '%s\n' '{"phase":"invocation","outcome":"started","prompt_kind":"spawn","prompt":"must not escape"}' '{"phase":"completion","outcome":"succeeded","prompt_kind":"spawn","body":"must not escape"}' >"$qwen_receipt"
+  qwen_events="$(provider_event_tail "$qwen_lane" 9)"
+  jq -e '.source.kind == "qwen-receipt-jsonl" and [.events[].event_type] == ["turn_started","turn_completed"] and ([.events[] | keys[]] | any(. == "prompt" or . == "body") | not)' <<<"$qwen_events" >/dev/null
+
+  # Billing evidence must identify an actual key; absence remains unknown.
+  unset BAILIAN_TOKEN_PLAN_API_KEY BAILIAN_CODING_PLAN_API_KEY DASHSCOPE_API_KEY
+  [[ "$(billing_path_v1 qwen | jq -r '.path + ":" + .evidence')" == unknown:none ]]
+  BAILIAN_TOKEN_PLAN_API_KEY=test
+  [[ "$(billing_path_v1 qwen | jq -r '.path + ":" + .evidence')" == api_key_env:env:BAILIAN_TOKEN_PLAN_API_KEY ]]
+  unset BAILIAN_TOKEN_PLAN_API_KEY
+
+  # Spawn/escalation may not persist an effort Qwen silently ignores.
+  ! qwen_validate_model_effort test-model high
+  ! qwen_resume_with_arm "$qwen_lifecycle" prompt false
+  ! qwen_confirm_escalation_submission "$qwen_lifecycle" prompt false
+
+  # Quota mapping.
+  clawmeter() { cat <<'JSON'
+{"schema_version":1,"providers":{"alibaba":{"usage":{"windows":[{"name":"session_5h","utilization":25,"resets_at":"2099-01-01T00:00:00Z"}],"stale":false,"fetched_at":"2026-07-28T00:00:00Z"},"forecast":{"windows":{"session_5h":{"projected_pct":30}}}}}}
+JSON
+  }
+  [[ "$(quota_observation_v1 qwen | jq -r '.state + ":" + .observation.provider_key')" == ok:alibaba ]]
+  unset -f clawmeter
+
+  # Help/doctor.
+  help_text="$("$root/bin/waspflow" --help)"
+  grep -q 'Claude/Codex/Grok/Antigravity/Qwen' <<<"$help_text"
+  [[ "$(grep -c '<claude|codex|grok|antigravity|qwen>' <<<"$help_text")" -ge 3 ]]
+  grep -q 'qwen' <<<"$("$root/bin/waspflow" doctor 2>&1 || true)"
+
 )
 
 echo "waspflow verify: ok"

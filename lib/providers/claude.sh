@@ -408,8 +408,12 @@ claude_revise() {
 # <sid>.jsonl): the authoritative record of which model actually served each
 # message. Claude does not expose a per-session effort in the log, so
 # runtime_effort stays empty (receipts record null — observed, not guessed).
-# v1 observes only; no drift comparison (requested aliases like "opus" resolve
-# to canonical ids like "claude-opus-4-8", so naive equality would false-alarm).
+# v1 observes only; no drift comparison. "opus" is a PROVIDER-OWNED family alias:
+# Claude Code resolves it to whichever canonical Opus id the provider currently
+# serves, which the session log then attests (this repo does not decide, or claim
+# to know, which id is current). Attestation has served both "claude-opus-4-8" and
+# "claude-opus-5" under the same "opus" request, so naive equality would false-alarm;
+# corroboration must accept any canonical Opus id, not one hard-coded default.
 # The (arm_generation, session_id) snapshot mirrors codex: a refresh that
 # straddles an escalation must never commit stale evidence.
 claude_refresh_runtime_settings() {
@@ -447,12 +451,18 @@ claude_refresh_runtime_settings() {
     return 0
   fi
   model="$models"
-  # Alias-tolerant corroboration: requested "opus" serves as "claude-opus-4-8".
+  # Alias-tolerant corroboration: the provider-owned family alias "opus" is
+  # corroborated by whatever canonical Opus id actually served — "claude-opus-4-8"
+  # and "claude-opus-5" are both accepted, without asserting which one "opus"
+  # currently resolves to (that is the provider's decision, read from the log).
   local requested match
   requested="$(lane_get "$lane" model_requested)"
   [[ -n "$requested" ]] || requested="$(lane_get "$lane" model)"
-  # Token-boundary containment: alias "opus" matches "claude-opus-4-8", but
-  # "grok-4" must NOT match "grok-4.5" (that is drift, not an alias).
+  # Token-boundary containment: family alias "opus" matches "claude-opus-4-8"
+  # or "claude-opus-5" (either canonical Opus corroborates the alias), but
+  # "grok-4" must NOT match "grok-4.5" (that is drift, not an alias) — and a
+  # pinned id like "claude-opus-4-8" must NOT match a different served id like
+  # "claude-opus-5" (same rule, opposite direction).
   if [[ -z "$requested" || "$model" == "$requested" || "-$model-" == *"-$requested-"* ]]; then
     match=true
   else

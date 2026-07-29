@@ -24,6 +24,12 @@ billing_report_auth() {
     echo "  [ok]   grok auth: no XAI_API_KEY in environment; billing follows configured Grok CLI auth (OAuth cache or login)"
   fi
   echo "  [info] antigravity auth: agy OAuth/quota path is provider-owned (heuristic only)"
+
+  if [[ -n "${BAILIAN_TOKEN_PLAN_API_KEY:-}" || -n "${BAILIAN_CODING_PLAN_API_KEY:-}" || -n "${DASHSCOPE_API_KEY:-}" ]]; then
+    echo "  [ok]   qwen auth: API key detected in environment (Token Plan / Coding Plan / DashScope)"
+  else
+    echo "  [warn] qwen auth: no API key in environment (set BAILIAN_TOKEN_PLAN_API_KEY or BAILIAN_CODING_PLAN_API_KEY)"
+  fi
 }
 
 billing_preflight_provider() {
@@ -33,6 +39,7 @@ billing_preflight_provider() {
     codex) billing_preflight_codex ;;
     grok) billing_preflight_grok ;;
     antigravity) billing_preflight_antigravity ;;
+    qwen) billing_preflight_qwen ;;
     *) return 0 ;;
   esac
 }
@@ -67,6 +74,8 @@ billing_preflight_grok() {
 }
 
 billing_preflight_antigravity() { return 0; }
+
+billing_preflight_qwen() { return 0; }
 
 # Emit BillingPath v1. This is observational only: an uncertain billing path
 # never changes whether a lane may launch. Args: provider endpoint_profile raw_args
@@ -105,6 +114,12 @@ billing_path_v1() {
       else path="oauth_env_heuristic"; evidence="absence_of_XAI_API_KEY"; fi
       ;;
     antigravity) path="oauth_quota_heuristic"; evidence="agy_provider_owned_auth" ;;
+    qwen)
+      if [[ -n "${BAILIAN_TOKEN_PLAN_API_KEY:-}" ]]; then path="api_key_env"; evidence="env:BAILIAN_TOKEN_PLAN_API_KEY"
+      elif [[ -n "${BAILIAN_CODING_PLAN_API_KEY:-}" ]]; then path="api_key_env"; evidence="env:BAILIAN_CODING_PLAN_API_KEY"
+      elif [[ -n "${DASHSCOPE_API_KEY:-}" ]]; then path="api_key_env"; evidence="env:DASHSCOPE_API_KEY"
+      else path="unknown"; evidence="none"; fi
+      ;;
   esac
   jq -cn --arg path "$path" --arg evidence "$evidence" --arg detail "$detail" \
     '{schema_version:1,path:$path,evidence:$evidence,detail:$detail}'
@@ -128,7 +143,7 @@ billing_cost_currency() {
 # narrow and checked at the parsing boundary; it is never a launch gate.
 quota_observation_v1() {
   local provider="$1" provider_key raw version usage_error stale state reason source observation
-  case "$provider" in codex) provider_key=openai ;; claude) provider_key=claude ;; antigravity) provider_key=antigravity ;; *)
+  case "$provider" in codex) provider_key=openai ;; claude) provider_key=claude ;; antigravity) provider_key=antigravity ;; qwen) provider_key=alibaba ;; *)
     jq -cn '{schema_version:1,state:"absent",reason:"clawmeter has no provider mapping",stale:false,source:"",observation:null}'
     return 0 ;;
   esac
