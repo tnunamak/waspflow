@@ -777,7 +777,7 @@ tmux_kill_owned_lane_scopes() {
 # names exist. If ownership capture fails, kill that exact id before returning.
 # Args: lane cwd shell_command. Echoes the exact window id.
 tmux_create_owned_lane_window() {
-  local lane="$1" cwd="$2" shell_command="$3" ownership="${4:-claim}" execution="${5:-pane}" window launcher
+  local lane="$1" cwd="$2" shell_command="$3" ownership="${4:-claim}" execution="${5:-pane}" window launcher window_lock
   # tmux panes inherit the tmux SERVER's environment, not necessarily the
   # caller's current WASPFLOW_HOME. Export the lane runtime coordinates and
   # pager policy into the pane explicitly before it sources core, or its scope
@@ -785,8 +785,36 @@ tmux_create_owned_lane_window() {
   # explicit pager override would be lost to the tmux server environment.
   launcher="export WASPFLOW_HOME=$(printf '%q' "$WASPFLOW_HOME") WASPFLOW_LIB=$(printf '%q' "$WASPFLOW_LIB") WASPFLOW_TMUX_SESSION=$(printf '%q' "$WASPFLOW_TMUX_SESSION") WASPFLOW_LANE_PAGER=$(printf '%q' "$WASPFLOW_LANE_PAGER") PATH=$(printf '%q' "$PATH"); source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_run_owned_lane_shell_command $(printf '%q' "$lane") $(printf '%q' "$cwd") $(printf '%q' "$execution") $(printf '%q' "$shell_command")"
   tmux_ensure_session
-  window="$(tmux new-window -d -P -F '#{window_id}' -t "$WASPFLOW_TMUX_SESSION" \
-    -n "$lane" -c "$cwd" "bash -c $(printf '%q' "$launcher")")" || return 1
+  # tmux chooses the next numeric window index inside the server. Concurrent
+  # callers can observe the same free index and one then fails with "index in
+  # use". Serialize only this allocation syscall; the panes run concurrently.
+  window_lock="$WASPFLOW_HOME/.tmux-window-create.lock"
+  mkdir -p "$WASPFLOW_HOME"
+  _tmux_allocate_lane_window() {
+    local indexes next=0 index
+    indexes="$(tmux list-windows -t "$WASPFLOW_TMUX_SESSION" -F '#{window_index}' 2>/dev/null | sort -n)"
+    while IFS= read -r index; do
+      [[ "$index" =~ ^[0-9]+$ ]] || continue
+      if (( index == next )); then
+        next=$((next + 1))
+      elif (( index > next )); then
+        break
+      fi
+    done <<<"$indexes"
+    tmux new-window -d -P -F '#{window_id}' -t "$WASPFLOW_TMUX_SESSION:$next" \
+      -n "$lane" -c "$cwd" "bash -c $(printf '%q' "$launcher")"
+  }
+  if command -v flock >/dev/null 2>&1; then
+    window="$(
+      (
+        flock -x 9
+        _tmux_allocate_lane_window
+      ) 9>"$window_lock"
+    )" || return 1
+  else
+    window="$(_tmux_allocate_lane_window)" || return 1
+  fi
+  unset -f _tmux_allocate_lane_window
   [[ "$window" == @* ]] || return 1
   [[ "$ownership" == claim || "$ownership" == provisional ]] || {
     tmux kill-window -t "$window" 2>/dev/null || true

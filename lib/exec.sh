@@ -219,18 +219,15 @@ _exec_codex() {
   local -a model_args=()
   [[ -n "$model" ]] && model_args=(-m "$model")
 
-  # Pass through exactly; never clamp xhigh→high. max is not a Codex value.
+  # Pass through exactly; never clamp xhigh/max to a lower effort.
   local -a effort_args=()
   case "$effort" in
     "") ;;
-    minimal|low|medium|high|xhigh)
+    minimal|low|medium|high|xhigh|max)
       effort_args=(-c "model_reasoning_effort=${effort}")
       ;;
-    max)
-      die "exec/codex: effort 'max' is not supported by Codex (use xhigh). Never silently remapped."
-      ;;
     *)
-      die "exec/codex: unsupported effort '$effort' (valid: minimal|low|medium|high|xhigh)"
+      die "exec/codex: unsupported effort '$effort' (valid: minimal|low|medium|high|xhigh|max)"
       ;;
   esac
 

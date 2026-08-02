@@ -16,9 +16,11 @@ mkdir -p "$scratch"
 
 bash -n "$root/bin/waspflow" "$root"/lib/*.sh "$root"/lib/providers/*.sh
 
-# Codex effort honesty: xhigh must pass through (never clamp xhigh|max → high)
+# Codex effort honesty: xhigh and max must pass through unchanged.
 grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/providers/codex.sh"
 grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/exec.sh"
+grep -Fq 'minimal|low|medium|high|xhigh|max)' "$root/lib/providers/codex.sh"
+grep -Fq 'minimal|low|medium|high|xhigh|max)' "$root/lib/exec.sh"
 # Grok effort honesty: unsupported values hard-fail (never silent-drop)
 grep -Eq "unsupported effort" "$root/lib/providers/grok.sh"
 # Generated capabilities-derived effort unions present
@@ -1610,6 +1612,10 @@ FAKE
   _exec_codex "$fixture" "" "" "prompt" "$out"
   grep -qx -- '-c' "$argvfile" && grep -qx 'mcp_servers.alpha.enabled=false' "$argvfile" \
     || { echo "codex argv: MCP override was not appended" >&2; exit 1; }
+  _exec_codex "$fixture" "gpt-5.6-luna" "max" "prompt" "$out"
+  grep -qx -- '-m' "$argvfile" && grep -qx 'gpt-5.6-luna' "$argvfile" \
+    && grep -qx 'model_reasoning_effort=max' "$argvfile" \
+    || { echo "codex argv: Luna max was not passed through exactly" >&2; exit 1; }
   MCP_ARGV=(--strict-mcp-config --mcp-config '{"mcpServers":{}}') MCP_ENV=(ENABLE_CLAUDEAI_MCP_SERVERS=false)
   _exec_claude "$fixture" "" "" "prompt" "$out"
   grep -qx -- '--strict-mcp-config' "$argvfile" && grep -qx -- '--mcp-config' "$argvfile" \
