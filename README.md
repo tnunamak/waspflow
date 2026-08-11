@@ -247,6 +247,7 @@ Useful `spawn` options:
 - `--mcp <auto|none|inherit>` controls worker MCP exposure. `auto` is the default and is MCP-minimal where the provider supports it; use `inherit` only when the task needs the current provider configuration.
 - `--op <id>` expands a task-shaped operating point (`waspflow ops list`); explicit flags win over expansion.
 - `--cwd <dir>` starts the worker in another directory.
+- `--parent-ref <opaque-ref>` records known parent-session provenance without resolving it.
 - `--arg <flag>` passes an extra flag to the underlying agent CLI.
 
 MCP policy by provider: Claude and Codex resolve `auto` to `none`; Grok,
@@ -366,6 +367,32 @@ Every lane writes to `$WASPFLOW_HOME/lanes/<lane>/`:
 - `git-diff.txt`
 
 Git captures are skipped, not errored, when the lane is not inside a git repo.
+
+### Provenance receipts
+
+At each confirmed launch, Waspflow appends generic `agent-provenance/v1` JSON
+events to `$WASPFLOW_HOME/provenance.jsonl` (mode `0600`). A stable local
+producer identity and lane UUID make these events safe to import idempotently
+by another local tool. The receipt records the lane and its provider-native
+worker session when known; it never records the raw task prompt.
+
+If the caller already knows its own durable session identity, pass it as an
+opaque reference. Waspflow records the assertion but does not resolve it,
+depend on any session-ledger implementation, or infer ancestry from tmux,
+processes, names, cwd, or timestamps.
+
+```bash
+waspflow spawn --parent-ref 'agent-session/v1/codex/your-session-id' \
+  --provider codex --accept-provider-default --lane parser -- "Fix the parser."
+```
+
+`WASPFLOW_PARENT_REF` supplies the same optional value for launcher-managed
+contexts. When neither explicit source exists, a valid Codex-provided
+`CODEX_THREAD_ID` is captured as `codex:<id>` with evidence class
+`observed_harness_env`. The precedence is `--parent-ref`, then
+`WASPFLOW_PARENT_REF`, then that validated Codex value. Parent references must
+not contain credentials. Missing parent evidence remains missing; Waspflow does
+not guess.
 
 ## How `wait` Knows a Worker Is Done
 
