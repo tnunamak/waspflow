@@ -49,7 +49,9 @@ When a caller has a durable parent-session reference, pass it with
 `--parent-ref <opaque-ref>` (or `WASPFLOW_PARENT_REF`). Waspflow writes an
 append-only generic provenance receipt at confirmed launch and binds the worker
 session when observed. It never guesses a parent from tmux, cwd, timestamps, or
-lane names; omit the reference when it is not known.
+lane names; omit the reference when it is not known. When neither explicit
+source exists, a validated Codex `CODEX_THREAD_ID` is captured automatically as
+an `observed_harness_env` parent context.
 
 ## Choosing provider / model / effort
 

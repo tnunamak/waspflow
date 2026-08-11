@@ -387,8 +387,12 @@ waspflow spawn --parent-ref 'agent-session/v1/codex/your-session-id' \
 ```
 
 `WASPFLOW_PARENT_REF` supplies the same optional value for launcher-managed
-contexts. Parent references must not contain credentials. Missing parent
-evidence remains missing; Waspflow does not guess.
+contexts. When neither explicit source exists, a valid Codex-provided
+`CODEX_THREAD_ID` is captured as `codex:<id>` with evidence class
+`observed_harness_env`. The precedence is `--parent-ref`, then
+`WASPFLOW_PARENT_REF`, then that validated Codex value. Parent references must
+not contain credentials. Missing parent evidence remains missing; Waspflow does
+not guess.
 
 ## How `wait` Knows a Worker Is Done
 

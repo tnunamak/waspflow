@@ -199,7 +199,7 @@ split_after_ddash() {
 # ============================================================================
 
 cmd_spawn() {
-  local provider="" lane="" model="" cwd="$PWD" isolate=0 effort="" mcp="auto" report="" no_recovery=0 parent_ref="${WASPFLOW_PARENT_REF:-}"
+  local provider="" lane="" model="" cwd="$PWD" isolate=0 effort="" mcp="auto" report="" no_recovery=0 parent_ref="" parent_ref_explicit=false
   local verify_command="" verify_name="verify" verify_timeout=1800 prepare_command="" verify_strength=""
   local op_id="" OP_ID="" OP_MODE="" provider_explicit=false model_explicit=false auto=false ack_deprecated=false accept_provider_default=false
   local -a extra=()
@@ -230,7 +230,8 @@ cmd_spawn() {
       --prepare) prepare_command="${2:-}"; shift 2 ;;
       --parent-ref)
         [[ $# -ge 2 ]] || die "spawn: --parent-ref requires a value"
-        parent_ref="$2"; shift 2
+        [[ -n "$2" ]] || die "spawn: --parent-ref requires a non-empty value"
+        parent_ref="$2"; parent_ref_explicit=true; shift 2
         ;;
       --arg)      extra+=("${2:-}"); shift 2 ;;   # repeatable pass-through to the agent CLI
       "")         shift ;;
@@ -271,6 +272,11 @@ cmd_spawn() {
   [[ -n "$lane" ]] || die "spawn: --lane is required"
   validate_lane_name "$lane"
   [[ -n "$prompt" ]] || die "spawn: a task prompt is required after '--'"
+  local explicit_parent_ref=""
+  [[ "$parent_ref_explicit" == true ]] && explicit_parent_ref="$parent_ref"
+  provenance_resolve_parent_context "$explicit_parent_ref" "${WASPFLOW_PARENT_REF:-}" "${CODEX_THREAD_ID:-}"
+  parent_ref="$PROVENANCE_PARENT_REF"
+  local parent_evidence_class="$PROVENANCE_PARENT_EVIDENCE_CLASS"
   provenance_validate_parent_ref "$parent_ref"
   cwd="$(cd "$cwd" && pwd)" || die "spawn: --cwd does not exist"
   guard_cwd "$cwd"   # never hand a worker '/' silently (known grok --cwd / crash)
@@ -560,6 +566,7 @@ cmd_spawn() {
     spawn_epoch "$spawned_epoch" \
     prompt "$prompt" \
     provenance_parent_ref "$parent_ref" \
+    provenance_parent_evidence_class "$parent_evidence_class" \
     provenance_lane_started_event_id "" \
     provenance_lane_started_emitted "false" \
     provenance_worker_bound_event_id "" \

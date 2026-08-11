@@ -1380,7 +1380,8 @@ grep -q 'spawn_submitted' "$root/bin/waspflow" || { echo "spawn: submission-conf
     session_id "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" \
     codex_marker "WASPFLOW_LANE_MARKER:provenance-lane:opaque" \
     prompt "do not retain this secret-looking prompt" \
-    provenance_parent_ref "agent-session/v1/codex/root-session"
+    provenance_parent_ref "agent-session/v1/codex/root-session" \
+    provenance_parent_evidence_class "caller_asserted"
   provenance_emit_lane_started provenance-lane
   provenance_emit_worker_session_bound provenance-lane
   provenance_emit_lane_started provenance-lane
@@ -1408,6 +1409,21 @@ grep -q 'spawn_submitted' "$root/bin/waspflow" || { echo "spawn: submission-conf
     || { echo "provenance: receipt storage is not owner-only" >&2; exit 1; }
   ! provenance_validate_parent_ref $'bad\nref' \
     || { echo "provenance: newline parent ref was accepted" >&2; exit 1; }
+  provenance_resolve_parent_context "flag-parent" "environment-parent" "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+  [[ "$PROVENANCE_PARENT_REF" == "flag-parent" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "caller_asserted" ]] \
+    || { echo "provenance: explicit parent ref did not win precedence" >&2; exit 1; }
+  provenance_resolve_parent_context "" "environment-parent" "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+  [[ "$PROVENANCE_PARENT_REF" == "environment-parent" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "caller_asserted" ]] \
+    || { echo "provenance: WASPFLOW_PARENT_REF did not win precedence" >&2; exit 1; }
+  provenance_resolve_parent_context "" "" "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+  [[ "$PROVENANCE_PARENT_REF" == "codex:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "observed_harness_env" ]] \
+    || { echo "provenance: valid CODEX_THREAD_ID was not captured as observed context" >&2; exit 1; }
+  provenance_resolve_parent_context "" "" "not-a-thread-id"
+  [[ -z "$PROVENANCE_PARENT_REF" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "absent" ]] \
+    || { echo "provenance: invalid CODEX_THREAD_ID was not ignored" >&2; exit 1; }
+  provenance_resolve_parent_context "" "" ""
+  [[ -z "$PROVENANCE_PARENT_REF" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "absent" ]] \
+    || { echo "provenance: direct shell without harness context was not absent" >&2; exit 1; }
   rm -rf "$provenance_home"
 )
 
@@ -1853,7 +1869,8 @@ PROV
   set -e
   [[ "$invalid_model_rc" -ne 0 && ! -d "$mcphome/lanes/invalid-model" ]] \
     || { echo "spawn: invalid model polluted the durable lane index" >&2; exit 1; }
-  WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+  WASPFLOW_PARENT_REF='agent-session/v1/test/lower-priority' CODEX_THREAD_ID='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' \
+    WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
     "$root/bin/waspflow" spawn --provider mcpp --lane mcp-state \
       --parent-ref 'agent-session/v1/test/root' -- "test policy" >/dev/null 2>&1
   jq -e '.mcp_requested == "auto" and .mcp_resolved == "none" and .mcp_warning == "test warning"' \
@@ -1868,6 +1885,34 @@ PROV
   jq -e 'select(.event_type == "worker_session_bound" and .worker.native_session_id == "mcpp-session-mcp-state")' \
     "$mcphome/provenance.jsonl" >/dev/null \
     || { echo "spawn: confirmed worker session did not produce a binding receipt" >&2; exit 1; }
+  WASPFLOW_PARENT_REF='agent-session/v1/test/env' CODEX_THREAD_ID='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' \
+    WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-parent-env -- "test environment parent" >/dev/null 2>&1
+  env -u WASPFLOW_PARENT_REF CODEX_THREAD_ID='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' \
+    WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-codex-context -- "test observed codex context" >/dev/null 2>&1
+  env -u WASPFLOW_PARENT_REF CODEX_THREAD_ID='not-a-thread-id' \
+    WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-invalid-context -- "test invalid codex context" >/dev/null 2>&1
+  env -u WASPFLOW_PARENT_REF -u CODEX_THREAD_ID \
+    WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-direct-shell -- "test direct shell" >/dev/null 2>&1
+  jq -e 'select(.event_type == "lane_started" and .lane.label == "mcp-parent-env" and
+    .parent.ref == "agent-session/v1/test/env" and .parent.evidence_class == "caller_asserted")' \
+    "$mcphome/provenance.jsonl" >/dev/null \
+    || { echo "spawn: WASPFLOW_PARENT_REF did not outrank CODEX_THREAD_ID" >&2; exit 1; }
+  jq -e 'select(.event_type == "lane_started" and .lane.label == "mcp-codex-context" and
+    .parent.ref == "codex:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" and .parent.evidence_class == "observed_harness_env")' \
+    "$mcphome/provenance.jsonl" >/dev/null \
+    || { echo "spawn: valid CODEX_THREAD_ID did not create observed parent context" >&2; exit 1; }
+  jq -e 'select(.event_type == "lane_started" and .lane.label == "mcp-invalid-context" and
+    .parent.ref == null and .parent.evidence_class == "absent")' \
+    "$mcphome/provenance.jsonl" >/dev/null \
+    || { echo "spawn: invalid CODEX_THREAD_ID invented a parent context" >&2; exit 1; }
+  jq -e 'select(.event_type == "lane_started" and .lane.label == "mcp-direct-shell" and
+    .parent.ref == null and .parent.evidence_class == "absent")' \
+    "$mcphome/provenance.jsonl" >/dev/null \
+    || { echo "spawn: direct shell invented a parent context" >&2; exit 1; }
   WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
     "$root/bin/waspflow" spawn --provider mcpp --lane mcp-state -- "must not overwrite" >/dev/null 2>&1 \
     && { echo "spawn: overwrote an unreaped lane" >&2; exit 1; }

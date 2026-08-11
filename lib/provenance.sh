@@ -16,6 +16,29 @@ provenance_validate_parent_ref() {
     || { err "spawn: --parent-ref cannot contain newlines"; return 1; }
 }
 
+provenance_valid_codex_thread_id() {
+  [[ "$1" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]
+}
+
+# Set a parent context only from a caller assertion or the one harness-owned
+# environment identity we can validate. This is capture at the launch boundary,
+# not reconstruction from process, terminal, or timing heuristics.
+provenance_resolve_parent_context() {
+  local explicit_ref="$1" environment_ref="$2" codex_thread_id="$3"
+  PROVENANCE_PARENT_REF=""
+  PROVENANCE_PARENT_EVIDENCE_CLASS="absent"
+  if [[ -n "$explicit_ref" ]]; then
+    PROVENANCE_PARENT_REF="$explicit_ref"
+    PROVENANCE_PARENT_EVIDENCE_CLASS="caller_asserted"
+  elif [[ -n "$environment_ref" ]]; then
+    PROVENANCE_PARENT_REF="$environment_ref"
+    PROVENANCE_PARENT_EVIDENCE_CLASS="caller_asserted"
+  elif [[ -n "$codex_thread_id" ]] && provenance_valid_codex_thread_id "$codex_thread_id"; then
+    PROVENANCE_PARENT_REF="codex:$codex_thread_id"
+    PROVENANCE_PARENT_EVIDENCE_CLASS="observed_harness_env"
+  fi
+}
+
 _provenance_sha256() {
   if command -v sha256sum >/dev/null 2>&1; then
     printf '%s' "$1" | sha256sum | awk '{print $1}'
@@ -95,7 +118,7 @@ _provenance_append() {
 }
 
 provenance_emit_lane_started() {
-  local lane="$1" event_id provider lane_uuid parent_ref prompt_hash instance payload
+  local lane="$1" event_id provider lane_uuid parent_ref parent_evidence_class prompt_hash instance payload
   event_id="$(lane_get "$lane" provenance_lane_started_event_id)"
   if [[ -z "$event_id" ]]; then
     event_id="$(new_uuid)" || return 1
@@ -104,16 +127,18 @@ provenance_emit_lane_started() {
   provider="$(lane_get "$lane" provider)"
   lane_uuid="$(lane_get "$lane" lane_uuid)"
   parent_ref="$(lane_get "$lane" provenance_parent_ref)"
+  parent_evidence_class="$(lane_get "$lane" provenance_parent_evidence_class)"
+  [[ -n "$parent_evidence_class" ]] || parent_evidence_class="absent"
   prompt_hash="$(_provenance_sha256 "$(lane_get "$lane" prompt)" 2>/dev/null || true)"
   instance="$(provenance_instance_id)" || return 1
   payload="$(jq -cn \
     --arg event_id "$event_id" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg lane_uuid "$lane_uuid" --arg lane "$lane" --arg provider "$provider" \
-    --arg parent_ref "$parent_ref" --arg task_hash "$prompt_hash" --arg instance "$instance" '
+    --arg parent_ref "$parent_ref" --arg parent_evidence_class "$parent_evidence_class" --arg task_hash "$prompt_hash" --arg instance "$instance" '
       {schema:"agent-provenance/v1",schema_version:1,event_id:$event_id,event_type:"lane_started",observed_at:$at,
        producer:{name:"waspflow",instance_id:$instance},
        lane:{id:$lane_uuid,label:$lane,provider:$provider},
-       parent:(if $parent_ref == "" then {ref:null,evidence_class:"absent"} else {ref:$parent_ref,evidence_class:"caller_asserted"} end),
+       parent:{ref:(if $parent_ref == "" then null else $parent_ref end),evidence_class:$parent_evidence_class},
        evidence:{class:"observed",method:"waspflow_confirmed_submission",task_fingerprint:(if $task_hash == "" then null else "sha256:" + $task_hash end)}}')" || return 1
   _provenance_append "$event_id" "$payload" || return 1
   lane_set "$lane" provenance_lane_started_emitted "true"
