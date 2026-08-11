@@ -3058,14 +3058,17 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
 
   source "$root/lib/providers/grok.sh"
   grok_events="$resume_home/events.jsonl"; : >"$grok_events"
-  _grok_events_file() { printf '%s\n' "$grok_events"; }
-  # Confirmation counts events BEFORE submission and polls for a NEW one AFTER —
-  # so the event must arrive post-call (not pre-seeded). The background writer
-  # simulates that arrival; give the poll a wide window (WASPFLOW_SUBMIT_ATTEMPTS)
-  # so a scheduler-delayed background write under machine load cannot miss it —
-  # the former 2-attempt window raced and produced a misleading "dropped
-  # model/effort" failure (the argv was in fact composed; only confirmation timed out).
-  ( sleep 0.1; printf '{"type":"turn_started"}\n' >>"$grok_events" ) &
+  grok_event_calls="$resume_home/event-calls"; printf '0\n' >"$grok_event_calls"
+  _grok_events_file() {
+    local calls
+    calls="$(cat "$grok_event_calls")"
+    calls=$((calls + 1))
+    printf '%s\n' "$calls" >"$grok_event_calls"
+    # The first call establishes the pre-submit count. The second call is the
+    # first poll, so append there instead of racing a scheduler-timed writer.
+    [[ "$calls" -ne 2 ]] || printf '{"type":"turn_started"}\n' >>"$grok_events"
+    printf '%s\n' "$grok_events"
+  }
   lane_set resume-grok cwd "$fixture" session_id grok-session pending_transition '{"to_arm":{"provider":"grok","model":"grok-new","effort":"high"},"provisional_session":{"session_id":"grok-session","ownership":{"tmux_session":"test","tmux_window":"@resume","tmux_pane_pid":"1"}}}'
   WASPFLOW_SUBMIT_ATTEMPTS=30 grok_resume_with_arm resume-grok prompt false
   grep -Fq -- 'grok\ -m\ grok-new' "$resume_argv" && grep -Fq -- '--effort\ high' "$resume_argv" && grep -Fq -- '--resume\ grok-session' "$resume_argv" \
