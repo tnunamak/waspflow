@@ -45,6 +45,12 @@ waspflow reap parser
 short + unique). `status <lane>` returns full JSON (provider, session_id, cwd,
 prompt, result).
 
+When a caller has a durable parent-session reference, pass it with
+`--parent-ref <opaque-ref>` (or `WASPFLOW_PARENT_REF`). Waspflow writes an
+append-only generic provenance receipt at confirmed launch and binds the worker
+session when observed. It never guesses a parent from tmux, cwd, timestamps, or
+lane names; omit the reference when it is not known.
+
 ## Choosing provider / model / effort
 
 Raw flags are canonical: `--provider claude|codex|grok|antigravity|qwen`, `--model <id>` (omit for

@@ -1365,6 +1365,52 @@ grep -q 'bash -c "\$command"' "$root/lib/artifacts.sh" || { echo "artifacts: ver
 # exit nonzero (which trained callers to ignore spawn's exit code, hiding real fails).
 grep -q 'spawn_submitted' "$root/bin/waspflow" || { echo "spawn: submission-confirmation (spawn_submitted) missing" >&2; exit 1; }
 
+# Generic launch provenance is an append-only producer boundary: no prompt text
+# enters the receipt, an optional opaque parent ref is retained, stable event IDs
+# make a retry idempotent, and owner-only storage is created under WASPFLOW_HOME.
+(
+  provenance_home="$(mktemp -d "$scratch/waspflow-provenance-XXXXXX")"
+  export WASPFLOW_HOME="$provenance_home" WASPFLOW_LIB="$root/lib"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/provenance.sh"
+  lane_set provenance-lane \
+    lane_uuid "11111111-2222-3333-4444-555555555555" provider codex \
+    session_id "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" \
+    codex_marker "WASPFLOW_LANE_MARKER:provenance-lane:opaque" \
+    prompt "do not retain this secret-looking prompt" \
+    provenance_parent_ref "agent-session/v1/codex/root-session"
+  provenance_emit_lane_started provenance-lane
+  provenance_emit_worker_session_bound provenance-lane
+  provenance_emit_lane_started provenance-lane
+  provenance_emit_worker_session_bound provenance-lane
+  lane_set provenance-unparented lane_uuid "66666666-7777-8888-9999-aaaaaaaaaaaa" provider claude prompt "ordinary task"
+  provenance_emit_lane_started provenance-unparented
+  ledger="$provenance_home/provenance.jsonl"
+  [[ "$(wc -l <"$ledger" | tr -d ' ')" == 3 ]] \
+    || { echo "provenance: unexpected launch-event count (retry may have duplicated an event)" >&2; exit 1; }
+  jq -s -e '
+    length == 2 and
+    all(.[]; .schema == "agent-provenance/v1" and .schema_version == 1 and
+      (.producer.name == "waspflow") and (.producer.instance_id | test("^[0-9a-f-]{36}$"))) and
+    any(.[]; .event_type == "lane_started" and .parent.ref == "agent-session/v1/codex/root-session" and
+      .parent.evidence_class == "caller_asserted" and (.evidence.task_fingerprint | startswith("sha256:"))) and
+    any(.[]; .event_type == "lane_started" and .lane.label == "provenance-unparented" and
+      .parent.ref == null and .parent.evidence_class == "absent") and
+    any(.[]; .event_type == "worker_session_bound" and
+      .worker.harness == "codex" and .worker.native_session_id == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+  ' "$ledger" >/dev/null \
+    || { echo "provenance: receipt schema or identity is wrong" >&2; exit 1; }
+  ! grep -Fq 'do not retain this secret-looking prompt' "$ledger" \
+    || { echo "provenance: raw prompt leaked into receipt" >&2; exit 1; }
+  [[ "$(stat -c '%a' "$ledger")" == 600 && "$(stat -c '%a' "$provenance_home/provenance-instance-id")" == 600 ]] \
+    || { echo "provenance: receipt storage is not owner-only" >&2; exit 1; }
+  ! provenance_validate_parent_ref $'bad\nref' \
+    || { echo "provenance: newline parent ref was accepted" >&2; exit 1; }
+  rm -rf "$provenance_home"
+)
+
 # Dead-on-arrival spawn: when a provider adapter cannot confirm the task submitted
 # (returns nonzero), cmd_spawn must exit 3, record spawn_submitted=false, and warn
 # loudly — never a phantom "spawned". Drive the REAL cmd_spawn with a fake provider
@@ -1794,6 +1840,7 @@ mcpp_mcp_policy() { case "$1" in auto) printf '%s\n' '{"resolved":"none","warnin
 mcpp_spawn() {
   local lane="$1" cwd="$2"
   tmux_create_owned_lane_window "$lane" "$cwd" "exec sleep 60" >/dev/null
+  lane_set "$lane" session_id "mcpp-session-$lane"
 }
 PROV
   sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok antigravity qwen)/WASPFLOW_PROVIDERS=(claude codex grok antigravity qwen mcpp)/' "$mcplib/core.sh"
@@ -1807,13 +1854,20 @@ PROV
   [[ "$invalid_model_rc" -ne 0 && ! -d "$mcphome/lanes/invalid-model" ]] \
     || { echo "spawn: invalid model polluted the durable lane index" >&2; exit 1; }
   WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
-    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-state -- "test policy" >/dev/null 2>&1
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-state \
+      --parent-ref 'agent-session/v1/test/root' -- "test policy" >/dev/null 2>&1
   jq -e '.mcp_requested == "auto" and .mcp_resolved == "none" and .mcp_warning == "test warning"' \
     "$mcphome/lanes/mcp-state/state.json" >/dev/null \
     || { echo "MCP state: requested/resolved receipt missing" >&2; exit 1; }
   jq -e '(.tmux_session != "") and (.tmux_window | startswith("@")) and (.tmux_pane_pid | tonumber > 0)' \
     "$mcphome/lanes/mcp-state/state.json" >/dev/null \
     || { echo "spawn: tmux ownership receipt missing" >&2; exit 1; }
+  jq -e 'select(.event_type == "lane_started" and .parent.ref == "agent-session/v1/test/root" and .parent.evidence_class == "caller_asserted")' \
+    "$mcphome/provenance.jsonl" >/dev/null \
+    || { echo "spawn: --parent-ref did not reach the generic provenance receipt" >&2; exit 1; }
+  jq -e 'select(.event_type == "worker_session_bound" and .worker.native_session_id == "mcpp-session-mcp-state")' \
+    "$mcphome/provenance.jsonl" >/dev/null \
+    || { echo "spawn: confirmed worker session did not produce a binding receipt" >&2; exit 1; }
   WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
     "$root/bin/waspflow" spawn --provider mcpp --lane mcp-state -- "must not overwrite" >/dev/null 2>&1 \
     && { echo "spawn: overwrote an unreaped lane" >&2; exit 1; }
