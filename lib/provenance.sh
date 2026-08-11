@@ -76,15 +76,38 @@ _provenance_prepare_locked() {
   }
   touch "$WASPFLOW_PROVENANCE_LEDGER" || return 1
   chmod 600 "$WASPFLOW_PROVENANCE_LEDGER" 2>/dev/null || true
-  # A crash must not glue a later valid JSON object onto a torn final record.
-  [[ ! -s "$WASPFLOW_PROVENANCE_LEDGER" || "$(tail -c1 "$WASPFLOW_PROVENANCE_LEDGER" 2>/dev/null)" == "" ]] \
-    || printf '\n' >>"$WASPFLOW_PROVENANCE_LEDGER"
   PROVENANCE_INSTANCE_ID="$instance"
 }
 
+_provenance_repair_torn_tail_locked() {
+  local line="" line_no=0 last_line=0 bad_line=0 last_byte tmp
+  [[ -s "$WASPFLOW_PROVENANCE_LEDGER" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_no=$((line_no + 1)); last_line=$line_no
+    jq -e 'type == "object"' >/dev/null 2>&1 <<<"$line" || [[ "$bad_line" -ne 0 ]] || bad_line=$line_no
+  done <"$WASPFLOW_PROVENANCE_LEDGER"
+  last_byte="$(tail -c 1 "$WASPFLOW_PROVENANCE_LEDGER" | od -An -tx1 | tr -d '[:space:]')"
+  if [[ "$bad_line" -eq 0 ]]; then
+    # A complete final object can lose only its trailing newline in a crash.
+    # Preserve that evidence and restore the JSONL record boundary.
+    [[ "$last_byte" == 0a ]] || printf '\n' >>"$WASPFLOW_PROVENANCE_LEDGER"
+    return 0
+  fi
+  if [[ "$bad_line" -eq "$last_line" && "$last_byte" != 0a ]]; then
+    tmp="$(mktemp "$(dirname "$WASPFLOW_PROVENANCE_LEDGER")/.provenance-ledger.XXXXXX")" || return 1
+    head -n -1 "$WASPFLOW_PROVENANCE_LEDGER" >"$tmp" || { rm -f "$tmp"; return 1; }
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv "$tmp" "$WASPFLOW_PROVENANCE_LEDGER" || { rm -f "$tmp"; return 1; }
+    return 0
+  fi
+  err "provenance: refusing to append; ledger has corrupt JSON before its final torn fragment"
+  return 1
+}
+
 _provenance_event_exists_locked() {
-  local event_id="$1"
-  jq -e --arg id "$event_id" 'select(.event_id == $id)' "$WASPFLOW_PROVENANCE_LEDGER" >/dev/null 2>&1
+  local event_id="$1" rc=0
+  jq -e --arg id "$event_id" 'select(.event_id == $id)' "$WASPFLOW_PROVENANCE_LEDGER" >/dev/null 2>&1 || rc=$?
+  case "$rc" in 0) return 0 ;; 4) return 1 ;; *) return 2 ;; esac
 }
 
 provenance_instance_id() {
@@ -109,19 +132,37 @@ _provenance_append() {
   flock -x "$fd" || { exec {fd}>&-; return 1; }
   local rc=0
   _provenance_prepare_locked || rc=$?
-  if [[ "$rc" -eq 0 ]] && ! _provenance_event_exists_locked "$event_id"; then
-    printf '%s\n' "$payload" >>"$WASPFLOW_PROVENANCE_LEDGER" || rc=$?
+  [[ "$rc" -ne 0 ]] || _provenance_repair_torn_tail_locked || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    local exists_rc=0
+    _provenance_event_exists_locked "$event_id" || exists_rc=$?
+    case "$exists_rc" in
+      0) ;;
+      1) printf '%s\n' "$payload" >>"$WASPFLOW_PROVENANCE_LEDGER" || rc=$? ;;
+      *) err "provenance: cannot determine whether event '$event_id' already exists"; rc=1 ;;
+    esac
   fi
   flock -u "$fd" || true
   exec {fd}>&-
   return "$rc"
 }
 
+_provenance_event_id() {
+  local lane="$1" kind="$2" lane_uuid
+  lane_uuid="$(lane_get "$lane" lane_uuid)"
+  [[ -n "$lane_uuid" ]] || return 1
+  printf 'waspflow:%s:%s\n' "$lane_uuid" "$kind"
+}
+
+provenance_enabled() {
+  [[ "$(lane_get "$1" provenance_version)" == "1" ]]
+}
+
 provenance_emit_lane_started() {
   local lane="$1" event_id provider lane_uuid parent_ref parent_evidence_class prompt_hash instance payload
   event_id="$(lane_get "$lane" provenance_lane_started_event_id)"
   if [[ -z "$event_id" ]]; then
-    event_id="$(new_uuid)" || return 1
+    event_id="$(_provenance_event_id "$lane" lane_started)" || return 1
     lane_set "$lane" provenance_lane_started_event_id "$event_id"
   fi
   provider="$(lane_get "$lane" provider)"
@@ -150,7 +191,7 @@ provenance_emit_worker_session_bound() {
   [[ -n "$session_id" ]] || return 0
   event_id="$(lane_get "$lane" provenance_worker_bound_event_id)"
   if [[ -z "$event_id" ]]; then
-    event_id="$(new_uuid)" || return 1
+    event_id="$(_provenance_event_id "$lane" worker_session_bound)" || return 1
     lane_set "$lane" provenance_worker_bound_event_id "$event_id"
   fi
   provider="$(lane_get "$lane" provider)"
@@ -168,4 +209,34 @@ provenance_emit_worker_session_bound() {
        evidence:{class:"observed",method:"provider_session_binding",correlation_digest:(if $marker_hash == "" then null else "sha256:" + $marker_hash end)}}')" || return 1
   _provenance_append "$event_id" "$payload" || return 1
   lane_set "$lane" provenance_worker_bound_emitted "true"
+}
+
+provenance_reconcile_lane() {
+  local lane="$1" session_id
+  provenance_enabled "$lane" || return 0
+  if [[ "$(lane_get "$lane" provenance_lane_started_emitted)" != true ]]; then
+    if ! provenance_emit_lane_started "$lane"; then
+      lane_set "$lane" provenance_state "launch_event_failed"
+      return 1
+    fi
+  fi
+  if [[ "$(lane_get "$lane" provenance_worker_bound_emitted)" == true ]]; then
+    lane_set "$lane" provenance_state "recorded"
+    return 0
+  fi
+  session_id="$(lane_get "$lane" session_id)"
+  if [[ -z "$session_id" ]]; then
+    lane_set "$lane" provenance_state "waiting_for_worker_session"
+    if [[ "$(lane_get "$lane" provenance_worker_bound_emitted)" == true ]]; then
+      lane_set "$lane" provenance_state "recorded"
+    elif [[ -n "$(lane_get "$lane" session_id)" ]]; then
+      provenance_reconcile_lane "$lane" || return 1
+    fi
+    return 0
+  fi
+  if ! provenance_emit_worker_session_bound "$lane"; then
+    lane_set "$lane" provenance_state "worker_binding_failed"
+    return 1
+  fi
+  lane_set "$lane" provenance_state "recorded"
 }

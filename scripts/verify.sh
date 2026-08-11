@@ -1392,7 +1392,7 @@ grep -q 'spawn_submitted' "$root/bin/waspflow" || { echo "spawn: submission-conf
   [[ "$(wc -l <"$ledger" | tr -d ' ')" == 3 ]] \
     || { echo "provenance: unexpected launch-event count (retry may have duplicated an event)" >&2; exit 1; }
   jq -s -e '
-    length == 2 and
+    length == 3 and
     all(.[]; .schema == "agent-provenance/v1" and .schema_version == 1 and
       (.producer.name == "waspflow") and (.producer.instance_id | test("^[0-9a-f-]{36}$"))) and
     any(.[]; .event_type == "lane_started" and .parent.ref == "agent-session/v1/codex/root-session" and
@@ -1425,6 +1425,97 @@ grep -q 'spawn_submitted' "$root/bin/waspflow" || { echo "spawn: submission-conf
   [[ -z "$PROVENANCE_PARENT_REF" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "absent" ]] \
     || { echo "provenance: direct shell without harness context was not absent" >&2; exit 1; }
   rm -rf "$provenance_home"
+)
+
+# Receipt emission is safe when a lifecycle command races itself: event identity
+# is lane-derived, the JSONL append lock deduplicates, and only a torn final
+# fragment is repaired. Earlier corruption remains a hard stop.
+(
+  race_home="$(mktemp -d "$scratch/waspflow-provenance-race-XXXXXX")"
+  export WASPFLOW_HOME="$race_home" WASPFLOW_LIB="$root/lib"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/provenance.sh"
+  lane_set provenance-race lane_uuid "bbbbbbbb-cccc-dddd-eeee-ffffffffffff" provider codex \
+    session_id "11111111-2222-3333-4444-555555555555" prompt "race prompt" \
+    provenance_version 1 provenance_lane_started_emitted false provenance_worker_bound_emitted false
+  for _ in $(seq 1 30); do
+    WASPFLOW_HOME="$race_home" WASPFLOW_LIB="$root/lib" bash -c '
+      source "$WASPFLOW_LIB/core.sh"
+      source "$WASPFLOW_LIB/provenance.sh"
+      provenance_reconcile_lane provenance-race
+    ' &
+  done
+  wait
+  race_ledger="$race_home/provenance.jsonl"
+  jq -s -e 'length == 2 and ([.[].event_id] | unique | length == 2) and
+    ([.[].event_type] | sort == ["lane_started","worker_session_bound"])' "$race_ledger" >/dev/null \
+    || { echo "provenance: concurrent reconciliation duplicated or lost events" >&2; exit 1; }
+  printf '{"torn"' >>"$race_ledger"
+  _provenance_append "waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:tail-test" \
+    '{"schema":"agent-provenance/v1","schema_version":1,"event_id":"waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:tail-test"}'
+  jq -s -e 'length == 3 and all(.[]; type == "object")' "$race_ledger" >/dev/null \
+    || { echo "provenance: torn final fragment was not safely repaired" >&2; exit 1; }
+  _provenance_append "waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:tail-test" \
+    '{"schema":"agent-provenance/v1","schema_version":1,"event_id":"waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:tail-test"}'
+  [[ "$(wc -l <"$race_ledger" | tr -d ' ')" == 3 ]] \
+    || { echo "provenance: crash-window retry duplicated an existing event" >&2; exit 1; }
+  printf '{"schema":"agent-provenance/v1","schema_version":1,"event_id":"waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:complete-no-newline"}' >>"$race_ledger"
+  _provenance_append "waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:after-complete-no-newline" \
+    '{"schema":"agent-provenance/v1","schema_version":1,"event_id":"waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:after-complete-no-newline"}'
+  jq -s -e 'length == 5 and all(.[]; type == "object")' "$race_ledger" >/dev/null \
+    || { echo "provenance: complete final object without newline was not preserved" >&2; exit 1; }
+  printf '{"broken":}\n{"still":"bad"' >"$race_ledger"
+  corrupt_before="$(sha256sum "$race_ledger" | awk '{print $1}')"
+  _provenance_append "waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:must-not-append" \
+    '{"schema":"agent-provenance/v1","schema_version":1,"event_id":"waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:must-not-append"}' \
+    && { echo "provenance: earlier corruption was incorrectly repaired" >&2; exit 1; }
+  [[ "$corrupt_before" == "$(sha256sum "$race_ledger" | awk '{print $1}')" ]] \
+    || { echo "provenance: earlier corruption changed during refusal" >&2; exit 1; }
+  rm -rf "$race_home"
+)
+
+# Reconciliation records a confirmed launch immediately, waits honestly for a
+# late provider session ID, and clears its pending state once binding succeeds.
+(
+  late_home="$(mktemp -d "$scratch/waspflow-provenance-late-XXXXXX")"
+  export WASPFLOW_HOME="$late_home" WASPFLOW_LIB="$root/lib"
+  source "$root/lib/core.sh"
+  source "$root/lib/provenance.sh"
+  lane_set provenance-late lane_uuid "cccccccc-dddd-eeee-ffff-000000000000" provider qwen prompt "late session" \
+    provenance_version 1 provenance_lane_started_emitted false provenance_worker_bound_emitted false
+  provenance_reconcile_lane provenance-late
+  [[ "$(lane_get provenance-late provenance_state)" == waiting_for_worker_session \
+      && "$(wc -l <"$late_home/provenance.jsonl" | tr -d ' ')" == 1 ]] \
+    || { echo "provenance: missing session was incorrectly reported as recorded" >&2; exit 1; }
+  lane_set provenance-late session_id "22222222-3333-4444-5555-666666666666"
+  provenance_reconcile_lane provenance-late
+  [[ "$(lane_get provenance-late provenance_state)" == recorded \
+      && "$(wc -l <"$late_home/provenance.jsonl" | tr -d ' ')" == 2 ]] \
+    || { echo "provenance: late session did not reconcile to recorded" >&2; exit 1; }
+  rm -rf "$late_home"
+)
+
+# A write failure is visible but not sticky: the next reconciliation retries the
+# same deterministic launch event and clears the failed state on success.
+(
+  retry_home="$(mktemp -d "$scratch/waspflow-provenance-retry-XXXXXX")"
+  export WASPFLOW_HOME="$retry_home" WASPFLOW_LIB="$root/lib"
+  source "$root/lib/core.sh"
+  source "$root/lib/provenance.sh"
+  lane_set provenance-retry lane_uuid "dddddddd-eeee-ffff-0000-111111111111" provider antigravity prompt "retry" \
+    provenance_version 1 provenance_lane_started_emitted false provenance_worker_bound_emitted false
+  printf '{"corrupt":}\n' >"$retry_home/provenance.jsonl"
+  provenance_reconcile_lane provenance-retry \
+    && { echo "provenance: corrupt ledger incorrectly reported launch success" >&2; exit 1; }
+  [[ "$(lane_get provenance-retry provenance_state)" == launch_event_failed ]] \
+    || { echo "provenance: launch failure state was not recorded" >&2; exit 1; }
+  : >"$retry_home/provenance.jsonl"
+  provenance_reconcile_lane provenance-retry
+  [[ "$(lane_get provenance-retry provenance_state)" == waiting_for_worker_session ]] \
+    || { echo "provenance: successful retry did not clear launch failure" >&2; exit 1; }
+  rm -rf "$retry_home"
 )
 
 # Dead-on-arrival spawn: when a provider adapter cannot confirm the task submitted

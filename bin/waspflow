@@ -567,6 +567,7 @@ cmd_spawn() {
     prompt "$prompt" \
     provenance_parent_ref "$parent_ref" \
     provenance_parent_evidence_class "$parent_evidence_class" \
+    provenance_version "1" \
     provenance_lane_started_event_id "" \
     provenance_lane_started_emitted "false" \
     provenance_worker_bound_event_id "" \
@@ -611,15 +612,8 @@ cmd_spawn() {
     die "spawn: provider reported success but created no owned tmux window"
   fi
 
-  if ! provenance_emit_lane_started "$lane"; then
-    lane_set "$lane" provenance_state "launch_event_failed"
-    warn "spawn: lane '$lane' was submitted, but its provenance launch receipt could not be written"
-  elif ! provenance_emit_worker_session_bound "$lane"; then
-    lane_set "$lane" provenance_state "worker_binding_failed"
-    warn "spawn: lane '$lane' was submitted, but its provenance worker-binding receipt could not be written"
-  else
-    lane_set "$lane" provenance_state "recorded"
-  fi
+  provenance_reconcile_lane "$lane" \
+    || warn "spawn: lane '$lane' was submitted, but its provenance receipt could not be written (a later lifecycle command will retry)"
 
   log "spawned $provider lane '$lane' (tmux: $WASPFLOW_TMUX_SESSION:$lane) — next: wait/peek/revise/reap $lane"
   [[ -n "$report_abs" ]] && log "  deliverable contract: $report_abs (verified on idle; one recovery pass if missing)"
@@ -957,11 +951,8 @@ cmd_status() {
   # Some providers discover their native session asynchronously. Bind it the
   # first time any ordinary read sees it; this adds immutable evidence without
   # changing lane lifecycle or requiring a resident watcher.
-  if [[ "$(lane_get "$lane" provenance_lane_started_emitted)" == true \
-        && "$(lane_get "$lane" provenance_worker_bound_emitted)" != true ]]; then
-    provenance_emit_worker_session_bound "$lane" \
-      || warn "status: lane '$lane' has an observed worker session but its provenance binding could not be written"
-  fi
+  provenance_reconcile_lane "$lane" \
+    || warn "status: lane '$lane' provenance reconciliation failed; it will retry on the next lifecycle command"
   jq . "$sf" 2>/dev/null || die "lane '$lane' has corrupted state.json ($sf) — cannot parse"
 }
 
@@ -1090,6 +1081,8 @@ cmd_wait() {
       || die "wait: escalation in progress for lane '$lane'"
     provider="$(lane_get "$lane" provider)"
     load_provider "$provider"
+    provenance_reconcile_lane "$lane" \
+      || warn "wait: lane '$lane' provenance reconciliation failed; continuing to observe the worker"
     if [[ "$barrier_cleared" -eq 0 ]]; then
       local cur_mark
       cur_mark="$("${provider}_turn_mark" "$lane" 2>/dev/null)" || true
@@ -1206,6 +1199,8 @@ _park_one() {
 
 _park_one_locked() {
   local lane="$1" reason="$2" adopt_legacy="${3:-0}"
+  provenance_reconcile_lane "$lane" \
+    || warn "park: lane '$lane' provenance reconciliation failed; the lane remains retryable"
   lane_is_parkable "$lane" "$adopt_legacy" || { err "park: lane '$lane' refused: $PARK_REFUSAL"; return 1; }
   if [[ "$PARK_NEEDS_ADOPT" -eq 1 ]]; then
     tmux_capture_lane_ownership "$lane" \
@@ -1468,6 +1463,8 @@ _reap_one() {
 
 _reap_one_locked() {
   local lane="$1" force="$2" keep_wt="$3" no_archive="$4"
+  provenance_reconcile_lane "$lane" \
+    || warn "reap: lane '$lane' provenance reconciliation failed; finalization continues with the failure recorded"
   if [[ "$(lane_get "$lane" status)" == escalating ]] || escalate_transition_requires_resolution "$lane"; then
     err "reap: escalation transition must be resumed or aborted for lane '$lane'"
     err "  next: waspflow escalate $lane --resume-transition"
