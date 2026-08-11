@@ -200,22 +200,19 @@ codex_spawn() {
   local model_args=()
   [[ -n "$model" ]] && model_args=(-m "$model")
   codex_load_process_mcp_policy "$lane" "$cwd" spawn || return 1
-  # Pass model_reasoning_effort through exactly. Codex supports
-  # minimal|low|medium|high|xhigh (OpenAI config reference). Never silently
-  # demote xhigh→high. 'max' is not a Codex value — hard fail (use xhigh).
+  # Pass model_reasoning_effort through exactly. GPT-5.6 supports
+  # minimal|low|medium|high|xhigh|max. Never silently demote a requested
+  # effort; availability remains the provider/account's decision.
   local effort_args=() effort passed_effort
   effort="$(lane_get "$lane" effort)"
   case "$effort" in
     "" ) ;;
-    minimal|low|medium|high|xhigh)
+    minimal|low|medium|high|xhigh|max)
       effort_args=(-c "model_reasoning_effort=${effort}")
       passed_effort="$effort"
       ;;
-    max)
-      die "codex: effort 'max' is not a Codex model_reasoning_effort value (use xhigh). Never silently remapped."
-      ;;
     *)
-      die "codex: unsupported effort '$effort' (valid: minimal|low|medium|high|xhigh)"
+      die "codex: unsupported effort '$effort' (valid: minimal|low|medium|high|xhigh|max)"
       ;;
   esac
   # requested vs passed (org-side caps may still alter observed effort later)
