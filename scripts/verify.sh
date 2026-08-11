@@ -2594,7 +2594,7 @@ FAIL
   old_path="$PATH"; export PATH="$failbin:$PATH"
   # Keep the pane alive long enough to capture its immutable ownership before
   # the intentionally failed cgroup launcher falls back to the original command.
-  spawn_scope_lane scope-fallback 'sleep 1; printf fallback > fallback-ran'
+  spawn_scope_lane scope-fallback 'sleep 5; printf fallback > fallback-ran'
   for _ in $(seq 1 150); do [[ -f "$scopework/fallback-ran" ]] && break; sleep 0.1; done
   [[ -f "$scopework/fallback-ran" ]] || { echo "scope: launch failure skipped original pane command" >&2; exit 1; }
   jq -e '(.cgroup_scope_receipts // []) == [] and .cgroup_fallbacks[-1].reason == "scope-launch-failed" and .tmux_window != ""' \
