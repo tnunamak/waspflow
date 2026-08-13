@@ -1392,7 +1392,7 @@ deadp_spawn() {
   return 1
 }   # window up, task never confirmed submitted
 PROV
-  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok antigravity qwen)/WASPFLOW_PROVIDERS=(claude codex grok antigravity qwen deadp)/' "$deadlib/core.sh"
+  sed -i '/^WASPFLOW_PROVIDERS=(/ s/)$/ deadp)/' "$deadlib/core.sh"
   dead_home="$(mktemp -d "$scratch/waspflow-deadhome-XXXXXX")"
   dead_work="$(mktemp -d "$scratch/waspflow-deadwork-XXXXXX")"
   ( cd "$dead_work" && git init -q )
@@ -1801,7 +1801,7 @@ mcpp_spawn() {
   tmux_create_owned_lane_window "$lane" "$cwd" "exec sleep 60" >/dev/null
 }
 PROV
-  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok antigravity qwen)/WASPFLOW_PROVIDERS=(claude codex grok antigravity qwen mcpp)/' "$mcplib/core.sh"
+  sed -i '/^WASPFLOW_PROVIDERS=(/ s/)$/ mcpp)/' "$mcplib/core.sh"
   mcphome="$(mktemp -d "$scratch/waspflow-mcp-home-XXXXXX")"
   mcpdir="$(mktemp -d "$scratch/waspflow-mcp-cwd-XXXXXX")"; (cd "$mcpdir" && git init -q)
   set +e
@@ -2250,7 +2250,7 @@ scopep_revise() {
     -- "$pid_file" "$pid_file" "$out_file" "$report"
 }
 PROV
-  sed -i 's/WASPFLOW_PROVIDERS=(claude codex grok antigravity qwen)/WASPFLOW_PROVIDERS=(claude codex grok antigravity qwen scopep)/' "$scopelib/core.sh"
+  sed -i '/^WASPFLOW_PROVIDERS=(/ s/)$/ scopep)/' "$scopelib/core.sh"
   scopehome="$(mktemp -d "$scratch/waspflow-scope-home-XXXXXX")"
   scopework="$(mktemp -d "$scratch/waspflow-scope-work-XXXXXX")"; ( cd "$scopework" && git init -q )
   scopesession="waspflow-scope-$$"
