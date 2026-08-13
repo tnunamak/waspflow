@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# waspflow — turnkey live orchestration of Claude/Codex/Grok/Antigravity/Qwen agents in tmux.
+# waspflow — turnkey live orchestration of Claude/Codex/Grok/Antigravity/Qwen/DeepSeek agents in tmux.
 #
 # An orchestrating session (itself Claude, Codex, Grok, or Antigravity, in ANY project dir)
 # uses this to spawn an agent of any supported provider into a tmux window,
@@ -80,7 +80,7 @@ load_event_reader() {
 
 usage() {
   cat <<EOF
-waspflow — turnkey live orchestration of Claude/Codex/Grok/Antigravity/Qwen agents in tmux.
+waspflow — turnkey live orchestration of Claude/Codex/Grok/Antigravity/Qwen/DeepSeek agents in tmux.
 
 First successful run:
   waspflow doctor
