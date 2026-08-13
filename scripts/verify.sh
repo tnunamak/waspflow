@@ -589,16 +589,21 @@ grep -q "waspflow spawn --provider codex --accept-provider-default --lane previe
 
 # Antigravity integration: literal escalation targets and PATH auto-detection
 # must remain aligned with the provider adapter's canonical name.
-grep -Eq '\^\(claude\|codex\|grok\|antigravity\|qwen\)/' "$root/lib/escalation.sh"
+grep -Eq '\^\(claude\|codex\|grok\|antigravity\|qwen\|deepseek\)/' "$root/lib/escalation.sh"
 demo_body="$(sed -n '/^cmd_demo()/,/^}/p' "$root/bin/waspflow")"
 grep -q 'command -v agy' <<<"$demo_body"
 grep -q 'provider="antigravity"' <<<"$demo_body"
-grep -q 'install codex, claude, grok, agy, or qwen' <<<"$demo_body"
+grep -q 'install codex, claude, grok, agy, qwen, or deepseek' <<<"$demo_body"
 
 # Qwen integration: escalation targets, PATH auto-detection, and provider array.
 grep -q 'command -v qwen' <<<"$demo_body"
 grep -q 'provider="qwen"' <<<"$demo_body"
 grep -q 'qwen' "$root/lib/core.sh"
+
+# DeepSeek integration: provider array, PATH auto-detection, and demo help.
+grep -q 'command -v deepseek' <<<"$demo_body"
+grep -q 'provider="deepseek"' <<<"$demo_body"
+grep -q 'deepseek' "$root/lib/core.sh"
 
 set +e
 missing_provider="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" exec -- "hello" 2>&1)"
@@ -3542,13 +3547,92 @@ JSON
   }
   [[ "$(quota_observation_v1 qwen | jq -r '.state + ":" + .observation.provider_key')" == ok:alibaba ]]
   unset -f clawmeter
+)
+
+# DeepSeek central integration: deterministic fake deepseek CLI, real adapter/exec/
+# event/billing boundaries. Mirrors the qwen test block above.
+(
+  unset WASPFLOW_LIB
+  state_home="$(mktemp -d "${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}/waspflow-verify-deepseek.XXXXXX")"
+  export WASPFLOW_HOME="$state_home"
+  fixture="$state_home/fixture"; mkdir -p "$fixture"
+  source "$root/lib/core.sh"
+  source "$root/lib/billing.sh"
+  source "$root/lib/providers/deepseek.sh"
+  source "$root/lib/events.sh"
+
+  # Contract: all 9 required functions exist.
+  for fn in spawn is_idle revise preflight discover_session session_resumable turn_mark valid_models mcp_policy; do
+    declare -F "deepseek_${fn}" >/dev/null || { echo "missing deepseek_${fn}" >&2; exit 1; }
+  done
+
+  # Fake deepseek CLI: records argv, emits stream-json lifecycle events, and writes
+  # the resumable session file that the real adapter contract requires.
+  deepseek_fake="$fixture/deepseek"; deepseek_args="$fixture/deepseek.args"
+  cat >"$deepseek_fake" <<'DEEPSEEK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"${DEEPSEEK_ARGS:?}"
+set -e
+sid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+if [[ "${DEEPSEEK_NO_SESSION:-0}" != 1 ]]; then
+  printf '{"type":"system","subtype":"session_start","session_id":"%s"}\n' "$sid"
+fi
+if [[ "${DEEPSEEK_FAIL:-0}" == 1 ]]; then
+  exit 9
+fi
+project="$(printf '%s' "$PWD" | sed 's|/|-|g')"
+chats="$HOME/.deepseek/projects/$project/chats"
+mkdir -p "$chats"
+printf '{"type":"assistant","model":"test-model"}\n' >"$chats/$sid.jsonl"
+printf '{"type":"result","subtype":"success"}\n'
+printf 'deepseek test output\n'
+DEEPSEEK
+  chmod +x "$deepseek_fake"
+  export DEEPSEEK_ARGS="$deepseek_args"; PATH="$fixture:$PATH"
+  export WASPFLOW_SELECTION_GATE=off
+
+  # Exec test.
+  exec_out="$fixture/deepseek.out"
+  "$root/bin/waspflow" exec --provider deepseek --model test-model -o "$exec_out" -- "deterministic prompt"
+  grep -Fq -- '-p deterministic prompt --model test-model --yolo --output-format text' "$deepseek_args"
+
+  # Effort rejection.
+  set +e; "$root/bin/waspflow" exec --provider deepseek --effort high -o "$fixture/bad.out" -- x >/dev/null 2>&1; deepseek_bad_rc=$?; set -e
+  [[ "$deepseek_bad_rc" -eq 1 ]]
+
+  # Lifecycle via _deepseek_shell: spawn, discover, idle, turn_mark, revise, turn 2.
+  deepseek_lifecycle=deepseek-lifecycle
+  lane_set "$deepseek_lifecycle" provider deepseek status live cwd "$fixture" model test-model
+  deepseek_cmd="$(_deepseek_shell "$deepseek_lifecycle" test-model "" "first turn" spawn)"
+  (cd "$fixture" && bash -c "$deepseek_cmd") >"$fixture/deepseek-lifecycle.out"
+  [[ "$(lane_get "$deepseek_lifecycle" session_id)" == aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee ]]
+  deepseek_is_idle "$deepseek_lifecycle"
+  deepseek_session_resumable "$deepseek_lifecycle"
+  [[ "$(deepseek_turn_mark "$deepseek_lifecycle")" -eq 1 ]]
+  ! find "$(lane_dir "$deepseek_lifecycle")" -maxdepth 1 -name '.deepseek-log.*' | grep -q .
+
+  deepseek_cmd="$(_deepseek_shell "$deepseek_lifecycle" test-model "$(lane_get "$deepseek_lifecycle" session_id)" "second turn" revise)"
+  (cd "$fixture" && bash -c "$deepseek_cmd") >"$fixture/deepseek-revise.out"
+  [[ "$(deepseek_turn_mark "$deepseek_lifecycle")" -eq 2 ]]
+
+  # Billing evidence.
+  unset DEEPSEEK_API_KEY
+  [[ "$(billing_path_v1 deepseek | jq -r '.path + ":" + .evidence')" == unknown:none ]]
+  DEEPSEEK_API_KEY=test
+  [[ "$(billing_path_v1 deepseek | jq -r '.path + ":" + .evidence')" == api_key_env:env:DEEPSEEK_API_KEY ]]
+  unset DEEPSEEK_API_KEY
+
+  # Escalation hooks unsupported.
+  ! deepseek_validate_model_effort test-model high
+  ! deepseek_resume_with_arm "$deepseek_lifecycle" prompt false
+  ! deepseek_confirm_escalation_submission "$deepseek_lifecycle" prompt false
 
   # Help/doctor.
   help_text="$("$root/bin/waspflow" --help)"
-  grep -q 'Claude/Codex/Grok/Antigravity/Qwen' <<<"$help_text"
-  [[ "$(grep -c '<claude|codex|grok|antigravity|qwen>' <<<"$help_text")" -ge 3 ]]
+  grep -q 'Claude/Codex/Grok/Antigravity/Qwen/DeepSeek' <<<"$help_text"
+  [[ "$(grep -c '<claude|codex|grok|antigravity|qwen|deepseek>' <<<"$help_text")" -ge 3 ]]
   grep -q 'qwen' <<<"$("$root/bin/waspflow" doctor 2>&1 || true)"
-
+  grep -q 'deepseek' <<<"$("$root/bin/waspflow" doctor 2>&1 || true)"
 )
 
 echo "waspflow verify: ok"

@@ -77,13 +77,15 @@ exec_run() {
     [[ "$accept_provider_default" == true ]] && model=""
   fi
 
-  [[ -n "$provider" ]] || die "exec: --provider is required (claude|codex|grok|antigravity|qwen; or use --op)"
+  [[ -n "$provider" ]] || die "exec: --provider is required (claude|codex|grok|antigravity|qwen|deepseek; or use --op)"
   is_known_provider "$provider" || die "exec: unknown provider '$provider'"
   [[ -n "$prompt" ]] || die "exec: a task prompt is required after '--'"
   cwd="$(cd "$cwd" && pwd)" || die "exec: --cwd does not exist"
   guard_cwd "$cwd"   # never run a worker with cwd '/' silently (known crash class)
   if [[ "$provider" == qwen && -n "$effort" ]]; then
     die "exec/qwen: --effort is not supported by Qwen Code"
+  elif [[ "$provider" == deepseek && -n "$effort" ]]; then
+    die "exec/deepseek: --effort is not supported by DeepSeek Code"
   elif [[ "$provider" == antigravity && -n "$effort" && ! "$effort" =~ ^(low|medium|high)$ ]]; then
     die "exec/antigravity: unsupported effort '$effort' (valid: low|medium|high)"
   elif [[ -n "$effort" && ! "$effort" =~ ^(none|minimal|low|medium|high|xhigh|max)$ ]]; then
@@ -130,7 +132,8 @@ exec_run() {
     claude) _exec_claude "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
     grok)   _exec_grok "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
     antigravity) _exec_antigravity "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
-    qwen)   _exec_qwen "$cwd" "$model" "$prompt" "$output_path" || rc=$? ;;
+    qwen)     _exec_qwen "$cwd" "$model" "$prompt" "$output_path" || rc=$? ;;
+    deepseek) _exec_deepseek "$cwd" "$model" "$prompt" "$output_path" || rc=$? ;;
     *)      die "exec: unsupported provider '$provider'" ;;
   esac
 
@@ -174,6 +177,13 @@ _exec_qwen() {
   local -a model_args=()
   [[ -n "$model" ]] && model_args=(--model "$model")
   (cd "$cwd" && qwen -p "$prompt" "${model_args[@]}" --yolo --output-format text </dev/null) >"$output_path"
+}
+
+_exec_deepseek() {
+  local cwd="$1" model="$2" prompt="$3" output_path="$4"
+  local -a model_args=()
+  [[ -n "$model" ]] && model_args=(--model "$model")
+  (cd "$cwd" && deepseek -p "$prompt" "${model_args[@]}" --yolo --output-format text </dev/null) >"$output_path"
 }
 
 # Reject an output file that is too small to be real, blank once stripped, or is

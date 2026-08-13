@@ -40,6 +40,7 @@ billing_preflight_provider() {
     grok) billing_preflight_grok ;;
     antigravity) billing_preflight_antigravity ;;
     qwen) billing_preflight_qwen ;;
+    deepseek) billing_preflight_deepseek ;;
     *) return 0 ;;
   esac
 }
@@ -76,6 +77,7 @@ billing_preflight_grok() {
 billing_preflight_antigravity() { return 0; }
 
 billing_preflight_qwen() { return 0; }
+billing_preflight_deepseek() { return 0; }
 
 # Emit BillingPath v1. This is observational only: an uncertain billing path
 # never changes whether a lane may launch. Args: provider endpoint_profile raw_args
@@ -118,6 +120,10 @@ billing_path_v1() {
       if [[ -n "${BAILIAN_TOKEN_PLAN_API_KEY:-}" ]]; then path="api_key_env"; evidence="env:BAILIAN_TOKEN_PLAN_API_KEY"
       elif [[ -n "${BAILIAN_CODING_PLAN_API_KEY:-}" ]]; then path="api_key_env"; evidence="env:BAILIAN_CODING_PLAN_API_KEY"
       elif [[ -n "${DASHSCOPE_API_KEY:-}" ]]; then path="api_key_env"; evidence="env:DASHSCOPE_API_KEY"
+      else path="unknown"; evidence="none"; fi
+      ;;
+    deepseek)
+      if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then path="api_key_env"; evidence="env:DEEPSEEK_API_KEY"
       else path="unknown"; evidence="none"; fi
       ;;
   esac
