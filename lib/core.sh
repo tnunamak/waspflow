@@ -992,7 +992,7 @@ load_provider() {
 }
 
 # Known providers (for validation / help).
-WASPFLOW_PROVIDERS=(claude codex grok antigravity qwen)
+WASPFLOW_PROVIDERS=(claude codex grok antigravity qwen deepseek)
 is_known_provider() {
   local p
   for p in "${WASPFLOW_PROVIDERS[@]}"; do [[ "$p" == "$1" ]] && return 0; done

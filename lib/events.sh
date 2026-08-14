@@ -131,7 +131,7 @@ lane_inspection_json() {
   sf="$(lane_state_file "$lane")"
   if ! jq empty "$sf" 2>/dev/null; then jq -cn --arg lane "$lane" '{lane:$lane,classification:"corrupt/unknown",eligibility:"preserve",reasons:["unparseable-state.json"]}'; return 0; fi
   provider="$(lane_get "$lane" provider)"
-  case "$provider" in claude|codex|grok|antigravity|qwen) load_provider "$provider" ;; *)
+  case "$provider" in claude|codex|grok|antigravity|qwen|deepseek) load_provider "$provider" ;; *)
     jq -cn --arg lane "$lane" --arg provider "$provider" '{lane:$lane,provider:$provider,classification:"corrupt/unknown",eligibility:"preserve",reasons:["unknown-provider"]}'
     return 0
   esac

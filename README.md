@@ -211,9 +211,9 @@ config shape.
 
 | Command | What it does |
 |---|---|
-| `spawn --provider <claude\|codex\|grok\|antigravity\|qwen> --lane <name> [opts] -- <task>` | Start a durable worker lane |
-| `exec --provider <claude\|codex\|grok\|antigravity\|qwen> [opts] [-o FILE] -- <task>` | Headless one-shot: run, return, leave no lane |
-| `demo --provider <claude\|codex\|grok\|antigravity\|qwen> [--run]` | Show or run a safe first demo |
+| `spawn --provider <claude\|codex\|grok\|antigravity\|qwen\|deepseek> --lane <name> [opts] -- <task>` | Start a durable worker lane |
+| `exec --provider <claude\|codex\|grok\|antigravity\|qwen\|deepseek> [opts] [-o FILE] -- <task>` | Headless one-shot: run, return, leave no lane |
+| `demo --provider <claude\|codex\|grok\|antigravity\|qwen\|deepseek> [--run]` | Show or run a safe first demo |
 | `wait <lane> [--reap]` | Poll the provider log until a worker finishes; `--reap` then returns the final reap result |
 | `events <lane> [--lines N] [--json]` | Safe, normalized provider-event tail for all supported providers |
 | `inspect [<lane>] --json` | Read-only lane facts and explainable cleanup classifications |
