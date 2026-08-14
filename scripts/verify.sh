@@ -2876,14 +2876,36 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
 
   source "$root/lib/providers/grok.sh"
   grok_events="$resume_home/events.jsonl"; : >"$grok_events"
-  _grok_events_file() { printf '%s\n' "$grok_events"; }
   # Confirmation counts events BEFORE submission and polls for a NEW one AFTER —
-  # so the event must arrive post-call (not pre-seeded). The background writer
-  # simulates that arrival; give the poll a wide window (WASPFLOW_SUBMIT_ATTEMPTS)
-  # so a scheduler-delayed background write under machine load cannot miss it —
-  # the former 2-attempt window raced and produced a misleading "dropped
-  # model/effort" failure (the argv was in fact composed; only confirmation timed out).
-  ( sleep 0.1; printf '{"type":"turn_started"}\n' >>"$grok_events" ) &
+  # so the event must arrive strictly after the adapter samples its baseline.
+  #
+  # A timer-based writer ( sleep N; ... ) & cannot guarantee that ordering: the
+  # baseline is sampled several jq/lane_set calls deep into the adapter, and on a
+  # loaded machine that work can outlast the timer. The event then lands BEFORE
+  # the baseline, so `before` is already 1, the poll waits for a second event that
+  # never comes, and the block fails as "Grok dropped target model or effort" —
+  # a misleading message, since the argv was in fact composed correctly.
+  # (Widening the poll window does not help; the write is early, not late.)
+  #
+  # Fix: hook the exact seam the adapter uses to read the events file, so the
+  # event is written strictly after the baseline sample by construction rather
+  # than by timing. The adapter calls _grok_events_file once for the baseline
+  # and once per poll iteration, so emitting the event on the second call places
+  # it unambiguously after the baseline — no sleep, no background job, no
+  # dependence on machine load. This still tests the real contract: an event
+  # that arrives only after submission must be observed as new.
+  #
+  # The call counter lives in a FILE, not a variable: the adapter invokes this
+  # via command substitution, so a variable increment would happen in a subshell
+  # and be discarded (leaving the counter stuck at 1 and the event never written).
+  grok_calls="$resume_home/events.calls"; printf '0\n' >"$grok_calls"
+  _grok_events_file() {
+    local n
+    n=$(( $(cat "$grok_calls") + 1 ))
+    printf '%s\n' "$n" >"$grok_calls"
+    [[ "$n" -eq 2 ]] && printf '{"type":"turn_started"}\n' >>"$grok_events"
+    printf '%s\n' "$grok_events"
+  }
   lane_set resume-grok cwd "$fixture" session_id grok-session pending_transition '{"to_arm":{"provider":"grok","model":"grok-new","effort":"high"},"provisional_session":{"session_id":"grok-session","ownership":{"tmux_session":"test","tmux_window":"@resume","tmux_pane_pid":"1"}}}'
   WASPFLOW_SUBMIT_ATTEMPTS=30 grok_resume_with_arm resume-grok prompt false
   grep -Fq -- 'grok\ -m\ grok-new' "$resume_argv" && grep -Fq -- '--effort\ high' "$resume_argv" && grep -Fq -- '--resume\ grok-session' "$resume_argv" \
