@@ -1373,6 +1373,159 @@ grep -q 'bash -c "\$command"' "$root/lib/artifacts.sh" || { echo "artifacts: ver
 # exit nonzero (which trained callers to ignore spawn's exit code, hiding real fails).
 grep -q 'spawn_submitted' "$root/bin/waspflow" || { echo "spawn: submission-confirmation (spawn_submitted) missing" >&2; exit 1; }
 
+# Generic launch provenance is an append-only producer boundary: no prompt text
+# enters the receipt, an optional opaque parent ref is retained, stable event IDs
+# make a retry idempotent, and owner-only storage is created under WASPFLOW_HOME.
+(
+  provenance_home="$(mktemp -d "$scratch/waspflow-provenance-XXXXXX")"
+  export WASPFLOW_HOME="$provenance_home" WASPFLOW_LIB="$root/lib"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/provenance.sh"
+  lane_set provenance-lane \
+    lane_uuid "11111111-2222-3333-4444-555555555555" provider codex \
+    session_id "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" \
+    codex_marker "WASPFLOW_LANE_MARKER:provenance-lane:opaque" \
+    prompt "do not retain this secret-looking prompt" \
+    provenance_parent_ref "agent-session/v1/codex/root-session" \
+    provenance_parent_evidence_class "caller_asserted"
+  provenance_emit_lane_started provenance-lane
+  provenance_emit_worker_session_bound provenance-lane
+  provenance_emit_lane_started provenance-lane
+  provenance_emit_worker_session_bound provenance-lane
+  lane_set provenance-unparented lane_uuid "66666666-7777-8888-9999-aaaaaaaaaaaa" provider claude prompt "ordinary task"
+  provenance_emit_lane_started provenance-unparented
+  ledger="$provenance_home/provenance.jsonl"
+  [[ "$(wc -l <"$ledger" | tr -d ' ')" == 3 ]] \
+    || { echo "provenance: unexpected launch-event count (retry may have duplicated an event)" >&2; exit 1; }
+  jq -s -e '
+    length == 3 and
+    all(.[]; .schema == "agent-provenance/v1" and .schema_version == 1 and
+      (.producer.name == "waspflow") and (.producer.instance_id | test("^[0-9a-f-]{36}$"))) and
+    any(.[]; .event_type == "lane_started" and .parent.ref == "agent-session/v1/codex/root-session" and
+      .parent.evidence_class == "caller_asserted" and (.evidence.task_fingerprint | startswith("sha256:"))) and
+    any(.[]; .event_type == "lane_started" and .lane.label == "provenance-unparented" and
+      .parent.ref == null and .parent.evidence_class == "absent") and
+    any(.[]; .event_type == "worker_session_bound" and
+      .worker.harness == "codex" and .worker.native_session_id == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+  ' "$ledger" >/dev/null \
+    || { echo "provenance: receipt schema or identity is wrong" >&2; exit 1; }
+  ! grep -Fq 'do not retain this secret-looking prompt' "$ledger" \
+    || { echo "provenance: raw prompt leaked into receipt" >&2; exit 1; }
+  [[ "$(stat -c '%a' "$ledger")" == 600 && "$(stat -c '%a' "$provenance_home/provenance-instance-id")" == 600 ]] \
+    || { echo "provenance: receipt storage is not owner-only" >&2; exit 1; }
+  ! provenance_validate_parent_ref $'bad\nref' \
+    || { echo "provenance: newline parent ref was accepted" >&2; exit 1; }
+  provenance_resolve_parent_context "flag-parent" "environment-parent" "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+  [[ "$PROVENANCE_PARENT_REF" == "flag-parent" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "caller_asserted" ]] \
+    || { echo "provenance: explicit parent ref did not win precedence" >&2; exit 1; }
+  provenance_resolve_parent_context "" "environment-parent" "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+  [[ "$PROVENANCE_PARENT_REF" == "environment-parent" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "caller_asserted" ]] \
+    || { echo "provenance: WASPFLOW_PARENT_REF did not win precedence" >&2; exit 1; }
+  provenance_resolve_parent_context "" "" "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+  [[ "$PROVENANCE_PARENT_REF" == "codex:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "observed_harness_env" ]] \
+    || { echo "provenance: valid CODEX_THREAD_ID was not captured as observed context" >&2; exit 1; }
+  provenance_resolve_parent_context "" "" "not-a-thread-id"
+  [[ -z "$PROVENANCE_PARENT_REF" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "absent" ]] \
+    || { echo "provenance: invalid CODEX_THREAD_ID was not ignored" >&2; exit 1; }
+  provenance_resolve_parent_context "" "" ""
+  [[ -z "$PROVENANCE_PARENT_REF" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "absent" ]] \
+    || { echo "provenance: direct shell without harness context was not absent" >&2; exit 1; }
+  rm -rf "$provenance_home"
+)
+
+# Receipt emission is safe when a lifecycle command races itself: event identity
+# is lane-derived, the JSONL append lock deduplicates, and only a torn final
+# fragment is repaired. Earlier corruption remains a hard stop.
+(
+  race_home="$(mktemp -d "$scratch/waspflow-provenance-race-XXXXXX")"
+  export WASPFLOW_HOME="$race_home" WASPFLOW_LIB="$root/lib"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/provenance.sh"
+  lane_set provenance-race lane_uuid "bbbbbbbb-cccc-dddd-eeee-ffffffffffff" provider codex \
+    session_id "11111111-2222-3333-4444-555555555555" prompt "race prompt" \
+    provenance_version 1 provenance_lane_started_emitted false provenance_worker_bound_emitted false
+  for _ in $(seq 1 30); do
+    WASPFLOW_HOME="$race_home" WASPFLOW_LIB="$root/lib" bash -c '
+      source "$WASPFLOW_LIB/core.sh"
+      source "$WASPFLOW_LIB/provenance.sh"
+      provenance_reconcile_lane provenance-race
+    ' &
+  done
+  wait
+  race_ledger="$race_home/provenance.jsonl"
+  jq -s -e 'length == 2 and ([.[].event_id] | unique | length == 2) and
+    ([.[].event_type] | sort == ["lane_started","worker_session_bound"])' "$race_ledger" >/dev/null \
+    || { echo "provenance: concurrent reconciliation duplicated or lost events" >&2; exit 1; }
+  printf '{"torn"' >>"$race_ledger"
+  _provenance_append "waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:tail-test" \
+    '{"schema":"agent-provenance/v1","schema_version":1,"event_id":"waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:tail-test"}'
+  jq -s -e 'length == 3 and all(.[]; type == "object")' "$race_ledger" >/dev/null \
+    || { echo "provenance: torn final fragment was not safely repaired" >&2; exit 1; }
+  _provenance_append "waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:tail-test" \
+    '{"schema":"agent-provenance/v1","schema_version":1,"event_id":"waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:tail-test"}'
+  [[ "$(wc -l <"$race_ledger" | tr -d ' ')" == 3 ]] \
+    || { echo "provenance: crash-window retry duplicated an existing event" >&2; exit 1; }
+  printf '{"schema":"agent-provenance/v1","schema_version":1,"event_id":"waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:complete-no-newline"}' >>"$race_ledger"
+  _provenance_append "waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:after-complete-no-newline" \
+    '{"schema":"agent-provenance/v1","schema_version":1,"event_id":"waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:after-complete-no-newline"}'
+  jq -s -e 'length == 5 and all(.[]; type == "object")' "$race_ledger" >/dev/null \
+    || { echo "provenance: complete final object without newline was not preserved" >&2; exit 1; }
+  printf '{"broken":}\n{"still":"bad"' >"$race_ledger"
+  corrupt_before="$(sha256sum "$race_ledger" | awk '{print $1}')"
+  _provenance_append "waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:must-not-append" \
+    '{"schema":"agent-provenance/v1","schema_version":1,"event_id":"waspflow:bbbbbbbb-cccc-dddd-eeee-ffffffffffff:must-not-append"}' \
+    && { echo "provenance: earlier corruption was incorrectly repaired" >&2; exit 1; }
+  [[ "$corrupt_before" == "$(sha256sum "$race_ledger" | awk '{print $1}')" ]] \
+    || { echo "provenance: earlier corruption changed during refusal" >&2; exit 1; }
+  rm -rf "$race_home"
+)
+
+# Reconciliation records a confirmed launch immediately, waits honestly for a
+# late provider session ID, and clears its pending state once binding succeeds.
+(
+  late_home="$(mktemp -d "$scratch/waspflow-provenance-late-XXXXXX")"
+  export WASPFLOW_HOME="$late_home" WASPFLOW_LIB="$root/lib"
+  source "$root/lib/core.sh"
+  source "$root/lib/provenance.sh"
+  lane_set provenance-late lane_uuid "cccccccc-dddd-eeee-ffff-000000000000" provider qwen prompt "late session" \
+    provenance_version 1 provenance_lane_started_emitted false provenance_worker_bound_emitted false
+  provenance_reconcile_lane provenance-late
+  [[ "$(lane_get provenance-late provenance_state)" == waiting_for_worker_session \
+      && "$(wc -l <"$late_home/provenance.jsonl" | tr -d ' ')" == 1 ]] \
+    || { echo "provenance: missing session was incorrectly reported as recorded" >&2; exit 1; }
+  lane_set provenance-late session_id "22222222-3333-4444-5555-666666666666"
+  provenance_reconcile_lane provenance-late
+  [[ "$(lane_get provenance-late provenance_state)" == recorded \
+      && "$(wc -l <"$late_home/provenance.jsonl" | tr -d ' ')" == 2 ]] \
+    || { echo "provenance: late session did not reconcile to recorded" >&2; exit 1; }
+  rm -rf "$late_home"
+)
+
+# A write failure is visible but not sticky: the next reconciliation retries the
+# same deterministic launch event and clears the failed state on success.
+(
+  retry_home="$(mktemp -d "$scratch/waspflow-provenance-retry-XXXXXX")"
+  export WASPFLOW_HOME="$retry_home" WASPFLOW_LIB="$root/lib"
+  source "$root/lib/core.sh"
+  source "$root/lib/provenance.sh"
+  lane_set provenance-retry lane_uuid "dddddddd-eeee-ffff-0000-111111111111" provider antigravity prompt "retry" \
+    provenance_version 1 provenance_lane_started_emitted false provenance_worker_bound_emitted false
+  printf '{"corrupt":}\n' >"$retry_home/provenance.jsonl"
+  provenance_reconcile_lane provenance-retry \
+    && { echo "provenance: corrupt ledger incorrectly reported launch success" >&2; exit 1; }
+  [[ "$(lane_get provenance-retry provenance_state)" == launch_event_failed ]] \
+    || { echo "provenance: launch failure state was not recorded" >&2; exit 1; }
+  : >"$retry_home/provenance.jsonl"
+  provenance_reconcile_lane provenance-retry
+  [[ "$(lane_get provenance-retry provenance_state)" == waiting_for_worker_session ]] \
+    || { echo "provenance: successful retry did not clear launch failure" >&2; exit 1; }
+  rm -rf "$retry_home"
+)
+
 # Dead-on-arrival spawn: when a provider adapter cannot confirm the task submitted
 # (returns nonzero), cmd_spawn must exit 3, record spawn_submitted=false, and warn
 # loudly — never a phantom "spawned". Drive the REAL cmd_spawn with a fake provider
@@ -1802,6 +1955,7 @@ mcpp_mcp_policy() { case "$1" in auto) printf '%s\n' '{"resolved":"none","warnin
 mcpp_spawn() {
   local lane="$1" cwd="$2"
   tmux_create_owned_lane_window "$lane" "$cwd" "exec sleep 60" >/dev/null
+  lane_set "$lane" session_id "mcpp-session-$lane"
 }
 PROV
   sed -i '/^WASPFLOW_PROVIDERS=(/ s/)$/ mcpp)/' "$mcplib/core.sh"
@@ -1814,14 +1968,50 @@ PROV
   set -e
   [[ "$invalid_model_rc" -ne 0 && ! -d "$mcphome/lanes/invalid-model" ]] \
     || { echo "spawn: invalid model polluted the durable lane index" >&2; exit 1; }
-  WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
-    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-state -- "test policy" >/dev/null 2>&1
+  WASPFLOW_PARENT_REF='agent-session/v1/test/lower-priority' CODEX_THREAD_ID='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' \
+    WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-state \
+      --parent-ref 'agent-session/v1/test/root' -- "test policy" >/dev/null 2>&1
   jq -e '.mcp_requested == "auto" and .mcp_resolved == "none" and .mcp_warning == "test warning"' \
     "$mcphome/lanes/mcp-state/state.json" >/dev/null \
     || { echo "MCP state: requested/resolved receipt missing" >&2; exit 1; }
   jq -e '(.tmux_session != "") and (.tmux_window | startswith("@")) and (.tmux_pane_pid | tonumber > 0)' \
     "$mcphome/lanes/mcp-state/state.json" >/dev/null \
     || { echo "spawn: tmux ownership receipt missing" >&2; exit 1; }
+  jq -e 'select(.event_type == "lane_started" and .parent.ref == "agent-session/v1/test/root" and .parent.evidence_class == "caller_asserted")' \
+    "$mcphome/provenance.jsonl" >/dev/null \
+    || { echo "spawn: --parent-ref did not reach the generic provenance receipt" >&2; exit 1; }
+  jq -e 'select(.event_type == "worker_session_bound" and .worker.native_session_id == "mcpp-session-mcp-state")' \
+    "$mcphome/provenance.jsonl" >/dev/null \
+    || { echo "spawn: confirmed worker session did not produce a binding receipt" >&2; exit 1; }
+  WASPFLOW_PARENT_REF='agent-session/v1/test/env' CODEX_THREAD_ID='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' \
+    WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-parent-env -- "test environment parent" >/dev/null 2>&1
+  env -u WASPFLOW_PARENT_REF CODEX_THREAD_ID='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' \
+    WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-codex-context -- "test observed codex context" >/dev/null 2>&1
+  env -u WASPFLOW_PARENT_REF CODEX_THREAD_ID='not-a-thread-id' \
+    WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-invalid-context -- "test invalid codex context" >/dev/null 2>&1
+  env -u WASPFLOW_PARENT_REF -u CODEX_THREAD_ID \
+    WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-direct-shell -- "test direct shell" >/dev/null 2>&1
+  jq -e 'select(.event_type == "lane_started" and .lane.label == "mcp-parent-env" and
+    .parent.ref == "agent-session/v1/test/env" and .parent.evidence_class == "caller_asserted")' \
+    "$mcphome/provenance.jsonl" >/dev/null \
+    || { echo "spawn: WASPFLOW_PARENT_REF did not outrank CODEX_THREAD_ID" >&2; exit 1; }
+  jq -e 'select(.event_type == "lane_started" and .lane.label == "mcp-codex-context" and
+    .parent.ref == "codex:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" and .parent.evidence_class == "observed_harness_env")' \
+    "$mcphome/provenance.jsonl" >/dev/null \
+    || { echo "spawn: valid CODEX_THREAD_ID did not create observed parent context" >&2; exit 1; }
+  jq -e 'select(.event_type == "lane_started" and .lane.label == "mcp-invalid-context" and
+    .parent.ref == null and .parent.evidence_class == "absent")' \
+    "$mcphome/provenance.jsonl" >/dev/null \
+    || { echo "spawn: invalid CODEX_THREAD_ID invented a parent context" >&2; exit 1; }
+  jq -e 'select(.event_type == "lane_started" and .lane.label == "mcp-direct-shell" and
+    .parent.ref == null and .parent.evidence_class == "absent")' \
+    "$mcphome/provenance.jsonl" >/dev/null \
+    || { echo "spawn: direct shell invented a parent context" >&2; exit 1; }
   WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
     "$root/bin/waspflow" spawn --provider mcpp --lane mcp-state -- "must not overwrite" >/dev/null 2>&1 \
     && { echo "spawn: overwrote an unreaped lane" >&2; exit 1; }
@@ -2412,7 +2602,7 @@ FAIL
   old_path="$PATH"; export PATH="$failbin:$PATH"
   # Keep the pane alive long enough to capture its immutable ownership before
   # the intentionally failed cgroup launcher falls back to the original command.
-  spawn_scope_lane scope-fallback 'sleep 0.1; printf fallback > fallback-ran'
+  spawn_scope_lane scope-fallback 'sleep 5; printf fallback > fallback-ran'
   for _ in $(seq 1 150); do [[ -f "$scopework/fallback-ran" ]] && break; sleep 0.1; done
   [[ -f "$scopework/fallback-ran" ]] || { echo "scope: launch failure skipped original pane command" >&2; exit 1; }
   jq -e '(.cgroup_scope_receipts // []) == [] and .cgroup_fallbacks[-1].reason == "scope-launch-failed" and .tmux_window != ""' \

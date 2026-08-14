@@ -62,6 +62,8 @@ source "$WASPFLOW_LIB/exec.sh"
 source "$WASPFLOW_LIB/worktree.sh"
 # shellcheck disable=SC1090
 source "$WASPFLOW_LIB/artifacts.sh"
+# shellcheck disable=SC1090
+source "$WASPFLOW_LIB/provenance.sh"
 # shellcheck source=/dev/null
 source "$WASPFLOW_LIB/escalation.sh"
 # shellcheck disable=SC1090
@@ -151,6 +153,7 @@ Spawn opts:
   --verify-strength <suite|smoke>
                     declare oracle strength for the receipt (never inferred)
   --prepare <cmd>    run setup command before --verify
+  --parent-ref <s>   opaque parent-session reference recorded in the launch provenance receipt
   --arg <flag>       pass an extra arg to the provider CLI
 
 Exec opts:
@@ -196,7 +199,7 @@ split_after_ddash() {
 # ============================================================================
 
 cmd_spawn() {
-  local provider="" lane="" model="" cwd="$PWD" isolate=0 effort="" mcp="auto" report="" no_recovery=0
+  local provider="" lane="" model="" cwd="$PWD" isolate=0 effort="" mcp="auto" report="" no_recovery=0 parent_ref="" parent_ref_explicit=false
   local verify_command="" verify_name="verify" verify_timeout=1800 prepare_command="" verify_strength=""
   local op_id="" OP_ID="" OP_MODE="" provider_explicit=false model_explicit=false auto=false ack_deprecated=false accept_provider_default=false
   local -a extra=()
@@ -225,6 +228,11 @@ cmd_spawn() {
       --verify-timeout) verify_timeout="${2:-}"; shift 2 ;;
       --verify-strength) verify_strength="${2:-}"; shift 2 ;;
       --prepare) prepare_command="${2:-}"; shift 2 ;;
+      --parent-ref)
+        [[ $# -ge 2 ]] || die "spawn: --parent-ref requires a value"
+        [[ -n "$2" ]] || die "spawn: --parent-ref requires a non-empty value"
+        parent_ref="$2"; parent_ref_explicit=true; shift 2
+        ;;
       --arg)      extra+=("${2:-}"); shift 2 ;;   # repeatable pass-through to the agent CLI
       "")         shift ;;
       *) die "spawn: unknown option '$1'" ;;
@@ -264,6 +272,12 @@ cmd_spawn() {
   [[ -n "$lane" ]] || die "spawn: --lane is required"
   validate_lane_name "$lane"
   [[ -n "$prompt" ]] || die "spawn: a task prompt is required after '--'"
+  local explicit_parent_ref=""
+  [[ "$parent_ref_explicit" == true ]] && explicit_parent_ref="$parent_ref"
+  provenance_resolve_parent_context "$explicit_parent_ref" "${WASPFLOW_PARENT_REF:-}" "${CODEX_THREAD_ID:-}"
+  parent_ref="$PROVENANCE_PARENT_REF"
+  local parent_evidence_class="$PROVENANCE_PARENT_EVIDENCE_CLASS"
+  provenance_validate_parent_ref "$parent_ref"
   cwd="$(cd "$cwd" && pwd)" || die "spawn: --cwd does not exist"
   guard_cwd "$cwd"   # never hand a worker '/' silently (known grok --cwd / crash)
   if [[ -n "$effort" && ! "$effort" =~ ^(none|minimal|low|medium|high|xhigh|max)$ ]]; then
@@ -550,7 +564,14 @@ cmd_spawn() {
     baseline_oracle_state "" \
     baseline_oracle_reason "" \
     spawn_epoch "$spawned_epoch" \
-    prompt "$prompt"
+    prompt "$prompt" \
+    provenance_parent_ref "$parent_ref" \
+    provenance_parent_evidence_class "$parent_evidence_class" \
+    provenance_version "1" \
+    provenance_lane_started_event_id "" \
+    provenance_lane_started_emitted "false" \
+    provenance_worker_bound_event_id "" \
+    provenance_worker_bound_emitted "false"
 
   # Durable artifacts: prompt + git-status-before, automatically (no flag).
   artifacts_capture_before "$lane" "$work_cwd" "$prompt"
@@ -590,6 +611,9 @@ cmd_spawn() {
     lane_set "$lane" status "spawn_failed" spawn_submitted "false"
     die "spawn: provider reported success but created no owned tmux window"
   fi
+
+  provenance_reconcile_lane "$lane" \
+    || warn "spawn: lane '$lane' was submitted, but its provenance receipt could not be written (a later lifecycle command will retry)"
 
   log "spawned $provider lane '$lane' (tmux: $WASPFLOW_TMUX_SESSION:$lane) — next: wait/peek/revise/reap $lane"
   [[ -n "$report_abs" ]] && log "  deliverable contract: $report_abs (verified on idle; one recovery pass if missing)"
@@ -925,6 +949,11 @@ cmd_status() {
   if [[ "$(lane_get "$lane" provider)" == codex ]]; then
     provider_refresh_runtime_settings "$lane"
   fi
+  # Some providers discover their native session asynchronously. Bind it the
+  # first time any ordinary read sees it; this adds immutable evidence without
+  # changing lane lifecycle or requiring a resident watcher.
+  provenance_reconcile_lane "$lane" \
+    || warn "status: lane '$lane' provenance reconciliation failed; it will retry on the next lifecycle command"
   jq . "$sf" 2>/dev/null || die "lane '$lane' has corrupted state.json ($sf) — cannot parse"
 }
 
@@ -1053,6 +1082,8 @@ cmd_wait() {
       || die "wait: escalation in progress for lane '$lane'"
     provider="$(lane_get "$lane" provider)"
     load_provider "$provider"
+    provenance_reconcile_lane "$lane" \
+      || warn "wait: lane '$lane' provenance reconciliation failed; continuing to observe the worker"
     if [[ "$barrier_cleared" -eq 0 ]]; then
       local cur_mark
       cur_mark="$("${provider}_turn_mark" "$lane" 2>/dev/null)" || true
@@ -1169,6 +1200,8 @@ _park_one() {
 
 _park_one_locked() {
   local lane="$1" reason="$2" adopt_legacy="${3:-0}"
+  provenance_reconcile_lane "$lane" \
+    || warn "park: lane '$lane' provenance reconciliation failed; the lane remains retryable"
   lane_is_parkable "$lane" "$adopt_legacy" || { err "park: lane '$lane' refused: $PARK_REFUSAL"; return 1; }
   if [[ "$PARK_NEEDS_ADOPT" -eq 1 ]]; then
     tmux_capture_lane_ownership "$lane" \
@@ -1431,6 +1464,8 @@ _reap_one() {
 
 _reap_one_locked() {
   local lane="$1" force="$2" keep_wt="$3" no_archive="$4"
+  provenance_reconcile_lane "$lane" \
+    || warn "reap: lane '$lane' provenance reconciliation failed; finalization continues with the failure recorded"
   if [[ "$(lane_get "$lane" status)" == escalating ]] || escalate_transition_requires_resolution "$lane"; then
     err "reap: escalation transition must be resumed or aborted for lane '$lane'"
     err "  next: waspflow escalate $lane --resume-transition"
