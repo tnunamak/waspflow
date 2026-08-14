@@ -628,8 +628,8 @@ EOF
     elif command -v grok >/dev/null 2>&1; then provider="grok"
     elif command -v agy >/dev/null 2>&1; then provider="antigravity"
     elif command -v qwen >/dev/null 2>&1; then provider="qwen"
-    elif command -v deepseek >/dev/null 2>&1; then provider="deepseek"
-    else die "demo: no provider found on PATH (install codex, claude, grok, agy, qwen, or deepseek, or pass --provider)"
+    elif command -v dsh >/dev/null 2>&1; then provider="deepseek"
+    else die "demo: no provider found on PATH (install codex, claude, grok, agy, qwen, or dsh, or pass --provider)"
     fi
   fi
   is_known_provider "$provider" || die "demo: unknown provider '$provider'"
@@ -1520,14 +1520,19 @@ cmd_doctor() {
   done
   command -v curl >/dev/null 2>&1 || ok=0
   command -v uuidgen >/dev/null 2>&1 || [[ -r /proc/sys/kernel/random/uuid ]] || ok=0
-  for c in claude codex grok agy qwen deepseek curl uuidgen; do
+  # Binaries whose name differs from the waspflow provider name get the
+  # provider annotated, so `doctor` output stays greppable by provider.
+  local label
+  for c in claude codex grok agy qwen dsh curl uuidgen; do
+    label="$c"
+    case "$c" in agy) label="agy (antigravity)" ;; dsh) label="dsh (deepseek)" ;; esac
     if command -v "$c" >/dev/null 2>&1; then
-      echo "  [ok]   $c"
-      [[ "$c" == "claude" || "$c" == "codex" || "$c" == "grok" || "$c" == "agy" || "$c" == "qwen" || "$c" == "deepseek" ]] && agent_ok=1
+      echo "  [ok]   $label"
+      [[ "$c" == "claude" || "$c" == "codex" || "$c" == "grok" || "$c" == "agy" || "$c" == "qwen" || "$c" == "dsh" ]] && agent_ok=1
     elif [[ "$c" == "curl" || "$c" == "uuidgen" ]]; then
       echo "  [MISS] $c (required on systems without an equivalent)"
     else
-      echo "  [warn] $c (install at least one agent CLI)"
+      echo "  [warn] $label (install at least one agent CLI)"
     fi
   done
   if ! command -v uuidgen >/dev/null 2>&1 && [[ -r /proc/sys/kernel/random/uuid ]]; then

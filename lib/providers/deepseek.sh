@@ -1,49 +1,138 @@
 #!/usr/bin/env bash
-# deepseek.sh - waspflow adapter for DeepSeek Code (deepseek CLI).
+# deepseek.sh - waspflow adapter for DeepSeek Harness (`dsh` CLI).
 #
-# DeepSeek Code is treated as an opaque headless process.  Each
-# `deepseek -p ... --yolo` invocation is one-shot and exits when done.
-# Lifecycle truth lives in the Waspflow-owned receipt JSONL; DeepSeek's
-# internal session logs are used only for session ID discovery and
-# runtime attestation.
+# TESTED AGAINST: @deepseek-ai/dsh 0.1.0-rc.6 (developer preview, MIT,
+# github.com/deepseek-ai/deepseek-harness).  v0.1 is explicitly pre-stable;
+# re-probe `dsh --profile headless --help` and `dsh --profile headless
+# --dump-config` before bumping.  NOTE: `pip install deepseek-harness` is an
+# UNRELATED third-party project that also ships a `dsh` binary — only the npm
+# @deepseek-ai/dsh package is supported here.
 #
-# Session IDs cannot be pre-minted (no --session-id flag).  DeepSeek assigns
-# its own UUID, discovered from the stream-json session_start event or
-# from the filesystem (~/.deepseek/projects/<sanitized-cwd>/chats/).
+# PROBE PROVENANCE: every claim below was observed against the real rc.6 binary.
+# Live API reachability was confirmed (a headless run produced a genuine HTTP
+# 402 from api.deepseek.com), but the available credential had zero balance, so
+# NO SUCCEEDING TURN was ever observed.  The success path — stdout carrying the
+# assistant text, exit 0 — is derived from the runner source, not from a live
+# green run.  The only live model ids are deepseek-v4-flash (the profile
+# default) and deepseek-v4-pro; deepseek-chat / deepseek-reasoner are retired.
 #
-# A spawn marker file eliminates the unrelated-session race: the marker
-# is touched immediately before deepseek starts, and filesystem discovery
-# only adopts chat files newer than the marker.
+# ── The interface, as observed (not as wished for) ─────────────────────────
+#
+# The launcher parses only its own flags (-V/--version, --profile, --patch,
+# --dump-config, --dump-default-config); the first unrecognized token begins
+# the booted app's argv.  The headless app's ENTIRE option set is `-h`:
+#
+#   Usage: dsh --profile headless [options] [task...]
+#     Arguments:  task        the task text; multiple words are joined by spaces
+#     Options:    -h, --help  show this help
+#
+# There is therefore NO --model, NO --output-format, NO streaming JSON, NO
+# session-id flag, NO --resume, and NO --yolo.  Passing any of them is a hard
+# usage error ("error: unknown option '--model'").
+#
+# Stdout is the final assistant text plus one newline — plain text, never JSON.
+# On failure the runner writes `dsh: <CODE>: <message>` to stderr and exits
+# non-zero; exit 0 happens only when the turn's reason is `completed`.
+#
+# ── Model / effort selection ───────────────────────────────────────────────
+#
+# Selection is configuration, not argv.  Two seams exist and both were probed
+# live against rc.6:
+#
+#   * `--patch <file>`: a YAML patch list re-configuring the `agent-default-model`
+#     entry.  Verified to reach the real LLM route (the session log's
+#     request/context showed the patched model).  Its schema is
+#     z.object({provider, model}) ONLY — a `reasoningEffort` key survives into
+#     --dump-config but is dropped before the request.  So --patch carries the
+#     model and cannot carry effort.
+#   * `$DSH_HOME/settings.yaml` section `agent-default-model`: accepts provider,
+#     model AND reasoningEffort (verified: request header showed
+#     reasoningEffort:max).  This is USER-OWNED global state, so the adapter
+#     reads it but never writes it — a per-lane write would silently retarget
+#     every other dsh process on the machine.
+#
+# The adapter uses --patch (per-lane, side-effect free).  Effort is therefore
+# refused rather than silently ignored: see deepseek_validate_model_effort.
+#
+# ── Sessions ───────────────────────────────────────────────────────────────
+#
+# The headless runner mints `session-<randomUUID>` per invocation and NEVER
+# reads an existing session (verified in @deepseek-ai/dsh-headless: it calls
+# agents.create({sessionId: SessionId(`session-${randomUUID()}`)}) on every run).
+# One-shot is the whole contract; conversational resume does not exist in v0.1.
+#
+# Sessions are nonetheless persisted, by @deepseek-ai/dsh-session-persistence-jsonl
+# rooted at `$DSH_HOME/sessions` ($DSH_HOME defaults to ~/.dsh):
+#
+#   $DSH_HOME/sessions/--<lossily-encoded-cwd>--/session-<uuid>/session.jsonl[.zstd]
+#
+# The default compression is zstd.  The project-directory key is a LOSSY
+# encoding (separator runs collapse, unsafe code units become ~XXXX, the whole
+# key is truncated to 251 chars), so this adapter deliberately does NOT
+# reimplement it — discovery scans the sessions root for a session directory
+# newer than a spawn marker instead, which is encoding-independent.
+#
+# A session log is written even when the run fails (e.g. MISSING_CREDENTIAL),
+# so the presence of a session proves invocation, never success.  Lifecycle
+# truth lives in the waspflow-owned receipt JSONL; the dsh session log is used
+# only for session-id discovery and runtime attestation.
 
 DEEPSEEK_RECEIPTS_NAME="deepseek-receipts.jsonl"
 DEEPSEEK_MARKER_NAME=".deepseek-spawn-marker"
 DEEPSEEK_SID_NAME=".deepseek-sid"
+DEEPSEEK_PATCH_NAME=".deepseek-model.patch.yml"
 
+# The dsh harness home; $DSH_HOME wins, else ~/.dsh (verified: resolveDshHome).
+_deepseek_home() { printf '%s\n' "${DSH_HOME:-$HOME/.dsh}"; }
+
+# dsh ships no model-enumeration command and no on-disk catalog: the default
+# catalog (deepseek-v4-flash, deepseek-v4-pro) is a JS constant inside
+# @deepseek-ai/dsh-llm-deepseek, and a deployment may override it from the
+# `llm-deepseek` settings section.  A user-authored catalog IS enumerable, so
+# report it as local_cache; otherwise report non_enumerable rather than
+# pretending the hardcoded pair is authoritative.
 deepseek_valid_models() {
-  local settings="$HOME/.deepseek/settings.json"
-  if [[ ! -f "$settings" ]]; then printf 'source=none\n'; return 0; fi
-  local models
-  models="$(jq -r '.modelProviders.openai[]?.id // empty' "$settings" 2>/dev/null)" || {
-    printf 'source=none\n'; return 0
-  }
-  [[ -n "$models" ]] || { printf 'source=none\n'; return 0; }
-  printf '%s\n' 'source=settings_json'
-  printf '%s\n' "$models" | awk 'NF && !seen[$0]++'
+  local settings; settings="$(_deepseek_home)/settings.yaml"
+  local models=""
+  if [[ -f "$settings" ]] && command -v python3 >/dev/null 2>&1; then
+    models="$(python3 - "$settings" <<'PY' 2>/dev/null || true
+import sys
+try:
+    import yaml
+except Exception:
+    sys.exit(0)
+try:
+    with open(sys.argv[1]) as fh:
+        doc = yaml.safe_load(fh) or {}
+except Exception:
+    sys.exit(0)
+section = doc.get("llm-deepseek") or {}
+for model in (section.get("models") or []):
+    if isinstance(model, dict) and model.get("id"):
+        print(model["id"])
+PY
+)"
+  fi
+  if [[ -n "$models" ]]; then
+    printf 'source=local_cache\n'
+    printf '%s\n' "$models" | awk 'NF && !seen[$0]++'
+    return 0
+  fi
+  printf 'source=non_enumerable\n'
 }
 
-# DeepSeek Code has no surgical MCP-disable flag.  --safe-mode disables MCP
-# but also disables context files, hooks, extensions, and skills.
+# dsh v0.1 has no MCP-disable flag on the headless profile.  MCP servers are
+# ordinary plugins in the profile tree, so "no MCP" would mean rewriting the
+# user's profile — not a boundary this adapter can honestly assert.
 deepseek_mcp_policy() {
-  local requested="$1" cwd="${2:-$PWD}" state="absent"
-  local settings="$HOME/.deepseek/settings.json"
-  if [[ -f "$settings" ]] && jq -e '.mcpServers | length > 0' "$settings" >/dev/null 2>&1; then
-    state="present"
-  fi
+  local requested="$1" cwd="${2:-$PWD}" state="absent" profile
+  profile="$(_deepseek_home)/profiles/headless/cordis.patch.yml"
+  if [[ -f "$profile" ]] && grep -q 'mcp' "$profile" 2>/dev/null; then state="present"; fi
   case "$requested" in
-    inherit) jq -cn --arg s "$state" '{resolved:"inherit",warning:(if $s == "present" then "deepseek MCP configuration inherited from ~/.deepseek/settings.json." else "deepseek MCP configuration inheritance is provider-controlled; no MCP servers configured." end),argv:[],env:{}}' ;;
-    auto) jq -cn --arg s "$state" '{resolved:"inherit",warning:(if $s == "present" then "deepseek MCP auto resolves to inherit: MCP servers are configured in settings.json." else "deepseek MCP auto resolves to inherit: deepseek has no surgical MCP-disable flag; --safe-mode disables all customizations." end),argv:[],env:{}}' ;;
+    inherit) jq -cn --arg s "$state" '{resolved:"inherit",warning:(if $s == "present" then "dsh MCP configuration inherited from the headless profile patch layer." else "dsh MCP configuration inheritance is provider-controlled; no MCP entries found in the headless profile patch layer." end),argv:[],env:{}}' ;;
+    auto) jq -cn --arg s "$state" '{resolved:"inherit",warning:(if $s == "present" then "dsh MCP auto resolves to inherit: MCP entries are configured in the headless profile." else "dsh MCP auto resolves to inherit: dsh v0.1 has no MCP-disable flag; MCP servers are profile plugins." end),argv:[],env:{}}' ;;
     none)
-      err "deepseek: --mcp none is unsupported; deepseek has no surgical MCP-disable flag (--safe-mode disables all customizations). Refusing an unverified MCP boundary (config=$state)"
+      err "deepseek: --mcp none is unsupported; dsh v0.1 has no MCP-disable flag (MCP servers are plugins in the profile tree). Refusing an unverified MCP boundary (config=$state)"
       return 1
       ;;
     *) return 1 ;;
@@ -51,32 +140,35 @@ deepseek_mcp_policy() {
 }
 
 deepseek_preflight() {
-  command -v deepseek >/dev/null 2>&1 || { err "deepseek not found on PATH"; return 1; }
+  command -v dsh >/dev/null 2>&1 || { err "dsh not found on PATH (install the DeepSeek Harness CLI: npm i -g @deepseek-ai/dsh)"; return 1; }
+  # The headless profile is what waspflow drives; a dsh install without it
+  # fails at boot with a profile-does-not-exist error, so check up front.
+  [[ -d "$(_deepseek_home)/profiles/headless" ]] || {
+    err "deepseek: the dsh 'headless' profile does not exist under $(_deepseek_home)/profiles (create it with: dsh plugin --profile headless add @deepseek-ai/dsh-headless)"
+    return 1
+  }
   billing_preflight_provider deepseek 2>/dev/null || true
   return 0
 }
 
-# Discover the DeepSeek session ID for a lane.
+# Discover the dsh session ID for a lane.
 #
 # Three-tier fallback chain:
 #   1. lane state   — written by the generated script on completion (primary)
 #   2. .deepseek-sid — written by the generated script immediately after
-#                      extracting the session ID from the stream-json log,
-#                      BEFORE lane_set.  Survives crashes between extraction
-#                      and state persistence.  Deterministic — no race.
-#   3. filesystem   — scans ~/.deepseek/projects/<cwd>/chats/ for a single chat
-#                      file newer than the spawn marker.  Last resort for
-#                      crashes that lose both state and the sid file.  Has a
-#                      narrow race window (concurrent same-cwd deepseek between
-#                      marker touch and chat-file creation).
+#                      reading the session id off disk, BEFORE lane_set.
+#                      Survives crashes between discovery and state persistence.
+#   3. filesystem   — scans $DSH_HOME/sessions for exactly one session-*
+#                      directory newer than the spawn marker.  Last resort;
+#                      the marker bounds it, but a concurrent dsh run started
+#                      in the same window would make it ambiguous (in which
+#                      case it deliberately returns nothing rather than guess).
 deepseek_discover_session() {
-  local lane="$1" sid sid_file cwd marker chats candidates
+  local lane="$1" sid sid_file marker root candidates
 
-  # Tier 1: lane state.
   sid="$(lane_get "$lane" session_id)"
   [[ -n "$sid" ]] && { printf '%s\n' "$sid"; return 0; }
 
-  # Tier 2: durable sid file (crash recovery, deterministic).
   sid_file="$(_deepseek_sid_file "$lane")"
   if [[ -s "$sid_file" ]]; then
     sid="$(cat "$sid_file")"
@@ -87,17 +179,15 @@ deepseek_discover_session() {
     fi
   fi
 
-  # Tier 3: marker-scoped filesystem scan (last resort, narrow race).
   marker="$(lane_dir "$lane")/$DEEPSEEK_MARKER_NAME"
   [[ -f "$marker" ]] || return 0
+  root="$(_deepseek_home)/sessions"
+  [[ -d "$root" ]] || return 0
 
-  cwd="$(lane_get "$lane" cwd)"
-  chats="$HOME/.deepseek/projects/$(_deepseek_sanitized_cwd "${cwd:-$PWD}")/chats"
-  [[ -d "$chats" ]] || return 0
-
-  candidates="$(find "$chats" -maxdepth 1 -type f -name '*.jsonl' -newer "$marker" 2>/dev/null)"
+  # The project-key encoding is lossy, so scan by mtime rather than by path.
+  candidates="$(find "$root" -mindepth 2 -maxdepth 2 -type d -name 'session-*' -newer "$marker" 2>/dev/null)"
   [[ "$(awk 'NF { count++ } END { print count + 0 }' <<<"$candidates")" -eq 1 ]] || return 0
-  sid="$(basename "$candidates" .jsonl)"
+  sid="$(basename "$candidates")"
   lane_set "$lane" session_id "$sid"
   printf '%s\n' "$sid"
 }
@@ -105,6 +195,7 @@ deepseek_discover_session() {
 _deepseek_receipt_file() { printf '%s/%s\n' "$(lane_dir "$1")" "$DEEPSEEK_RECEIPTS_NAME"; }
 _deepseek_marker_file() { printf '%s/%s\n' "$(lane_dir "$1")" "$DEEPSEEK_MARKER_NAME"; }
 _deepseek_sid_file() { printf '%s/%s\n' "$(lane_dir "$1")" "$DEEPSEEK_SID_NAME"; }
+_deepseek_patch_file() { printf '%s/%s\n' "$(lane_dir "$1")" "$DEEPSEEK_PATCH_NAME"; }
 
 _deepseek_receipt() {
   local lane="$1" phase="$2" outcome="$3" rc="$4" sid="$5" started="$6" finished="$7" prompt_kind="$8"
@@ -116,8 +207,41 @@ _deepseek_receipt() {
     >>"$file"
 }
 
-# Sanitize a cwd to the DeepSeek project directory name (slashes → dashes).
-_deepseek_sanitized_cwd() { printf '%s' "$1" | sed 's|/|-|g'; }
+# Locate a session's log file, tolerating either compression setting.
+# Args: session-id.  Prints the path, or nothing.
+_deepseek_session_log() {
+  local sid="$1" root; root="$(_deepseek_home)/sessions"
+  [[ -n "$sid" && -d "$root" ]] || return 0
+  find "$root" -mindepth 3 -maxdepth 3 -type f -path "*/$sid/session.jsonl*" 2>/dev/null | head -1
+}
+
+# Stream a session log as plain JSONL regardless of compression.
+_deepseek_session_lines() {
+  local log="$1"
+  [[ -s "$log" ]] || return 1
+  case "$log" in
+    *.zstd) command -v zstdcat >/dev/null 2>&1 || return 1; zstdcat "$log" 2>/dev/null ;;
+    *) cat "$log" ;;
+  esac
+}
+
+# Write the per-lane --patch overlay that retargets `agent-default-model`.
+# Emitting nothing (and printing no path) when no model is requested keeps the
+# provider's own default authoritative.
+_deepseek_write_model_patch() {
+  local lane="$1" model="$2" file
+  [[ -n "$model" ]] || return 0
+  file="$(_deepseek_patch_file "$lane")"
+  mkdir -p "$(dirname "$file")"
+  # dsh reads this as a YAML patch list; the id targets the composed entry.
+  {
+    printf -- '- id: agent-default-model\n'
+    printf -- '  config:\n'
+    printf -- '    provider: %s\n' "${DEEPSEEK_PROVIDER_ROUTE:-deepseek-official}"
+    printf -- '    model: %s\n' "$model"
+  } >"$file"
+  printf '%s\n' "$file"
+}
 
 # Build the shell script evaluated inside the lane-owned tmux process.
 #
@@ -125,34 +249,39 @@ _deepseek_sanitized_cwd() { printf '%s' "$1" | sed 's|/|-|g'; }
 #   1. sources core.sh + deepseek.sh for receipt/lane helpers
 #   2. touches the spawn marker (discovery race boundary)
 #   3. writes an invocation receipt
-#   4. runs deepseek with stream-json output tee'd to a log
-#   5. checks PIPESTATUS for both deepseek and tee
-#   6. extracts the session ID from the log
+#   4. runs `dsh --profile headless [--patch <model>] -- <task>` tee'd to a log
+#   5. checks PIPESTATUS for both dsh and tee
+#   6. discovers the session ID from $DSH_HOME/sessions (marker-scoped)
 #   7. writes a completion receipt with the correct outcome
 #   8. persists the session ID to lane state
 #   9. cleans up the log via an EXIT trap
 #
-# API keys are NEVER passed via argv; deepseek reads them from the inherited
-# environment.
+# API keys are NEVER passed via argv; dsh reads DEEPSEEK_API_KEY from the
+# inherited environment (which, per dsh-credentials-local, outranks its own
+# managed store).
 _deepseek_shell() {
   local lane="$1" model="$2" session_id="$3" prompt="$4" kind="$5"
   shift 5
   local extra=("$@")
-  local log adapter core marker
+  local log adapter core marker patch
   log="$(lane_dir "$lane")/.deepseek-log.$$"
   marker="$(_deepseek_marker_file "$lane")"
   adapter="${WASPFLOW_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/providers/deepseek.sh"
   core="${WASPFLOW_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/core.sh"
-  local argv=(deepseek -p "$prompt" --yolo --output-format stream-json)
-  [[ -n "$model" ]] && argv+=(--model "$model")
-  [[ -n "$session_id" ]] && argv+=(--resume "$session_id")
+
+  # session_id is accepted for contract symmetry but cannot be honored: the
+  # headless runner mints a fresh UUID per invocation.  Callers that need
+  # continuation must refuse earlier (deepseek_revise does).
+  patch="$(_deepseek_write_model_patch "$lane" "$model")"
+
+  local argv=(dsh --profile headless)
+  [[ -n "$patch" ]] && argv+=(--patch "$patch")
+  # `--` ends launcher parsing so a task beginning with '-' reaches the app.
+  argv+=(-- "$prompt")
   argv+=("${extra[@]}")
   local q a; q=""
   for a in "${argv[@]}"; do q+=" $(printf '%q' "$a")"; done
 
-  # Emit the generated script as a readable multi-line string.
-  # All dynamic values are injected via %q-escaped variables at the top;
-  # the body is a quoted heredoc with no further interpolation.
   printf 'source %q; source %q\n' "$core" "$adapter"
   cat <<'DEEPSEEK_SCRIPT'
 cleanup_log=""
@@ -171,7 +300,10 @@ pipeline_rc=("${PIPESTATUS[@]}")
 set -e
 rc=${pipeline_rc[0]}
 tee_rc=${pipeline_rc[1]}
-sid=$(jq -r 'select(.type=="system" and .subtype=="session_start") | .session_id // empty' "$cleanup_log" 2>/dev/null | head -1 || true)
+DEEPSEEK_SCRIPT
+  # Session discovery is filesystem-only: dsh prints no session id on stdout.
+  printf 'sid=$(deepseek_discover_session %q 2>/dev/null || true)\n' "$lane"
+  cat <<'DEEPSEEK_SCRIPT'
 outcome=failed
 if [[ "$rc" -eq 0 && "$tee_rc" -ne 0 ]]; then
   rc="$tee_rc"
@@ -183,18 +315,19 @@ fi
 finished=$(date +%s)
 DEEPSEEK_SCRIPT
   printf '_deepseek_receipt %q completion "$outcome" "$rc" "$sid" "$started" "$finished" %q\n' "$lane" "$kind"
-  # Persist the session ID to a durable file BEFORE lane_set.  If the
-  # process crashes between here and lane_set, tier-2 discovery recovers
-  # the ID deterministically (no filesystem race).
   printf 'if [[ -n "$sid" ]]; then printf "%%s" "$sid" > %q; fi\n' "$(_deepseek_sid_file "$lane")"
   printf 'if [[ -n "$sid" ]]; then lane_set %q session_id "$sid"; fi\n' "$lane"
   printf 'exit "$rc"\n'
 }
 
+# dsh CAN take a reasoning effort, but only through $DSH_HOME/settings.yaml —
+# global, user-owned state this adapter refuses to mutate per lane.  The
+# per-lane --patch seam silently drops reasoningEffort (its schema is
+# provider+model only), so honoring --effort here would be a lie.
 deepseek_validate_model_effort() {
   local _model="${1:-}" effort="${2:-}"
   if [[ -n "$effort" ]]; then
-    err "deepseek: --effort is unsupported by DeepSeek Code"
+    err "deepseek: --effort is unsupported; dsh v0.1 exposes reasoning effort only via the global \$DSH_HOME/settings.yaml 'agent-default-model' section, which waspflow will not rewrite per lane"
     return 1
   fi
 }
@@ -222,14 +355,11 @@ deepseek_spawn() {
   return 1
 }
 
-deepseek_session_resumable() {
-  local lane="$1" sid; sid="$(deepseek_discover_session "$lane")"
-  [[ -n "$sid" ]] || return 1
-  local cwd; cwd="$(lane_get "$lane" cwd)"
-  local sanitized; sanitized="$(_deepseek_sanitized_cwd "${cwd:-$PWD}")"
-  [[ -f "$HOME/.deepseek/projects/$sanitized/chats/${sid}.jsonl" ]] || return 1
-  jq -e --arg s "$sid" 'select(.phase=="completion" and .outcome=="succeeded" and .session_id==$s)' "$(_deepseek_receipt_file "$lane")" >/dev/null 2>&1
-}
+# A dsh session is never resumable: the headless runner mints a fresh session
+# per invocation and offers no way to attach to an existing one.  Reporting
+# "resumable" for a session that exists on disk would be false — the next turn
+# would start from an empty context while claiming continuity.
+deepseek_session_resumable() { return 1; }
 
 deepseek_is_idle() {
   local lane="$1" file; file="$(_deepseek_receipt_file "$lane")"
@@ -239,36 +369,31 @@ deepseek_is_idle() {
 
 deepseek_turn_mark() { local f; f="$(_deepseek_receipt_file "$1")"; jq -r 'select(.phase=="completion" and .outcome=="succeeded") | 1' "$f" 2>/dev/null | wc -l; }
 
+# Mid-run revision needs conversational continuity, which v0.1 cannot provide:
+# every `dsh --profile headless` invocation is a brand-new session with an
+# empty context.  Sending the follow-up anyway would produce a confident
+# answer to a question the agent has no context for — the worst failure mode.
 deepseek_revise() {
-  local lane="$1" message="$2" out_file="${3:-}" sid model cwd cmd
-  sid="$(deepseek_discover_session "$lane")"; [[ -n "$sid" ]] || { err "deepseek: no resumable session for lane '$lane'"; return 1; }
-  deepseek_session_resumable "$lane" || { err "deepseek: session '$sid' is not resumable (no successful completion)"; return 1; }
-  model="$(lane_get "$lane" model)"; cwd="$(lane_get "$lane" cwd)"
-  deepseek_validate_model_effort "$model" "$(lane_get "$lane" effort)" || return 1
-  cmd="$(_deepseek_shell "$lane" "$model" "$sid" "$message" revise)"
-  if [[ -n "$out_file" ]]; then
-    tmux_run_owned_lane_command "$lane" "${cwd:-$PWD}" headless-revise -- bash -lc "$cmd" </dev/null >"$out_file"
-  else
-    tmux_run_owned_lane_command "$lane" "${cwd:-$PWD}" headless-revise -- bash -lc "$cmd" </dev/null
-  fi
+  err "deepseek: revise is unsupported by DeepSeek Harness v0.1; the headless profile mints a fresh session per invocation (no --resume, no session-id flag), so a follow-up would run with no prior context. Spawn a new lane with the full task instead."
+  return 1
 }
 
-# DeepSeek cannot accept a caller-minted session ID, so it cannot participate in
-# the escalation state machine's provisional ownership protocol.
-deepseek_resume_with_arm() { err "deepseek: escalation hooks are unsupported by DeepSeek Code"; return 1; }
-deepseek_confirm_escalation_submission() { err "deepseek: escalation confirmation is unsupported by DeepSeek Code"; return 1; }
+# dsh cannot accept a caller-minted session ID, so it cannot participate in the
+# escalation state machine's provisional ownership protocol.
+deepseek_resume_with_arm() { err "deepseek: escalation hooks are unsupported by DeepSeek Harness"; return 1; }
+deepseek_confirm_escalation_submission() { err "deepseek: escalation confirmation is unsupported by DeepSeek Harness"; return 1; }
 
-# Read the model from the last assistant message in the session JSONL.
-# Guard large logs with timeout; only read typed top-level fields via jq.
+# Read the model actually used from the session log's request/context event —
+# dsh's own record of the route it dialed, so this is real attestation rather
+# than an echo of what we asked for.  Guard large logs with timeout.
 deepseek_refresh_runtime_settings() {
-  local lane="$1" sid cwd sanitized session_file observed_model
+  local lane="$1" sid log observed_model
   sid="$(deepseek_discover_session "$lane")"
   [[ -n "$sid" ]] || return 0
-  cwd="$(lane_get "$lane" cwd)"
-  sanitized="$(_deepseek_sanitized_cwd "${cwd:-$PWD}")"
-  session_file="$HOME/.deepseek/projects/$sanitized/chats/${sid}.jsonl"
-  [[ -f "$session_file" ]] || return 0
-  observed_model="$(timeout 5 jq -r 'select(.type=="assistant") | .model // empty' "$session_file" 2>/dev/null | tail -1)" || return 0
+  log="$(_deepseek_session_log "$sid")"
+  [[ -n "$log" ]] || return 0
+  observed_model="$(_deepseek_session_lines "$log" 2>/dev/null \
+    | timeout 5 jq -r 'select(.type=="request/context") | .data.model // empty' 2>/dev/null | tail -1)" || return 0
   [[ -n "$observed_model" ]] || return 0
   lane_set "$lane" runtime_model "$observed_model"
 }

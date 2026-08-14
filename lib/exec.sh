@@ -85,7 +85,7 @@ exec_run() {
   if [[ "$provider" == qwen && -n "$effort" ]]; then
     die "exec/qwen: --effort is not supported by Qwen Code"
   elif [[ "$provider" == deepseek && -n "$effort" ]]; then
-    die "exec/deepseek: --effort is not supported by DeepSeek Code"
+    die "exec/deepseek: --effort is not supported by DeepSeek Harness (dsh v0.1 exposes reasoning effort only via global \$DSH_HOME/settings.yaml)"
   elif [[ "$provider" == antigravity && -n "$effort" && ! "$effort" =~ ^(low|medium|high)$ ]]; then
     die "exec/antigravity: unsupported effort '$effort' (valid: low|medium|high)"
   elif [[ -n "$effort" && ! "$effort" =~ ^(none|minimal|low|medium|high|xhigh|max)$ ]]; then
@@ -179,11 +179,27 @@ _exec_qwen() {
   (cd "$cwd" && qwen -p "$prompt" "${model_args[@]}" --yolo --output-format text </dev/null) >"$output_path"
 }
 
+# dsh's headless profile takes ONLY a task positional (plus -h) and prints the
+# final assistant text on stdout. Model selection is configuration, not argv:
+# a temporary --patch overlay retargets the `agent-default-model` entry.
 _exec_deepseek() {
   local cwd="$1" model="$2" prompt="$3" output_path="$4"
-  local -a model_args=()
-  [[ -n "$model" ]] && model_args=(--model "$model")
-  (cd "$cwd" && deepseek -p "$prompt" "${model_args[@]}" --yolo --output-format text </dev/null) >"$output_path"
+  local -a patch_args=()
+  local patch=""
+  if [[ -n "$model" ]]; then
+    patch="$(mktemp "${TMPDIR:-/tmp}/waspflow-dsh-patch.XXXXXX.yml")" || return 1
+    {
+      printf -- '- id: agent-default-model\n'
+      printf -- '  config:\n'
+      printf -- '    provider: %s\n' "${DEEPSEEK_PROVIDER_ROUTE:-deepseek-official}"
+      printf -- '    model: %s\n' "$model"
+    } >"$patch"
+    patch_args=(--patch "$patch")
+  fi
+  local rc=0
+  (cd "$cwd" && dsh --profile headless "${patch_args[@]}" -- "$prompt" </dev/null) >"$output_path" || rc=$?
+  [[ -n "$patch" ]] && rm -f "$patch"
+  return "$rc"
 }
 
 # Reject an output file that is too small to be real, blank once stripped, or is

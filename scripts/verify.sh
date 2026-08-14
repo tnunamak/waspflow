@@ -593,7 +593,7 @@ grep -Eq '\^\(claude\|codex\|grok\|antigravity\|qwen\|deepseek\)/' "$root/lib/es
 demo_body="$(sed -n '/^cmd_demo()/,/^}/p' "$root/bin/waspflow")"
 grep -q 'command -v agy' <<<"$demo_body"
 grep -q 'provider="antigravity"' <<<"$demo_body"
-grep -q 'install codex, claude, grok, agy, qwen, or deepseek' <<<"$demo_body"
+grep -q 'install codex, claude, grok, agy, qwen, or dsh' <<<"$demo_body"
 
 # Qwen integration: escalation targets, PATH auto-detection, and provider array.
 grep -q 'command -v qwen' <<<"$demo_body"
@@ -601,8 +601,11 @@ grep -q 'provider="qwen"' <<<"$demo_body"
 grep -q 'qwen' "$root/lib/core.sh"
 
 # DeepSeek integration: provider array, PATH auto-detection, and demo help.
-grep -q 'command -v deepseek' <<<"$demo_body"
+# The real DeepSeek Harness binary is `dsh`, NOT `deepseek` — auto-detection
+# must probe the binary that actually exists.
+grep -q 'command -v dsh' <<<"$demo_body"
 grep -q 'provider="deepseek"' <<<"$demo_body"
+! grep -q 'command -v deepseek' <<<"$demo_body"
 grep -q 'deepseek' "$root/lib/core.sh"
 
 set +e
@@ -3549,13 +3552,38 @@ JSON
   unset -f clawmeter
 )
 
-# DeepSeek central integration: deterministic fake deepseek CLI, real adapter/exec/
-# event/billing boundaries. Mirrors the qwen test block above.
+# DeepSeek central integration: deterministic fake `dsh` CLI, real adapter/exec/
+# event/billing boundaries.
+#
+# The fake reproduces DeepSeek Harness 0.1.0-rc.6 as PROBED LIVE, not as
+# convenient. Grounding facts, each verified against the real binary:
+#   * the binary is `dsh`; the headless profile's ENTIRE option set is `-h`
+#     (no --model, no --output-format, no --resume, no --yolo). An unknown
+#     flag is a hard error: "error: unknown option '--model'".
+#   * stdout is the final assistant text plus a newline — plain text, no JSON.
+#   * model selection happens through a `--patch` YAML overlay retargeting the
+#     `agent-default-model` entry; verified to reach the real LLM route.
+#   * sessions land at $DSH_HOME/sessions/--<encoded-cwd>--/session-<uuid>/
+#     session.jsonl[.zstd], written even when the run FAILS.
+#   * the runner mints a fresh session-<randomUUID> per invocation, so no
+#     invocation can ever continue a prior one.
+#   * the only live model ids are deepseek-v4-flash (profile default) and
+#     deepseek-v4-pro, confirmed against GET https://api.deepseek.com/models.
+#
+# UNVERIFIED-AGAINST-LIVE: a real key was available and DID reach DeepSeek's
+# API (the session log shows request/context followed by a genuine HTTP 402),
+# but the account carries no balance, so a SUCCEEDING turn was never observed.
+# Every FAILURE path below is verbatim from a live run. The success path — the
+# assistant text on stdout and the assistant/message + turn/end(completed)
+# lines — is modelled from the runner source (dsh-headless writes
+# `outcome.text + "\n"` and exits 0 only when reason.kind === "completed").
 (
   unset WASPFLOW_LIB
   state_home="$(mktemp -d "${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}/waspflow-verify-deepseek.XXXXXX")"
   export WASPFLOW_HOME="$state_home"
   fixture="$state_home/fixture"; mkdir -p "$fixture"
+  export DSH_HOME="$state_home/dsh-home"
+  mkdir -p "$DSH_HOME/profiles/headless"
   source "$root/lib/core.sh"
   source "$root/lib/billing.sh"
   source "$root/lib/providers/deepseek.sh"
@@ -3566,54 +3594,156 @@ JSON
     declare -F "deepseek_${fn}" >/dev/null || { echo "missing deepseek_${fn}" >&2; exit 1; }
   done
 
-  # Fake deepseek CLI: records argv, emits stream-json lifecycle events, and writes
-  # the resumable session file that the real adapter contract requires.
-  deepseek_fake="$fixture/deepseek"; deepseek_args="$fixture/deepseek.args"
-  cat >"$deepseek_fake" <<'DEEPSEEK'
+  dsh_fake="$fixture/dsh"; dsh_args="$fixture/dsh.args"
+  cat >"$dsh_fake" <<'DSH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >"${DEEPSEEK_ARGS:?}"
+# Fake DeepSeek Harness CLI reproducing 0.1.0-rc.6 observed behaviour.
+printf '%s\n' "$*" >"${DSH_ARGS:?}"
 set -e
-sid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-if [[ "${DEEPSEEK_NO_SESSION:-0}" != 1 ]]; then
-  printf '{"type":"system","subtype":"session_start","session_id":"%s"}\n' "$sid"
+
+# Launcher flag parsing: only -V/--version, --profile, --patch, --dump-config,
+# --dump-default-config are the launcher's. The first unrecognized token starts
+# the app's argv (verified against the real launcher).
+profile=""; patch=""; task_argv=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -V|--version) printf '0.1.0-rc.6\n'; exit 0 ;;
+    --profile) profile="$2"; shift 2 ;;
+    --patch) patch="$2"; shift 2 ;;
+    --dump-config|--dump-default-config) printf -- '- id: agent-default-model\n'; exit 0 ;;
+    --) shift; task_argv+=("$@"); break ;;
+    *) task_argv+=("$@"); break ;;
+  esac
+done
+
+if [[ "$profile" != headless ]]; then
+  printf 'Error: dsh: profile "%s" does not exist; create it with '"'"'dsh plugin --profile %s add <package>'"'"'\n' "$profile" "$profile" >&2
+  exit 1
 fi
-if [[ "${DEEPSEEK_FAIL:-0}" == 1 ]]; then
-  exit 9
+
+# The headless app accepts ONLY a task positional and -h. Anything else is a
+# usage error, verbatim as commander emits it.
+for a in "${task_argv[@]}"; do
+  case "$a" in
+    -h|--help) printf 'Usage: dsh --profile headless [options] [task...]\n'; exit 0 ;;
+    -*) printf "error: unknown option '%s'\n" "$a" >&2; exit 1 ;;
+  esac
+done
+task="${task_argv[*]}"
+if [[ -z "${task// /}" ]]; then
+  printf 'error: a task is required, for example: dsh --profile headless "run the tests"\n' >&2
+  exit 1
 fi
-project="$(printf '%s' "$PWD" | sed 's|/|-|g')"
-chats="$HOME/.deepseek/projects/$project/chats"
-mkdir -p "$chats"
-printf '{"type":"assistant","model":"test-model"}\n' >"$chats/$sid.jsonl"
-printf '{"type":"result","subtype":"success"}\n'
-printf 'deepseek test output\n'
-DEEPSEEK
-  chmod +x "$deepseek_fake"
-  export DEEPSEEK_ARGS="$deepseek_args"; PATH="$fixture:$PATH"
+
+# Model comes from the --patch overlay, never from argv.
+model="deepseek-v4-flash"
+if [[ -n "$patch" ]]; then
+  [[ -f "$patch" ]] || { printf 'Error: ENOENT: no such file or directory, open %s\n' "$patch" >&2; exit 1; }
+  patched="$(sed -n 's/^ *model: *//p' "$patch" | head -1)"
+  [[ -n "$patched" ]] && model="$patched"
+fi
+
+# Sessions are persisted even when the turn fails. Session ids are minted fresh
+# per invocation; the project key is a lossy encoding of cwd.
+sid="session-$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)"
+key="--$(printf '%s' "$PWD" | sed 's|[/\\:]\{1,\}|-|g; s|^-*||')--"
+dir="${DSH_HOME:-$HOME/.dsh}/sessions/$key/$sid"
+mkdir -p "$dir"
+log="$dir/session.jsonl"
+{
+  printf '{"type":"session","version":0,"id":"%s","createdAt":%s000,"cwd":"%s","delegationDepth":0}\n' "$sid" "$(date +%s)" "$PWD"
+  printf '{"type":"turn/start","seq":4,"time":%s000,"data":{"turn":1}}\n' "$(date +%s)"
+  printf '{"type":"request/context","seq":12,"time":%s000,"data":{"provider":"deepseek-official","model":"%s","contextWindow":1000000}}\n' "$(date +%s)" "$model"
+} >"$log"
+
+# Both failure shapes below are VERBATIM from live runs. In each: stdout is a
+# bare newline, stderr is one `dsh: <CODE>: <message>` line, exit is 1, and the
+# session log is still written — so a session on disk never implies success.
+if [[ "${DSH_FAIL:-0}" == quota ]]; then
+  # Observed live with a valid key against a zero-balance account (HTTP 402).
+  printf '{"type":"turn/end","seq":16,"time":%s000,"data":{"turn":1,"reason":{"kind":"error","error":{"message":"Insufficient Balance","code":"QUOTA","status":402}}}}\n' "$(date +%s)" >>"$log"
+  printf '\n'
+  printf 'dsh: QUOTA: Insufficient Balance\n' >&2
+  exit 1
+fi
+if [[ "${DSH_FAIL:-0}" == 1 ]]; then
+  # Observed live with no key configured at all.
+  printf '{"type":"turn/end","seq":16,"time":%s000,"data":{"turn":1,"reason":{"kind":"error","error":{"message":"llm-deepseek: no API key for provider route \\"deepseek-official\\"","code":"MISSING_CREDENTIAL"}}}}\n' "$(date +%s)" >>"$log"
+  printf '\n'
+  printf 'dsh: MISSING_CREDENTIAL: llm-deepseek: no API key for provider route "deepseek-official"; store DEEPSEEK_API_KEY through the credentials service (the web Models page writes it), or export DEEPSEEK_API_KEY in the launching environment\n' >&2
+  exit 1
+fi
+
+# Success path (modelled from dsh-headless source; never observed live).
+printf '{"type":"assistant/message","seq":14,"time":%s000,"data":{"message":{"content":[{"type":"text","text":"dsh test output"}]}}}\n' "$(date +%s)" >>"$log"
+printf '{"type":"turn/end","seq":16,"time":%s000,"data":{"turn":1,"reason":{"kind":"completed"}}}\n' "$(date +%s)" >>"$log"
+printf 'dsh test output\n'
+DSH
+  chmod +x "$dsh_fake"
+  export DSH_ARGS="$dsh_args"; PATH="$fixture:$PATH"
   export WASPFLOW_SELECTION_GATE=off
 
-  # Exec test.
+  # Exec: the model must travel as a --patch overlay, never as argv.
   exec_out="$fixture/deepseek.out"
-  "$root/bin/waspflow" exec --provider deepseek --model test-model -o "$exec_out" -- "deterministic prompt"
-  grep -Fq -- '-p deterministic prompt --model test-model --yolo --output-format text' "$deepseek_args"
+  "$root/bin/waspflow" exec --provider deepseek --model deepseek-v4-pro -o "$exec_out" -- "deterministic prompt"
+  grep -Fq -- '--profile headless --patch ' "$dsh_args"
+  grep -Fq -- '-- deterministic prompt' "$dsh_args"
+  # Anything resembling the old Qwen-shaped invocation is a regression.
+  ! grep -Eq -- '(^| )-p( |$)|--yolo|--output-format|--model ' "$dsh_args"
+  grep -Fq 'dsh test output' "$exec_out"
 
-  # Effort rejection.
+  # Effort rejection (dsh exposes effort only through global settings.yaml).
   set +e; "$root/bin/waspflow" exec --provider deepseek --effort high -o "$fixture/bad.out" -- x >/dev/null 2>&1; deepseek_bad_rc=$?; set -e
   [[ "$deepseek_bad_rc" -eq 1 ]]
 
-  # Lifecycle via _deepseek_shell: spawn, discover, idle, turn_mark, revise, turn 2.
+  # Lifecycle via _deepseek_shell: spawn, marker-scoped discovery, idle, turn_mark.
   deepseek_lifecycle=deepseek-lifecycle
-  lane_set "$deepseek_lifecycle" provider deepseek status live cwd "$fixture" model test-model
-  deepseek_cmd="$(_deepseek_shell "$deepseek_lifecycle" test-model "" "first turn" spawn)"
+  lane_set "$deepseek_lifecycle" provider deepseek status live cwd "$fixture" model deepseek-v4-pro
+  deepseek_cmd="$(_deepseek_shell "$deepseek_lifecycle" deepseek-v4-pro "" "first turn" spawn)"
   (cd "$fixture" && bash -c "$deepseek_cmd") >"$fixture/deepseek-lifecycle.out"
-  [[ "$(lane_get "$deepseek_lifecycle" session_id)" == aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee ]]
+  deepseek_sid="$(lane_get "$deepseek_lifecycle" session_id)"
+  [[ "$deepseek_sid" == session-* ]]
   deepseek_is_idle "$deepseek_lifecycle"
-  deepseek_session_resumable "$deepseek_lifecycle"
   [[ "$(deepseek_turn_mark "$deepseek_lifecycle")" -eq 1 ]]
   ! find "$(lane_dir "$deepseek_lifecycle")" -maxdepth 1 -name '.deepseek-log.*' | grep -q .
+  # The lane's model patch really was written, and really carries the model.
+  grep -Fq 'model: deepseek-v4-pro' "$(_deepseek_patch_file "$deepseek_lifecycle")"
 
-  deepseek_cmd="$(_deepseek_shell "$deepseek_lifecycle" test-model "$(lane_get "$deepseek_lifecycle" session_id)" "second turn" revise)"
-  (cd "$fixture" && bash -c "$deepseek_cmd") >"$fixture/deepseek-revise.out"
-  [[ "$(deepseek_turn_mark "$deepseek_lifecycle")" -eq 2 ]]
+  # Runtime attestation reads the model dsh recorded on its own request route.
+  deepseek_refresh_runtime_settings "$deepseek_lifecycle"
+  [[ "$(lane_get "$deepseek_lifecycle" runtime_model)" == deepseek-v4-pro ]]
+
+  # v0.1 cannot continue a session: every invocation mints a fresh UUID, so
+  # both resumability and revise must refuse rather than silently start over.
+  ! deepseek_session_resumable "$deepseek_lifecycle"
+  set +e; deepseek_revise "$deepseek_lifecycle" "second turn" >/dev/null 2>&1; deepseek_revise_rc=$?; set -e
+  [[ "$deepseek_revise_rc" -ne 0 ]]
+
+  # A failed run still writes a session log, so a session must never be read as
+  # success: the receipt outcome is the only lifecycle truth.
+  deepseek_failing=deepseek-failing
+  lane_set "$deepseek_failing" provider deepseek status live cwd "$fixture" model deepseek-v4-pro
+  deepseek_cmd="$(_deepseek_shell "$deepseek_failing" deepseek-v4-pro "" "doomed turn" spawn)"
+  set +e; (cd "$fixture" && DSH_FAIL=1 bash -c "$deepseek_cmd") >"$fixture/deepseek-fail.out" 2>&1; deepseek_fail_rc=$?; set -e
+  [[ "$deepseek_fail_rc" -ne 0 ]]
+  grep -Fq 'MISSING_CREDENTIAL' "$fixture/deepseek-fail.out"
+  deepseek_is_idle "$deepseek_failing"
+  [[ "$(deepseek_turn_mark "$deepseek_failing")" -eq 0 ]]
+
+  # Same for a quota exhaustion (observed live: valid key, zero balance, 402).
+  # exec must not launder an exhausted account into a successful report.
+  set +e; DSH_FAIL=quota "$root/bin/waspflow" exec --provider deepseek -o "$fixture/quota.out" -- "say hi" >"$fixture/quota.log" 2>&1; deepseek_quota_rc=$?; set -e
+  [[ "$deepseek_quota_rc" -ne 0 ]]
+  grep -Fq 'QUOTA: Insufficient Balance' "$fixture/quota.log"
+
+  # Preflight checks for `dsh`, not `deepseek`, and for the headless profile.
+  deepseek_preflight
+  ( PATH="/usr/bin:/bin"; ! deepseek_preflight 2>/dev/null )
+  ( DSH_HOME="$fixture/no-such-home"; ! deepseek_preflight 2>/dev/null )
+
+  # Model enumeration: dsh ships no enumeration command, so the honest default
+  # is non_enumerable; a user-authored catalog is reported as local_cache.
+  [[ "$(deepseek_valid_models | head -1)" == 'source=non_enumerable' ]]
 
   # Billing evidence.
   unset DEEPSEEK_API_KEY
@@ -3623,7 +3753,7 @@ DEEPSEEK
   unset DEEPSEEK_API_KEY
 
   # Escalation hooks unsupported.
-  ! deepseek_validate_model_effort test-model high
+  ! deepseek_validate_model_effort deepseek-v4-pro high
   ! deepseek_resume_with_arm "$deepseek_lifecycle" prompt false
   ! deepseek_confirm_escalation_submission "$deepseek_lifecycle" prompt false
 
@@ -3631,8 +3761,9 @@ DEEPSEEK
   help_text="$("$root/bin/waspflow" --help)"
   grep -q 'Claude/Codex/Grok/Antigravity/Qwen/DeepSeek' <<<"$help_text"
   [[ "$(grep -c '<claude|codex|grok|antigravity|qwen|deepseek>' <<<"$help_text")" -ge 3 ]]
-  grep -q 'qwen' <<<"$("$root/bin/waspflow" doctor 2>&1 || true)"
-  grep -q 'deepseek' <<<"$("$root/bin/waspflow" doctor 2>&1 || true)"
+  doctor_text="$("$root/bin/waspflow" doctor 2>&1 || true)"
+  grep -q 'qwen' <<<"$doctor_text"
+  grep -q 'dsh (deepseek)' <<<"$doctor_text"
 )
 
 echo "waspflow verify: ok"
