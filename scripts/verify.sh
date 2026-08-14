@@ -3619,11 +3619,19 @@ JSON
 #   * `models` MUST be a YAML list of {id: ...}; a map fails config validation
 #     with "$.providers.<route>.models expected array but got [object Object]".
 #
-# Note: api.deepseek.com itself was reachable and authenticated (GET /models ->
-# 200, listing exactly deepseek-v4-flash and deepseek-v4-pro) but that account
-# had no balance (POST /chat/completions -> HTTP 402 Insufficient Balance), so
-# the DeepSeek-native success path specifically remains unexercised. The code
-# path is identical — only the route's baseURL/api differ.
+# The DeepSeek-NATIVE success path is verified too (same date), against
+# api.deepseek.com with a funded account and the stock `deepseek-official`
+# route — no gateway, no patch beyond the model:
+#
+#   - id: agent-default-model
+#     config: {provider: deepseek-official, model: deepseek-v4-flash}
+#
+# `dsh --profile headless --patch <p> "Reply with exactly: hello"` produced
+# stdout `hello\n` and exit 0, and the session log recorded
+# `request/context model: deepseek-v4-flash` followed by
+# assistant/message -> step/end -> turn/end{reason.kind: "completed"} —
+# byte-identical in shape to the gateway run above, confirming the adapter is
+# genuinely provider-agnostic rather than coincidentally working on one route.
 (
   unset WASPFLOW_LIB
   state_home="$(mktemp -d "${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}/waspflow-verify-deepseek.XXXXXX")"
