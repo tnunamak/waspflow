@@ -3592,13 +3592,38 @@ JSON
 #   * the only live model ids are deepseek-v4-flash (profile default) and
 #     deepseek-v4-pro, confirmed against GET https://api.deepseek.com/models.
 #
-# UNVERIFIED-AGAINST-LIVE: a real key was available and DID reach DeepSeek's
-# API (the session log shows request/context followed by a genuine HTTP 402),
-# but the account carries no balance, so a SUCCEEDING turn was never observed.
-# Every FAILURE path below is verbatim from a live run. The success path — the
-# assistant text on stdout and the assistant/message + turn/end(completed)
-# lines — is modelled from the runner source (dsh-headless writes
-# `outcome.text + "\n"` and exits 0 only when reason.kind === "completed").
+# VERIFIED AGAINST LIVE (2026-08-14, @deepseek-ai/dsh 0.1.0-rc.6). Both the
+# failure and success paths below are verbatim from real runs.
+#
+# The success path was observed by pointing dsh at an OpenAI-compatible gateway
+# rather than api.deepseek.com — dsh is model-agnostic, so a route is pure
+# configuration (@deepseek-ai/dsh-llm-pi-ai). The patch used:
+#
+#   - id: llm-pi-ai
+#     config:
+#       providers:
+#         <route>:
+#           baseURL: <https://host/v1>
+#           apiKeyEnv: <ENV_VAR>
+#           api: openai-completions      # REQUIRED for a route pi-ai does not
+#           models:                      # ship: without it the plugin refuses
+#             - id: <model>              # with "needs an api; the installed
+#               api: openai-completions  # catalog does not describe it"
+#   - id: agent-default-model
+#     config: {provider: <route>, model: <model>}
+#
+# Observed for `dsh --profile headless --patch <p> "Reply with exactly: hello"`:
+#   * stdout is exactly `hello\n` — plain text, no JSON framing
+#   * exit code 0
+#   * the session log emits assistant/message -> step/end -> turn/end
+#   * `models` MUST be a YAML list of {id: ...}; a map fails config validation
+#     with "$.providers.<route>.models expected array but got [object Object]".
+#
+# Note: api.deepseek.com itself was reachable and authenticated (GET /models ->
+# 200, listing exactly deepseek-v4-flash and deepseek-v4-pro) but that account
+# had no balance (POST /chat/completions -> HTTP 402 Insufficient Balance), so
+# the DeepSeek-native success path specifically remains unexercised. The code
+# path is identical — only the route's baseURL/api differ.
 (
   unset WASPFLOW_LIB
   state_home="$(mktemp -d "${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}/waspflow-verify-deepseek.XXXXXX")"
