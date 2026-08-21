@@ -440,9 +440,11 @@ calling harness blocks while `wait` polls the provider session log at its
 configured interval, and receives the normal final reap result only after the
 provider terminal oracle confirms the lane is idle. There is no waspflow daemon,
 event subscription, callback endpoint, or claimed asynchronous notification
-delivery: process completion is the notification mechanism. Use `peek` after a
-nonzero `wait` result (especially rc 4 stalled) to diagnose the exception; it is
-not the completion oracle.
+delivery. Process completion is pollable, but does not by itself wake or start a
+new model turn. A harness-owned background task may provide a native notification
+while its parent session remains alive; otherwise the owner must explicitly await
+or reconcile the result. Use `peek` after a nonzero `wait` result (especially rc 4
+stalled) to diagnose the exception; it is not the completion oracle.
 
 ## Parking and Conservative Fleet GC
 
@@ -477,7 +479,7 @@ commands, and resolved provider argv/env; use `status <lane>` for one full recor
 |---|---|---|
 | `WASPFLOW_HOME` | `~/.local/state/waspflow` | Lane state and transcripts |
 | `WASPFLOW_TMUX_SESSION` | `waspflow` | tmux session that holds worker windows |
-| `WASPFLOW_TMUX_HISTORY_LIMIT` | `10000` | Scrollback lines for future waspflow windows; empty or `0` restores tmux's inherited setting |
+| `WASPFLOW_TMUX_HISTORY_LIMIT` | _(unset — inherit)_ | Scrollback lines for future waspflow windows. Unset, empty, or `0` inherits tmux's own setting (no cap). Set a number (e.g. `100000`) to bound retained scrollback during large fan-outs |
 | `WASPFLOW_LANE_PAGER` | `cat` | Pager command for provider children in new lanes; overrides inherited `PAGER` and `GIT_PAGER` for those children only |
 | `WASPFLOW_ALLOW_API_BILLING` | empty | Set to `1` to intentionally allow Claude workers while `ANTHROPIC_API_KEY` is set |
 | `WASPFLOW_CODEX_BACKEND_HEALTH_URL` | empty | Optional health check URL for proxy-routed Codex setups |
@@ -501,6 +503,13 @@ and headless lane recovery commands, not to the operator's shell.
 session, never to tmux's global setting or another session such as `main`.
 It affects windows created after the setting is applied; it does not shrink the
 scrollback already retained by open windows.
+
+It defaults to unset (inherit) rather than to a cap. tmux has no "unlimited"
+value — a literal `0` means *no* scrollback — so opting out means removing the
+session-local override and letting tmux's own `history-limit` apply. Under a
+large fan-out, retained scrollback is a real memory cost (hundreds of panes
+each climbing toward the global ceiling), so set an explicit limit for those
+runs rather than paying it by default.
 
 ## Architecture
 

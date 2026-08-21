@@ -150,6 +150,7 @@ done
     "${history_prefix}-custom"
     "${history_prefix}-empty"
     "${history_prefix}-zero"
+    "${history_prefix}-unset"
   )
   history_tmux() {
     env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$TMUX_TMPDIR" \
@@ -192,7 +193,6 @@ done
       || { echo "tmux history: global setting changed" >&2; exit 1; }
   )
 
-  history_case default __unset__ 10000 10000
   history_case custom 50000 50000 50000
 
   history_opt_out_case() (
@@ -219,6 +219,21 @@ done
 
   history_opt_out_case empty ''
   history_opt_out_case zero 0
+
+  # Default (variable never set) must inherit, not cap: waspflow does not take
+  # away the operator's scrollback unless they ask for a limit.
+  (
+    export WASPFLOW_TMUX_SESSION="${history_prefix}-unset"
+    unset WASPFLOW_TMUX_HISTORY_LIMIT
+    # shellcheck source=/dev/null
+    source "$root/lib/core.sh"
+    tmux_ensure_session
+    [[ -z "$(history_tmux show-options -t "$WASPFLOW_TMUX_SESSION" -v history-limit)" ]] \
+      || { echo "tmux history: unset default set a local limit instead of inheriting" >&2; exit 1; }
+    history_tmux new-window -d -t "$WASPFLOW_TMUX_SESSION" -n later 'exec sleep 30'
+    [[ "$(history_tmux display-message -p -t "$WASPFLOW_TMUX_SESSION:later" '#{history_limit}')" == "$history_global_limit" ]] \
+      || { echo "tmux history: unset default did not inherit $history_global_limit" >&2; exit 1; }
+  )
 )
 
 # Textual pane consumers require the plain, width-preserving capture contract:

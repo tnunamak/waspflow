@@ -45,9 +45,15 @@ WASPFLOW_CODEX_BACKEND_HEALTH_URL="${WASPFLOW_CODEX_BACKEND_HEALTH_URL:-}"
 WASPFLOW_TMUX_SESSION="${WASPFLOW_TMUX_SESSION:-waspflow}"
 
 # Limit retained history for future waspflow windows without changing the tmux
-# server or any other session. An unset value defaults to 10000; empty and 0
-# remove this session's override so tmux's inherited setting applies.
-WASPFLOW_TMUX_HISTORY_LIMIT="${WASPFLOW_TMUX_HISTORY_LIMIT-10000}"
+# server or any other session. Unset, empty, and 0 all remove this session's
+# override so tmux's inherited setting applies (effectively "unlimited" — tmux
+# has no unlimited value, and a literal 0 would mean NO scrollback).
+#
+# Default is inherit, not a cap: measured scrollback on this host was ~1.3k
+# lines/pane against a 500k ceiling, so a cap costs real scrollback today while
+# only binding under heavy fan-out. Set this explicitly (e.g. 100000) when
+# running a large fleet.
+WASPFLOW_TMUX_HISTORY_LIMIT="${WASPFLOW_TMUX_HISTORY_LIMIT-}"
 
 # A lane is an unattended child process even though its provider owns an
 # interactive tmux pane.  Inheriting the tmux server's PAGER/GIT_PAGER lets a
