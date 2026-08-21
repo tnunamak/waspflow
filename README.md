@@ -337,8 +337,8 @@ fails before launch.
 
 ## Billing Safety
 
-`waspflow doctor` reports the active auth/billing path implied by the current
-environment. This is especially important for Claude fleets: if
+`waspflow doctor` reports the active auth/billing path. This is especially
+important for Claude fleets: if
 `ANTHROPIC_API_KEY` is set, headless Claude workers bill pay-as-you-go API
 rates instead of subscription/Agent-SDK credit.
 
@@ -351,9 +351,16 @@ WASPFLOW_ALLOW_API_BILLING=1 waspflow spawn --provider claude --accept-provider-
   "Run the intended API-billed task"
 ```
 
-Codex and Grok have secondary analogous checks: `OPENAI_API_KEY` / `XAI_API_KEY`
-are reported by `doctor`, and spawns print a billing notice when the matching
-key is set.
+For Codex, waspflow uses the read-only `codex login status` result rather than
+the presence of `OPENAI_API_KEY`. ChatGPT auth emits no Codex billing message,
+even when that variable is set. API-key auth emits a determinate API-billing
+notice. A missing, failed, timed-out, skipped, or unrecognized check emits an
+explicit unknown; it never becomes an API-billing conclusion. The check has a
+2-second hard timeout and a 15-second cache scoped to the Codex auth context.
+Set `WASPFLOW_SKIP_CODEX_AUTH_CHECK=1` only when a status probe must not run;
+waspflow will report that the billing path is unknown.
+
+Grok remains a separate environment-based advisory check.
 
 ## What Waspflow Saves
 
@@ -483,6 +490,9 @@ commands, and resolved provider argv/env; use `status <lane>` for one full recor
 | `WASPFLOW_LANE_PAGER` | `cat` | Pager command for provider children in new lanes; overrides inherited `PAGER` and `GIT_PAGER` for those children only |
 | `WASPFLOW_ALLOW_API_BILLING` | empty | Set to `1` to intentionally allow Claude workers while `ANTHROPIC_API_KEY` is set |
 | `WASPFLOW_CODEX_BACKEND_HEALTH_URL` | empty | Optional health check URL for proxy-routed Codex setups |
+| `WASPFLOW_CODEX_AUTH_TIMEOUT_SECONDS` | `2` | Hard limit for the read-only `codex login status` check |
+| `WASPFLOW_CODEX_AUTH_CACHE_TTL_SECONDS` | `15` | Seconds to reuse a Codex auth-mode observation in the same auth context |
+| `WASPFLOW_SKIP_CODEX_AUTH_CHECK` | empty | Set to `1` to skip the Codex status check; billing is reported as unknown |
 | `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Claude session logs |
 | `CODEX_SESSIONS_DIR` | `~/.codex/sessions` | Codex session logs |
 | `GROK_HOME` | `~/.grok` | Grok config home (sessions under `$GROK_HOME/sessions`) |

@@ -1,9 +1,112 @@
 #!/usr/bin/env bash
 #
-# billing.sh — env-only billing/auth safety checks.
+# billing.sh — billing/auth safety checks.
 #
-# This intentionally does not call provider CLIs or networks. It only reports
-# and gates on environment variables that change billing paths.
+# Claude is intentionally an environment-only hard guard. Codex is different:
+# its read-only `login status` command reports the active auth mode, so use that
+# observed state instead of treating an environment variable as billing proof.
+
+# Emit a cached, read-only Codex auth observation as `mode<TAB>principal`.
+# Modes are `chatgpt_subscription`, `api_key`, or `unknown:<reason>`.
+# The cache context deliberately includes only key/token *presence*, never their
+# values, and the result never changes whether a command may launch.
+codex_auth_observation() {
+  local cache_dir cache_file cache_key cache_hash cached_at cached_mode cached_principal
+  local codex_path mode="" principal="" status="" status_rc=0
+  local now ttl timeout_seconds tmp=""
+
+  if [[ "${WASPFLOW_SKIP_CODEX_AUTH_CHECK:-}" == "1" ]]; then
+    printf 'unknown:check_skipped\t\n'
+    return 0
+  fi
+  if ! command -v codex >/dev/null 2>&1; then
+    printf 'unknown:codex_missing\t\n'
+    return 0
+  fi
+  if ! command -v timeout >/dev/null 2>&1; then
+    printf 'unknown:timeout_unavailable\t\n'
+    return 0
+  fi
+
+  ttl="${WASPFLOW_CODEX_AUTH_CACHE_TTL_SECONDS:-15}"
+  [[ "$ttl" =~ ^[0-9]+$ && "$ttl" -gt 0 ]] || ttl=15
+  timeout_seconds="${WASPFLOW_CODEX_AUTH_TIMEOUT_SECONDS:-2}"
+  [[ "$timeout_seconds" =~ ^[0-9]+$ && "$timeout_seconds" -gt 0 ]] || timeout_seconds=2
+
+  codex_path="$(command -v codex)"
+  cache_dir="${WASPFLOW_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/waspflow}/codex-auth-cache"
+  cache_key="v1|$codex_path|${CODEX_HOME:-$HOME/.codex}|openai-api-key:${OPENAI_API_KEY:+set}|codex-access-token:${CODEX_ACCESS_TOKEN:+set}"
+  cache_hash="$(printf '%s' "$cache_key" | cksum)"
+  cache_hash="${cache_hash%% *}"
+  cache_file="$cache_dir/$cache_hash"
+  now="$(date +%s)"
+
+  if [[ -r "$cache_file" ]]; then
+    cached_at=""; cached_mode=""; cached_principal=""
+    IFS=$'\t' read -r cached_at cached_mode cached_principal <"$cache_file" || true
+    if [[ "$cached_at" =~ ^[0-9]+$ && "$cached_mode" =~ ^(chatgpt_subscription|api_key|unknown:[a-z_]+)$ ]] \
+      && (( now - cached_at >= 0 && now - cached_at < ttl )); then
+      printf '%s\t%s\n' "$cached_mode" "$cached_principal"
+      return 0
+    fi
+  fi
+
+  if status="$(timeout --kill-after=1s "${timeout_seconds}s" codex login status 2>&1)"; then
+    if grep -qi 'Logged in using ChatGPT' <<<"$status"; then
+      mode=chatgpt_subscription
+    elif grep -qiE 'api[ -]?key' <<<"$status"; then
+      mode=api_key
+    else
+      mode=unknown:unrecognized_status
+    fi
+    principal="$(sed -nE '/^[[:space:]]*(Account|Logged in as)[[:space:]]*:/Ip' <<<"$status" | head -1)"
+  else
+    status_rc=$?
+    if [[ "$status_rc" == 124 || "$status_rc" == 137 ]]; then
+      mode=unknown:timed_out
+    else
+      mode=unknown:status_failed
+    fi
+  fi
+
+  if mkdir -p "$cache_dir" 2>/dev/null; then
+    tmp="$(mktemp "$cache_dir/.auth-mode.XXXXXX" 2>/dev/null || true)"
+    if [[ -n "$tmp" ]]; then
+      if ! printf '%s\t%s\t%s\n' "$now" "$mode" "$principal" >"$tmp" || ! mv -f "$tmp" "$cache_file"; then
+        rm -f "$tmp" || true
+      fi
+    fi
+  fi
+  printf '%s\t%s\n' "$mode" "$principal"
+}
+
+billing_codex_auth_notice() {
+  local surface="$1" mode principal reason message
+  IFS=$'\t' read -r mode principal < <(codex_auth_observation) || mode=unknown:status_failed
+
+  case "$mode" in
+    chatgpt_subscription) return 0 ;;
+    api_key) message="active Codex login uses API-key auth; Codex usage is billed at API pay-as-you-go rates." ;;
+    unknown:*)
+      reason="${mode#unknown:}"
+      case "$reason" in
+        check_skipped) message="Codex auth mode is unknown: the check was skipped because WASPFLOW_SKIP_CODEX_AUTH_CHECK=1; billing path could not be determined." ;;
+        codex_missing) message="Codex auth mode is unknown: codex is not installed; billing path could not be determined." ;;
+        timeout_unavailable) message="Codex auth mode is unknown: a hard timeout utility is unavailable; billing path could not be determined." ;;
+        timed_out) message="Codex auth mode is unknown: codex login status timed out; billing path could not be determined." ;;
+        status_failed) message="Codex auth mode is unknown: codex login status failed; billing path could not be determined." ;;
+        *) message="Codex auth mode is unknown: codex login status did not report a recognized auth mode; billing path could not be determined." ;;
+      esac
+      ;;
+    *) message="Codex auth mode is unknown: codex login status did not report a recognized auth mode; billing path could not be determined." ;;
+  esac
+
+  if [[ "$surface" == report ]]; then
+    echo "  [warn] codex auth: $message"
+  else
+    warn "codex billing notice: $message"
+  fi
+}
 
 billing_report_auth() {
   if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
@@ -12,11 +115,7 @@ billing_report_auth() {
     echo "  [ok]   claude auth: subscription/Agent-SDK credit (no ANTHROPIC_API_KEY)"
   fi
 
-  if [[ -n "${OPENAI_API_KEY:-}" ]]; then
-    echo "  [warn] codex auth: OPENAI_API_KEY is set -> headless Codex may use API pay-as-you-go billing instead of subscription-backed CLI auth. Verify billing before fleet use."
-  else
-    echo "  [ok]   codex auth: no OPENAI_API_KEY in environment; billing follows configured Codex CLI auth"
-  fi
+  billing_codex_auth_notice report
 
   if [[ -n "${XAI_API_KEY:-}" ]]; then
     echo "  [warn] grok auth: XAI_API_KEY is set -> headless Grok may use API pay-as-you-go billing instead of OAuth/subscription-backed CLI auth. Verify billing before fleet use."
@@ -63,8 +162,7 @@ billing_preflight_claude() {
 }
 
 billing_preflight_codex() {
-  [[ -n "${OPENAI_API_KEY:-}" ]] || return 0
-  warn "codex billing notice: OPENAI_API_KEY is set; verify whether Codex will use API pay-as-you-go billing before fleet use."
+  billing_codex_auth_notice preflight
   return 0
 }
 
@@ -83,7 +181,7 @@ billing_preflight_deepseek() { return 0; }
 # never changes whether a lane may launch. Args: provider endpoint_profile raw_args
 billing_path_v1() {
   local provider="$1" endpoint_profile="${2:-default}" raw_args="${3:-false}"
-  local path="unknown" evidence="none" detail="" status=""
+  local path="unknown" evidence="none" detail="" mode="" principal=""
   case "$provider" in
     claude)
       if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then path="api_key"; evidence="env:ANTHROPIC_API_KEY"
@@ -99,16 +197,12 @@ billing_path_v1() {
       elif [[ "$endpoint_profile" != default || "$raw_args" == true ]]; then
         path="scoped_unknown"; evidence="scoped_invocation"
       else
-        if command -v codex >/dev/null 2>&1; then
-          status="$(codex login status 2>&1 || true)"
-          if grep -qi 'Logged in using ChatGPT' <<<"$status"; then
-            path="chatgpt_subscription"; evidence="codex_login_status_text"; detail="$(head -n 1 <<<"$status")"
-          elif grep -qiE 'api[ -]?key' <<<"$status"; then
-            path="api_key"; evidence="codex_login_status_text"; detail="$(head -n 1 <<<"$status")"
-          fi
-        fi
-        if [[ "$path" == unknown && -n "${CODEX_ACCESS_TOKEN:-}" ]]; then path="access_token_env"; evidence="env:CODEX_ACCESS_TOKEN"
-        elif [[ "$path" == unknown && -n "${OPENAI_API_KEY:-}" ]]; then path="api_key_env"; evidence="env:OPENAI_API_KEY"; fi
+        IFS=$'\t' read -r mode principal < <(codex_auth_observation) || mode=unknown:status_failed
+        case "$mode" in
+          chatgpt_subscription) path="chatgpt_subscription"; evidence="codex_login_status" ;;
+          api_key) path="api_key"; evidence="codex_login_status" ;;
+          unknown:*) evidence="codex_login_status_unknown"; detail="${mode#unknown:}" ;;
+        esac
       fi
       ;;
     grok)
@@ -132,9 +226,10 @@ billing_path_v1() {
 }
 
 billing_auth_principal() {
+  local mode principal
   [[ "$1" == codex ]] || return 0
-  command -v codex >/dev/null 2>&1 || return 0
-  codex login status 2>&1 | sed -nE '/^[[:space:]]*(Account|Logged in as)[[:space:]]*:/Ip' | head -1 || true
+  IFS=$'\t' read -r mode principal < <(codex_auth_observation) || return 0
+  [[ -n "$principal" ]] && printf '%s\n' "$principal"
 }
 
 billing_cost_currency() {
