@@ -394,6 +394,31 @@ contexts. When neither explicit source exists, a valid Codex-provided
 not contain credentials. Missing parent evidence remains missing; Waspflow does
 not guess.
 
+### Forensic provenance search roots
+
+`scripts/waspflow-provenance.py` is a read-only forensic helper. With no
+alternate root configured, its JSON is byte-identical to the original helper
+output. When it discovers an alternate root, it includes `search_coverage` so
+an unresolved result states the searched and skipped directories. A failed
+candidate scan instead reports its roots as `unscanned_roots` with the error.
+
+```bash
+python3 scripts/waspflow-provenance.py --lanes my-lane --show-search-coverage --json
+```
+
+Alternate roots are deduplicated and skipped with a reason when missing,
+unreadable, or not a directory. Claude config homes resolve to `projects` from
+`CLAUDE_CONFIG_DIR` or a lane's recorded `claude_config_dir`; Codex config homes
+resolve to `sessions` from `CODEX_HOME` or a recorded `codex_home`. The helper
+also respects the direct session-root overrides `CLAUDE_PROJECTS_DIR` and
+`CODEX_SESSIONS_DIR`.
+
+For another layout, pass a direct transcript root with `--search-root PATH`
+(repeatable), or set the path-separated
+`WASPFLOW_PROVENANCE_SEARCH_ROOTS` environment variable. Spawn evidence still
+comes only from executed command-argument fields; transcript prose and command
+output are not evidence.
+
 ## How `wait` Knows a Worker Is Done
 
 Waspflow does not scrape prompt glyphs. It reads each provider's session log:

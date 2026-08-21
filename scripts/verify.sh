@@ -81,6 +81,166 @@ grep -q 'verify_tmux kill-session -t "\$WASPFLOW_TMUX_SESSION"' <<<"$verify_clea
   && ! grep -q 'kill-server' <<<"$verify_cleanup_body" \
   || { echo "tmux EXIT cleanup: must kill only the isolated verify session" >&2; exit 1; }
 
+# The forensic helper is intentionally separate from the mutable provenance
+# ledger. Its default JSON remains the historical shape; alternate transcript
+# roots make coverage and the exact command-argument field explicit.
+provenance_fixture="$fixture/provenance-search-roots"
+provenance_home="$provenance_fixture/home"
+provenance_state="$provenance_fixture/state"
+provenance_alternate="$provenance_fixture/alternate-claude"
+provenance_lane="alternate-root"
+mkdir -p "$provenance_home" "$provenance_state"
+python3 - "$provenance_state" "$provenance_alternate" "$provenance_lane" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+state_root = Path(sys.argv[1])
+alternate_home = Path(sys.argv[2])
+lane = sys.argv[3]
+(state_root / "lanes" / lane).mkdir(parents=True)
+(state_root / "lanes" / lane / "state.json").write_text(
+    json.dumps({"lane": lane, "provider": "claude", "status": "exited", "spawn_epoch": 1000}) + "\n",
+    encoding="utf-8",
+)
+transcript = alternate_home / "projects" / "project" / "session.jsonl"
+transcript.parent.mkdir(parents=True)
+rows = [
+    {
+        "type": "assistant",
+        "timestamp": "1970-01-01T00:16:40Z",
+        "message": {
+            "content": [
+                {"type": "tool_result", "content": f"waspflow spawn --lane {lane}"},
+            ]
+        },
+    },
+    {
+        "type": "assistant",
+        "timestamp": "1970-01-01T00:16:40Z",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "Bash",
+                    "input": {"command": f"waspflow spawn --provider claude --lane {lane} -- task"},
+                }
+            ]
+        },
+    },
+]
+transcript.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+codex_transcript = alternate_home / "codex" / "sessions" / "session.jsonl"
+codex_transcript.parent.mkdir(parents=True)
+codex_transcript.write_text(
+    json.dumps(
+        {
+            "timestamp": "1970-01-01T00:16:40Z",
+            "payload": {
+                "type": "function_call",
+                "name": "exec",
+                "arguments": json.dumps(
+                    {"cmd": f"waspflow spawn --provider codex --lane {lane} -- task"}
+                ),
+            },
+        }
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+provenance_helper=(
+  env -u CLAUDE_CONFIG_DIR -u CODEX_HOME -u CLAUDE_PROJECTS_DIR -u CODEX_SESSIONS_DIR \
+    -u WASPFLOW_PROVENANCE_SEARCH_ROOTS "HOME=$provenance_home" \
+    python3 "$root/scripts/waspflow-provenance.py" --state-dir "$provenance_state" \
+    --convo-db "$provenance_fixture/missing.sqlite3" --sidecar "$provenance_fixture/missing-sidecar.json" \
+    --lanes "$provenance_lane" --skip-generic --json
+)
+"${provenance_helper[@]}" >"$provenance_fixture/default.json"
+jq -e '
+  (.lanes | length) == 1
+  and .lanes[0].provenance == "unresolved"
+  and (has("search_coverage") | not)
+' "$provenance_fixture/default.json" >/dev/null \
+  || { echo "provenance helper: default output changed shape or attribution" >&2; exit 1; }
+"${provenance_helper[@]}" --show-search-coverage >"$provenance_fixture/coverage.json"
+jq -e '
+  (.lanes[0].provenance == "unresolved")
+  and (.search_coverage.searched_roots | length == 0)
+  and (.search_coverage.skipped_roots | length == 3)
+' "$provenance_fixture/coverage.json" >/dev/null \
+  || { echo "provenance helper: explicit default coverage was incomplete" >&2; exit 1; }
+"${provenance_helper[@]}" --search-root "$provenance_fixture/missing-root" \
+  >"$provenance_fixture/missing-root.json"
+jq -e --arg root "$provenance_fixture/missing-root" '
+  (.lanes[0].provenance == "unresolved")
+  and any(.search_coverage.skipped_roots[]; .path == $root and .reason == "missing")
+' "$provenance_fixture/missing-root.json" >/dev/null \
+  || { echo "provenance helper: missing search root was not safely reported" >&2; exit 1; }
+env -u CODEX_HOME -u CLAUDE_PROJECTS_DIR -u CODEX_SESSIONS_DIR -u WASPFLOW_PROVENANCE_SEARCH_ROOTS \
+  "HOME=$provenance_home" "CLAUDE_CONFIG_DIR=$provenance_alternate" \
+  python3 "$root/scripts/waspflow-provenance.py" --state-dir "$provenance_state" \
+  --convo-db "$provenance_fixture/missing.sqlite3" --sidecar "$provenance_fixture/missing-sidecar.json" \
+  --lanes "$provenance_lane" --skip-generic --json >"$provenance_fixture/config-home.json"
+jq -e --arg root "$provenance_alternate/projects" '
+  .lanes[0] as $lane
+  | ($lane.provenance == "exact_spawn_call")
+  and (($lane.roots | length) == 1)
+  and (($lane.roots[0].evidence | length) == 1)
+  and ($lane.roots[0].evidence[0].command_field == "assistant.message.content[].input.command")
+  and any(.search_coverage.searched_roots[]; .path == $root and (.sources | index("CLAUDE_CONFIG_DIR")))
+' "$provenance_fixture/config-home.json" >/dev/null \
+  || { echo "provenance helper: CLAUDE_CONFIG_DIR did not yield strict command evidence" >&2; exit 1; }
+python_bin="$(command -v python3)"
+env -u CODEX_HOME -u CLAUDE_PROJECTS_DIR -u CODEX_SESSIONS_DIR -u WASPFLOW_PROVENANCE_SEARCH_ROOTS \
+  "HOME=$provenance_home" "CLAUDE_CONFIG_DIR=$provenance_alternate" "PATH=/nonexistent" \
+  "$python_bin" "$root/scripts/waspflow-provenance.py" --state-dir "$provenance_state" \
+  --convo-db "$provenance_fixture/missing.sqlite3" --sidecar "$provenance_fixture/missing-sidecar.json" \
+  --lanes "$provenance_lane" --skip-generic --json >"$provenance_fixture/scanner-failure.json"
+jq -e --arg root "$provenance_alternate/projects" '
+  (.lanes[0].provenance == "unresolved")
+  and (.search_coverage.searched_roots | length == 0)
+  and (.search_coverage.candidate_scan_error == "command_unavailable")
+  and any(.search_coverage.unscanned_roots[]; .path == $root and (.sources | index("CLAUDE_CONFIG_DIR")))
+' "$provenance_fixture/scanner-failure.json" >/dev/null \
+  || { echo "provenance helper: failed scan was reported as searched" >&2; exit 1; }
+env -u CLAUDE_CONFIG_DIR -u CLAUDE_PROJECTS_DIR -u CODEX_SESSIONS_DIR -u WASPFLOW_PROVENANCE_SEARCH_ROOTS \
+  "HOME=$provenance_home" "CODEX_HOME=$provenance_alternate/codex" \
+  python3 "$root/scripts/waspflow-provenance.py" --state-dir "$provenance_state" \
+  --convo-db "$provenance_fixture/missing.sqlite3" --sidecar "$provenance_fixture/missing-sidecar.json" \
+  --lanes "$provenance_lane" --skip-generic --json >"$provenance_fixture/codex-home.json"
+jq -e --arg root "$provenance_alternate/codex/sessions" '
+  .lanes[0] as $lane
+  | ($lane.provenance == "exact_spawn_call")
+  and (($lane.roots[0].evidence | length) == 1)
+  and ($lane.roots[0].evidence[0].command_field == "payload.arguments.cmd")
+  and any(.search_coverage.searched_roots[]; .path == $root and (.sources | index("CODEX_HOME")))
+' "$provenance_fixture/codex-home.json" >/dev/null \
+  || { echo "provenance helper: CODEX_HOME did not yield strict command evidence" >&2; exit 1; }
+"${provenance_helper[@]}" --search-root "$provenance_alternate/projects" \
+  >"$provenance_fixture/operator-root.json"
+jq -e --arg root "$provenance_alternate/projects" '
+  (.lanes[0].provenance == "exact_spawn_call")
+  and any(.search_coverage.searched_roots[]; .path == $root and (.sources | index("--search-root")))
+' "$provenance_fixture/operator-root.json" >/dev/null \
+  || { echo "provenance helper: --search-root was not searched" >&2; exit 1; }
+python3 - "$provenance_state/lanes/$provenance_lane/state.json" "$provenance_alternate" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+state = json.loads(path.read_text(encoding="utf-8"))
+state["claude_config_dir"] = sys.argv[2]
+path.write_text(json.dumps(state) + "\n", encoding="utf-8")
+PY
+"${provenance_helper[@]}" >"$provenance_fixture/lane-root.json"
+jq -e --arg root "$provenance_alternate/projects" --arg source "lane:$provenance_lane:claude_config_dir" '
+  (.lanes[0].provenance == "exact_spawn_call")
+  and any(.search_coverage.searched_roots[]; .path == $root and (.sources | index($source)))
+' "$provenance_fixture/lane-root.json" >/dev/null \
+  || { echo "provenance helper: lane config home was not searched" >&2; exit 1; }
+
 # A scoped tmux helper must dispose of its session on EXIT for both ordinary and
 # failing exits, and that cleanup must not mutate the operator's default server.
 # Exercise the trap in child processes so the assertion runs after their EXIT.
