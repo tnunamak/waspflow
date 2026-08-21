@@ -16,6 +16,98 @@ mkdir -p "$scratch"
 
 bash -n "$root/bin/waspflow" "$root"/lib/*.sh "$root"/lib/providers/*.sh
 
+# Codex billing truth: `OPENAI_API_KEY` is not an auth-mode signal. Stub the
+# read-only status probe so these assertions never depend on this host's login.
+(
+  billing_home="$(mktemp -d "$scratch/waspflow-codex-billing-XXXXXX")"
+  billing_bin="$billing_home/bin"; mkdir -p "$billing_bin"
+  billing_log="$billing_home/codex-login-status.log"
+  cat >"$billing_bin/codex" <<'CODEX'
+#!/usr/bin/env bash
+[[ "$1" == login && "$2" == status ]] || exit 64
+printf '%s\n' "$*" >>"${CODEX_AUTH_LOG:?}"
+case "${CODEX_AUTH_MODE:?}" in
+  chatgpt)
+    printf 'Logged in using ChatGPT\nAccount: subscription@example.invalid\n'
+    ;;
+  api_key)
+    printf 'Logged in using API key\nAccount: api@example.invalid\n'
+    ;;
+  failure)
+    printf 'codex login status failed\n' >&2
+    exit 9
+    ;;
+  timeout)
+    sleep 5
+    ;;
+  *) exit 65 ;;
+esac
+CODEX
+  chmod +x "$billing_bin/codex"
+  export PATH="$billing_bin:$PATH" CODEX_AUTH_LOG="$billing_log" OPENAI_API_KEY=synthetic-key
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+
+  # ChatGPT auth stays silent even when OPENAI_API_KEY is non-empty. The three
+  # consumers share a 15-second cache, so only one status process is started.
+  export WASPFLOW_HOME="$billing_home/chatgpt" CODEX_AUTH_MODE=chatgpt
+  chatgpt_doctor="$(billing_report_auth)"
+  chatgpt_preflight="$(billing_preflight_codex 2>&1)"
+  chatgpt_path="$(billing_path_v1 codex default false | jq -r '.path + ":" + .evidence')"
+  ! grep -q 'codex auth:' <<<"$chatgpt_doctor" \
+    || { echo "codex billing: ChatGPT auth emitted a doctor warning" >&2; exit 1; }
+  [[ -z "$chatgpt_preflight" ]] \
+    || { echo "codex billing: ChatGPT auth emitted a preflight warning" >&2; exit 1; }
+  [[ "$chatgpt_path" == chatgpt_subscription:codex_login_status ]] \
+    || { echo "codex billing: ChatGPT auth was not recorded as subscription" >&2; exit 1; }
+  [[ "$(wc -l <"$billing_log" | tr -d ' ')" == 1 ]] \
+    || { echo "codex billing: status probe was not cached" >&2; exit 1; }
+
+  # API-key auth is a determinate billing fact, never a request to verify.
+  : >"$billing_log"
+  export WASPFLOW_HOME="$billing_home/api-key" CODEX_AUTH_MODE=api_key
+  api_doctor="$(billing_report_auth)"
+  api_preflight="$(billing_preflight_codex 2>&1)"
+  [[ "$api_doctor" == *"  [warn] codex auth: active Codex login uses API-key auth; Codex usage is billed at API pay-as-you-go rates."* ]] \
+    || { echo "codex billing: API-key doctor warning was not determinate" >&2; exit 1; }
+  [[ "$api_preflight" == "waspflow: codex billing notice: active Codex login uses API-key auth; Codex usage is billed at API pay-as-you-go rates." ]] \
+    || { echo "codex billing: API-key preflight warning was not determinate" >&2; exit 1; }
+  ! grep -qiE 'may|verify' <<<"$api_doctor$api_preflight" \
+    || { echo "codex billing: API-key warning retained speculative wording" >&2; exit 1; }
+
+  # A failed or timed-out probe is explicit unknown, not silence or a false
+  # API-key conclusion. Each case gets a separate cache namespace.
+  export WASPFLOW_HOME="$billing_home/failure" CODEX_AUTH_MODE=failure
+  failure_doctor="$(billing_report_auth)"
+  failure_preflight="$(billing_preflight_codex 2>&1)"
+  [[ "$failure_doctor" == *"  [warn] codex auth: Codex auth mode is unknown: codex login status failed; billing path could not be determined."* ]] \
+    || { echo "codex billing: failed probe was not reported as unknown" >&2; exit 1; }
+  [[ "$failure_preflight" == "waspflow: codex billing notice: Codex auth mode is unknown: codex login status failed; billing path could not be determined." ]] \
+    || { echo "codex billing: failed preflight probe was not reported as unknown" >&2; exit 1; }
+
+  export WASPFLOW_HOME="$billing_home/timeout" CODEX_AUTH_MODE=timeout WASPFLOW_CODEX_AUTH_TIMEOUT_SECONDS=1
+  timeout_doctor="$(billing_report_auth)"
+  timeout_preflight="$(billing_preflight_codex 2>&1)"
+  [[ "$timeout_doctor" == *"  [warn] codex auth: Codex auth mode is unknown: codex login status timed out; billing path could not be determined."* ]] \
+    || { echo "codex billing: timed-out probe was not reported as unknown" >&2; exit 1; }
+  [[ "$timeout_preflight" == "waspflow: codex billing notice: Codex auth mode is unknown: codex login status timed out; billing path could not be determined." ]] \
+    || { echo "codex billing: timed-out preflight probe was not reported as unknown" >&2; exit 1; }
+  unset WASPFLOW_CODEX_AUTH_TIMEOUT_SECONDS
+
+  # The Claude guard remains an exact hard refusal without its existing opt-in.
+  export ANTHROPIC_API_KEY=synthetic-key
+  unset WASPFLOW_ALLOW_API_BILLING
+  set +e
+  claude_guard="$(billing_preflight_claude 2>&1)"
+  claude_guard_rc=$?
+  set -e
+  [[ "$claude_guard_rc" -eq 1 ]] \
+    || { echo "claude billing guard: refusal exit code changed" >&2; exit 1; }
+  [[ "$claude_guard" == $'waspflow: claude billing guard: ANTHROPIC_API_KEY is set.\nwaspflow: Headless Claude workers will bill pay-as-you-go API rates, NOT your subscription/Agent-SDK credit.\nwaspflow: A fleet can run up large charges (see claude-code issue #37686).\nwaspflow: Fix: unset ANTHROPIC_API_KEY before spawning Claude workers.\nwaspflow: Intentional override: WASPFLOW_ALLOW_API_BILLING=1 waspflow spawn --provider claude ...' ]] \
+    || { echo "claude billing guard: refusal text changed" >&2; exit 1; }
+  rm -rf "$billing_home"
+)
+
 # Codex effort honesty: xhigh and max must pass through unchanged.
 grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/providers/codex.sh"
 grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/exec.sh"

@@ -1,5 +1,11 @@
 # Billing Safety Report
 
+> **Codex update (2026-08-21):** The Codex findings and transcript below record
+> the former environment-only advisory. They are preserved as historical
+> evidence, not current behavior. Codex now uses bounded, cached, read-only
+> `codex login status` observation: ChatGPT auth is silent, API-key auth states
+> API billing as a fact, and an unavailable result is explicitly unknown.
+
 ## What Changed
 
 Waspflow now has an env-only billing guard in `lib/billing.sh`.

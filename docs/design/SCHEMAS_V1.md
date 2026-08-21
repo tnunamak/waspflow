@@ -111,18 +111,19 @@ runtime-settings receipt machinery; Receipt v1 carries both plus `stats_eligible
 ## 3. BillingPath v1
 
 sol #4 finding 4 (P0, verified): `codex debug auth` does not exist; `codex login status`
-prints e.g. "Logged in using ChatGPT" (text, cheap). Claude has more paths than two.
-Enums widened; every value carries its evidence; `_env_heuristic` values never masquerade
-as attestation.
+prints e.g. "Logged in using ChatGPT" (text, cheap). A bounded, short-lived,
+auth-context cache shares that read-only observation between the launch paths.
+Claude has more paths than two. Enums widened; every value carries its evidence;
+`_env_heuristic` values never masquerade as attestation.
 
 ```json
-{ "schema_version": 1, "path": "chatgpt_subscription", "evidence": "codex_login_status_text", "detail": "Logged in using ChatGPT" }
+{ "schema_version": 1, "path": "chatgpt_subscription", "evidence": "codex_login_status", "detail": "" }
 ```
 
 | provider | path values | evidence rule |
 |----------|------------|---------------|
 | claude | `api_key` \| `auth_token` \| `bedrock` \| `vertex` \| `custom_base_url` \| `subscription_env_heuristic` \| `unknown` | `ANTHROPIC_API_KEY` → api_key; `ANTHROPIC_AUTH_TOKEN` → auth_token; `CLAUDE_CODE_USE_BEDROCK/VERTEX` → bedrock/vertex; `ANTHROPIC_BASE_URL` → custom_base_url; none of these set → `subscription_env_heuristic` (absence of overrides does NOT prove subscription — named accordingly) |
-| codex | `chatgpt_subscription` \| `api_key` \| `api_key_env` \| `access_token_env` \| `oss_local` \| `scoped_unknown` \| `unknown` | Precedence, first match wins: (1) `--oss` → oss_local; (2) `--profile`/`-c`/raw args → `scoped_unknown` (login status can't speak for a non-default profile/endpoint); (3) `codex login status` text → chatgpt_subscription or api_key (attested, cheap); (4) `CODEX_ACCESS_TOKEN` set → access_token_env; (5) `OPENAI_API_KEY` set → api_key_env (the signal `lib/billing.sh:15` already warns on); (6) unknown |
+| codex | `chatgpt_subscription` \| `api_key` \| `api_key_env` \| `access_token_env` \| `oss_local` \| `scoped_unknown` \| `unknown` | Precedence, first match wins: (1) `--oss` → oss_local; (2) `--profile`/`-c`/raw args → `scoped_unknown` (login status cannot speak for a non-default profile/endpoint); (3) bounded, cached `codex login status` text → chatgpt_subscription or api_key; (4) absent, failed, timed-out, skipped, or unrecognized status → unknown with `codex_login_status_unknown` evidence. `OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN` only partition the short-lived cache; they do not classify the active auth mode. `api_key_env` and `access_token_env` remain valid for historic receipts. |
 | grok | `api_key_env` \| `oauth_env_heuristic` \| `unknown` | `XAI_API_KEY` → api_key_env; else oauth_env_heuristic |
 
 `cost_currency` derivation: `chatgpt_subscription | subscription_env_heuristic |
