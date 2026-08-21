@@ -24,6 +24,7 @@ accept-runtime cmd_accept_runtime
 attach cmd_attach
 close cmd_close
 captured cmd_captured
+provenance cmd_provenance
 verify cmd_verify
 escalate cmd_escalate
 reap cmd_reap
@@ -100,6 +101,7 @@ help_usage() {
     attach) help_usage_attach ;;
     close) help_usage_close ;;
     captured) help_usage_captured ;;
+    provenance) help_usage_provenance ;;
     verify) help_usage_verify ;;
     escalate) help_usage_escalate ;;
     reap) help_usage_reap ;;
@@ -514,6 +516,25 @@ Flags:
 Examples:
   waspflow close fix --status harvested --into PR#42
   waspflow close experiment --status abandoned --reason "Approach was invalid"
+EOF
+}
+
+help_usage_provenance() {
+  cat <<'EOF'
+Append forensic parent-attribution facts for lanes recorded without a parent.
+
+Recovers a lane's spawning session only from an exact spawn command argument in a
+recorded tool call. Command output and transcript prose are never treated as
+evidence. Events are appended; original lane_started records are never rewritten.
+
+Usage:
+  waspflow provenance backfill --report <file>
+
+Flags:
+  --report <file>             Helper report (waspflow-provenance.py --json) to read.
+
+Examples:
+  waspflow provenance backfill --report /tmp/provenance.json
 EOF
 }
 

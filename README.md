@@ -236,6 +236,7 @@ config shape.
 | `gc [--lane-age S] [--apply]` | Dry-run fleet selection for safely parkable old lanes; `--apply` parks them |
 | `close <lane> --status <harvested\|superseded\|abandoned>` | Record a lane's fan-in outcome (with provenance) |
 | `captured <lane> --in <ref>` | Is the lane's work already present in `<ref>`? (by content, not ancestry) |
+| `provenance backfill --report <file> [--skip <lane>]...` | Append revalidated forensic parent facts without changing lane state |
 | `ops list\|explain\|resolve <id>` | Resolve a task-shaped operating point to explicit flags |
 | `list` | List lanes |
 | `status <lane>` | Show one lane's JSON state |
@@ -265,6 +266,11 @@ Antigravity, and Qwen resolve `auto` to `inherit` with a warning because their C
 have no verified empty-MCP launch boundary. Explicit `--mcp none` fails before launch
 for those providers. Under Claude/Codex isolation, pass-through MCP config (and Codex
 config profiles) is rejected; choose `inherit` explicitly when a task needs it.
+
+For a one-time recovery of older missing parent records, see
+[forensic parent backfill](docs/provenance-backfill.md). It uses only exact
+spawn commands recorded as submitted tool arguments; it does not infer a parent
+from transcript or command output.
 
 ## Exec: Headless One-Shot Work
 
