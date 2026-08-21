@@ -44,6 +44,11 @@ WASPFLOW_CODEX_BACKEND_HEALTH_URL="${WASPFLOW_CODEX_BACKEND_HEALTH_URL:-}"
 # default session.
 WASPFLOW_TMUX_SESSION="${WASPFLOW_TMUX_SESSION:-waspflow}"
 
+# Limit retained history for future waspflow windows without changing the tmux
+# server or any other session. An unset value defaults to 10000; empty and 0
+# remove this session's override so tmux's inherited setting applies.
+WASPFLOW_TMUX_HISTORY_LIMIT="${WASPFLOW_TMUX_HISTORY_LIMIT-10000}"
+
 # A lane is an unattended child process even though its provider owns an
 # interactive tmux pane.  Inheriting the tmux server's PAGER/GIT_PAGER lets a
 # provider-invoked `git` stop the lane in less, waiting for an operator to press
@@ -376,9 +381,17 @@ lane_matches_project() {
 # ---- tmux helpers -----------------------------------------------------------
 # All windows live in a dedicated session so we never disturb the user's tmux.
 tmux_ensure_session() {
-  tmux has-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null && return 0
-  # Create detached with a placeholder window we immediately leave alone.
-  tmux new-session -d -s "$WASPFLOW_TMUX_SESSION" -n _waspflow_home 2>/dev/null || true
+  if ! tmux has-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null; then
+    # Create detached with a placeholder window we immediately leave alone.
+    tmux new-session -d -s "$WASPFLOW_TMUX_SESSION" -n _waspflow_home 2>/dev/null || true
+  fi
+  if [[ -z "$WASPFLOW_TMUX_HISTORY_LIMIT" || "$WASPFLOW_TMUX_HISTORY_LIMIT" == 0 ]]; then
+    tmux set-option -u -t "$WASPFLOW_TMUX_SESSION" history-limit 2>/dev/null || true
+    return 0
+  fi
+  # history-limit is session-scoped unless -g is supplied. Keep the operator's
+  # other sessions on their inherited setting.
+  tmux set-option -t "$WASPFLOW_TMUX_SESSION" history-limit "$WASPFLOW_TMUX_HISTORY_LIMIT" 2>/dev/null || true
 }
 
 tmux_window_target() {

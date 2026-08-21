@@ -139,6 +139,88 @@ done
 [[ "$(default_session_count)" == "$default_sessions_before" ]] \
   || { echo "tmux EXIT cleanup: touched the default tmux server" >&2; exit 1; }
 
+# history-limit must stay local to waspflow. This intentionally uses the
+# suite's explicit -L socket for every tmux action, including cleanup.
+(
+  history_prefix="waspflow-history-$$-$RANDOM"
+  history_main_session="${history_prefix}-main"
+  history_sessions=(
+    "$history_main_session"
+    "${history_prefix}-default"
+    "${history_prefix}-custom"
+    "${history_prefix}-empty"
+    "${history_prefix}-zero"
+  )
+  history_tmux() {
+    env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$TMUX_TMPDIR" \
+      "$real_tmux" -L "$WASPFLOW_TMUX_SOCKET" "$@"
+  }
+  history_cleanup() {
+    local session
+    for session in "${history_sessions[@]}"; do
+      history_tmux kill-session -t "$session" 2>/dev/null || true
+    done
+  }
+  trap history_cleanup EXIT
+
+  history_tmux new-session -d -s "$history_main_session" -n home 'exec sleep 30'
+  history_main_local_limit="$(history_tmux show-options -t "$history_main_session" -v history-limit)"
+  history_main_effective_limit="$(history_tmux display-message -p -t "$history_main_session" '#{history_limit}')"
+  history_global_limit="$(history_tmux show-options -g -v history-limit)"
+
+  history_case() (
+    local name="$1" limit="$2" local_expected="$3" future_expected="$4"
+    export WASPFLOW_TMUX_SESSION="${history_prefix}-${name}"
+    if [[ "$limit" == __unset__ ]]; then
+      unset WASPFLOW_TMUX_HISTORY_LIMIT
+    else
+      export WASPFLOW_TMUX_HISTORY_LIMIT="$limit"
+    fi
+    # shellcheck source=/dev/null
+    source "$root/lib/core.sh"
+    tmux_ensure_session
+    [[ "$(history_tmux show-options -t "$WASPFLOW_TMUX_SESSION" -v history-limit)" == "$local_expected" ]] \
+      || { echo "tmux history: $name waspflow session limit was not $local_expected" >&2; exit 1; }
+    history_tmux new-window -d -t "$WASPFLOW_TMUX_SESSION" -n later 'exec sleep 30'
+    [[ "$(history_tmux display-message -p -t "$WASPFLOW_TMUX_SESSION:later" '#{history_limit}')" == "$future_expected" ]] \
+      || { echo "tmux history: $name future window limit was not $future_expected" >&2; exit 1; }
+    [[ "$(history_tmux show-options -t "$history_main_session" -v history-limit)" == "$history_main_local_limit" ]] \
+      || { echo "tmux history: non-waspflow session changed" >&2; exit 1; }
+    [[ "$(history_tmux display-message -p -t "$history_main_session" '#{history_limit}')" == "$history_main_effective_limit" ]] \
+      || { echo "tmux history: non-waspflow effective limit changed" >&2; exit 1; }
+    [[ "$(history_tmux show-options -g -v history-limit)" == "$history_global_limit" ]] \
+      || { echo "tmux history: global setting changed" >&2; exit 1; }
+  )
+
+  history_case default __unset__ 10000 10000
+  history_case custom 50000 50000 50000
+
+  history_opt_out_case() (
+    local name="$1" limit="$2"
+    export WASPFLOW_TMUX_SESSION="${history_prefix}-${name}"
+    export WASPFLOW_TMUX_HISTORY_LIMIT=10000
+    # shellcheck source=/dev/null
+    source "$root/lib/core.sh"
+    tmux_ensure_session
+    [[ "$(history_tmux show-options -t "$WASPFLOW_TMUX_SESSION" -v history-limit)" == 10000 ]] \
+      || { echo "tmux history: $name setup did not set a local limit" >&2; exit 1; }
+    export WASPFLOW_TMUX_HISTORY_LIMIT="$limit"
+    tmux_ensure_session
+    [[ -z "$(history_tmux show-options -t "$WASPFLOW_TMUX_SESSION" -v history-limit)" ]] \
+      || { echo "tmux history: $name did not restore inherited behavior" >&2; exit 1; }
+    history_tmux new-window -d -t "$WASPFLOW_TMUX_SESSION" -n later 'exec sleep 30'
+    [[ "$(history_tmux display-message -p -t "$WASPFLOW_TMUX_SESSION:later" '#{history_limit}')" == "$history_global_limit" ]] \
+      || { echo "tmux history: $name future window did not inherit $history_global_limit" >&2; exit 1; }
+    [[ "$(history_tmux display-message -p -t "$history_main_session" '#{history_limit}')" == "$history_main_effective_limit" ]] \
+      || { echo "tmux history: non-waspflow effective limit changed" >&2; exit 1; }
+    [[ "$(history_tmux show-options -g -v history-limit)" == "$history_global_limit" ]] \
+      || { echo "tmux history: global setting changed" >&2; exit 1; }
+  )
+
+  history_opt_out_case empty ''
+  history_opt_out_case zero 0
+)
+
 # Textual pane consumers require the plain, width-preserving capture contract:
 # normal capture has no ANSI bytes, while `-e` remains replay/debug-only.
 (

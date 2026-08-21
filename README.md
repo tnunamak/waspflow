@@ -477,6 +477,7 @@ commands, and resolved provider argv/env; use `status <lane>` for one full recor
 |---|---|---|
 | `WASPFLOW_HOME` | `~/.local/state/waspflow` | Lane state and transcripts |
 | `WASPFLOW_TMUX_SESSION` | `waspflow` | tmux session that holds worker windows |
+| `WASPFLOW_TMUX_HISTORY_LIMIT` | `10000` | Scrollback lines for future waspflow windows; empty or `0` restores tmux's inherited setting |
 | `WASPFLOW_LANE_PAGER` | `cat` | Pager command for provider children in new lanes; overrides inherited `PAGER` and `GIT_PAGER` for those children only |
 | `WASPFLOW_ALLOW_API_BILLING` | empty | Set to `1` to intentionally allow Claude workers while `ANTHROPIC_API_KEY` is set |
 | `WASPFLOW_CODEX_BACKEND_HEALTH_URL` | empty | Optional health check URL for proxy-routed Codex setups |
@@ -495,6 +496,11 @@ is `cat`; inherited `PAGER` and `GIT_PAGER` never control a lane. Set
 `WASPFLOW_LANE_PAGER=less` only when an operator intentionally accepts that an
 unattended lane may wait in a pager. The override applies to provider children
 and headless lane recovery commands, not to the operator's shell.
+
+`WASPFLOW_TMUX_HISTORY_LIMIT` is applied only to the configured waspflow tmux
+session, never to tmux's global setting or another session such as `main`.
+It affects windows created after the setting is applied; it does not shrink the
+scrollback already retained by open windows.
 
 ## Architecture
 
