@@ -25,6 +25,7 @@
 #   attach  <lane>                        attach your terminal to the pane
 #   close   <lane> --status <...> [--into|--by|--reason ...]  set fan-in outcome
 #   captured <lane> --in <ref>            is lane's work in <ref>? (by content)
+#   provenance backfill --report FILE [--skip LANE]...       append forensic parent facts
 #   verify  <lane>                         non-destructive verification checkpoint
 #   reap    <lane|--status S,...> [--force] [--keep-worktree] [--no-archive]
 #   check   [--cwd DIR] [--config FILE] [--no-fail] project integrity gate
@@ -111,6 +112,8 @@ Verbs:
   attach  <lane>                        attach your terminal to the pane
   close   <lane> --status <harvested|superseded|abandoned|open> [prov]  fan-in outcome
   captured <lane> --in <ref>            is lane's work already in <ref>? (by content)
+  provenance backfill --report FILE [--skip LANE]... [--convo-db FILE] [--tolerance S]
+                                      append validated forensic parent facts; never changes lane state
   verify  <lane> [--json]               run prepare/verify without reaping (0 pass, 2 fail)
   escalate <lane> [--to OP|PROVIDER/MODEL[/EFFORT]] [--handoff] [--reset-tree]
            [--force] [--ack-deprecated] [--note TEXT] [--json]
@@ -923,6 +926,110 @@ cmd_captured() {
   fanin_captured "$lane" "$ref"   # prints verdict to stdout, summary to stderr
 }
 
+# Import only a helper report whose exact rows can be revalidated against an
+# executed tool-command argument. The Python boundary deliberately emits no
+# candidate for prose or aggregated-output appearances. This command itself
+# appends only forensic provenance facts; it never calls lane_set.
+cmd_provenance() {
+  local action="${1:-}" report="" convo_db="$HOME/.local/share/minnows/convo/ledger.sqlite3" tolerance=600
+  local attempted exact unmatched skipped=0 exact_skipped=0 eligible written=0 already_present=0
+  local candidate_text lane root_harness root_session_id matched_field command_hash source_path_hash source_offset tool_timestamp spawn_delta
+  local -a skip_lanes=() report_lanes=() candidates=() helper_args=()
+  local -A excluded=() present=()
+  [[ -n "$action" ]] || die "provenance: expected 'backfill'"
+  shift
+  case "$action" in
+    backfill) ;;
+    *) die "provenance: unknown action '$action' (try: waspflow provenance backfill --report FILE)" ;;
+  esac
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --report)
+        [[ $# -ge 2 && -n "${2:-}" ]] || die "provenance backfill: --report requires a file"
+        report="$2"; shift 2
+        ;;
+      --skip)
+        [[ $# -ge 2 && -n "${2:-}" ]] || die "provenance backfill: --skip requires a lane name"
+        skip_lanes+=("$2"); shift 2
+        ;;
+      --convo-db)
+        [[ $# -ge 2 && -n "${2:-}" ]] || die "provenance backfill: --convo-db requires a file"
+        convo_db="$2"; shift 2
+        ;;
+      --tolerance)
+        [[ $# -ge 2 && -n "${2:-}" ]] || die "provenance backfill: --tolerance requires seconds"
+        tolerance="$2"; shift 2
+        ;;
+      -*) die "provenance backfill: unknown option '$1'" ;;
+      *) die "provenance backfill: unexpected argument '$1'" ;;
+    esac
+  done
+  [[ -n "$report" && -f "$report" ]] || die "provenance backfill: --report FILE is required"
+  [[ "$tolerance" =~ ^[0-9]+$ ]] || die "provenance backfill: --tolerance must be a non-negative integer"
+
+  mapfile -t report_lanes < <(jq -r '.lanes[]?.lane // empty' "$report")
+  attempted="${#report_lanes[@]}"
+  [[ "$attempted" -gt 0 ]] || die "provenance backfill: helper report contains no lanes"
+  for lane in "${report_lanes[@]}"; do
+    [[ -z "${present[$lane]:-}" ]] || die "provenance backfill: helper report repeats lane '$lane'"
+    present["$lane"]=true
+  done
+  exact="$(jq '[.lanes[]? | select(.provenance == "exact_spawn_call")] | length' "$report")"
+  unmatched=$((attempted - exact))
+  for lane in "${skip_lanes[@]}"; do
+    [[ -n "$lane" ]] || die "provenance backfill: --skip requires a lane name"
+    [[ -n "${present[$lane]:-}" ]] || die "provenance backfill: excluded lane '$lane' is not in the helper report"
+    [[ -z "${excluded[$lane]:-}" ]] || die "provenance backfill: lane '$lane' was excluded twice"
+    excluded["$lane"]=true
+    helper_args+=(--skip "$lane")
+  done
+  for lane in "${report_lanes[@]}"; do
+    [[ -z "${excluded[$lane]:-}" ]] && continue
+    skipped=$((skipped + 1))
+    if jq -e --arg lane "$lane" '.lanes[] | select(.lane == $lane and .provenance == "exact_spawn_call")' "$report" >/dev/null; then
+      exact_skipped=$((exact_skipped + 1))
+    fi
+  done
+  eligible=$((exact - exact_skipped))
+
+  if ! candidate_text="$(python3 "$WASPFLOW_ROOT/scripts/provenance-backfill.py" \
+    --report "$report" --state-dir "$WASPFLOW_LANES_DIR" --convo-db "$convo_db" --tolerance "$tolerance" \
+    "${helper_args[@]}")"; then
+    die "provenance backfill: helper evidence did not revalidate"
+  fi
+  if [[ -n "$candidate_text" ]]; then mapfile -t candidates <<<"$candidate_text"; fi
+  [[ "${#candidates[@]}" -eq "$eligible" ]] \
+    || die "provenance backfill: revalidated ${#candidates[@]} candidates, expected $eligible"
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    lane="$(jq -r '.lane' <<<"$candidate")"
+    root_harness="$(jq -r '.root_harness' <<<"$candidate")"
+    root_session_id="$(jq -r '.root_session_id' <<<"$candidate")"
+    matched_field="$(jq -r '.matched_field' <<<"$candidate")"
+    command_hash="$(jq -r '.command_sha256' <<<"$candidate")"
+    source_path_hash="$(jq -r '.source_path_sha256' <<<"$candidate")"
+    source_offset="$(jq -r '.source_byte_offset' <<<"$candidate")"
+    tool_timestamp="$(jq -r '.tool_timestamp' <<<"$candidate")"
+    spawn_delta="$(jq -r '.spawn_delta_seconds' <<<"$candidate")"
+    provenance_emit_forensic_spawn_call "$lane" "$root_harness" "$root_session_id" "$matched_field" \
+      "$command_hash" "$source_path_hash" "$source_offset" "$tool_timestamp" "$spawn_delta" \
+      || die "provenance backfill: failed to append lane '$lane'"
+    case "$PROVENANCE_APPEND_STATUS" in
+      written) written=$((written + 1)) ;;
+      already_present) already_present=$((already_present + 1)) ;;
+      *) die "provenance backfill: lane '$lane' append result is unknown" ;;
+    esac
+  done
+  jq -cn \
+    --argjson attempted "$attempted" --argjson exact "$exact" --argjson written "$written" \
+    --argjson already_present "$already_present" --argjson skipped "$skipped" \
+    --argjson still_absent "$((unmatched + exact_skipped))" --argjson unresolved "$unmatched" \
+    --argjson excluded_exact "$exact_skipped" \
+    '{attempted:$attempted,exact_spawn_call:$exact,written:$written,already_present:$already_present,
+      skipped_by_name:$skipped,still_absent:$still_absent,unresolved:$unresolved,excluded_exact:$excluded_exact}'
+}
+
 cmd_status() {
   local lane="${1:-}"; shift || true
   local tail_events="" json=0
@@ -1647,6 +1754,7 @@ main() {
     attach) cmd_attach "$@" ;;
     close)  cmd_close "$@" ;;
     captured) cmd_captured "$@" ;;
+    provenance) cmd_provenance "$@" ;;
     verify) cmd_verify "$@" ;;
     escalate) cmd_escalate "$@" ;;
     reap)   cmd_reap "$@" ;;

@@ -1435,6 +1435,76 @@ grep -q 'spawn_submitted' "$root/bin/waspflow" || { echo "spawn: submission-conf
   rm -rf "$provenance_home"
 )
 
+# Forensic parent recovery appends a new fact only after it revalidates the
+# helper's byte-offset evidence against a submitted command field. It is safe
+# to retry, leaves the original absent receipt and lane states untouched, and
+# refuses an output-only fake match.
+(
+  backfill_home="$(mktemp -d "$scratch/waspflow-provenance-backfill-XXXXXX")"
+  source_dir="$backfill_home/source"; mkdir -p "$source_dir"
+  export WASPFLOW_HOME="$backfill_home" WASPFLOW_LIB="$root/lib"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/provenance.sh"
+  lane_set provenance-backfill-exact lane_uuid "eeeeeeee-1111-2222-3333-444444444444" provider claude spawn_epoch 200 prompt exact
+  lane_set provenance-backfill-unresolved lane_uuid "eeeeeeee-1111-2222-3333-555555555555" provider claude spawn_epoch 200 prompt unresolved
+  lane_set provenance-backfill-output-only lane_uuid "eeeeeeee-1111-2222-3333-666666666666" provider claude spawn_epoch 200 prompt output-only
+  provenance_emit_lane_started provenance-backfill-exact
+  provenance_emit_lane_started provenance-backfill-unresolved
+  provenance_emit_lane_started provenance-backfill-output-only
+  source_path="$source_dir/backfill-root.jsonl"
+  printf '%s\n' '{"type":"assistant","timestamp":"1970-01-01T00:03:20Z","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"waspflow spawn --lane provenance-backfill-exact -- task"}}]}}' >"$source_path"
+  report="$backfill_home/helper-report.json"
+  jq -cn --arg source "$source_path" '
+    {lanes:[
+      {lane:"provenance-backfill-exact",provenance:"exact_spawn_call",roots:[{harness:"",session_id:"backfill-root",evidence:[{root_path:$source,byte_offset:0}]}]},
+      {lane:"provenance-backfill-unresolved",provenance:"unresolved",roots:[]}
+    ]}' >"$report"
+  lane_state_digest() {
+    find "$backfill_home/lanes" -name state.json -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+  }
+  states_before="$(lane_state_digest)"
+  first_backfill="$("$root/bin/waspflow" provenance backfill --report "$report" --convo-db "$backfill_home/no-catalog.sqlite3")"
+  jq -e '.attempted == 2 and .exact_spawn_call == 1 and .written == 1 and .already_present == 0 and
+    .skipped_by_name == 0 and .still_absent == 1 and .unresolved == 1' <<<"$first_backfill" >/dev/null \
+    || { echo "provenance backfill: first result counts are wrong" >&2; exit 1; }
+  [[ "$states_before" == "$(lane_state_digest)" ]] \
+    || { echo "provenance backfill: changed lane state" >&2; exit 1; }
+  jq -s -e '
+    length == 4 and
+    any(.[]; .event_type == "lane_started" and .lane.label == "provenance-backfill-exact" and .parent.evidence_class == "absent") and
+    any(.[]; .event_type == "lane_parent_backfilled" and .lane.label == "provenance-backfill-exact" and
+      .parent.ref == "backfill-root" and .parent.evidence_class == "forensic_spawn_call" and .parent.root.harness == null and
+      .evidence.class == "forensic" and .evidence.method == "exact_spawn_tool_command_argument" and
+      .evidence.matched_field == "assistant.message.content[].input.command" and
+      (.evidence.command_fingerprint | test("^sha256:[0-9a-f]{64}$")) and
+      (.evidence.source.path_fingerprint | test("^sha256:[0-9a-f]{64}$")) and
+      .evidence.source.byte_offset == 0 and .evidence.source.spawn_delta_seconds == 0) and
+    all(.[]; (.event_type != "lane_parent_backfilled") or (.evidence | has("command") | not))
+  ' "$backfill_home/provenance.jsonl" >/dev/null \
+    || { echo "provenance backfill: forensic event schema is wrong" >&2; exit 1; }
+  second_backfill="$("$root/bin/waspflow" provenance backfill --report "$report" --convo-db "$backfill_home/no-catalog.sqlite3")"
+  jq -e '.written == 0 and .already_present == 1 and .still_absent == 1' <<<"$second_backfill" >/dev/null \
+    || { echo "provenance backfill: retry was not a no-op" >&2; exit 1; }
+  [[ "$(wc -l <"$backfill_home/provenance.jsonl" | tr -d ' ')" == 4 && "$states_before" == "$(lane_state_digest)" ]] \
+    || { echo "provenance backfill: retry changed ledger or lane state" >&2; exit 1; }
+  output_path="$source_dir/output-root.jsonl"
+  printf '%s\n' '{"type":"assistant","timestamp":"1970-01-01T00:03:20Z","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"printf listed-lanes"}}]},"aggregated_output":"waspflow spawn --lane provenance-backfill-output-only -- task"}' >"$output_path"
+  output_report="$backfill_home/output-only-report.json"
+  jq -cn --arg source "$output_path" '
+    {lanes:[{lane:"provenance-backfill-output-only",provenance:"exact_spawn_call",roots:[{harness:"",session_id:"output-root",evidence:[{root_path:$source,byte_offset:0}]}]}]}' >"$output_report"
+  set +e
+  "$root/bin/waspflow" provenance backfill --report "$output_report" --convo-db "$backfill_home/no-catalog.sqlite3" >/dev/null 2>&1
+  output_only_rc=$?
+  set -e
+  [[ "$output_only_rc" -ne 0 ]] \
+    || { echo "provenance backfill: output-only match was accepted" >&2; exit 1; }
+  ! jq -e 'select(.event_type == "lane_parent_backfilled" and .lane.label == "provenance-backfill-output-only")' "$backfill_home/provenance.jsonl" >/dev/null \
+    || { echo "provenance backfill: output-only match wrote an event" >&2; exit 1; }
+  rm -rf "$backfill_home"
+)
+
 # Receipt emission is safe when a lifecycle command races itself: event identity
 # is lane-derived, the JSONL append lock deduplicates, and only a torn final
 # fragment is repaired. Earlier corruption remains a hard stop.

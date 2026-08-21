@@ -126,6 +126,7 @@ provenance_instance_id() {
 
 _provenance_append() {
   local event_id="$1" payload="$2" fd
+  PROVENANCE_APPEND_STATUS=""
   command -v flock >/dev/null 2>&1 || { err "provenance: flock is required"; return 1; }
   mkdir -p -m 700 "$WASPFLOW_LOCKS_DIR" || return 1
   exec {fd}>"$WASPFLOW_LOCKS_DIR/provenance.lock" || return 1
@@ -137,8 +138,11 @@ _provenance_append() {
     local exists_rc=0
     _provenance_event_exists_locked "$event_id" || exists_rc=$?
     case "$exists_rc" in
-      0) ;;
-      1) printf '%s\n' "$payload" >>"$WASPFLOW_PROVENANCE_LEDGER" || rc=$? ;;
+      0) PROVENANCE_APPEND_STATUS="already_present" ;;
+      1)
+        printf '%s\n' "$payload" >>"$WASPFLOW_PROVENANCE_LEDGER" || rc=$?
+        [[ "$rc" -ne 0 ]] || PROVENANCE_APPEND_STATUS="written"
+        ;;
       *) err "provenance: cannot determine whether event '$event_id' already exists"; rc=1 ;;
     esac
   fi
@@ -209,6 +213,57 @@ provenance_emit_worker_session_bound() {
        evidence:{class:"observed",method:"provider_session_binding",correlation_digest:(if $marker_hash == "" then null else "sha256:" + $marker_hash end)}}')" || return 1
   _provenance_append "$event_id" "$payload" || return 1
   lane_set "$lane" provenance_worker_bound_emitted "true"
+}
+
+# A forensic parent fact intentionally stays separate from lane_started: it was
+# recovered after launch, not observed at the spawn boundary. This function
+# never changes a lane state file; the event ID plus ledger lock make retries a
+# no-op while preserving the original absent receipt.
+provenance_emit_forensic_spawn_call() {
+  local lane="$1" root_harness="$2" root_session_id="$3" matched_field="$4"
+  local command_hash="$5" source_path_hash="$6" source_offset="$7" tool_timestamp="$8" spawn_delta="$9"
+  local event_id lane_uuid provider parent_ref instance payload
+
+  lane_exists "$lane" || { err "provenance: no such lane '$lane'"; return 1; }
+  lane_uuid="$(lane_get "$lane" lane_uuid)"
+  provider="$(lane_get "$lane" provider)"
+  [[ -n "$lane_uuid" && -n "$provider" ]] || { err "provenance: lane '$lane' lacks identity or provider"; return 1; }
+  [[ ( -z "$root_harness" || "$root_harness" =~ ^[a-z0-9_-]+$ ) && -n "$root_session_id" ]] \
+    || { err "provenance: forensic root identity is invalid"; return 1; }
+  [[ "$matched_field" != *$'\n'* && "$matched_field" != *$'\r'* && -n "$matched_field" ]] \
+    || { err "provenance: forensic matched field is invalid"; return 1; }
+  [[ "$command_hash" =~ ^[0-9a-f]{64}$ && "$source_path_hash" =~ ^[0-9a-f]{64}$ ]] \
+    || { err "provenance: forensic evidence digests are invalid"; return 1; }
+  [[ "$source_offset" =~ ^[0-9]+$ && "$spawn_delta" =~ ^[0-9]+$ && -n "$tool_timestamp" ]] \
+    || { err "provenance: forensic source coordinates are invalid"; return 1; }
+
+  # Refuse to turn a current/other parent record into a forensic fact. The
+  # original absent launch receipt remains immutable evidence of the gap.
+  jq -e --arg lane_uuid "$lane_uuid" --arg lane "$lane" '
+    select(.event_type == "lane_started" and .lane.id == $lane_uuid and .lane.label == $lane and
+      .parent.evidence_class == "absent")
+  ' "$WASPFLOW_PROVENANCE_LEDGER" >/dev/null 2>&1 \
+    || { err "provenance: lane '$lane' has no absent launch receipt to backfill"; return 1; }
+
+  parent_ref="${root_harness:+$root_harness:}$root_session_id"
+  provenance_validate_parent_ref "$parent_ref" || return 1
+  event_id="$(_provenance_event_id "$lane" lane_parent_backfilled)" || return 1
+  instance="$(provenance_instance_id)" || return 1
+  payload="$(jq -cn \
+    --arg event_id "$event_id" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg lane_uuid "$lane_uuid" --arg lane "$lane" --arg provider "$provider" \
+    --arg parent_ref "$parent_ref" --arg root_harness "$root_harness" --arg root_session_id "$root_session_id" \
+    --arg matched_field "$matched_field" --arg command_hash "$command_hash" --arg source_path_hash "$source_path_hash" \
+    --arg tool_timestamp "$tool_timestamp" --arg instance "$instance" \
+    --argjson source_offset "$source_offset" --argjson spawn_delta "$spawn_delta" '
+      {schema:"agent-provenance/v1",schema_version:1,event_id:$event_id,event_type:"lane_parent_backfilled",observed_at:$at,
+       producer:{name:"waspflow",instance_id:$instance},
+       lane:{id:$lane_uuid,label:$lane,provider:$provider},
+       parent:{ref:$parent_ref,evidence_class:"forensic_spawn_call",root:{harness:(if $root_harness == "" then null else $root_harness end),session_id:$root_session_id}},
+       evidence:{class:"forensic",method:"exact_spawn_tool_command_argument",matched_field:$matched_field,
+        command_fingerprint:"sha256:" + $command_hash,source:{path_fingerprint:"sha256:" + $source_path_hash,
+        byte_offset:$source_offset,tool_observed_at:$tool_timestamp,spawn_delta_seconds:$spawn_delta}}}')" || return 1
+  _provenance_append "$event_id" "$payload"
 }
 
 provenance_reconcile_lane() {
