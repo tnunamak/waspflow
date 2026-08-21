@@ -20,11 +20,15 @@ provenance_valid_codex_thread_id() {
   [[ "$1" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]
 }
 
-# Set a parent context only from a caller assertion or the one harness-owned
+provenance_valid_claude_code_session_id() {
+  provenance_valid_codex_thread_id "$1"
+}
+
+# Set a parent context only from a caller assertion or a harness-owned
 # environment identity we can validate. This is capture at the launch boundary,
 # not reconstruction from process, terminal, or timing heuristics.
 provenance_resolve_parent_context() {
-  local explicit_ref="$1" environment_ref="$2" codex_thread_id="$3"
+  local explicit_ref="$1" environment_ref="$2" codex_thread_id="$3" claude_code_session_id="${4:-}"
   PROVENANCE_PARENT_REF=""
   PROVENANCE_PARENT_EVIDENCE_CLASS="absent"
   if [[ -n "$explicit_ref" ]]; then
@@ -36,7 +40,32 @@ provenance_resolve_parent_context() {
   elif [[ -n "$codex_thread_id" ]] && provenance_valid_codex_thread_id "$codex_thread_id"; then
     PROVENANCE_PARENT_REF="codex:$codex_thread_id"
     PROVENANCE_PARENT_EVIDENCE_CLASS="observed_harness_env"
+  elif [[ -n "$claude_code_session_id" ]] && provenance_valid_claude_code_session_id "$claude_code_session_id"; then
+    PROVENANCE_PARENT_REF="claude:$claude_code_session_id"
+    PROVENANCE_PARENT_EVIDENCE_CLASS="observed_harness_env"
   fi
+}
+
+provenance_gate_mode() {
+  local mode="${WASPFLOW_PROVENANCE_GATE:-warn}"
+  case "$mode" in
+    warn|enforce) printf '%s\n' "$mode" ;;
+    *) die "provenance: WASPFLOW_PROVENANCE_GATE must be warn or enforce (got: $mode)" ;;
+  esac
+}
+
+provenance_gate_parent_context() {
+  local mode="$1" evidence_class="$2"
+  [[ "$evidence_class" != absent ]] && return 0
+  case "$mode" in
+    warn)
+      warn "provenance: parent absent; add --parent-ref <opaque-ref> or --no-parent to declare a top-level spawn"
+      ;;
+    enforce)
+      err "parent required: add --parent-ref <opaque-ref> or --no-parent to declare a top-level spawn"
+      return 6
+      ;;
+  esac
 }
 
 _provenance_sha256() {

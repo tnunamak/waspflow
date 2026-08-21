@@ -103,7 +103,7 @@ split_after_ddash() {
 # ============================================================================
 
 cmd_spawn() {
-  local provider="" lane="" model="" cwd="$PWD" isolate=0 effort="" mcp="auto" report="" no_recovery=0 parent_ref="" parent_ref_explicit=false
+  local provider="" lane="" model="" cwd="$PWD" isolate=0 effort="" mcp="auto" report="" no_recovery=0 parent_ref="" parent_ref_explicit=false no_parent=false
   local verify_command="" verify_name="verify" verify_timeout=1800 prepare_command="" verify_strength=""
   local op_id="" OP_ID="" OP_MODE="" provider_explicit=false model_explicit=false auto=false ack_deprecated=false accept_provider_default=false
   local -a extra=()
@@ -137,6 +137,7 @@ cmd_spawn() {
         [[ -n "$2" ]] || die "spawn: --parent-ref requires a non-empty value"
         parent_ref="$2"; parent_ref_explicit=true; shift 2
         ;;
+      --no-parent) no_parent=true; shift ;;
       --arg)      extra+=("${2:-}"); shift 2 ;;   # repeatable pass-through to the agent CLI
       "")         shift ;;
       *) die "spawn: unknown option '$1'" ;;
@@ -149,6 +150,7 @@ cmd_spawn() {
   [[ "$auto" == false || "$accept_provider_default" == false ]] || die "spawn: --auto conflicts with --accept-provider-default"
   [[ "$model_explicit" == false || "$accept_provider_default" == false ]] || die "spawn: --model conflicts with --accept-provider-default"
   [[ "$ack_deprecated" == false || "$auto" == true ]] || die "spawn: --ack-deprecated applies only to --auto"
+  [[ "$no_parent" == false || "$parent_ref_explicit" == false ]] || die "spawn: --no-parent conflicts with --parent-ref"
   local selection_mode
   selection_mode="$(selection_gate_mode)"
   if [[ "$selection_mode" == enforce && -z "$op_id" && "$model_explicit" == false && "$accept_provider_default" == false ]]; then
@@ -178,10 +180,18 @@ cmd_spawn() {
   [[ -n "$prompt" ]] || die "spawn: a task prompt is required after '--'"
   local explicit_parent_ref=""
   [[ "$parent_ref_explicit" == true ]] && explicit_parent_ref="$parent_ref"
-  provenance_resolve_parent_context "$explicit_parent_ref" "${WASPFLOW_PARENT_REF:-}" "${CODEX_THREAD_ID:-}"
+  provenance_resolve_parent_context "$explicit_parent_ref" "${WASPFLOW_PARENT_REF:-}" "${CODEX_THREAD_ID:-}" "${CLAUDE_CODE_SESSION_ID:-}"
   parent_ref="$PROVENANCE_PARENT_REF"
   local parent_evidence_class="$PROVENANCE_PARENT_EVIDENCE_CLASS"
+  if [[ "$no_parent" == true ]]; then
+    parent_ref=""
+    parent_evidence_class="declared_orphan"
+  fi
   provenance_validate_parent_ref "$parent_ref"
+  local provenance_mode provenance_gate_rc=0
+  provenance_mode="$(provenance_gate_mode)"
+  provenance_gate_parent_context "$provenance_mode" "$parent_evidence_class" || provenance_gate_rc=$?
+  [[ "$provenance_gate_rc" -eq 0 ]] || return "$provenance_gate_rc"
   cwd="$(cd "$cwd" && pwd)" || die "spawn: --cwd does not exist"
   guard_cwd "$cwd"   # never hand a worker '/' silently (known grok --cwd / crash)
   if [[ -n "$effort" && ! "$effort" =~ ^(none|minimal|low|medium|high|xhigh|max)$ ]]; then
@@ -336,10 +346,11 @@ cmd_spawn() {
     done
     [[ "$codex_oss" -eq 1 ]] && endpoint_profile="oss" || endpoint_profile="${codex_profile:-default}"
   fi
-  local billing_path auth_principal lane_uuid
+  local billing_path auth_principal lane_uuid claude_config_dir
   billing_path="$(billing_path_v1 "$provider" "$endpoint_profile" "$raw_provider_args")"
   auth_principal="$(billing_auth_principal "$provider")"
   lane_uuid="$(new_uuid)"
+  claude_config_dir="${CLAUDE_CONFIG_DIR:-default}"
   # Compute dispositions on every selected/explicit arm. Enforcement decides
   # whether to stop; explicit choice always continues after its warnings.
   if [[ -n "$op_id" ]]; then
@@ -393,6 +404,7 @@ cmd_spawn() {
     endpoint_profile "$endpoint_profile" \
     raw_provider_args "$raw_provider_args" \
     auth_principal "$auth_principal" \
+    claude_config_dir "$claude_config_dir" \
     billing_path "$billing_path" \
     selection_quota_observation "$selection_quota_observation" \
     selection_quota_filtered "$selection_quota_filtered" \

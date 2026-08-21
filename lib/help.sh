@@ -169,7 +169,8 @@ State: $WASPFLOW_HOME (default ~/.local/state/waspflow)
 tmux:  $WASPFLOW_TMUX_SESSION (default waspflow)
 
 Exit codes: 1 usage/error; 2 failed contract; 3 launch unconfirmed; 4 stalled;
-            5 selection_required (nothing launched; choose an arm and retry)
+            5 selection_required (nothing launched; choose an arm and retry);
+            6 parent_required (nothing launched; declare provenance and retry)
 EOF
 }
 

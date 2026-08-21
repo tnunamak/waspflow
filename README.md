@@ -45,6 +45,15 @@ or `--accept-provider-default`; it exits 5 (`selection_required`) without
 launching anything. `--auto` selects an op fallback and requires `--op`;
 `--ack-deprecated` applies only to that selector path.
 
+## Provenance gate
+
+Parent provenance defaults to `warn` for one release: a spawn with no resolved
+parent continues, records `absent`, and prints one suggestion to add
+`--parent-ref`. Set `WASPFLOW_PROVENANCE_GATE=enforce` to refuse that spawn with
+exit 6 (`parent_required`) before it creates a lane. Use `--no-parent` only for
+an intentional top-level spawn; it records `declared_orphan` rather than
+`absent`.
+
 You need `tmux`, `jq`, `git`, `curl`, `uuidgen`, and at least one agent CLI:
 `codex`, `claude`, `grok`, or `agy`. If something is missing, `waspflow doctor` tells
 you what to install. See [docs/prerequisites.md](docs/prerequisites.md) for links.
@@ -248,6 +257,7 @@ Useful `spawn` options:
 - `--op <id>` expands a task-shaped operating point (`waspflow ops list`); explicit flags win over expansion.
 - `--cwd <dir>` starts the worker in another directory.
 - `--parent-ref <opaque-ref>` records known parent-session provenance without resolving it.
+- `--no-parent` deliberately records this spawn as a top-level orphan.
 - `--arg <flag>` passes an extra flag to the underlying agent CLI.
 
 MCP policy by provider: Claude and Codex resolve `auto` to `none`; Grok,
@@ -395,11 +405,19 @@ waspflow spawn --parent-ref 'agent-session/v1/codex/your-session-id' \
 
 `WASPFLOW_PARENT_REF` supplies the same optional value for launcher-managed
 contexts. When neither explicit source exists, a valid Codex-provided
-`CODEX_THREAD_ID` is captured as `codex:<id>` with evidence class
-`observed_harness_env`. The precedence is `--parent-ref`, then
-`WASPFLOW_PARENT_REF`, then that validated Codex value. Parent references must
-not contain credentials. Missing parent evidence remains missing; Waspflow does
-not guess.
+`CODEX_THREAD_ID` or Claude Code-provided `CLAUDE_CODE_SESSION_ID` is captured
+as `codex:<id>` or `claude:<id>` with evidence class `observed_harness_env`.
+The precedence is `--parent-ref`, then `WASPFLOW_PARENT_REF`, then the validated
+Codex and Claude harness values. Waspflow also gives each worker its direct
+lane identity as `WASPFLOW_PARENT_REF=waspflow:<lane-uuid>`, so a nested spawn
+attributes to that lane rather than its grandparent. Parent references must not
+contain credentials. Missing parent evidence remains missing; Waspflow does not
+guess.
+
+`status <lane>` includes `claude_config_dir`: the value of `CLAUDE_CONFIG_DIR`
+captured at spawn, or `default`, for Claude-resume diagnostics. It is diagnostic
+state only; Waspflow does not change resume behavior or select credentials from
+this field.
 
 ## How `wait` Knows a Worker Is Done
 
@@ -488,12 +506,14 @@ commands, and resolved provider argv/env; use `status <lane>` for one full recor
 | `WASPFLOW_TMUX_SESSION` | `waspflow` | tmux session that holds worker windows |
 | `WASPFLOW_TMUX_HISTORY_LIMIT` | _(unset — inherit)_ | Scrollback lines for future waspflow windows. Unset, empty, or `0` inherits tmux's own setting (no cap). Set a number (e.g. `100000`) to bound retained scrollback during large fan-outs |
 | `WASPFLOW_LANE_PAGER` | `cat` | Pager command for provider children in new lanes; overrides inherited `PAGER` and `GIT_PAGER` for those children only |
+| `WASPFLOW_PROVENANCE_GATE` | `warn` | Parent-attribution gate: `warn` or `enforce` (exit 6) |
 | `WASPFLOW_ALLOW_API_BILLING` | empty | Set to `1` to intentionally allow Claude workers while `ANTHROPIC_API_KEY` is set |
 | `WASPFLOW_CODEX_BACKEND_HEALTH_URL` | empty | Optional health check URL for proxy-routed Codex setups |
 | `WASPFLOW_CODEX_AUTH_TIMEOUT_SECONDS` | `2` | Hard limit for the read-only `codex login status` check |
 | `WASPFLOW_CODEX_AUTH_CACHE_TTL_SECONDS` | `15` | Seconds to reuse a Codex auth-mode observation in the same auth context |
 | `WASPFLOW_SKIP_CODEX_AUTH_CHECK` | empty | Set to `1` to skip the Codex status check; billing is reported as unknown |
 | `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Claude session logs |
+| `CLAUDE_CONFIG_DIR` | default | Claude credential/config home, captured in spawned lane state as `claude_config_dir` |
 | `CODEX_SESSIONS_DIR` | `~/.codex/sessions` | Codex session logs |
 | `GROK_HOME` | `~/.grok` | Grok config home (sessions under `$GROK_HOME/sessions`) |
 | `GROK_SESSIONS_DIR` | `$GROK_HOME/sessions` | Grok session directories |
