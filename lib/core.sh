@@ -607,15 +607,19 @@ tmux_enter_lane_scope_and_capture() {
 # fails after preflight, run the original command and record the degraded truth.
 # Args: lane cwd execution -- command [args...]
 tmux_run_owned_lane_command() {
-  local lane="$1" cwd="$2" execution="$3" unit marker rc=0 run_dir="" startup="" state="" supervisor_pid="" supervisor_ticks=""
+  local lane="$1" cwd="$2" execution="$3" unit marker rc=0 run_dir="" startup="" state="" supervisor_pid="" supervisor_ticks="" parent_ref="${WASPFLOW_PARENT_REF:-}"
+  local -a child_environment=()
   shift 3
   [[ "${1:-}" == "--" ]] || return 2
   shift
   [[ $# -gt 0 ]] || return 2
+  case "$execution" in
+    pane|escalation:*) child_environment=("WASPFLOW_PARENT_REF=$parent_ref") ;;
+  esac
 
   if ! tmux_cgroup_scope_available; then
     tmux_record_lane_cgroup_fallback "$lane" "$execution" "scope-unavailable" || return 1
-    ( cd "$cwd" && env "PAGER=$WASPFLOW_LANE_PAGER" "GIT_PAGER=$WASPFLOW_LANE_PAGER" "$@" )
+    ( cd "$cwd" && env "${child_environment[@]}" "PAGER=$WASPFLOW_LANE_PAGER" "GIT_PAGER=$WASPFLOW_LANE_PAGER" "$@" )
     return $?
   fi
 
@@ -631,6 +635,7 @@ tmux_run_owned_lane_command() {
     ( cd "$cwd" && systemd-run --user --scope --unit="$unit" --collect --quiet -- \
         env "WASPFLOW_HOME=$WASPFLOW_HOME" "WASPFLOW_LIB=$WASPFLOW_LIB" \
         "WASPFLOW_TMUX_SESSION=$WASPFLOW_TMUX_SESSION" "PATH=$PATH" \
+        "${child_environment[@]}" \
         "PAGER=$WASPFLOW_LANE_PAGER" "GIT_PAGER=$WASPFLOW_LANE_PAGER" \
         bash -c 'source "$1"; tmux_enter_lane_scope "$2" "$3" "$4" "${@:5}"' -- \
         "$WASPFLOW_LIB/core.sh" "$lane" "$unit" "$execution" "$@" ) || rc=$?
@@ -639,6 +644,7 @@ tmux_run_owned_lane_command() {
     ( cd "$cwd" && systemd-run --user --scope --no-block --unit="$unit" --collect --quiet -- \
         env "WASPFLOW_HOME=$WASPFLOW_HOME" "WASPFLOW_LIB=$WASPFLOW_LIB" \
         "WASPFLOW_TMUX_SESSION=$WASPFLOW_TMUX_SESSION" "PATH=$PATH" \
+        "${child_environment[@]}" \
         "PAGER=$WASPFLOW_LANE_PAGER" "GIT_PAGER=$WASPFLOW_LANE_PAGER" \
         bash -c 'source "$1"; tmux_enter_lane_scope_and_capture "$2" "$3" "$4" "$5" "${@:6}"' -- \
         "$WASPFLOW_LIB/core.sh" "$lane" "$unit" "$execution" "$run_dir" "$@" ) || rc=$?
@@ -704,7 +710,7 @@ tmux_run_owned_lane_command() {
   fi
 
   tmux_record_lane_cgroup_fallback "$lane" "$execution" "scope-launch-failed" || return 1
-  ( cd "$cwd" && env "PAGER=$WASPFLOW_LANE_PAGER" "GIT_PAGER=$WASPFLOW_LANE_PAGER" "$@" )
+  ( cd "$cwd" && env "${child_environment[@]}" "PAGER=$WASPFLOW_LANE_PAGER" "GIT_PAGER=$WASPFLOW_LANE_PAGER" "$@" )
 }
 
 # A pane command is arbitrary shell syntax assembled by a provider adapter.
@@ -777,13 +783,17 @@ tmux_kill_owned_lane_scopes() {
 # names exist. If ownership capture fails, kill that exact id before returning.
 # Args: lane cwd shell_command. Echoes the exact window id.
 tmux_create_owned_lane_window() {
-  local lane="$1" cwd="$2" shell_command="$3" ownership="${4:-claim}" execution="${5:-pane}" window launcher window_lock
+  local lane="$1" cwd="$2" shell_command="$3" ownership="${4:-claim}" execution="${5:-pane}" window launcher window_lock lane_uuid lane_parent_ref=""
   # tmux panes inherit the tmux SERVER's environment, not necessarily the
   # caller's current WASPFLOW_HOME. Export the lane runtime coordinates and
   # pager policy into the pane explicitly before it sources core, or its scope
   # receipt would be written to the operator's default state directory and an
   # explicit pager override would be lost to the tmux server environment.
-  launcher="export WASPFLOW_HOME=$(printf '%q' "$WASPFLOW_HOME") WASPFLOW_LIB=$(printf '%q' "$WASPFLOW_LIB") WASPFLOW_TMUX_SESSION=$(printf '%q' "$WASPFLOW_TMUX_SESSION") WASPFLOW_LANE_PAGER=$(printf '%q' "$WASPFLOW_LANE_PAGER") PATH=$(printf '%q' "$PATH"); source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_run_owned_lane_shell_command $(printf '%q' "$lane") $(printf '%q' "$cwd") $(printf '%q' "$execution") $(printf '%q' "$shell_command")"
+  lane_uuid="$(lane_get "$lane" lane_uuid)"
+  if [[ "$lane_uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
+    lane_parent_ref="waspflow:$lane_uuid"
+  fi
+  launcher="export WASPFLOW_HOME=$(printf '%q' "$WASPFLOW_HOME") WASPFLOW_LIB=$(printf '%q' "$WASPFLOW_LIB") WASPFLOW_TMUX_SESSION=$(printf '%q' "$WASPFLOW_TMUX_SESSION") WASPFLOW_LANE_PAGER=$(printf '%q' "$WASPFLOW_LANE_PAGER") WASPFLOW_PARENT_REF=$(printf '%q' "$lane_parent_ref") PATH=$(printf '%q' "$PATH"); source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_run_owned_lane_shell_command $(printf '%q' "$lane") $(printf '%q' "$cwd") $(printf '%q' "$execution") $(printf '%q' "$shell_command")"
   tmux_ensure_session
   # tmux chooses the next numeric window index inside the server. Concurrent
   # callers can observe the same free index and one then fails with "index in

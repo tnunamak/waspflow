@@ -1417,7 +1417,7 @@ grep -q 'spawn_submitted' "$root/bin/waspflow" || { echo "spawn: submission-conf
     || { echo "provenance: receipt storage is not owner-only" >&2; exit 1; }
   ! provenance_validate_parent_ref $'bad\nref' \
     || { echo "provenance: newline parent ref was accepted" >&2; exit 1; }
-  provenance_resolve_parent_context "flag-parent" "environment-parent" "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+  provenance_resolve_parent_context "flag-parent" "environment-parent" "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
   [[ "$PROVENANCE_PARENT_REF" == "flag-parent" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "caller_asserted" ]] \
     || { echo "provenance: explicit parent ref did not win precedence" >&2; exit 1; }
   provenance_resolve_parent_context "" "environment-parent" "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -1426,9 +1426,15 @@ grep -q 'spawn_submitted' "$root/bin/waspflow" || { echo "spawn: submission-conf
   provenance_resolve_parent_context "" "" "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
   [[ "$PROVENANCE_PARENT_REF" == "codex:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "observed_harness_env" ]] \
     || { echo "provenance: valid CODEX_THREAD_ID was not captured as observed context" >&2; exit 1; }
+  provenance_resolve_parent_context "" "" "" "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+  [[ "$PROVENANCE_PARENT_REF" == "claude:bbbbbbbb-cccc-dddd-eeee-ffffffffffff" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "observed_harness_env" ]] \
+    || { echo "provenance: valid CLAUDE_CODE_SESSION_ID was not captured as observed context" >&2; exit 1; }
   provenance_resolve_parent_context "" "" "not-a-thread-id"
   [[ -z "$PROVENANCE_PARENT_REF" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "absent" ]] \
     || { echo "provenance: invalid CODEX_THREAD_ID was not ignored" >&2; exit 1; }
+  provenance_resolve_parent_context "" "" "" "not-a-session-id"
+  [[ -z "$PROVENANCE_PARENT_REF" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "absent" ]] \
+    || { echo "provenance: invalid CLAUDE_CODE_SESSION_ID was not ignored" >&2; exit 1; }
   provenance_resolve_parent_context "" "" ""
   [[ -z "$PROVENANCE_PARENT_REF" && "$PROVENANCE_PARENT_EVIDENCE_CLASS" == "absent" ]] \
     || { echo "provenance: direct shell without harness context was not absent" >&2; exit 1; }
@@ -1954,7 +1960,11 @@ mcpp_valid_models() { printf 'source=live_query\nallowed-model\n'; }
 mcpp_mcp_policy() { case "$1" in auto) printf '%s\n' '{"resolved":"none","warning":"test warning","argv":[],"env":{}}' ;; *) return 1 ;; esac; }
 mcpp_spawn() {
   local lane="$1" cwd="$2"
-  tmux_create_owned_lane_window "$lane" "$cwd" "exec sleep 60" >/dev/null
+  if [[ "$lane" == mcp-child-parent ]]; then
+    tmux_create_owned_lane_window "$lane" "$cwd" "printf '%s\\n' \"\$WASPFLOW_PARENT_REF\" > $(printf '%q' "${MCPP_PARENT_REF_FILE:?}")" >/dev/null
+  else
+    tmux_create_owned_lane_window "$lane" "$cwd" "exec sleep 60" >/dev/null
+  fi
   lane_set "$lane" session_id "mcpp-session-$lane"
 }
 PROV
@@ -1990,10 +2000,16 @@ PROV
   env -u WASPFLOW_PARENT_REF CODEX_THREAD_ID='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' \
     WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
     "$root/bin/waspflow" spawn --provider mcpp --lane mcp-codex-context -- "test observed codex context" >/dev/null 2>&1
-  env -u WASPFLOW_PARENT_REF CODEX_THREAD_ID='not-a-thread-id' \
+  env -u WASPFLOW_PARENT_REF -u CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID='bbbbbbbb-cccc-dddd-eeee-ffffffffffff' \
+    WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-claude-context -- "test observed claude context" >/dev/null 2>&1
+  env -u WASPFLOW_PARENT_REF -u CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID='not-a-thread-id' \
     WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
     "$root/bin/waspflow" spawn --provider mcpp --lane mcp-invalid-context -- "test invalid codex context" >/dev/null 2>&1
-  env -u WASPFLOW_PARENT_REF -u CODEX_THREAD_ID \
+  env -u WASPFLOW_PARENT_REF -u CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID='not-a-session-id' \
+    WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-invalid-claude-context -- "test invalid claude context" >/dev/null 2>&1
+  env -u WASPFLOW_PARENT_REF -u CODEX_THREAD_ID -u CLAUDE_CODE_SESSION_ID \
     WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
     "$root/bin/waspflow" spawn --provider mcpp --lane mcp-direct-shell -- "test direct shell" >/dev/null 2>&1
   jq -e 'select(.event_type == "lane_started" and .lane.label == "mcp-parent-env" and
@@ -2004,14 +2020,91 @@ PROV
     .parent.ref == "codex:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" and .parent.evidence_class == "observed_harness_env")' \
     "$mcphome/provenance.jsonl" >/dev/null \
     || { echo "spawn: valid CODEX_THREAD_ID did not create observed parent context" >&2; exit 1; }
+  jq -e 'select(.event_type == "lane_started" and .lane.label == "mcp-claude-context" and
+    .parent.ref == "claude:bbbbbbbb-cccc-dddd-eeee-ffffffffffff" and .parent.evidence_class == "observed_harness_env")' \
+    "$mcphome/provenance.jsonl" >/dev/null \
+    || { echo "spawn: valid CLAUDE_CODE_SESSION_ID did not create observed parent context" >&2; exit 1; }
   jq -e 'select(.event_type == "lane_started" and .lane.label == "mcp-invalid-context" and
     .parent.ref == null and .parent.evidence_class == "absent")' \
     "$mcphome/provenance.jsonl" >/dev/null \
     || { echo "spawn: invalid CODEX_THREAD_ID invented a parent context" >&2; exit 1; }
+  jq -e 'select(.event_type == "lane_started" and .lane.label == "mcp-invalid-claude-context" and
+    .parent.ref == null and .parent.evidence_class == "absent")' \
+    "$mcphome/provenance.jsonl" >/dev/null \
+    || { echo "spawn: invalid CLAUDE_CODE_SESSION_ID invented a parent context" >&2; exit 1; }
   jq -e 'select(.event_type == "lane_started" and .lane.label == "mcp-direct-shell" and
     .parent.ref == null and .parent.evidence_class == "absent")' \
     "$mcphome/provenance.jsonl" >/dev/null \
     || { echo "spawn: direct shell invented a parent context" >&2; exit 1; }
+
+  # A lane's child process receives the lane's own durable identity, not the
+  # caller's parent (which would skip a generation on nested delegation).
+  child_parent_ref_file="$mcphome/child-parent-ref"
+  MCPP_PARENT_REF_FILE="$child_parent_ref_file" \
+    env -u WASPFLOW_PARENT_REF -u CODEX_THREAD_ID -u CLAUDE_CODE_SESSION_ID \
+    WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-child-parent -- "test nested parent export" >/dev/null 2>&1
+  for _ in $(seq 1 300); do [[ -s "$child_parent_ref_file" ]] && break; sleep 0.1; done
+  child_lane_uuid="$(jq -r '.lane_uuid' "$mcphome/lanes/mcp-child-parent/state.json")"
+  [[ "$(cat "$child_parent_ref_file")" == "waspflow:$child_lane_uuid" ]] \
+    || { echo "spawn: child environment did not receive its direct lane parent ref" >&2; exit 1; }
+
+  # Record the Claude credential-domain diagnostic at launch without changing
+  # any provider launch or resume behavior. `status` prints the full state.
+  env -u WASPFLOW_PARENT_REF -u CODEX_THREAD_ID -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CONFIG_DIR \
+    WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-config-default -- "test default config dir" >/dev/null 2>&1
+  mcp_config_dir="$mcphome/claude-secondary"
+  CLAUDE_CONFIG_DIR="$mcp_config_dir" \
+    env -u WASPFLOW_PARENT_REF -u CODEX_THREAD_ID -u CLAUDE_CODE_SESSION_ID \
+    WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-config-custom -- "test custom config dir" >/dev/null 2>&1
+  [[ "$(jq -r '.claude_config_dir' "$mcphome/lanes/mcp-config-default/state.json")" == default ]] \
+    || { echo "spawn: default Claude config dir was not recorded" >&2; exit 1; }
+  [[ "$(jq -r '.claude_config_dir' "$mcphome/lanes/mcp-config-custom/state.json")" == "$mcp_config_dir" ]] \
+    || { echo "spawn: custom Claude config dir was not recorded" >&2; exit 1; }
+  mcp_config_status="$(WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" "$root/bin/waspflow" status mcp-config-custom)"
+  [[ "$(jq -r '.claude_config_dir' <<<"$mcp_config_status")" == "$mcp_config_dir" ]] \
+    || { echo "status: Claude config dir was not surfaced" >&2; exit 1; }
+
+  # Parent attribution defaults to a single warning. Enforce mode refuses
+  # before creating lane state, while --no-parent declares the orphan instead.
+  set +e
+  parent_warn_output="$(env -u WASPFLOW_PARENT_REF -u CODEX_THREAD_ID -u CLAUDE_CODE_SESSION_ID -u WASPFLOW_PROVENANCE_GATE \
+    WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-parent-warn -- "test parent warning" 2>&1 >/dev/null)"
+  parent_warn_rc=$?
+  set -e
+  [[ "$parent_warn_rc" -eq 0 ]] \
+    || { echo "provenance gate: warn mode blocked spawn ($parent_warn_rc)" >&2; exit 1; }
+  [[ "$(grep -Fc 'provenance: parent absent; add --parent-ref <opaque-ref>' <<<"$parent_warn_output")" -eq 1 ]] \
+    || { echo "provenance gate: warn mode did not emit exactly one --parent-ref line" >&2; exit 1; }
+  jq -e '.provenance_parent_ref == "" and .provenance_parent_evidence_class == "absent"' \
+    "$mcphome/lanes/mcp-parent-warn/state.json" >/dev/null \
+    || { echo "provenance gate: warn mode did not record absent context" >&2; exit 1; }
+
+  set +e
+  parent_enforce_output="$(env -u WASPFLOW_PARENT_REF -u CODEX_THREAD_ID -u CLAUDE_CODE_SESSION_ID \
+    WASPFLOW_PROVENANCE_GATE=enforce WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-parent-enforce -- "test parent enforcement" 2>&1)"
+  parent_enforce_rc=$?
+  set -e
+  [[ "$parent_enforce_rc" -eq 6 && ! -d "$mcphome/lanes/mcp-parent-enforce" ]] \
+    || { echo "provenance gate: enforce mode did not refuse before lane creation ($parent_enforce_rc)" >&2; exit 1; }
+  grep -Fq 'parent required: add --parent-ref <opaque-ref>' <<<"$parent_enforce_output" \
+    || { echo "provenance gate: enforce mode did not provide a parent-ref retry" >&2; exit 1; }
+
+  env -u WASPFLOW_PARENT_REF -u CODEX_THREAD_ID -u CLAUDE_CODE_SESSION_ID \
+    WASPFLOW_PROVENANCE_GATE=enforce WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --no-parent --lane mcp-parent-declared -- "test declared orphan" >/dev/null 2>&1
+  jq -e '.provenance_parent_ref == "" and .provenance_parent_evidence_class == "declared_orphan"' \
+    "$mcphome/lanes/mcp-parent-declared/state.json" >/dev/null \
+    || { echo "provenance gate: --no-parent did not record a declared orphan" >&2; exit 1; }
+  jq -e 'select(.event_type == "lane_started" and .lane.label == "mcp-parent-declared" and
+    .parent.ref == null and .parent.evidence_class == "declared_orphan")' \
+    "$mcphome/provenance.jsonl" >/dev/null \
+    || { echo "provenance gate: --no-parent receipt was not distinct from absent" >&2; exit 1; }
+
   WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
     "$root/bin/waspflow" spawn --provider mcpp --lane mcp-state -- "must not overwrite" >/dev/null 2>&1 \
     && { echo "spawn: overwrote an unreaped lane" >&2; exit 1; }
