@@ -70,6 +70,8 @@ source "$WASPFLOW_LIB/escalation.sh"
 source "$WASPFLOW_LIB/fanin.sh"
 # shellcheck disable=SC1090
 source "$WASPFLOW_LIB/project.sh"
+# shellcheck disable=SC1090
+source "$WASPFLOW_LIB/help.sh"
 
 # Keep ordinary control-plane verbs independent of event-reader setup. This is
 # both compatibility isolation and the performance boundary: ordinary list
@@ -81,105 +83,7 @@ load_event_reader() {
 }
 
 usage() {
-  cat <<EOF
-waspflow — turnkey live orchestration of Claude/Codex/Grok/Antigravity/Qwen/DeepSeek agents in tmux.
-
-First successful run:
-  waspflow doctor
-  waspflow demo --provider codex
-  waspflow demo --provider codex --run
-
-Verbs:
-  spawn   --provider <claude|codex|grok|antigravity|qwen|deepseek> | --op <id> --lane <name> [opts] -- <task>
-  exec    --provider <claude|codex|grok|antigravity|qwen|deepseek> | --op <id> [--model M] [--auto] [--accept-provider-default] [--effort L] [--mcp P] [--cwd DIR] [-o FILE] -- <task prompt>
-  ops     list|explain|resolve|path     operating-point resolver (decision cards)
-  init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
-  demo    --provider <claude|codex|grok|antigravity|qwen|deepseek> [--run] guided first lane
-  list    [--status S,...] [--lifecycle-state S,...] [--project DIR] [--limit N] [--json]
-                                          show the durable global lane index
-  receipts summary [--json]               outcome ledger: arms, verify results, stats-eligible fraction
-  status  <lane> [--tail-events N --json] one lane's state or safe provider-event tail
-  events  <lane> [--lines N] [--json]   normalized provider event tail (automation default)
-  inspect [<lane>] [--json]              read-only lane reconciliation/classification
-  peek    <lane> [--lines N] [--events]  pane diagnosis (or normalized event tail)
-  wait    <lane> [--timeout S] [--interval S] [--reap]   block until idle; --reap cleans up only after idle
-  park    <lane> [--reason TEXT] [--adopt-legacy]  park an owned, terminal-idle resumable lane
-  gc      [--lane-age S] [--project DIR] [--adopt-legacy] [--apply]
-                                      dry-run eligible terminal-idle lanes; --apply parks, never reaps
-  revise  <lane> [--out FILE] -- <message>      steer live, or resume if exited
-  accept-runtime <lane> --reason TEXT            accept the current observed Codex runtime mismatch
-  attach  <lane>                        attach your terminal to the pane
-  close   <lane> --status <harvested|superseded|abandoned|open> [prov]  fan-in outcome
-  captured <lane> --in <ref>            is lane's work already in <ref>? (by content)
-  verify  <lane> [--json]               run prepare/verify without reaping (0 pass, 2 fail)
-  escalate <lane> [--to OP|PROVIDER/MODEL[/EFFORT]] [--handoff] [--reset-tree]
-           [--force] [--ack-deprecated] [--note TEXT] [--json]
-           [--resume-transition|--abort-transition]
-           revise steers the SAME arm in-session; escalate switches arms after a failed verify
-  reap    <lane|--status S,...> [--force] [--keep-worktree] [--no-archive]  clean up
-  check   [--cwd DIR] [--config FILE] [--no-fail] [--explain] project integrity gate
-  doctor                                check deps + backends
-
-Operating points (not cheap/default/max profiles):
-  waspflow ops list --task implementation
-  waspflow ops explain implement.standard
-  waspflow ops resolve review.audit --json
-  waspflow spawn --op implement.standard --lane fix -- "…"
-  # explicit flags always win over --op expansion
-
-Fan-in (docs/lane-closeout-and-fan-in.md):
-  close   <lane> --status harvested  --into <pr#|ref>   # work landed here
-  close   <lane> --status superseded --by   <lane|ref>  # a better version won
-  close   <lane> --status abandoned  --reason "..."     # dead end, dropped
-  list    --status harvested,superseded,abandoned        # the reap-safe set
-  reap    --status harvested,superseded,abandoned        # fan-in cleanup, one command
-
-Spawn opts:
-  --op <id>          expand a task-shaped operating point (see ops list)
-  --model <id>       provider model override
-  --auto              select the op fallback (requires --op)
-  --ack-deprecated    permit --auto to use an edge-deprecated fallback
-  --accept-provider-default
-                    intentionally use the provider default model
-  --effort <level>   none|minimal|low|medium|high|xhigh|max (pass-through; never silent demote)
-  --mcp <policy>     auto|none|inherit (default: auto; MCP-minimal where supported)
-  --cwd <dir>        worker cwd (default: current dir)
-  --isolate          create an isolated git worktree
-  --report <path>    require a deliverable report at reap
-  --verify <cmd>     configure a project verification command (run via verify or reap)
-  --verify-name <s>  label for verification receipts (default: verify)
-  --verify-timeout <seconds>
-                    verification timeout in seconds (default: 1800)
-  --verify-strength <suite|smoke>
-                    declare oracle strength for the receipt (never inferred)
-  --prepare <cmd>    run setup command before --verify
-  --parent-ref <s>   opaque parent-session reference recorded in the launch provenance receipt
-  --arg <flag>       pass an extra arg to the provider CLI
-
-Exec opts:
-  --op <id>          expand a task-shaped operating point
-  --model <id>       provider model override
-  --auto              select the op fallback (requires --op)
-  --ack-deprecated    permit --auto to use an edge-deprecated fallback
-  --accept-provider-default
-                    intentionally use the provider default model
-  --effort <level>   none|minimal|low|medium|high|xhigh|max
-  --mcp <policy>     auto|none|inherit (default: auto; MCP-minimal where supported)
-  --cwd <dir>        worker cwd (default: current dir)
-  -o <file>          write final message to file (default: stdout)
-
-Billing safety:
-  Claude workers refuse to launch when ANTHROPIC_API_KEY is set because that
-  bills pay-as-you-go API rates instead of subscription/Agent-SDK credit.
-  Unset ANTHROPIC_API_KEY, or intentionally override with:
-    WASPFLOW_ALLOW_API_BILLING=1 waspflow spawn --provider claude ...
-
-State: $WASPFLOW_HOME (default ~/.local/state/waspflow)
-tmux:  $WASPFLOW_TMUX_SESSION (default waspflow)
-
-Exit codes: 1 usage/error; 2 failed contract; 3 launch unconfirmed; 4 stalled;
-            5 selection_required (nothing launched; choose an arm and retry)
-EOF
+  help_global_usage
 }
 
 # ---- arg splitting ----------------------------------------------------------
@@ -1628,32 +1532,21 @@ cmd_doctor() {
 main() {
   local verb="${1:-}"; shift || true
   case "$verb" in
-    spawn)  cmd_spawn "$@" ;;
-    exec)   cmd_exec "$@" ;;
-    ops)    cmd_ops "$@" ;;
-    init)   cmd_init "$@" ;;
-    demo)   cmd_demo "$@" ;;
-    list|ls) cmd_list "$@" ;;
-    receipts) cmd_receipts "$@" ;;
-    status) cmd_status "$@" ;;
-    events) cmd_events "$@" ;;
-    inspect) cmd_inspect "$@" ;;
-    peek)   cmd_peek "$@" ;;
-    wait)   cmd_wait "$@" ;;
-    park)   cmd_park "$@" ;;
-    gc)     cmd_gc "$@" ;;
-    revise) cmd_revise "$@" ;;
-    accept-runtime) cmd_accept_runtime "$@" ;;
-    attach) cmd_attach "$@" ;;
-    close)  cmd_close "$@" ;;
-    captured) cmd_captured "$@" ;;
-    verify) cmd_verify "$@" ;;
-    escalate) cmd_escalate "$@" ;;
-    reap)   cmd_reap "$@" ;;
-    check)  cmd_check "$@" ;;
-    doctor) cmd_doctor "$@" ;;
-    -h|--help|help|"") usage ;;
-    *) die "unknown command '$verb' (try: waspflow help)" ;;
+    -h|--help|help|"") usage; return ;;
   esac
+
+  local command handler
+  command="$(help_canonical_command "$verb")"
+  handler="$(help_command_handler "$command")" || die "unknown command '$verb' (try: waspflow help)"
+  declare -F "$handler" >/dev/null || die "internal error: command '$command' has no handler '$handler'"
+
+  # This is the only per-command help dispatch. It runs before any command
+  # parser, so help flags never reach command-specific validation.
+  if help_requested "$@"; then
+    help_usage "$command"
+    return 0
+  fi
+
+  "$handler" "$@"
 }
 main "$@"

@@ -81,6 +81,54 @@ grep -q 'verify_tmux kill-session -t "\$WASPFLOW_TMUX_SESSION"' <<<"$verify_clea
   && ! grep -q 'kill-server' <<<"$verify_cleanup_body" \
   || { echo "tmux EXIT cleanup: must kill only the isolated verify session" >&2; exit 1; }
 
+# The registry owns both command dispatch and help coverage, so a new command
+# cannot become reachable without appearing in this data-driven loop.
+# shellcheck disable=SC1090
+source "$root/lib/help.sh"
+mapfile -t help_verbs < <(help_command_names)
+[[ "${#help_verbs[@]}" -gt 0 ]] || { echo "help: command registry is empty" >&2; exit 1; }
+for help_verb in "${help_verbs[@]}"; do
+  for help_flag in --help -h; do
+    set +e
+    help_output="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" "$help_verb" "$help_flag" 2>&1)"
+    help_rc=$?
+    set -e
+    [[ "$help_rc" -eq 0 ]] || { echo "help: $help_verb $help_flag exited $help_rc" >&2; exit 1; }
+    grep -Fq "waspflow $help_verb" <<<"$help_output" \
+      || { echo "help: $help_verb $help_flag did not print command usage" >&2; exit 1; }
+    grep -Fq 'Flags:' <<<"$help_output" && grep -Fq 'Examples:' <<<"$help_output" \
+      || { echo "help: $help_verb $help_flag is missing flags or examples" >&2; exit 1; }
+  done
+done
+
+global_help="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" --help)"
+for help_verb in "${help_verbs[@]}"; do
+  grep -Eq "^[[:space:]]*$help_verb[[:space:]]" <<<"$global_help" \
+    || { echo "help: global usage does not list $help_verb" >&2; exit 1; }
+done
+
+list_alias_help="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" ls --help)"
+grep -Fq 'waspflow list' <<<"$list_alias_help" \
+  || { echo "help: ls alias did not print list usage" >&2; exit 1; }
+
+help_after_value_flag="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" spawn --provider codex --help)"
+grep -Fq 'waspflow spawn' <<<"$help_after_value_flag" \
+  || { echo "help: help after a value-taking flag was not intercepted" >&2; exit 1; }
+
+set +e
+literal_help_value_output="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" accept-runtime lane --reason --help 2>&1)"
+literal_help_value_rc=$?
+set -e
+[[ "$literal_help_value_rc" -eq 1 ]] && grep -Fq "no such lane 'lane'" <<<"$literal_help_value_output" \
+  || { echo "help: --help used as a flag value changed parser behavior" >&2; exit 1; }
+
+set +e
+unknown_option_output="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" spawn --definitely-unknown 2>&1)"
+unknown_option_rc=$?
+set -e
+[[ "$unknown_option_rc" -eq 1 ]] && grep -Fq "spawn: unknown option '--definitely-unknown'" <<<"$unknown_option_output" \
+  || { echo "help: unknown options must remain errors" >&2; exit 1; }
+
 # A scoped tmux helper must dispose of its session on EXIT for both ordinary and
 # failing exits, and that cleanup must not mutate the operator's default server.
 # Exercise the trap in child processes so the assertion runs after their EXIT.
