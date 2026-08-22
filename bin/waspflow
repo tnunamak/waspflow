@@ -608,34 +608,30 @@ EOF
 # every field. A malformed file makes its chunk fail and deliberately falls
 # back to the conservative per-file path below, which surfaces corruption.
 cmd_list_json_batch() {
-  local lanes="$1" snapshot="$2" lane start=0 chunk_size=128 output
+  local lanes="$1" active_scopes="$2" scope_query_available="$3" lane start=0 chunk_size=128 output jq_filter
   local -a names=() files=() rows=()
+  jq_filter="$(waspflow_liveness_jq_defs)
+input_filename as \$file |
+(\$file | split("/") | .[-2]) as \$lane |
+waspflow_derived_lifecycle(\$active_scopes; \$scope_query_available) as \$lifecycle |
+{lane:\$lane,provider:(.provider // ""),lifecycle_state:\$lifecycle,
+ record_status:(.status // ""),outcome:(if (.outcome // "") == "" then "open" else .outcome end),result:(.result // ""),
+ cwd:(.cwd // ""),origin_cwd:(.origin_cwd // ""),repo_root:(.repo_root // ""),
+ requested_model:(.model_requested // .model // ""),requested_effort:(.effort_requested // .effort // ""),
+ runtime_model:(.runtime_model // ""),runtime_effort:(.runtime_effort // ""),
+ runtime_settings_source:(.runtime_settings_source // ""),runtime_settings_observed_at:(.runtime_settings_observed_at // ""),
+ runtime_settings_state:(.runtime_settings_state // "unknown"),runtime_settings_match_requested:(.runtime_settings_match_requested // "unknown"),
+ runtime_settings_error:(.runtime_settings_error // ""),runtime_refresh_state:(.runtime_refresh_state // "unknown"),
+ runtime_refresh_error:(.runtime_refresh_error // ""),runtime_receipt_enforced:(.runtime_receipt_enforced // "false"),spawn_epoch:(.spawn_epoch // ""),
+ updated_at:(.updated_at // ""),parked_at:(.parked_at // ""),spawn_submitted:(.spawn_submitted // ""),
+ mcp_requested:(.mcp_requested // ""),mcp_resolved:(.mcp_resolved // ""),mcp_warning:(.mcp_warning // ""),
+ tmux_session:(.tmux_session // ""),tmux_window:(.tmux_window // ""),tmux_pane_pid:(.tmux_pane_pid // "")}"
   mapfile -t names <<<"$lanes"
   while [[ "$start" -lt "${#names[@]}" ]]; do
     files=()
     for ((i=start; i<start+chunk_size && i<${#names[@]}; i++)); do files+=("$(lane_state_file "${names[$i]}")"); done
-    output="$(jq -c --arg snapshot "$snapshot" '
-      input_filename as $file |
-      ($file | split("/") | .[-2]) as $lane |
-      (.tmux_window // "") as $window |
-      ((.tmux_pane_pid // "") | tostring) as $pid |
-      (if $window != "" and ($pid|test("^[0-9]+$"))
-       then ($snapshot | split("\n") | any((split("|")[0] // "") == $window and (split("|")[2] // "") == $pid))
-       else ($snapshot | split("\n") | any((split("|")[1] // "") == $lane)) end) as $live_window |
-      (if .status == "reaped" then "reaped" elif .status == "parked" then "parked" elif $live_window then "live" else "exited" end) as $lifecycle |
-      {lane:$lane,provider:(.provider // ""),lifecycle_state:$lifecycle,
-       record_status:(.status // ""),outcome:(if (.outcome // "") == "" then "open" else .outcome end),result:(.result // ""),
-       cwd:(.cwd // ""),origin_cwd:(.origin_cwd // ""),repo_root:(.repo_root // ""),
-       requested_model:(.model_requested // .model // ""),requested_effort:(.effort_requested // .effort // ""),
-       runtime_model:(.runtime_model // ""),runtime_effort:(.runtime_effort // ""),
-       runtime_settings_source:(.runtime_settings_source // ""),runtime_settings_observed_at:(.runtime_settings_observed_at // ""),
-       runtime_settings_state:(.runtime_settings_state // "unknown"),runtime_settings_match_requested:(.runtime_settings_match_requested // "unknown"),
-       runtime_settings_error:(.runtime_settings_error // ""),runtime_refresh_state:(.runtime_refresh_state // "unknown"),
-       runtime_refresh_error:(.runtime_refresh_error // ""),runtime_receipt_enforced:(.runtime_receipt_enforced // "false"),spawn_epoch:(.spawn_epoch // ""),
-       updated_at:(.updated_at // ""),parked_at:(.parked_at // ""),spawn_submitted:(.spawn_submitted // ""),
-       mcp_requested:(.mcp_requested // ""),mcp_resolved:(.mcp_resolved // ""),mcp_warning:(.mcp_warning // ""),
-       tmux_session:(.tmux_session // ""),tmux_window:(.tmux_window // ""),tmux_pane_pid:(.tmux_pane_pid // "")}
-    ' "${files[@]}" 2>/dev/null)" || return 1
+    output="$(jq -c --argjson active_scopes "$active_scopes" \
+      --argjson scope_query_available "$scope_query_available" "$jq_filter" "${files[@]}" 2>/dev/null)" || return 1
     while IFS= read -r lane; do [[ -n "$lane" ]] && rows+=("$lane"); done <<<"$output"
     start=$((start + chunk_size))
   done
@@ -708,7 +704,7 @@ cmd_list() {
     local -a requested_states=()
     IFS=',' read -r -a requested_states <<<"$lifecycle_filter"
     for requested_state in "${requested_states[@]}"; do
-      case "$requested_state" in live|exited|parked|reaped) ;; *) die "list: --lifecycle-state must contain only live, exited, parked, or reaped" ;; esac
+      case "$requested_state" in live|interrupted|unknown|exited|parked|reaped) ;; *) die "list: --lifecycle-state must contain only live, interrupted, unknown, exited, parked, or reaped" ;; esac
     done
   fi
   if [[ -n "$project" ]]; then
@@ -719,16 +715,24 @@ cmd_list() {
     [[ "$json" -eq 1 ]] && echo '[]' || echo "(no lanes)"
     return 0
   fi
-  [[ "$json" -eq 1 ]] || printf '%-20s %-8s %-8s %-11s %-48s %s\n' LANE PROVIDER STATE OUTCOME INTENT/RUNTIME CWD
-  local tmux_snapshot; tmux_snapshot="$(tmux_fleet_snapshot)"
+  [[ "$json" -eq 1 ]] || printf '%-20s %-8s %-11s %-11s %-48s %s\n' LANE PROVIDER STATE OUTCOME INTENT/RUNTIME CWD
+  local active_scopes='[]' scope_query_available=true
+  if ! active_scopes="$(waspflow_active_scope_snapshot)"; then
+    scope_query_available=false
+  fi
   # Fast path: the common machine fleet inventory. Filters and prefix limits
   # intentionally use the exact conservative path below; this path handles the
   # healthy, unfiltered index without changing those semantics.
   if [[ "$json" -eq 1 && -z "$status_filter" && -z "$lifecycle_filter" && -z "$project" && -z "$limit" ]]; then
-    if cmd_list_json_batch "$lanes" "$tmux_snapshot"; then return 0; fi
+    if cmd_list_json_batch "$lanes" "$active_scopes" "$scope_query_available"; then return 0; fi
   fi
-  local lane matched=0 any_corrupt=0 emitted=0
+  local lane matched=0 any_corrupt=0 emitted=0 slow_lifecycle_jq_filter
   local -a json_rows=()
+  slow_lifecycle_jq_filter="$(waspflow_liveness_jq_defs)
+$(cat <<'JQ'
+[(.provider // ""),(.status // ""),(.cwd // ""),(if (.outcome // "") == "" then "open" else .outcome end),(.origin_cwd // ""),(.repo_root // ""),waspflow_derived_lifecycle($active_scopes; $scope_query_available)] | join("\u001f")
+JQ
+)"
   while IFS= read -r lane; do
     [[ -n "$lane" ]] || continue
     # `--limit` is intentionally a prefix of the sorted durable index. Once it
@@ -744,31 +748,25 @@ cmd_list() {
       if [[ "$json" -eq 1 ]]; then
         json_rows+=("$(jq -cn --arg lane "$lane" '{lane:$lane,lifecycle_state:"corrupt",corrupt:true,error:"unparseable state.json",scope:"unknown"}')")
       else
-      printf '%-20s %-8s %-8s %-11s %-48s %s\n' "$lane" "?" "CORRUPT" "?" "unknown" "(unparseable state.json)"
+      printf '%-20s %-8s %-11s %-11s %-48s %s\n' "$lane" "?" "CORRUPT" "?" "unknown" "(unparseable state.json)"
       fi
       continue
     fi
     # Read each durable record once. All filtering and rendering below operates
     # on that value, never by re-opening state.json or provider session logs.
-    local provider status cwd outcome origin_cwd repo_root window pane_pid live lifecycle
+    local provider status cwd outcome origin_cwd repo_root lifecycle
     # Delimit with US (\x1f), NOT tab: tab is IFS-whitespace, so `read` collapses
     # consecutive tabs and an empty middle field (e.g. repo_root="" on a
-    # non-isolated lane) shifts every later field left — window/pane_pid empty,
-    # so a dead lane matches on name and prints live, disagreeing with --json
-    # (excellence audit Ranks 1 & 11). US never appears in these values.
-    IFS=$'\x1f' read -r provider status cwd outcome origin_cwd repo_root window pane_pid < <(
-      jq -j '[(.provider // ""),(.status // ""),(.cwd // ""),(if (.outcome // "") == "" then "open" else .outcome end),(.origin_cwd // ""),(.repo_root // ""),(.tmux_window // ""),(.tmux_pane_pid // "")] | join("\u001f")' <<<"$record"
+    # non-isolated lane) shifts every later field left. US never appears in
+    # these values, so the human and JSON renderings agree.
+    IFS=$'\x1f' read -r provider status cwd outcome origin_cwd repo_root lifecycle < <(
+      jq -j --argjson active_scopes "$active_scopes" \
+        --argjson scope_query_available "$scope_query_available" "$slow_lifecycle_jq_filter" <<<"$record"
     ) || true
     # --status filters on the fan-in OUTCOME (the reap-safe question).
     if [[ -n "$status_filter" ]]; then
       [[ ",$status_filter," == *",$outcome,"* ]] || continue
     fi
-    if [[ -n "$window" && "$pane_pid" =~ ^[0-9]+$ ]]; then
-      if awk -F '|' -v w="$window" -v p="$pane_pid" '$1 == w && $3 == p { found=1 } END { exit !found }' <<<"$tmux_snapshot"; then live="live"; else live="exited"; fi
-    elif awk -F '|' -v n="$lane" '$2 == n { found=1 } END { exit !found }' <<<"$tmux_snapshot"; then live="live"; else live="exited"; fi
-    [[ "$status" == "reaped" ]] && live="reaped"
-    [[ "$status" == "parked" ]] && live="parked"
-    lifecycle="$live"
     [[ -z "$lifecycle_filter" || ",$lifecycle_filter," == *",$lifecycle,"* ]] || continue
     [[ -z "$project" ]] || lane_matches_project "$lane" "$project" || continue
     matched=1
@@ -794,7 +792,7 @@ cmd_list() {
     else
       local runtime_label
       runtime_label="$(jq -r '((.model_requested // .model // "default") + "/" + (.effort_requested // .effort // "default") + " -> ") + (if (.runtime_settings_state // "unknown") == "observed" then ((.runtime_model // "?") + "/" + (.runtime_effort // "?") + " " + (if .runtime_settings_match_requested == "false" then "DRIFT" elif .runtime_settings_match_requested == "true" then "match" else "observed" end)) else (.runtime_settings_state // "unknown") end) + " [refresh=" + (.runtime_refresh_state // "unknown") + if (.runtime_refresh_error // "") != "" then ":" + .runtime_refresh_error else "" end + "]"' <<<"$record")"
-      printf '%-20s %-8s %-8s %-11s %-48s %s\n' "$lane" "$provider" "$live" "$outcome" "$runtime_label" "$cwd"
+      printf '%-20s %-8s %-11s %-11s %-48s %s\n' "$lane" "$provider" "$lifecycle" "$outcome" "$runtime_label" "$cwd"
     fi
     emitted=$((emitted + 1))
   done <<<"$lanes"
@@ -964,18 +962,20 @@ cmd_status() {
   # Pretty-print the state, but on malformed JSON emit a clear waspflow error
   # instead of leaking a raw `jq: parse error` to the operator (red-team finding).
   local sf; sf="$(lane_state_file "$lane")"
-  # Hot path: codex refresh tails a bounded rollout snapshot; claude/grok
-  # refreshers scan whole session logs (hundreds of MB) and belong at reap
-  # time only. status shows their attestation once a reap/receipt computed it.
-  if [[ "$(lane_get "$lane" provider)" == codex ]]; then
-    provider_refresh_runtime_settings "$lane"
+  # Status is strictly observational: it must not refresh provider receipts or
+  # append provenance while answering a liveness question about another live
+  # lane. Lifecycle commands remain responsible for recording those facts.
+  local record active_scopes='[]' scope_query_available=true lifecycle
+  record="$(jq -c . "$sf" 2>/dev/null)" || die "lane '$lane' has corrupted state.json ($sf) — cannot parse"
+  if ! active_scopes="$(waspflow_active_scope_snapshot)"; then
+    scope_query_available=false
   fi
-  # Some providers discover their native session asynchronously. Bind it the
-  # first time any ordinary read sees it; this adds immutable evidence without
-  # changing lane lifecycle or requiring a resident watcher.
-  provenance_reconcile_lane "$lane" \
-    || warn "status: lane '$lane' provenance reconciliation failed; it will retry on the next lifecycle command"
-  jq . "$sf" 2>/dev/null || die "lane '$lane' has corrupted state.json ($sf) — cannot parse"
+  lifecycle="$(waspflow_derived_lane_lifecycle "$record" "$active_scopes" "$scope_query_available")"
+  jq --arg lifecycle "$lifecycle" '
+    (.status // "") as $record_status
+    | .status = $lifecycle
+    | .record_status = $record_status
+  ' <<<"$record"
 }
 
 cmd_events() {

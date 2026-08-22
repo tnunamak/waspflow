@@ -304,13 +304,13 @@ Usage:
 
 Flags:
   --status <outcomes>         Filter by comma-separated fan-in outcomes.
-  --lifecycle-state <states>  Filter by comma-separated live, exited, parked, or reaped states.
+  --lifecycle-state <states>  Filter by comma-separated live, interrupted, unknown, exited, parked, or reaped states.
   --project <dir>             Filter to lanes for this project directory.
   --limit <n>                 Limit output to a positive number of lanes.
   --json                      Emit lane rows as JSON.
 
 Examples:
-  waspflow list --lifecycle-state live,exited
+  waspflow list --lifecycle-state live,interrupted,unknown
   waspflow list --project . --json
 EOF
 }

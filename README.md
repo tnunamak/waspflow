@@ -474,8 +474,9 @@ observed for the exact correlated session; launch intent is never overwritten.
 immutable launch-intent receipts (legacy `model`/`effort` remain unchanged).
 Codex lanes additionally expose `runtime_model`,
 `runtime_effort`, source, timestamp, and requested-match status from typed rollout
-events only (`turn_context` and `thread_settings_applied`). `status` and `list
---json` refresh this receipt without reading TUI text, prompts, or transcripts.
+events only (`turn_context` and `thread_settings_applied`). Read commands show the
+last recorded receipt; lifecycle commands refresh it without reading TUI text,
+prompts, or transcripts.
 
 An explicit requested model/effort mismatch blocks normal reap with
 `result: runtime_drift` while retaining the lane and its work. After reviewing
@@ -524,10 +525,15 @@ prove that a lane's changes were inspected, captured, or safe to destroy, so
 age-based cleanup parks rather than reaps.
 
 `list --json` exposes the durable global lane index to callers. It supports
-`--project DIR`, `--lifecycle-state live,exited,parked,reaped`, and `--limit N`
-while continuing to show corrupt records rather than silently dropping them.
-The bulk JSON is a metadata projection and deliberately excludes prompts,
-commands, and resolved provider argv/env; use `status <lane>` for one full record.
+`--project DIR`, `--lifecycle-state live,interrupted,unknown,exited,parked,reaped`,
+and `--limit N` while continuing to show corrupt records rather than silently
+dropping them. `live` is derived from a current waspflow systemd scope receipt;
+a stored `live` record with no active receipt is `interrupted`, and a lane that
+ran through the `scope-unavailable` fallback is `unknown`. `unknown` also
+preserves a missing lifecycle record or an unavailable scope query rather than
+guessing `live`. The stored transition is retained as `record_status`. The bulk
+JSON is a metadata projection and deliberately excludes prompts, commands, and
+resolved provider argv/env; use `status <lane>` for one full record.
 
 ## Environment
 

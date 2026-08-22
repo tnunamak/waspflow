@@ -758,6 +758,63 @@ tmux_lane_scope_receipts() {
   ' "$sf" 2>/dev/null || true
 }
 
+# ---- derived lane liveness --------------------------------------------------
+#
+# A pane PID is tmux ownership metadata, not process liveness: the pane shell
+# can exit while a lane-owned descendant keeps running. Scope receipts are the
+# kernel-backed ownership record. Read commands therefore take one fleet-wide
+# scope snapshot, then derive each lane from its recorded receipt units.
+#
+# Output is a JSON array so callers can pass the immutable snapshot through a
+# single jq process for many lane records. A failed query is deliberately
+# distinguishable from an empty, successful query: without the oracle, live
+# records are unknown rather than silently assumed live or interrupted.
+waspflow_active_scope_snapshot() {
+  local units
+  command -v systemctl >/dev/null 2>&1 || return 1
+  units="$(systemctl --user list-units --all --type=scope --state=active \
+    --no-legend --plain --full 'waspflow-*.scope')" || return 1
+  printf '%s\n' "$units" \
+    | awk 'NF && $1 ~ /^waspflow-[A-Za-z0-9._-]+\.scope$/ { print $1 }' \
+    | jq -Rsc 'split("\n") | map(select(length > 0)) | unique'
+}
+
+# Shared jq definitions for the single-lane status path and batched list path.
+# A scope is sufficient evidence of current liveness; the stored lifecycle
+# remains historical evidence. `scope-unavailable` is a durable declaration
+# that a command ran without scope supervision, so it cannot honestly appear
+# live when no owned active scope is present.
+waspflow_liveness_jq_defs() {
+  cat <<'JQ'
+def waspflow_scope_units:
+  (((.cgroup_scope_receipts // []) | if type == "array" then . else [] end)
+   | map(.unit? | select(type == "string")))
+  + ([.cgroup_scope?] | map(select(type == "string")))
+  | map(select(test("^waspflow-[A-Za-z0-9._-]+\\.scope$")))
+  | unique;
+def waspflow_scope_unavailable:
+  ((.cgroup_fallbacks // []) | if type == "array" then . else [] end)
+  | any(.[]?; .reason? == "scope-unavailable");
+def waspflow_derived_lifecycle($active_scopes; $scope_query_available):
+  waspflow_scope_units as $units
+  | if ($units | any(.[]; . as $unit | ($active_scopes | index($unit)) != null)) then "live"
+    elif ($scope_query_available | not) then "unknown"
+    elif waspflow_scope_unavailable then "unknown"
+    elif (.status // "") == "live" then "interrupted"
+    elif (.status // "") == "" then "unknown"
+    else .status
+    end;
+JQ
+}
+
+waspflow_derived_lane_lifecycle() {
+  local record="$1" active_scopes="$2" scope_query_available="$3"
+  jq -r --argjson active_scopes "$active_scopes" \
+    --argjson scope_query_available "$scope_query_available" \
+    "$(waspflow_liveness_jq_defs)
+waspflow_derived_lifecycle(\$active_scopes; \$scope_query_available)" <<<"$record"
+}
+
 # Scope receipts are normally lane-wide. Escalation also needs to bind its
 # provisional process tree to one immutable transition id for crash cleanup.
 tmux_lane_scope_receipts_for_execution() {

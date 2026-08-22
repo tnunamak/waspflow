@@ -3191,6 +3191,67 @@ fi
   rm -rf "$nosystemd_home" "$nosystemd_cwd"
 )
 
+# Liveness is derived from the active systemd scope set, never from a tmux pane
+# shell. The fake `systemctl` makes the fleet read deterministic and proves the
+# list path asks for that set once, even when it renders several lanes.
+(
+  liveness_home="$(mktemp -d "$scratch/waspflow-liveness-home-XXXXXX")"
+  liveness_bin="$(mktemp -d "$scratch/waspflow-liveness-bin-XXXXXX")"
+  liveness_query_log="$liveness_home/scope-queries.log"
+  cat >"$liveness_bin/systemctl" <<'SYSTEMCTL'
+#!/usr/bin/env bash
+if [[ "$1" == "--user" && "$2" == "list-units" ]]; then
+  printf 'scope-query\n' >>"${WASPFLOW_SCOPE_QUERY_LOG:?}"
+  printf '%s\n' 'waspflow-live-receipt.scope loaded active running synthetic scope'
+  exit 0
+fi
+exit 64
+SYSTEMCTL
+  chmod +x "$liveness_bin/systemctl"
+  mkdir -p "$liveness_home/lanes/active" "$liveness_home/lanes/interrupted" "$liveness_home/lanes/fallback"
+  jq -n '{provider:"test",status:"live",cgroup_scope_receipts:[{unit:"waspflow-live-receipt.scope",invocation_id:"synthetic"}]}' \
+    >"$liveness_home/lanes/active/state.json"
+  jq -n '{provider:"test",status:"live",cgroup_scope_receipts:[{unit:"waspflow-dead-receipt.scope",invocation_id:"synthetic"}]}' \
+    >"$liveness_home/lanes/interrupted/state.json"
+  jq -n '{provider:"test",status:"live",cgroup_fallbacks:[{reason:"scope-unavailable"}]}' \
+    >"$liveness_home/lanes/fallback/state.json"
+  before="$(find "$liveness_home/lanes" -name state.json -print0 | sort -z | xargs -0 sha256sum | sha256sum)"
+  listed="$(PATH="$liveness_bin:$PATH" WASPFLOW_HOME="$liveness_home" WASPFLOW_SCOPE_QUERY_LOG="$liveness_query_log" \
+    "$root/bin/waspflow" list --json)"
+  after="$(find "$liveness_home/lanes" -name state.json -print0 | sort -z | xargs -0 sha256sum | sha256sum)"
+  jq -e '
+    length == 3
+    and any(.[]; .lane == "active" and .lifecycle_state == "live" and .record_status == "live")
+    and any(.[]; .lane == "interrupted" and .lifecycle_state == "interrupted" and .record_status == "live")
+    and any(.[]; .lane == "fallback" and .lifecycle_state == "unknown" and .record_status == "live")
+  ' <<<"$listed" >/dev/null \
+    || { echo "liveness: list did not report live/interrupted/unknown truthfully" >&2; exit 1; }
+  [[ "$(wc -l <"$liveness_query_log" | tr -d ' ')" == 1 ]] \
+    || { echo "liveness: list queried active scopes more than once" >&2; exit 1; }
+  [[ "$before" == "$after" ]] \
+    || { echo "liveness: list rewrote a lane record" >&2; exit 1; }
+
+  : >"$liveness_query_log"
+  active_status="$(PATH="$liveness_bin:$PATH" WASPFLOW_HOME="$liveness_home" WASPFLOW_SCOPE_QUERY_LOG="$liveness_query_log" \
+    "$root/bin/waspflow" status active)"
+  interrupted_status="$(PATH="$liveness_bin:$PATH" WASPFLOW_HOME="$liveness_home" WASPFLOW_SCOPE_QUERY_LOG="$liveness_query_log" \
+    "$root/bin/waspflow" status interrupted)"
+  fallback_status="$(PATH="$liveness_bin:$PATH" WASPFLOW_HOME="$liveness_home" WASPFLOW_SCOPE_QUERY_LOG="$liveness_query_log" \
+    "$root/bin/waspflow" status fallback)"
+  jq -e '.status == "live" and .record_status == "live"' <<<"$active_status" >/dev/null \
+    || { echo "liveness: status did not derive an active receipt as live" >&2; exit 1; }
+  jq -e '.status == "interrupted" and .record_status == "live"' <<<"$interrupted_status" >/dev/null \
+    || { echo "liveness: status retained a stale live record as current truth" >&2; exit 1; }
+  jq -e '.status == "unknown" and .record_status == "live"' <<<"$fallback_status" >/dev/null \
+    || { echo "liveness: status reported scope-unavailable fallback as live" >&2; exit 1; }
+  [[ "$(wc -l <"$liveness_query_log" | tr -d ' ')" == 3 ]] \
+    || { echo "liveness: status did not query active scopes once per invocation" >&2; exit 1; }
+  after_status="$(find "$liveness_home/lanes" -name state.json -print0 | sort -z | xargs -0 sha256sum | sha256sum)"
+  [[ "$before" == "$after_status" ]] \
+    || { echo "liveness: status rewrote a lane record" >&2; exit 1; }
+  rm -rf "$liveness_home" "$liveness_bin"
+)
+
 # Fleet index contract: list renders persisted receipts only. A poisoned Codex
 # source must never be touched, and --limit must stop before parsing the whole
 # historical fleet. This is intentionally a 1,600-lane fixture, close to the
@@ -3235,8 +3296,9 @@ fi
   rm -rf "$index_home"
 )
 
-# Batch lifecycle parity: ownership is window-id + pane-pid, not a mutable
-# window name. Provider state in older records may encode the PID as JSON number.
+# Batch liveness ignores pane identity entirely. A stored `live` record with no
+# active scope is interrupted even when its tmux pane still exists; pane PID
+# types therefore cannot change the result.
 (
   parity_home="$(mktemp -d "$scratch/waspflow-batch-parity-home-XXXXXX")"
   parity_session="waspflow-batch-parity-$$"
@@ -3257,8 +3319,8 @@ fi
   jq -n --arg session "$parity_session" --arg window "$parity_window" --argjson pid "$parity_pid" '{provider:"codex",status:"live",tmux_session:$session,tmux_window:$window,tmux_pane_pid:$pid}' >"$parity_home/lanes/pid-number/state.json"
   jq -n --arg session "$parity_session" --arg window "$parity_window" --arg pid "$parity_pid" '{provider:"codex",status:"live",tmux_session:$session,tmux_window:$window,tmux_pane_pid:$pid}' >"$parity_home/lanes/pid-string/state.json"
   parity="$(WASPFLOW_HOME="$parity_home" WASPFLOW_TMUX_SESSION="$parity_session" "$root/bin/waspflow" list --json)"
-  jq -e 'length == 2 and all(.[]; .lifecycle_state == "live")' <<<"$parity" >/dev/null \
-    || { echo "list batch: renamed/numeric owned pane lost lifecycle parity" >&2; exit 1; }
+  jq -e 'length == 2 and all(.[]; .lifecycle_state == "interrupted" and .record_status == "live")' <<<"$parity" >/dev/null \
+    || { echo "list batch: pane metadata was treated as liveness" >&2; exit 1; }
   parity_tmux kill-session -t "$parity_session" 2>/dev/null || true
   trap - EXIT
   rm -rf "$parity_home"
