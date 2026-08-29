@@ -66,6 +66,20 @@ WASPFLOW_TMUX_HISTORY_LIMIT="${WASPFLOW_TMUX_HISTORY_LIMIT-}"
 # safe default for an unattended lane.
 WASPFLOW_LANE_PAGER="${WASPFLOW_LANE_PAGER:-cat}"
 
+# Transcript capture is readable by default. Set WASPFLOW_TRANSCRIPT_RAW=1 to
+# retain verbatim terminal bytes for diagnosing a terminal-specific rendering
+# problem; no other value opts out of stripping.
+transcript_capture_command() {
+  local transcript="$1" quoted_transcript quoted_filter
+  quoted_transcript="$(printf '%q' "$transcript")"
+  if [[ "${WASPFLOW_TRANSCRIPT_RAW:-}" == "1" ]]; then
+    printf 'cat >> %s\n' "$quoted_transcript"
+    return 0
+  fi
+  quoted_filter="$(printf '%q' "$WASPFLOW_ROOT/scripts/strip-ansi.pl")"
+  printf 'perl %s >> %s\n' "$quoted_filter" "$quoted_transcript"
+}
+
 # ---- logging ----------------------------------------------------------------
 _wf_is_tty() { [[ -t 2 ]]; }
 _wf_color() { _wf_is_tty && printf '\033[%sm' "$1" || true; }
@@ -1029,7 +1043,9 @@ tmux_paste_text() {
 }
 
 # Strip ANSI escapes from captured pane text for human/log consumption.
-strip_ansi() { sed -E 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b[()][AB0]//g'; }
+# The streaming parser shares the pipe-pane grammar so peek's live-pane path
+# handles the same control sequences as saved transcripts.
+strip_ansi() { perl "$WASPFLOW_ROOT/scripts/strip-ansi.pl"; }
 
 # Does a captured pane look like it is BLOCKED on an interactive prompt that
 # expects a human keystroke? These appear MID-RUN and can't be predicted per

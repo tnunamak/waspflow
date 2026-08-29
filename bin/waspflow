@@ -1038,11 +1038,11 @@ cmd_peek() {
   if [[ "$events" -eq 1 ]]; then cmd_events "$lane" --lines "$lines"; return 0; fi
   if tmux_window_exists "$lane"; then
     tmux capture-pane -p -t "$(tmux_window_target "$lane")" -S -"$lines" 2>/dev/null \
-      | strip_ansi | grep -v '^$' | tail -"$lines"
+      | strip_ansi | grep -a -v '^$' | tail -"$lines"
   else
     local t; t="$(lane_get "$lane" transcript)"
     [[ -f "$t" ]] || die "peek: lane '$lane' has no live window and no transcript yet"
-    strip_ansi <"$t" | grep -v '^$' | tail -"$lines"
+    strip_ansi <"$t" | grep -a -v '^$' | tail -"$lines"
   fi
 }
 

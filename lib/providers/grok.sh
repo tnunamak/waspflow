@@ -111,7 +111,7 @@ grok_spawn() {
   local target
   target="$(tmux_create_owned_lane_window "$lane" "$cwd" "bash -lc${quoted:+ }$(printf '%q' "${quoted# }")")" \
     || return 1
-  tmux pipe-pane -t "$target" -o "cat >> $(printf '%q' "$transcript")" 2>/dev/null || true
+  tmux pipe-pane -t "$target" -o "$(transcript_capture_command "$transcript")" 2>/dev/null || true
 
   # Best-effort: wait for the session dir / first turn to appear.
   _grok_verify_started "$lane" "$target"
@@ -272,7 +272,7 @@ grok_resume_with_arm() {
   local argv=(grok "${model_args[@]}" "${effort_args[@]}" "${resume_args[@]}" --always-approve --cwd "$cwd" "$prompt")
   for a in "${argv[@]}"; do quoted+=" $(printf '%q' "$a")"; done
   tmux_send_owned_window_shell_command "$ownership" "bash -lc $(printf '%q' "${quoted# }")" || return 1
-  tmux pipe-pane -t "$target" -o "cat >> $(printf '%q' "$(lane_transcript "$lane")")" 2>/dev/null || true
+  tmux pipe-pane -t "$target" -o "$(transcript_capture_command "$(lane_transcript "$lane")")" 2>/dev/null || true
   local before=0 events i
   events="$(_grok_events_file "$sid" || true)"; before="$(wc -l <"$events" 2>/dev/null || echo 0)"
   for i in $(seq 1 "${WASPFLOW_SUBMIT_ATTEMPTS:-20}"); do
