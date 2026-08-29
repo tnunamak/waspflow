@@ -228,8 +228,22 @@ fanin_bundle_lane() {
   base="$(git -C "$repo_root" merge-base HEAD "$branch" 2>/dev/null || true)"
   [[ -n "$base" ]] || base="$(git -C "$repo_root" merge-base main "$branch" 2>/dev/null || true)"
 
+  # base == tip means the branch is FULLY MERGED into HEAD/main: it has no commits
+  # of its own left to preserve. That is the cheapest possible case, but treating
+  # it like "no fork point" sent it to the full-history fallback — so the work
+  # needing the LEAST archival got a clone-sized bundle. Measured on this host:
+  # 1,474 of 1,525 bundles (14.2 of 14.4 GB) have a tip already in a live repo,
+  # including 354 MB bundles whose unique content is a commit and its own revert.
+  # Record it as merged and skip the bundle; the commits remain in the origin repo.
+  local tip; tip="$(git -C "$repo_root" rev-parse "$branch" 2>/dev/null || true)"
+  if [[ -n "$base" && -n "$tip" && "$base" == "$tip" ]]; then
+    lane_set "$lane" archive_skipped "merged" archive_merged_at "$tip"
+    log "reap: branch '$branch' is fully merged (${tip:0:9}); no bundle needed"
+    return 0
+  fi
+
   local made=0
-  if [[ -n "$base" && "$base" != "$(git -C "$repo_root" rev-parse "$branch" 2>/dev/null)" ]]; then
+  if [[ -n "$base" && "$base" != "$tip" ]]; then
     if git -C "$repo_root" bundle create "$bundle" "${base}..${branch}" >/dev/null 2>&1 \
        && git -C "$repo_root" bundle verify "$bundle" >/dev/null 2>&1; then
       lane_set "$lane" archive_bundle "$bundle" archive_base "$base"

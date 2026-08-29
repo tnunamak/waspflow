@@ -2940,6 +2940,47 @@ PROV
   [[ "$(stat -c%s "$bun")" -lt "$(stat -c%s "$br/full.bundle")" ]]     || { echo "thin: thin bundle not smaller than full — thinning didn't happen" >&2; exit 1; }
   rm -rf "$br"
 )
+# A FULLY MERGED branch must not be bundled at all (2026-08-29). merge-base == tip
+# means the branch has no commits of its own left; the work already lives in the
+# origin repo. This case previously fell through to the full-history fallback, so
+# the branch needing the LEAST archival produced a clone-sized bundle. Measured on
+# this host: 1,474 of 1,525 bundles (14.2 of 14.4 GB) had a tip already in a live
+# repo, incl. 354 MB bundles whose unique content was a commit and its own revert.
+(
+  export WASPFLOW_HOME="$state_home"
+  export WASPFLOW_ARCHIVE_DIR="$state_home/archive-merged"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/fanin.sh"
+  br="$(mktemp -d "$scratch/waspflow-merged-XXXXXX")"
+  ( cd "$br" && git init -q && git config user.email t@e.invalid && git config user.name T
+    for i in 1 2 3 4 5 6 7 8; do echo "base$i" >> base.txt; git add -A; git commit -q -m "b$i"; done
+    git branch -m main 2>/dev/null || true
+    git checkout -q -b waspflow/mergedlane; echo work > w.txt; git add -A; git commit -q -m work
+    # land it, so the branch tip IS the merge-base with main (fully merged)
+    git checkout -q main && git merge -q --ff-only waspflow/mergedlane )
+  mkdir -p "$state_home/lanes/mergedlane"
+  jq -n --arg c "$br" '{provider:"codex", repo_root:$c}' > "$state_home/lanes/mergedlane/state.json"
+  fanin_bundle_lane mergedlane >/dev/null 2>&1 || { echo "merged: bundling reported failure" >&2; exit 1; }
+  st="$state_home/lanes/mergedlane/state.json"
+  [[ -z "$(jq -r '.archive_bundle // empty' "$st")" ]] \
+    || { echo "merged: a fully-merged branch must NOT produce a bundle" >&2; exit 1; }
+  [[ "$(jq -r '.archive_skipped // empty' "$st")" == "merged" ]] \
+    || { echo "merged: skip reason not recorded as 'merged'" >&2; exit 1; }
+  [[ -z "$(ls -A "$state_home/archive-merged" 2>/dev/null)" ]] \
+    || { echo "merged: archive dir should be empty, found $(ls "$state_home/archive-merged")" >&2; exit 1; }
+  # GUARD: an UNMERGED branch in the same repo must still be bundled — the skip
+  # must key on merged-ness, not simply stop archiving.
+  ( cd "$br" && git checkout -q -b waspflow/unmergedlane && echo more > m.txt \
+    && git add -A && git commit -q -m more && git checkout -q main )
+  mkdir -p "$state_home/lanes/unmergedlane"
+  jq -n --arg c "$br" '{provider:"codex", repo_root:$c}' > "$state_home/lanes/unmergedlane/state.json"
+  fanin_bundle_lane unmergedlane >/dev/null 2>&1 || { echo "merged: unmerged bundling failed" >&2; exit 1; }
+  [[ -n "$(jq -r '.archive_bundle // empty' "$state_home/lanes/unmergedlane/state.json")" ]] \
+    || { echo "merged: an UNMERGED branch must still be archived" >&2; exit 1; }
+  rm -rf "$br"
+)
 
 # lane_set concurrency (2026-07-10): the per-lane flock must prevent lost updates
 # when many writes hit the SAME lane at once (was last-writer-wins, ~7/40 survived).
