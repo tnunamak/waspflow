@@ -106,7 +106,7 @@ claude_spawn() {
   target="$(tmux_create_owned_lane_window "$lane" "$cwd" "bash -lc${quoted:+ }$(printf '%q' "${quoted# }")")" \
     || return 1
   # Capture a live transcript via pipe-pane (parity with codex).
-  tmux pipe-pane -t "$target" -o "cat >> $(printf '%q' "$transcript")" 2>/dev/null || true
+  tmux pipe-pane -t "$target" -o "$(transcript_capture_command "$transcript")" 2>/dev/null || true
 
   # Clear Claude's folder-trust gate if it appears. --dangerously-skip-permissions
   # governs TOOL permissions, NOT the "Is this a project you trust?" folder gate,
@@ -205,7 +205,7 @@ claude_resume_with_arm() {
   local argv=(env "${MCP_ENV[@]}" claude "${resume_args[@]}" "${model_args[@]}" "${effort_args[@]}" --name "$lane" --dangerously-skip-permissions "${MCP_ARGV[@]}" -- "$prompt")
   for a in "${argv[@]}"; do quoted+=" $(printf '%q' "$a")"; done
   tmux_send_owned_window_shell_command "$ownership" "bash -lc $(printf '%q' "${quoted# }")" || return 1
-  tmux pipe-pane -t "$target" -o "cat >> $(printf '%q' "$(lane_transcript "$lane")")" 2>/dev/null || true
+  tmux pipe-pane -t "$target" -o "$(transcript_capture_command "$(lane_transcript "$lane")")" 2>/dev/null || true
   _claude_clear_trust_prompt "$target"
   if ! _claude_verify_started "$lane" "$target" "$prompt" "$sid" "$nonce"; then
     return 1

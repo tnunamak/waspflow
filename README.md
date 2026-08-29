@@ -537,6 +537,7 @@ commands, and resolved provider argv/env; use `status <lane>` for one full recor
 | `WASPFLOW_TMUX_SESSION` | `waspflow` | tmux session that holds worker windows |
 | `WASPFLOW_TMUX_HISTORY_LIMIT` | _(unset — inherit)_ | Scrollback lines for future waspflow windows. Unset, empty, or `0` inherits tmux's own setting (no cap). Set a number (e.g. `100000`) to bound retained scrollback during large fan-outs |
 | `WASPFLOW_LANE_PAGER` | `cat` | Pager command for provider children in new lanes; overrides inherited `PAGER` and `GIT_PAGER` for those children only |
+| `WASPFLOW_TRANSCRIPT_RAW` | empty | Set to `1` to keep new transcripts verbatim. By default waspflow strips terminal control sequences while writing readable transcripts; this does not alter existing transcripts. |
 | `WASPFLOW_PROVENANCE_GATE` | `warn` | Parent-attribution gate: `warn` or `enforce` (exit 6) |
 | `WASPFLOW_ALLOW_API_BILLING` | empty | Set to `1` to intentionally allow Claude workers while `ANTHROPIC_API_KEY` is set |
 | `WASPFLOW_CODEX_BACKEND_HEALTH_URL` | empty | Optional health check URL for proxy-routed Codex setups |

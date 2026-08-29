@@ -243,7 +243,7 @@ codex_spawn() {
   local target
   target="$(tmux_create_owned_lane_window "$lane" "$cwd" "bash -lc $(printf '%q' "${quoted# }")")" \
     || return 1
-  tmux pipe-pane -t "$target" -o "cat >> $(printf '%q' "$transcript")" 2>/dev/null || true
+  tmux pipe-pane -t "$target" -o "$(transcript_capture_command "$transcript")" 2>/dev/null || true
 
   # Drive the TUI deterministically. The startup is racy (trust prompt, hook
   # output, "model: loading"), so we synchronize on observable pane state at each
@@ -379,7 +379,7 @@ codex_resume_with_arm() {
   fi
   for a in "${argv[@]}"; do quoted+=" $(printf '%q' "$a")"; done
   tmux_send_owned_window_shell_command "$ownership" "bash -lc $(printf '%q' "${quoted# }")" || return 1
-  tmux pipe-pane -t "$target" -o "cat >> $(printf '%q' "$(lane_transcript "$lane")")" 2>/dev/null || true
+  tmux pipe-pane -t "$target" -o "$(transcript_capture_command "$(lane_transcript "$lane")")" 2>/dev/null || true
   _codex_clear_trust_prompt "$target"
   _codex_wait_composer_ready "$target"
   if ! _codex_submit_prompt "$lane" "$cwd" "$target" "$prompt" "$marker" true; then

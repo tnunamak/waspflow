@@ -538,6 +538,68 @@ done
 # Textual pane consumers require the plain, width-preserving capture contract:
 # normal capture has no ANSI bytes, while `-e` remains replay/debug-only.
 (
+  # The fixture includes CSI (including an intermediate and non-letter final),
+  # OSC, DCS, APC, PM, SOS, charset selectors, and an OSC split at an explicit
+  # seven-byte read boundary (the first chunk ends with ESC).
+  export WASPFLOW_HOME="$state_home"
+  # shellcheck source=/dev/null
+  source "$root/lib/core.sh"
+  ansi_input="$(mktemp "$scratch/waspflow-ansi-input-XXXXXX")"
+  ansi_actual="$(mktemp "$scratch/waspflow-ansi-actual-XXXXXX")"
+  ansi_raw="$(mktemp "$scratch/waspflow-ansi-raw-XXXXXX")"
+  ansi_capture="$(mktemp "$scratch/waspflow-ansi-capture-XXXXXX")"
+  perl -0ne 's/\s+//g; print pack("H*", $_)' "$root/tests/fixtures/ansi-transcript.hex" >"$ansi_input"
+  WASPFLOW_STRIP_ANSI_CHUNK_SIZE=7 strip_ansi <"$ansi_input" >"$ansi_actual"
+  cmp -s "$root/tests/fixtures/ansi-transcript.stripped" "$ansi_actual" \
+    || { echo "ANSI strip: fixture output differed from reference" >&2; exit 1; }
+  ! grep -q $'\e' "$ansi_actual" \
+    || { echo "ANSI strip: stripped fixture retained ESC bytes" >&2; exit 1; }
+
+  raw_command="$(WASPFLOW_TRANSCRIPT_RAW=1 transcript_capture_command "$ansi_raw")"
+  bash -c "$raw_command" <"$ansi_input"
+  cmp -s "$ansi_input" "$ansi_raw" \
+    || { echo "ANSI strip: WASPFLOW_TRANSCRIPT_RAW=1 was not byte-identical to cat" >&2; exit 1; }
+
+  capture_command="$(transcript_capture_command "$ansi_capture")"
+  bash -c "$capture_command" <"$ansi_input"
+  cmp -s "$root/tests/fixtures/ansi-transcript.stripped" "$ansi_capture" \
+    || { echo "ANSI strip: default capture command did not strip" >&2; exit 1; }
+
+  ansi_fifo="$scratch/waspflow-ansi-live-$$.fifo"
+  ansi_live_output="$(mktemp "$scratch/waspflow-ansi-live-output-XXXXXX")"
+  mkfifo "$ansi_fifo"
+  perl "$root/scripts/strip-ansi.pl" <"$ansi_fifo" >"$ansi_live_output" &
+  ansi_filter_pid=$!
+  { printf 'LIVE \033[31mOUTPUT\033[0m\n'; sleep 1; } >"$ansi_fifo" &
+  ansi_writer_pid=$!
+  ansi_observed=false
+  for _ in $(seq 1 10); do
+    if grep -qx 'LIVE OUTPUT' "$ansi_live_output"; then ansi_observed=true; break; fi
+    sleep 0.1
+  done
+  [[ "$ansi_observed" == true ]] \
+    || { echo "ANSI strip: filtered output stayed buffered while pipe input remained open" >&2; exit 1; }
+  wait "$ansi_writer_pid"
+  wait "$ansi_filter_pid"
+  rm -f "$ansi_fifo" "$ansi_live_output"
+
+  lane_set ansi-peek provider codex status exited cwd "$fixture" transcript "$(lane_transcript ansi-peek)"
+  cp "$ansi_capture" "$(lane_transcript ansi-peek)"
+  peek_output="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" peek ansi-peek --lines 20)"
+  [[ "$peek_output" == *"START END"* && "$peek_output" == *"EIGHT REDOK"* && "$peek_output" != *$'\e'* ]] \
+    || { echo "ANSI strip: peek did not render stripped transcript" >&2; exit 1; }
+
+  ! rg -q 'pipe-pane.*cat >>' "$root/lib/providers" \
+    || { echo "ANSI strip: provider retained raw pipe-pane capture" >&2; exit 1; }
+  while IFS= read -r capture_site; do
+    [[ "$capture_site" == *transcript_capture_command* ]] \
+      || { echo "ANSI strip: pipe-pane bypassed shared capture command: $capture_site" >&2; exit 1; }
+  done < <(rg '^[[:space:]]*tmux pipe-pane' "$root/lib/providers")
+  rm -rf "$(lane_dir ansi-peek)"
+  rm -f "$ansi_input" "$ansi_actual" "$ansi_raw" "$ansi_capture"
+)
+
+(
   capture_tmpdir="$(mktemp -d "$HOME/.tmp/wf-plain-capture-XXXXXX")"
   capture_socket="wf-plain-capture-$$-$RANDOM"
   capture_session="waspflow-plain-capture-$$-$RANDOM"

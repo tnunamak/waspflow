@@ -100,7 +100,7 @@ antigravity_spawn() {
   : >"$receipt_file"
   local cmd; cmd="$(_antigravity_shell "$lane" "$model" "$effort" "" "$prompt" spawn)"
   local target; target="$(tmux_create_owned_lane_window "$lane" "$cwd" "bash -lc $(printf '%q' "$cmd")")" || return 1
-  tmux pipe-pane -t "$target" -o "cat >> $(printf '%q' "$transcript")" 2>/dev/null || true
+  tmux pipe-pane -t "$target" -o "$(transcript_capture_command "$transcript")" 2>/dev/null || true
   attempts="${WASPFLOW_SUBMIT_ATTEMPTS:-20}"
   for i in $(seq 1 "$attempts"); do
     if [[ -s "$receipt_file" ]] && jq -e 'select(.phase == "invocation" and .prompt_kind == "spawn" and .outcome == "started")' "$receipt_file" >/dev/null 2>&1; then
