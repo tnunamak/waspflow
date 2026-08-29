@@ -6,6 +6,21 @@
 # its read-only `login status` command reports the active auth mode, so use that
 # observed state instead of treating an environment variable as billing proof.
 
+# The one shared, read-only Codex health/auth probe.  Doctor's auth report and
+# spawn preflight must use the exact same command, timeout, and environment so
+# an operator never gets a reassuring doctor result from a different mechanism.
+# This makes no model request.
+codex_login_status() {
+  local timeout_seconds
+  command -v timeout >/dev/null 2>&1 || {
+    err "codex login status: a hard timeout utility is required"
+    return 127
+  }
+  timeout_seconds="${WASPFLOW_CODEX_AUTH_TIMEOUT_SECONDS:-2}"
+  [[ "$timeout_seconds" =~ ^[0-9]+$ && "$timeout_seconds" -gt 0 ]] || timeout_seconds=2
+  timeout --kill-after=1s "${timeout_seconds}s" codex login status
+}
+
 # Emit a cached, read-only Codex auth observation as `mode<TAB>principal`.
 # Modes are `chatgpt_subscription`, `api_key`, or `unknown:<reason>`.
 # The cache context deliberately includes only key/token *presence*, never their
@@ -13,7 +28,7 @@
 codex_auth_observation() {
   local cache_dir cache_file cache_key cache_hash cached_at cached_mode cached_principal
   local codex_path mode="" principal="" status="" status_rc=0
-  local now ttl timeout_seconds tmp=""
+  local now ttl tmp=""
 
   if [[ "${WASPFLOW_SKIP_CODEX_AUTH_CHECK:-}" == "1" ]]; then
     printf 'unknown:check_skipped\t\n'
@@ -30,9 +45,6 @@ codex_auth_observation() {
 
   ttl="${WASPFLOW_CODEX_AUTH_CACHE_TTL_SECONDS:-15}"
   [[ "$ttl" =~ ^[0-9]+$ && "$ttl" -gt 0 ]] || ttl=15
-  timeout_seconds="${WASPFLOW_CODEX_AUTH_TIMEOUT_SECONDS:-2}"
-  [[ "$timeout_seconds" =~ ^[0-9]+$ && "$timeout_seconds" -gt 0 ]] || timeout_seconds=2
-
   codex_path="$(command -v codex)"
   cache_dir="${WASPFLOW_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/waspflow}/codex-auth-cache"
   cache_key="v1|$codex_path|${CODEX_HOME:-$HOME/.codex}|openai-api-key:${OPENAI_API_KEY:+set}|codex-access-token:${CODEX_ACCESS_TOKEN:+set}"
@@ -51,7 +63,19 @@ codex_auth_observation() {
     fi
   fi
 
-  if status="$(timeout --kill-after=1s "${timeout_seconds}s" codex login status 2>&1)"; then
+  # codex_preflight seeds this result so the actual spawn gate and the billing
+  # receipt do not run the CLI twice.  The value is shell-local, not exported.
+  if [[ -n "${CODEX_LOGIN_STATUS_PREFLIGHT_STATUS+x}" ]]; then
+    status="$CODEX_LOGIN_STATUS_PREFLIGHT_STATUS"
+    status_rc="${CODEX_LOGIN_STATUS_PREFLIGHT_RC:-0}"
+    unset CODEX_LOGIN_STATUS_PREFLIGHT_STATUS CODEX_LOGIN_STATUS_PREFLIGHT_RC
+  elif status="$(codex_login_status 2>&1)"; then
+    status_rc=0
+  else
+    status_rc=$?
+  fi
+
+  if [[ "$status_rc" -eq 0 ]]; then
     if grep -qi 'Logged in using ChatGPT' <<<"$status"; then
       mode=chatgpt_subscription
     elif grep -qiE 'api[ -]?key' <<<"$status"; then
@@ -61,7 +85,6 @@ codex_auth_observation() {
     fi
     principal="$(sed -nE '/^[[:space:]]*(Account|Logged in as)[[:space:]]*:/Ip' <<<"$status" | head -1)"
   else
-    status_rc=$?
     if [[ "$status_rc" == 124 || "$status_rc" == 137 ]]; then
       mode=unknown:timed_out
     else
@@ -229,7 +252,10 @@ billing_auth_principal() {
   local mode principal
   [[ "$1" == codex ]] || return 0
   IFS=$'\t' read -r mode principal < <(codex_auth_observation) || return 0
+  # `codex login status` may truthfully report a valid auth mode without an
+  # account line.  Principal is optional evidence, never a launch gate.
   [[ -n "$principal" ]] && printf '%s\n' "$principal"
+  return 0
 }
 
 billing_cost_currency() {

@@ -255,9 +255,13 @@ cmd_spawn() {
   # A lane record is durable evidence. Reusing a name is allowed only after the
   # old record was explicitly reaped; parked, exited, malformed, and otherwise
   # unreaped records must never be silently overwritten by a new spawn.
-  if lane_exists "$lane"; then
+  local existing_lane_dir
+  existing_lane_dir="$(lane_dir "$lane")"
+  if [[ -e "$existing_lane_dir" ]]; then
+    [[ -f "$(lane_state_file "$lane")" ]] \
+      || die "spawn: lane '$lane' has condition=missing_state_json; refusing to overwrite preserved evidence"
     jq empty "$(lane_state_file "$lane")" 2>/dev/null \
-      || die "spawn: lane '$lane' has corrupted state.json; refusing to overwrite it"
+      || die "spawn: lane '$lane' has condition=unparseable_state_json; refusing to overwrite it"
     [[ "$(lane_get "$lane" status)" == "reaped" ]] \
       || die "spawn: lane '$lane' already exists and is unreaped (reap it first or pick another name)"
   fi
@@ -298,9 +302,7 @@ cmd_spawn() {
 
   local session_id transcript
   session_id="$(new_uuid)"           # claude/grok use this; codex mints its own
-  mkdir -p "$(lane_dir "$lane")"
   transcript="$(lane_transcript "$lane")"
-  : >"$transcript"
 
   # Resolve a --report path to absolute against the worker's working dir so the
   # agent writes it where we'll look for it.
@@ -382,7 +384,7 @@ cmd_spawn() {
   [[ -n "$wt_path" ]] && verify_fork_point="$(git -C "$work_cwd" rev-parse HEAD 2>/dev/null || true)"
   local spawned_epoch
   spawned_epoch="$(date +%s)"
-  lane_set "$lane" \
+  lane_create "$lane" \
     provider "$provider" \
     lane_uuid "$lane_uuid" \
     surface "tui" \
@@ -488,7 +490,12 @@ cmd_spawn() {
     provenance_lane_started_event_id "" \
     provenance_lane_started_emitted "false" \
     provenance_worker_bound_event_id "" \
-    provenance_worker_bound_emitted "false"
+    provenance_worker_bound_emitted "false" \
+    || die "spawn: could not atomically publish lane '$lane'"
+
+  # The lane directory is now visible with a complete state.json.  Artifacts
+  # may follow; failures from the old setup window occurred before publication.
+  : >"$transcript"
 
   # Durable artifacts: prompt + git-status-before, automatically (no flag).
   artifacts_capture_before "$lane" "$work_cwd" "$prompt"
@@ -743,12 +750,21 @@ JQ
     # (that would misreport the fleet). A corrupt record has unknown scope, so
     # it remains visible even under project/state filters rather than disappearing.
     local record
-    if ! record="$(jq -c . "$(lane_state_file "$lane")" 2>/dev/null)"; then
+    local state_file condition reason state_label
+    state_file="$(lane_state_file "$lane")"
+    if [[ ! -f "$state_file" ]]; then
+      condition="missing_state_json"; state_label="MISSING_STATE_JSON"; reason="missing state.json"
+    elif ! record="$(jq -c . "$state_file" 2>/dev/null)"; then
+      condition="unparseable_state_json"; state_label="CORRUPT_UNPARSEABLE_STATE_JSON"; reason="unparseable state.json"
+    else
+      condition=""; state_label=""; reason=""
+    fi
+    if [[ -n "$condition" ]]; then
       matched=1; any_corrupt=1
       if [[ "$json" -eq 1 ]]; then
-        json_rows+=("$(jq -cn --arg lane "$lane" '{lane:$lane,lifecycle_state:"corrupt",corrupt:true,error:"unparseable state.json",scope:"unknown"}')")
+        json_rows+=("$(jq -cn --arg lane "$lane" --arg condition "$condition" --arg reason "$reason" '{lane:$lane,lifecycle_state:$condition,corrupt:true,condition:$condition,error:$reason,scope:"unknown"}')")
       else
-      printf '%-20s %-8s %-11s %-11s %-48s %s\n' "$lane" "?" "CORRUPT" "?" "unknown" "(unparseable state.json)"
+      printf '%-20s %-8s %-8s %-11s %-48s %s\n' "$lane" "?" "$state_label" "?" "unknown" "($reason; preserved)"
       fi
       continue
     fi
@@ -801,7 +817,7 @@ JQ
   elif [[ -n "$status_filter" && "$matched" -eq 0 ]]; then
     echo "(no lanes with outcome in: $status_filter)"
   fi
-  [[ "$any_corrupt" -eq 1 ]] && { warn "list: one or more lanes have corrupt state.json (shown as CORRUPT)"; return 2; }
+  [[ "$any_corrupt" -eq 1 ]] && { warn "list: one or more lanes have missing or unparseable state.json (shown with named conditions)"; return 2; }
   return 0
 }
 
@@ -949,7 +965,12 @@ cmd_status() {
     case "$1" in --tail-events) tail_events="${2:-}"; shift 2 ;; --json) json=1; shift ;; *) die "status: unknown option '$1'" ;; esac
   done
   [[ -n "$lane" ]] || die "status: <lane> required"
-  lane_exists "$lane" || die "no such lane '$lane'"
+  local sf
+  sf="$(lane_state_file "$lane")"
+  [[ -d "$(lane_dir "$lane")" ]] || die "no such lane '$lane'"
+  [[ -f "$sf" ]] || die "lane '$lane' condition=missing_state_json: state.json is missing ($sf); preserved for diagnosis"
+  jq empty "$sf" 2>/dev/null \
+    || die "lane '$lane' condition=unparseable_state_json: corrupted state.json cannot be parsed ($sf); preserved for diagnosis"
   if [[ -n "$tail_events" ]]; then
     [[ "$tail_events" =~ ^[0-9]+$ && "$tail_events" -gt 0 ]] || die "status: --tail-events must be a positive integer"
     [[ "$json" -eq 1 ]] || die "status: --tail-events requires --json (safe machine schema)"
@@ -966,7 +987,7 @@ cmd_status() {
   # append provenance while answering a liveness question about another live
   # lane. Lifecycle commands remain responsible for recording those facts.
   local record active_scopes='[]' scope_query_available=true lifecycle
-  record="$(jq -c . "$sf" 2>/dev/null)" || die "lane '$lane' has corrupted state.json ($sf) — cannot parse"
+  record="$(jq -c . "$sf" 2>/dev/null)" || die "lane '$lane' condition=unparseable_state_json: corrupted state.json cannot be parsed ($sf); preserved for diagnosis"
   if ! active_scopes="$(waspflow_active_scope_snapshot)"; then
     scope_query_available=false
   fi

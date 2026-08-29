@@ -313,6 +313,60 @@ lane_set() {
   fi
 }
 
+# Publish a new lane only after its complete initial state is parseable.  Build
+# in a private directory outside the lane index, then rename the directory into
+# place.  A reader of $WASPFLOW_LANES_DIR therefore sees either no lane or a
+# lane whose state.json is already a useful record; it never sees mkdir's
+# state.json-free interval.
+#
+# A reaped lane name is deliberately reusable.  Its old state is already valid,
+# so replace only state.json atomically after staging the new life; readers see
+# a valid old record or a valid new record, never a gap.
+# Args: lane k1 v1 k2 v2 ...
+lane_create() {
+  local lane="$1"; shift
+  local dir staging staged state_file
+  dir="$(lane_dir "$lane")"
+  staging="$WASPFLOW_HOME/.spawn-staging"
+  mkdir -p "$WASPFLOW_LANES_DIR" "$staging" || return 1
+  staged="$(mktemp -d "$staging/${lane}.XXXXXX")" || return 1
+  state_file="$staged/state.json"
+
+  if ! _lane_set_locked "$staged" "$@"; then
+    rm -rf "$staged"
+    return 1
+  fi
+  if ! jq -e '
+    type == "object"
+    and (.provider | type == "string" and length > 0)
+    and (.status | type == "string" and length > 0)
+    and (.cwd | type == "string" and length > 0)
+    and (.transcript | type == "string" and length > 0)
+  ' "$state_file" >/dev/null 2>&1; then
+    rm -rf "$staged"
+    return 1
+  fi
+
+  if [[ -e "$dir" ]]; then
+    # cmd_spawn admitted this path only after proving it is a reaped, parseable
+    # record.  The source and destination are under one WASPFLOW_HOME, so mv
+    # replaces the file atomically on the same filesystem.
+    if ! mv -f "$state_file" "$dir/state.json"; then
+      rm -rf "$staged"
+      return 1
+    fi
+    rmdir "$staged" 2>/dev/null || rm -rf "$staged"
+    return 0
+  fi
+
+  # -T prevents a concurrent/unexpected directory from turning this into a
+  # nested move.  The spawn lane lock prevents normal same-name races.
+  if ! mv -T "$staged" "$dir"; then
+    rm -rf "$staged"
+    return 1
+  fi
+}
+
 # Conditionally merge fields only when the arm/session snapshot read by a
 # provider is still current.  Runtime observers use this instead of lane_set:
 # an observer for the old session must never overwrite state after an arm

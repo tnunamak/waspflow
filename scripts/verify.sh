@@ -26,9 +26,12 @@ bash -n "$root/bin/waspflow" "$root"/lib/*.sh "$root"/lib/providers/*.sh
 #!/usr/bin/env bash
 [[ "$1" == login && "$2" == status ]] || exit 64
 printf '%s\n' "$*" >>"${CODEX_AUTH_LOG:?}"
-case "${CODEX_AUTH_MODE:?}" in
+  case "${CODEX_AUTH_MODE:?}" in
   chatgpt)
-    printf 'Logged in using ChatGPT\nAccount: subscription@example.invalid\n'
+    # The CLI may identify the auth mode without exposing an account.  Keep
+    # this fixture deliberately account-free so principal extraction cannot
+    # accidentally manufacture a value from unrelated output.
+    printf 'Logged in using ChatGPT\n'
     ;;
   api_key)
     printf 'Logged in using API key\nAccount: api@example.invalid\n'
@@ -54,12 +57,15 @@ CODEX
   chatgpt_doctor="$(billing_report_auth)"
   chatgpt_preflight="$(billing_preflight_codex 2>&1)"
   chatgpt_path="$(billing_path_v1 codex default false | jq -r '.path + ":" + .evidence')"
+  chatgpt_principal="$(billing_auth_principal codex)"
   ! grep -q 'codex auth:' <<<"$chatgpt_doctor" \
     || { echo "codex billing: ChatGPT auth emitted a doctor warning" >&2; exit 1; }
   [[ -z "$chatgpt_preflight" ]] \
     || { echo "codex billing: ChatGPT auth emitted a preflight warning" >&2; exit 1; }
   [[ "$chatgpt_path" == chatgpt_subscription:codex_login_status ]] \
     || { echo "codex billing: ChatGPT auth was not recorded as subscription" >&2; exit 1; }
+  [[ -z "$chatgpt_principal" ]] \
+    || { echo "codex billing: fake status has no account line, but principal was invented" >&2; exit 1; }
   [[ "$(wc -l <"$billing_log" | tr -d ' ')" == 1 ]] \
     || { echo "codex billing: status probe was not cached" >&2; exit 1; }
 
@@ -2091,6 +2097,155 @@ grep -q 'spawn_submitted' "$root/bin/waspflow" || { echo "spawn: submission-conf
 # loudly — never a phantom "spawned". Drive the REAL cmd_spawn with a fake provider
 # whose spawn returns 1. (The incident: an orchestrator reported work in flight that
 # never ran, because spawn couldn't tell submitted from dead-on-arrival.)
+
+# Spawn publication is atomic.  Every failure point that used to run after
+# mkdir/transcript creation but before the first lane_set must leave no lane
+# directory.  The successful fake-provider path also proves the provider sees a
+# complete, parseable state and transcript from its very first call.
+(
+  atomic_lib="$(mktemp -d "$scratch/waspflow-atomic-lib-XXXXXX")"; mkdir -p "$atomic_lib/providers"
+  cp "$root"/lib/*.sh "$atomic_lib/"; cp -r "$root/lib/generated" "$atomic_lib/" 2>/dev/null || true
+  cat >"$atomic_lib/providers/atomicp.sh" <<'PROV'
+atomicp_preflight() { :; }
+atomicp_discover_session() { printf 'atomicp-session\n'; }
+atomicp_session_resumable() { return 0; }
+atomicp_is_idle() { return 0; }
+atomicp_revise() { :; }
+atomicp_turn_mark() { printf '0\n'; }
+atomicp_valid_models() { printf 'source=non_enumerable\n'; }
+atomicp_mcp_policy() { printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}'; }
+atomicp_spawn() {
+  local lane="$1" cwd="$2" transcript="$5"
+  jq -e 'type == "object" and .provider == "atomicp" and .status == "live" and (.cwd | length > 0) and (.transcript | length > 0)' "$(lane_state_file "$lane")" >/dev/null \
+    || return 1
+  [[ -f "$transcript" ]] || return 1
+  tmux_create_owned_lane_window "$lane" "$cwd" 'exec sleep 60' >/dev/null || return 1
+  lane_set "$lane" session_id atomicp-session
+}
+PROV
+  sed -i '/^WASPFLOW_PROVIDERS=(/ s/)$/ atomicp)/' "$atomic_lib/core.sh"
+  atomic_home="$(mktemp -d "$scratch/waspflow-atomic-home-XXXXXX")"
+  atomic_work="$(mktemp -d "$scratch/waspflow-atomic-work-XXXXXX")"
+  atomic_session="wf-atomic-$$"
+  ( cd "$atomic_work" && git init -q )
+
+  set +e
+  newline_out="$(cd "$atomic_work" && WASPFLOW_LIB="$atomic_lib" WASPFLOW_HOME="$atomic_home" WASPFLOW_TMUX_SESSION="$atomic_session" \
+    "$root/bin/waspflow" spawn --provider atomicp --lane atomic-newline --report $'bad\nreport.md' -- 'test' 2>&1)"
+  newline_rc=$?
+  set -e
+  [[ "$newline_rc" -ne 0 ]] && grep -q 'report cannot contain newlines' <<<"$newline_out" \
+    || { echo "spawn atomicity: newline report was not rejected" >&2; exit 1; }
+  [[ ! -e "$atomic_home/lanes/atomic-newline" ]] \
+    || { echo "spawn atomicity: newline report left a lane artifact" >&2; exit 1; }
+
+  # Force artifacts_normalize_report_path through its missing-parent fallback.
+  # This reaches the old second failure point without relying on host realpath.
+  atomic_bin="$atomic_home/bin"; mkdir -p "$atomic_bin"
+  cat >"$atomic_bin/realpath" <<'REALPATH'
+#!/usr/bin/env bash
+exit 1
+REALPATH
+  chmod +x "$atomic_bin/realpath"
+  set +e
+  normalize_out="$(cd "$atomic_work" && PATH="$atomic_bin:$PATH" WASPFLOW_LIB="$atomic_lib" WASPFLOW_HOME="$atomic_home" WASPFLOW_TMUX_SESSION="$atomic_session" \
+    "$root/bin/waspflow" spawn --provider atomicp --lane atomic-normalize --report missing-parent/report.md -- 'test' 2>&1)"
+  normalize_rc=$?
+  set -e
+  [[ "$normalize_rc" -ne 0 ]] && grep -q 'cannot normalize --report path' <<<"$normalize_out" \
+    || { echo "spawn atomicity: unnormalizable report was not rejected" >&2; exit 1; }
+  [[ ! -e "$atomic_home/lanes/atomic-normalize" ]] \
+    || { echo "spawn atomicity: report normalization left a lane artifact" >&2; exit 1; }
+
+  WASPFLOW_LIB="$atomic_lib" WASPFLOW_HOME="$atomic_home" WASPFLOW_TMUX_SESSION="$atomic_session" \
+    "$root/bin/waspflow" spawn --provider atomicp --lane atomic-published -- 'test'
+  jq -e '.provider == "atomicp" and .status == "live" and (.transcript | length > 0)' \
+    "$atomic_home/lanes/atomic-published/state.json" >/dev/null \
+    || { echo "spawn atomicity: published lane lacks complete initial state" >&2; exit 1; }
+  [[ -f "$atomic_home/lanes/atomic-published/transcript.log" ]] \
+    || { echo "spawn atomicity: published lane lacks transcript" >&2; exit 1; }
+
+  # Existing evidence is diagnosed and left intact.  It is never silently
+  # treated as absent or overwritten by a later spawn.
+  mkdir -p "$atomic_home/lanes/atomic-missing-state"
+  : >"$atomic_home/lanes/atomic-missing-state/transcript.log"
+  set +e
+  missing_list="$(WASPFLOW_LIB="$atomic_lib" WASPFLOW_HOME="$atomic_home" WASPFLOW_TMUX_SESSION="$atomic_session" "$root/bin/waspflow" list 2>&1)"
+  missing_list_rc=$?
+  missing_status="$(WASPFLOW_LIB="$atomic_lib" WASPFLOW_HOME="$atomic_home" WASPFLOW_TMUX_SESSION="$atomic_session" "$root/bin/waspflow" status atomic-missing-state 2>&1)"
+  missing_status_rc=$?
+  set -e
+  [[ "$missing_list_rc" -eq 2 ]] && grep -q 'MISSING_STATE_JSON' <<<"$missing_list" && grep -q 'missing state.json' <<<"$missing_list" \
+    || { echo "spawn atomicity: list did not name missing state" >&2; exit 1; }
+  [[ "$missing_status_rc" -ne 0 ]] && grep -q 'condition=missing_state_json' <<<"$missing_status" \
+    || { echo "spawn atomicity: status did not name missing state" >&2; exit 1; }
+  [[ -f "$atomic_home/lanes/atomic-missing-state/transcript.log" && ! -e "$atomic_home/lanes/atomic-missing-state/state.json" ]] \
+    || { echo "spawn atomicity: diagnostic commands mutated preserved stub evidence" >&2; exit 1; }
+
+  mkdir -p "$atomic_home/lanes/atomic-unparseable-state"
+  printf '{not valid json\n' >"$atomic_home/lanes/atomic-unparseable-state/state.json"
+  set +e
+  unparseable_list="$(WASPFLOW_LIB="$atomic_lib" WASPFLOW_HOME="$atomic_home" WASPFLOW_TMUX_SESSION="$atomic_session" "$root/bin/waspflow" list 2>&1)"
+  unparseable_list_rc=$?
+  unparseable_status="$(WASPFLOW_LIB="$atomic_lib" WASPFLOW_HOME="$atomic_home" WASPFLOW_TMUX_SESSION="$atomic_session" "$root/bin/waspflow" status atomic-unparseable-state 2>&1)"
+  unparseable_status_rc=$?
+  set -e
+  [[ "$unparseable_list_rc" -eq 2 ]] && grep -q 'CORRUPT_UNPARSEABLE_STATE_JSON' <<<"$unparseable_list" && grep -q 'unparseable state.json' <<<"$unparseable_list" \
+    || { echo "spawn atomicity: list did not name unparseable state" >&2; exit 1; }
+  [[ "$unparseable_status_rc" -ne 0 ]] && grep -q 'condition=unparseable_state_json' <<<"$unparseable_status" \
+    || { echo "spawn atomicity: status did not name unparseable state" >&2; exit 1; }
+  [[ "$(<"$atomic_home/lanes/atomic-unparseable-state/state.json")" == '{not valid json' ]] \
+    || { echo "spawn atomicity: diagnostic commands mutated unparseable evidence" >&2; exit 1; }
+
+  tmux kill-session -t "$atomic_session" 2>/dev/null || true
+  rm -rf "$atomic_lib" "$atomic_home" "$atomic_work"
+)
+
+# Codex preflight uses the provider's own bounded `login status` path before a
+# lane is published.  Preserve the CLI's real error, and prove a hung probe is
+# capped by the same short timeout used by doctor/billing.
+(
+  preflight_home="$(mktemp -d "$scratch/waspflow-preflight-home-XXXXXX")"
+  preflight_work="$(mktemp -d "$scratch/waspflow-preflight-work-XXXXXX")"
+  preflight_bin="$preflight_home/bin"; mkdir -p "$preflight_bin"
+  preflight_session="wf-preflight-$$"
+  cat >"$preflight_bin/codex" <<'CODEX'
+#!/usr/bin/env bash
+[[ "$1" == login && "$2" == status ]] || exit 64
+case "${CODEX_PREFLIGHT_MODE:?}" in
+  failure)
+    printf '%s\n' 'EXACT_PROVIDER_CLI_ERROR: login session expired; run codex login' >&2
+    exit 73
+    ;;
+  timeout)
+    sleep 10
+    ;;
+  *) exit 65 ;;
+esac
+CODEX
+  chmod +x "$preflight_bin/codex"
+  set +e
+  preflight_out="$(cd "$preflight_work" && PATH="$preflight_bin:$PATH" CODEX_PREFLIGHT_MODE=failure WASPFLOW_HOME="$preflight_home" WASPFLOW_TMUX_SESSION="$preflight_session" \
+    "$root/bin/waspflow" spawn --provider codex --lane codex-preflight-failure -- 'test' 2>&1)"
+  preflight_rc=$?
+  timeout_start="$(date +%s)"
+  timeout_out="$(cd "$preflight_work" && PATH="$preflight_bin:$PATH" CODEX_PREFLIGHT_MODE=timeout WASPFLOW_CODEX_AUTH_TIMEOUT_SECONDS=1 WASPFLOW_HOME="$preflight_home" WASPFLOW_TMUX_SESSION="$preflight_session" \
+    "$root/bin/waspflow" spawn --provider codex --lane codex-preflight-timeout -- 'test' 2>&1)"
+  timeout_rc=$?
+  timeout_end="$(date +%s)"
+  set -e
+  [[ "$preflight_rc" -ne 0 ]] && grep -q 'EXACT_PROVIDER_CLI_ERROR: login session expired; run codex login' <<<"$preflight_out" \
+    || { echo "codex preflight: real provider CLI error was not preserved" >&2; exit 1; }
+  [[ ! -e "$preflight_home/lanes/codex-preflight-failure" ]] \
+    || { echo "codex preflight: failed health check created a lane artifact" >&2; exit 1; }
+  [[ "$timeout_rc" -ne 0 ]] && grep -q 'timed out after 1s' <<<"$timeout_out" && [[ $((timeout_end - timeout_start)) -lt 6 ]] \
+    || { echo "codex preflight: timeout was not bounded" >&2; exit 1; }
+  [[ ! -e "$preflight_home/lanes/codex-preflight-timeout" ]] \
+    || { echo "codex preflight: timed-out health check created a lane artifact" >&2; exit 1; }
+  tmux kill-session -t "$preflight_session" 2>/dev/null || true
+  rm -rf "$preflight_home" "$preflight_work"
+)
+
 (
   deadlib="$(mktemp -d "$scratch/waspflow-deadlib-XXXXXX")"; mkdir -p "$deadlib/providers"
   cp "$root"/lib/*.sh "$deadlib/"; cp -r "$root/lib/generated" "$deadlib/" 2>/dev/null || true
