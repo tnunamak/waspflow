@@ -338,6 +338,15 @@ $prompt"
   # Clear any starter text ("Implement {feature}") and paste literally. Plain
   # send-keys is brittle for long prompts: it can mangle spaces and queue text
   # as a follow-up instead of submitting the intended first turn.
+  # Before typing anything: if a startup menu owns the screen, our C-u/paste/Enter
+  # would drive THAT menu, not the composer. Refuse rather than guess which item
+  # is selected — answering blind is how a spawn becomes an unrequested upgrade.
+  local startup_pane startup_reason
+  startup_pane="$(tmux capture-pane -p -t "$target" 2>/dev/null || true)"
+  if [[ -n "$startup_pane" ]] && startup_reason="$(wf_pane_startup_menu "$startup_pane")"; then
+    err "codex spawn: lane '$lane' is showing a $startup_reason, so the prompt was not submitted (an injected Enter would answer the menu). Resolve it, then retry: waspflow attach $lane"
+    return 1
+  fi
   tmux send-keys -t "$target" C-u
   sleep 0.3
   tmux_paste_text "$target" "$full_prompt"

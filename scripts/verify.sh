@@ -2349,6 +2349,31 @@ grep -q 'corrupted state.json' "$root/bin/waspflow" || { echo "status: corrupt-j
   wf_pane_looks_blocked "$real_approval" >/dev/null \
     || { echo "stall hint: MISSED the real codex approval prompt (captured 2026-07-10)" >&2; exit 1; }
 )
+# STARTUP MENUS (2026-08-29): a menu shown at LAUNCH steals the first Enter, so the
+# prompt is never submitted and the menu's preselected item runs instead. Observed
+# live: codex offering an update with "Update now" preselected. Distinct from the
+# mid-run prompts above — those appear after the task started.
+(
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # GROUND TRUTH: captured LIVE from codex at spawn (2026-08-29), verbatim.
+  real_update="$(printf '%s\n' \
+    '  Update available! 0.149.0 -> 0.150.1.' \
+    '❯ 1. Update now' \
+    '  2. Not now')"
+  wf_pane_startup_menu "$real_update" >/dev/null \
+    || { echo "startup menu: MISSED the real codex update prompt (captured 2026-08-29)" >&2; exit 1; }
+  # A working pane, and a MID-RUN prompt, must NOT be called a startup menu — a false
+  # positive here refuses a spawn that would have succeeded.
+  if wf_pane_startup_menu "$(printf '● Done. Worked for 6s\n❯ ')" >/dev/null; then
+    echo "startup menu: a working pane must not be flagged" >&2; exit 1; fi
+  if wf_pane_startup_menu "$(printf 'Would you like to run the following command?\n❯ 1. Yes, proceed (y)')" >/dev/null; then
+    echo "startup menu: a mid-run approval must not be flagged as startup" >&2; exit 1; fi
+)
+# The spawn path must CONSULT the startup gate before sending Enter. Without this
+# pin, the detector can exist while the submit loop still types blind.
+grep -q 'wf_pane_startup_menu' "$root/lib/providers/codex.sh" \
+  || { echo "startup menu: codex submit path does not check for a startup menu" >&2; exit 1; }
 # Pins: the trigger is stall (not wording); config knob present.
 grep -q 'STALLED' "$root/bin/waspflow" || { echo "wait: stall surfacing missing" >&2; exit 1; }
 grep -q 'WASPFLOW_STALL_SECONDS' "$root/bin/waspflow" || { echo "wait: stall window not configurable" >&2; exit 1; }

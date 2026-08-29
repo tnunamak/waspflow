@@ -1129,6 +1129,30 @@ wf_pane_looks_blocked() {
   return 1
 }
 
+# A startup menu is a DIFFERENT hazard from a mid-run prompt: it appears before
+# our prompt has been typed, so an injected Enter does not submit the task — it
+# activates whatever the menu had selected. Observed live: codex offering
+# "Update available! 0.149.0 -> 0.150.1" with "Update now" preselected, which
+# swallowed the Enter and started an upgrade instead of the turn.
+#
+# Deliberately NARROW. This gates spawn on a match, so a false positive stalls a
+# spawn that would have worked. Only launch-time banners that are known to steal
+# the first Enter belong here; a mid-run confirmation is wf_pane_looks_blocked's
+# job. Echoes a short reason if a startup menu is showing; rc 1 if not.
+# Args: pane_text
+wf_pane_startup_menu() {
+  local pane="$1"
+  # Update/upgrade offers shown at launch, before the composer accepts input.
+  if grep -qiE 'update available|new version available|a new version of .* is available|would you like to (update|upgrade)|update now' <<<"$pane"; then
+    echo "startup update prompt"; return 0
+  fi
+  # First-run trust/onboarding gates that precede the composer.
+  if grep -qiE 'do you trust the (files|authors)|trust this (folder|directory|workspace)|welcome to .*!.*(get started|continue)' <<<"$pane"; then
+    echo "startup trust prompt"; return 0
+  fi
+  return 1
+}
+
 # ---- provider adapter dispatch ---------------------------------------------
 # Each provider is a file lib/providers/<provider>.sh defining shell functions
 # named  <provider>_spawn  <provider>_is_idle  <provider>_revise
