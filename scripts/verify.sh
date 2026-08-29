@@ -606,6 +606,15 @@ done
   [[ "$peek_output" == *"START END"* && "$peek_output" == *"EIGHT"* && "$peek_output" == *"OK"* && "$peek_output" != *$'\e'* ]] \
     || { echo "ANSI strip: peek did not render stripped transcript" >&2; exit 1; }
 
+  # REGRESSION: peek's line filter must use `grep -a`. Without it, GNU grep
+  # classifies a transcript containing any byte >0x7F as binary and prints
+  # "binary file matches" instead of the lines — silently dropping every line
+  # with a UTF-8 glyph (box drawing, emoji, spinner marks). Caught when a
+  # fixture line carrying 8-bit bytes vanished from peek output.
+  binary_peek="$(printf 'PLAIN LINE\n\xc2\x9b31mHIGH BYTE LINE\n' | grep -a -v '^$' | tail -5)"
+  [[ "$binary_peek" == *"HIGH BYTE LINE"* ]] \
+    || { echo "ANSI strip: peek line filter drops high-byte lines (needs grep -a)" >&2; exit 1; }
+
   ! rg -q 'pipe-pane.*cat >>' "$root/lib/providers" \
     || { echo "ANSI strip: provider retained raw pipe-pane capture" >&2; exit 1; }
   while IFS= read -r capture_site; do
