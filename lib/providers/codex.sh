@@ -120,9 +120,29 @@ codex_load_process_mcp_policy() {
   fi
 }
 
-# Preflight: codex on PATH + the model backend reachable (else turns hang).
+# Preflight: codex on PATH + its own bounded, read-only auth/status command +
+# the optional model backend reachability check.  `codex login status` makes no
+# model request.  Preserve its stderr verbatim enough for the caller to fix the
+# real fault instead of receiving only a generic preflight failure.
 codex_preflight() {
   command -v codex >/dev/null 2>&1 || { err "codex not found on PATH"; return 1; }
+  local login_status login_rc line
+  if login_status="$(codex_login_status 2>&1)"; then
+    CODEX_LOGIN_STATUS_PREFLIGHT_STATUS="$login_status"
+    CODEX_LOGIN_STATUS_PREFLIGHT_RC=0
+  else
+    login_rc=$?
+    err "codex preflight: 'codex login status' failed (exit $login_rc)"
+    if [[ "$login_rc" == 124 || "$login_rc" == 137 ]]; then
+      err "  timed out after ${WASPFLOW_CODEX_AUTH_TIMEOUT_SECONDS:-2}s"
+    fi
+    if [[ -n "$login_status" ]]; then
+      while IFS= read -r line; do err "  $line"; done <<<"$login_status"
+    else
+      err "  (the Codex CLI produced no error text)"
+    fi
+    return 1
+  fi
   billing_preflight_provider codex || return 1
   local url="$WASPFLOW_CODEX_BACKEND_HEALTH_URL"
   if [[ -n "$url" ]]; then
@@ -421,17 +441,26 @@ _codex_rollout_session_id() {
 # lane (past or present) has run in the same repo, so callers must never fall
 # back to a cwd-only match (see codex_discover_session).
 #
-# Sort newest-first by FILENAME, lexically (plain `sort -r`), not `sort -rn`:
-# these filenames (rollout-YYYY-MM-DDTHH-MM-SS-<uuid>.jsonl) are not numeric, so
-# `-n` parses no leading digits from any of them, treats every line as the
-# value 0, and produces an order with no reliable relationship to session time.
-# Lexical order on this zero-padded ISO-8601-like prefix sorts correctly.
-# Newest-first only matters for early-exit performance here — correctness comes
-# from the marker match (a fresh UUID per spawn), not from ordering.
+# Return rollout candidates containing an exact correlation string, newest
+# first.  A real fleet can contain thousands of rollout files; checking session
+# metadata before searching the marker makes a just-completed spawn wait minutes
+# even though its exact file is already present.  rg searches the exact marker
+# first.  The find/grep fallback retains portability for machines without rg.
+_codex_rollout_candidates_for_text() {
+  local text="$1"
+  if command -v rg >/dev/null 2>&1; then
+    rg -l -F --glob 'rollout-*.jsonl' -- "$text" "$CODEX_SESSIONS_DIR" 2>/dev/null | sort -r
+  else
+    find "$CODEX_SESSIONS_DIR" -type f -name 'rollout-*.jsonl' -printf '%f\t%p\n' 2>/dev/null \
+      | sort -r | cut -f2- \
+      | while IFS= read -r f; do grep -Fq "$text" "$f" 2>/dev/null && printf '%s\n' "$f"; done
+  fi
+}
+
 _codex_find_rollout_for_marker() {
   local cwd="$1" marker="$2" f fcwd
   [[ -n "$marker" ]] || return 1
-  local listing; listing="$(find "$CODEX_SESSIONS_DIR" -type f -name 'rollout-*.jsonl' -printf '%f\t%p\n' 2>/dev/null | sort -r | cut -f2-)"
+  local listing; listing="$(_codex_rollout_candidates_for_text "$marker")"
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
     fcwd="$(head -1 "$f" 2>/dev/null | jq -rc 'select(.type=="session_meta") | .payload.cwd // empty' 2>/dev/null)"
@@ -448,8 +477,15 @@ _codex_find_rollout_for_marker() {
 # the durable session-discovery key, while spawn receipt requires evidence that
 # the complete task crossed the tmux/Codex boundary. Args: cwd full_prompt
 _codex_find_rollout_for_submitted_prompt() {
-  local cwd="$1" full_prompt="$2" f fcwd
-  local listing; listing="$(find "$CODEX_SESSIONS_DIR" -type f -name 'rollout-*.jsonl' -printf '%f\t%p\n' 2>/dev/null | sort -r | cut -f2-)"
+  local cwd="$1" full_prompt="$2" f fcwd marker listing
+  marker="${full_prompt%%$'\n'*}"
+  if [[ "$marker" == WASPFLOW_LANE_MARKER:* ]]; then
+    listing="$(_codex_rollout_candidates_for_text "$marker")"
+  else
+    # This helper is also used by narrow test fixtures.  A caller without the
+    # spawn marker retains the former exhaustive, correctness-first behavior.
+    listing="$(find "$CODEX_SESSIONS_DIR" -type f -name 'rollout-*.jsonl' -printf '%f\t%p\n' 2>/dev/null | sort -r | cut -f2-)"
+  fi
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
     fcwd="$(head -1 "$f" 2>/dev/null | jq -rc 'select(.type=="session_meta") | .payload.cwd // empty' 2>/dev/null)"
