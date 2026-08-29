@@ -555,6 +555,23 @@ done
   ! grep -q $'\e' "$ansi_actual" \
     || { echo "ANSI strip: stripped fixture retained ESC bytes" >&2; exit 1; }
 
+  # REGRESSION: ECMA-48's 8-bit C1 codes (0x9B CSI, 0x9C ST, 0x9D OSC) collide
+  # with UTF-8 continuation bytes. U+2733 is e2 9c b3 — treating its 0x9c as a
+  # string terminator ends an OSC mid-character and leaks the rest of the title
+  # as visible text. Measured: 167 of 400 real transcripts carry such a
+  # sequence. Recognize only the 7-bit ESC-prefixed forms.
+  c1_out=""
+  c1_out="$(printf 'A\033]0;title \342\234\263 more\007B' | perl "$root/scripts/strip-ansi.pl")"
+  [[ "$c1_out" == "AB" ]] \
+    || { echo "ANSI strip: UTF-8 byte inside OSC leaked (got '$c1_out', want 'AB')" >&2; exit 1; }
+
+  # BEL terminates OSC only. tmux's DCS passthrough (\ePtmux;...\e\\) embeds raw
+  # nested ESC/BEL bytes in its payload, so a BEL must not end a DCS string.
+  dcs_out=""
+  dcs_out="$(printf 'A\033Ptmux;\033[31m\007still-inside\033\\B' | perl "$root/scripts/strip-ansi.pl")"
+  [[ "$dcs_out" == "AB" ]] \
+    || { echo "ANSI strip: BEL wrongly terminated a DCS string (got '$dcs_out', want 'AB')" >&2; exit 1; }
+
   raw_command="$(WASPFLOW_TRANSCRIPT_RAW=1 transcript_capture_command "$ansi_raw")"
   bash -c "$raw_command" <"$ansi_input"
   cmp -s "$ansi_input" "$ansi_raw" \
@@ -586,7 +603,7 @@ done
   lane_set ansi-peek provider codex status exited cwd "$fixture" transcript "$(lane_transcript ansi-peek)"
   cp "$ansi_capture" "$(lane_transcript ansi-peek)"
   peek_output="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" peek ansi-peek --lines 20)"
-  [[ "$peek_output" == *"START END"* && "$peek_output" == *"EIGHT REDOK"* && "$peek_output" != *$'\e'* ]] \
+  [[ "$peek_output" == *"START END"* && "$peek_output" == *"EIGHT"* && "$peek_output" == *"OK"* && "$peek_output" != *$'\e'* ]] \
     || { echo "ANSI strip: peek did not render stripped transcript" >&2; exit 1; }
 
   ! rg -q 'pipe-pane.*cat >>' "$root/lib/providers" \

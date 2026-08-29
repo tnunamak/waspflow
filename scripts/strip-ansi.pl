@@ -15,10 +15,10 @@ my $holdback_limit = 8192;
 my $buffer = '';
 
 # ECMA-48 CSI: parameter bytes, intermediate bytes, then a final byte.
-my $csi = qr/(?:\e\[|\x9b)[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/;
+my $csi = qr/(?:\e\[)[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/;
 # OSC accepts xterm's BEL extension as well as the standard string terminator.
-my $osc = qr/(?:\e\]|\x9d)[^\a\e\x9c]*(?:\a|\e\\|\x9c)/;
-my $string = qr/(?:\e[\x50\x58\x5e\x5f]|[\x90\x98\x9e\x9f])[^\e\x9c]*(?:\e\\|\x9c)/;
+my $osc = qr/(?:\e\])[^\a\e]*(?:\a|\e\\)/;
+my $string = qr/(?:\e[\x50\x58\x5e\x5f]).*?(?:\e\\)/s;
 my $charset = qr/\e(?:[%#]|[\(\)\*\+\-\.\/])[\x30-\x7e]/;
 # Fe excludes [ ] P X ^ _: those bytes open CSI/control strings, not two-byte
 # escape sequences. Keeping them out prevents an OSC split across reads from
@@ -27,9 +27,9 @@ my $fe = qr/\e[\x30-\x4f\x51-\x57\x59-\x5a\x5c\x60-\x7e]/;
 my $complete = qr/(?:$csi|$osc|$string|$charset|$fe)/;
 my $partial = qr/
   (?:
-    (?:\e\[|\x9b)[\x30-\x3f]*[\x20-\x2f]* |
-    (?:\e\]|\x9d)[^\a\e\x9c]*(?:\e)? |
-    (?:\e[\x50\x58\x5e\x5f]|[\x90\x98\x9e\x9f])[^\e\x9c]*(?:\e)? |
+    (?:\e\[)[\x30-\x3f]*[\x20-\x2f]* |
+    (?:\e\])[^\a\e]*(?:\e)? |
+    (?:\e[\x50\x58\x5e\x5f])(?:(?!\e\\).)*(?:\e)? |
     \e(?:[%#]|[\(\)\*\+\-\.\/])? |
     \e
   )\z

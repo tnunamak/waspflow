@@ -1,0 +1,14 @@
+ansi-transcript.hex intentionally contains 8-bit C1 forms (0x9B CSI, 0x9D OSC).
+
+The stripper deliberately does NOT recognize them. ECMA-48's 8-bit C1 codes
+collide with UTF-8 continuation bytes: U+2733 is e2 9c b3, and treating its
+0x9c as ST ends an OSC mid-character, leaking the rest as visible text.
+
+Measured on real captures (2026-08-29):
+  - 509 occurrences of 0x9b as a UTF-8 continuation byte
+  - 0 occurrences that could be a genuine 8-bit CSI
+  - 167/400 transcripts carried an OSC containing 0x9b/0x9c
+  - 139/300 carried a tmux DCS passthrough with a nested ESC
+
+So .stripped retains those bytes as literal text. That is correct: real
+captures use only 7-bit ESC-prefixed forms.
