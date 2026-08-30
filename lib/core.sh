@@ -692,6 +692,36 @@ tmux_enter_lane_scope_and_capture() {
 # exec. If systemd accepted the scope but receipt recording failed, do NOT run a
 # second unsupervised copy: return the failure instead. If scope creation itself
 # fails after preflight, run the original command and record the degraded truth.
+#
+# Intentional lane crash-noise, deliberately NOT suppressed here: some lanes
+# (e.g. pdpp's memory-capped OOM test oracle) deliberately SIGABRT as part of a
+# passing run, and systemd-coredump surfaces a "Service Crash" desktop
+# notification for that expected abort. A prior version of this function ran
+# `ulimit -c 0` in the wrapper shell before exec, on the theory that RLIMIT_CORE=0
+# would stop the dump. That was wrong: this host's core_pattern is a piped
+# handler (`|/usr/lib/systemd/systemd-coredump ...`), and with a piped handler
+# the kernel invokes the handler on any fatal signal regardless of RLIMIT_CORE —
+# the rlimit only bounds how large a core body the handler may write. A test
+# process confirmed this directly: `setrlimit(RLIMIT_CORE, {0,0})` then
+# `abort()` still produced a `coredumpctl` entry (core-less, but still the exact
+# event that triggers the notification). The rlimit approach therefore fixed
+# nothing.
+#
+# The mechanism that actually suppresses the event (not just the body) is
+# `prctl(PR_SET_DUMPABLE, 0)`, set per-process — confirmed directly: the same
+# `abort()` test with `PR_SET_DUMPABLE` cleared produced zero coredumpctl
+# entries. But this function has no narrower place to apply it: it wraps the
+# entire lane scope from the top (the agent CLI process itself), and the
+# process that actually does the intentional abort is several levels down
+# inside that CLI's own child tree (e.g. pdpp's test-harness.ts spawning a
+# Node test worker). Clearing PR_SET_DUMPABLE here would have to apply to the
+# whole scope's lifetime, which blinds coredump diagnostics for the other
+# ~100% of lane crashes that are NOT an intentional abort — an unexpected
+# agent-CLI crash or a real segfault in tooling — and that diagnostic signal
+# has real value for debugging waspflow itself. Removed rather than reimplemented
+# with the correct primitive: the narrow fix belongs at the process that has
+# visibility into which child is expected to abort, which is pdpp's own
+# test-harness.ts (tracked separately, in the pdpp repo), not this wrapper.
 # Args: lane cwd execution -- command [args...]
 tmux_run_owned_lane_command() {
   local lane="$1" cwd="$2" execution="$3" unit marker rc=0 run_dir="" startup="" state="" supervisor_pid="" supervisor_ticks="" parent_ref="${WASPFLOW_PARENT_REF:-}"
