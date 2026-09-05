@@ -2772,9 +2772,13 @@ exit 73
 FAIL
   chmod +x "$failbin/systemd-run"
   old_path="$PATH"; export PATH="$failbin:$PATH"
-  # Keep the pane alive long enough to capture its immutable ownership before
-  # the intentionally failed cgroup launcher falls back to the original command.
-  spawn_scope_lane scope-fallback 'sleep 5; printf fallback > fallback-ran'
+  # The trailing sleep keeps the pane alive long enough to capture its immutable
+  # ownership after the intentionally failed cgroup launcher falls back to the
+  # original command. Write the proof marker FIRST: with the sleep leading, the
+  # marker could not appear for 5s of the 15s poll budget, leaving only 10s of
+  # slack — enough on a fast machine, not on a loaded CI runner. Order alone
+  # decides this; the assertions below are unchanged.
+  spawn_scope_lane scope-fallback 'printf fallback > fallback-ran; sleep 5'
   for _ in $(seq 1 150); do [[ -f "$scopework/fallback-ran" ]] && break; sleep 0.1; done
   [[ -f "$scopework/fallback-ran" ]] || { echo "scope: launch failure skipped original pane command" >&2; exit 1; }
   jq -e '(.cgroup_scope_receipts // []) == [] and .cgroup_fallbacks[-1].reason == "scope-launch-failed" and .tmux_window != ""' \
