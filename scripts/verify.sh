@@ -2645,8 +2645,33 @@ PROV
   spawn_scope_lane() { ( cd "$scopework" && "$root/bin/waspflow" spawn --provider scopep --lane "$1" "${@:3}" -- "$2" >/dev/null ); }
 
   # Normal completion gets a real scope receipt before its short command exits.
-  spawn_scope_lane normal-done 'true'
+  #
+  # The pane command must NOT exit on its own. `true` returns instantly, so the
+  # window could vanish before spawn finished capturing its ownership, and spawn
+  # then correctly reported "provider reported success but created no owned tmux
+  # window" — a genuine race in the fixture, not in the code under test. Instead
+  # of padding with a sleep (which only moves the race), the pane blocks on a
+  # sentinel file the test creates once it has the evidence it needs. That makes
+  # the ordering explicit: spawn -> receipt observed -> release -> pane exits.
+  scope_release="$scopework/normal-done-release"
+  rm -f "$scope_release"
+  spawn_scope_lane normal-done "until [ -e '$scope_release' ]; do sleep 0.05; done"
   wait_for_receipts normal-done 1 || { echo "scope: normal pane receipt missing" >&2; exit 1; }
+  : > "$scope_release"
+  # Wait for the pane to actually exit, so reap runs against a finished command
+  # rather than racing it — the condition this case is meant to exercise.
+  for _ in $(seq 1 100); do
+    tmux list-windows -t "$scopesession" -F '#{window_name}' 2>/dev/null \
+      | grep -qx 'normal-done' || break
+    sleep 0.1
+  done
+  # Assert the exit rather than letting the poll fall through. Without this, a
+  # timed-out poll would proceed to reap, reap would kill the still-live pane,
+  # and the lane would reach `reaped` anyway — the case would pass while proving
+  # the opposite of what it claims (completion, not termination).
+  tmux list-windows -t "$scopesession" -F '#{window_name}' 2>/dev/null \
+    | grep -qx 'normal-done' \
+    && { echo "scope: normal pane still running after its release sentinel" >&2; exit 1; }
   "$root/bin/waspflow" reap normal-done --no-archive >/dev/null
   [[ "$(jq -r .status "$scopehome/lanes/normal-done/state.json")" == reaped ]] \
     || { echo "scope: normal completion did not reap" >&2; exit 1; }
