@@ -18,6 +18,20 @@ set -euo pipefail
 WASPFLOW_LIB="${WASPFLOW_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 WASPFLOW_ROOT="${WASPFLOW_ROOT:-$(cd "$WASPFLOW_LIB/.." && pwd)}"
 
+# Every effort token any supported provider has ever accepted. This is the
+# SYNTACTIC gate only — "is this a plausible effort word at all" — so a new
+# provider level does not have to be added in four places to stop being a parse
+# error. What a given provider/model actually accepts is the per-provider
+# whitelist below (capabilities-derived) plus the provider's own hard-fail.
+#
+# `ultra` is Codex-only, verified live 2026-09-05 against gpt-5.6-terra:
+# `-c model_reasoning_effort=ultra` completed a turn, while a bogus value on the
+# same command returned HTTP 400 — so the level is honored, not silently ignored.
+# `codex debug models` lists it for gpt-6-astra, gpt-5.6-sol and gpt-5.6-terra.
+# Claude's CLI help advertises only low/medium/high/xhigh/max, so it is NOT
+# universal — the per-provider whitelist stays the real gate.
+WASPFLOW_EFFORT_TOKENS="none|minimal|low|medium|high|xhigh|max|ultra"
+
 # Generated effort unions from minnows capabilities (optional; adapters hard-fail themselves).
 if [[ -f "$WASPFLOW_LIB/generated/effort-whitelists.sh" ]]; then
   # shellcheck source=/dev/null

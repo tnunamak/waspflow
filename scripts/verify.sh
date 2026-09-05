@@ -19,8 +19,10 @@ bash -n "$root/bin/waspflow" "$root"/lib/*.sh "$root"/lib/providers/*.sh
 # Codex effort honesty: xhigh and max must pass through unchanged.
 grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/providers/codex.sh"
 grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/exec.sh"
-grep -Fq 'minimal|low|medium|high|xhigh|max)' "$root/lib/providers/codex.sh"
-grep -Fq 'minimal|low|medium|high|xhigh|max)' "$root/lib/exec.sh"
+# Codex gained `ultra` (2026-09-05, verified live); the arms must list it and
+# must still list every prior level — a silent demote or drop is the hazard here.
+grep -Fq 'minimal|low|medium|high|xhigh|max|ultra)' "$root/lib/providers/codex.sh"
+grep -Fq 'minimal|low|medium|high|xhigh|max|ultra)' "$root/lib/exec.sh"
 # Grok effort honesty: unsupported values hard-fail (never silent-drop)
 grep -Eq "unsupported effort" "$root/lib/providers/grok.sh"
 # Generated capabilities-derived effort unions present
@@ -649,6 +651,176 @@ JSONL
   [[ "$(codex_discover_session marker-b)" == "22222222-2222-2222-2222-222222222222" ]]
   [[ "$(cksum "$(lane_state_file marker-a)")" == "$marker_before" ]] \
     || { echo "codex discovery: read-only oracle mutated lane state" >&2; exit 1; }
+)
+
+# ARCHIVE-AWARE DISCOVERY (2026-09-05). A retention pass moves older rollouts to
+# a sibling sessions-archive tree. Its age cutoff was younger than the
+# crash-recovery resume horizon, so a still-resumable session was moved out of
+# the searched tree and resume silently reported "no session" — no error, just
+# nothing to restore. Reproduced on an isolated fixture; no real transcript is
+# read or moved by this test.
+(
+  export WASPFLOW_HOME="$state_home"
+  arch_root="$(mktemp -d "$scratch/waspflow-codex-arch-XXXXXX")"
+  mkdir -p "$arch_root/live" "$arch_root/live-archive/2026/08/21"
+  arch_cwd="$fixture"
+  arch_sid="01a02536-2c0d-7ce0-ab32-4284ed5a541c"
+  cat >"$arch_root/live-archive/2026/08/21/rollout-2026-08-21T11-45-02-$arch_sid.jsonl" <<JSONL
+{"type":"session_meta","payload":{"id":"$arch_sid","cwd":"$arch_cwd"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"WASPFLOW_LANE_MARKER:arch:zzz"}}
+{"type":"event_msg","payload":{"type":"task_complete"}}
+JSONL
+  export CODEX_SESSIONS_DIR="$arch_root/live"
+  # deliberately NOT setting CODEX_SESSIONS_ARCHIVE_DIR: the derived default must
+  # land on the sibling of the overridden sessions dir, never the real ~/.codex.
+  unset CODEX_SESSIONS_ARCHIVE_DIR
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/codex.sh"
+
+  # 0. HERMETICITY: the derived archive root must be inside the fixture. If this
+  #    ever points at $HOME, every other codex test silently reads this machine's
+  #    real rollout history and results depend on local state.
+  case "$CODEX_SESSIONS_ARCHIVE_DIR" in
+    "$arch_root"/*) ;;
+    *) echo "archive: derived archive root escaped the fixture ($CODEX_SESSIONS_ARCHIVE_DIR)" >&2; exit 1 ;;
+  esac
+
+  # 1. id -> path resolves even though the live tree is empty.
+  [[ -n "$(_codex_rollout_for_session "$arch_sid" || true)" ]] \
+    || { echo "archive: session id did not resolve from the archive root" >&2; exit 1; }
+
+  # 2. marker-based crash recovery (session_id never recorded) also reaches it.
+  lane_set arch-lane provider codex status live cwd "$arch_cwd" codex_marker "WASPFLOW_LANE_MARKER:arch:zzz"
+  [[ "$(codex_discover_session arch-lane)" == "$arch_sid" ]] \
+    || { echo "archive: crash-recovery discovery missed an archived rollout" >&2; exit 1; }
+
+  # 3. LIVE WINS. Codex appends to the live file; an archived copy must never
+  #    shadow it, or resume reads a stale prefix and the lane looks idle.
+  mkdir -p "$CODEX_SESSIONS_DIR/2026/08/21"
+  cp "$CODEX_SESSIONS_ARCHIVE_DIR/2026/08/21/rollout-2026-08-21T11-45-02-$arch_sid.jsonl" \
+     "$CODEX_SESSIONS_DIR/2026/08/21/"
+  case "$(_codex_rollout_for_session "$arch_sid" || true)" in
+    *-archive/*) echo "archive: archived copy shadowed the live rollout" >&2; exit 1 ;;
+  esac
+  rm -rf "${CODEX_SESSIONS_DIR:?}/2026"
+
+  # 4. Opt-out: an empty archive dir restores live-only behaviour, so an operator
+  #    who does not archive pays nothing for the second pass.
+  [[ -z "$(CODEX_SESSIONS_ARCHIVE_DIR="" _codex_rollout_for_session "$arch_sid" || true)" ]] \
+    || { echo "archive: empty CODEX_SESSIONS_ARCHIVE_DIR did not disable the fallback" >&2; exit 1; }
+)
+# Pins: one owner for "where rollouts live". Without these a later edit can
+# reintroduce a live-only lookup and silently re-break crash recovery.
+grep -q 'CODEX_SESSIONS_ARCHIVE_DIR' "$root/lib/providers/codex.sh" \
+  || { echo "archive: no archive root defined in the codex adapter" >&2; exit 1; }
+grep -q 'find "\$CODEX_SESSIONS_DIR"' "$root/lib/providers/codex.sh" \
+  && { echo "archive: a live-only rollout lookup remains; route it through _codex_rollout_roots" >&2; exit 1; }
+
+# FULL ARCHIVED-LANE REVISE JOURNEY (2026-09-05). Discovery alone does NOT
+# restore resume: `codex exec resume` accepts "a session id or --last" and has no
+# path argument (verified against the installed CLI's --help), so Codex resolves
+# the id against ITS OWN sessions dir. A rollout living only in the operator's
+# bulk archive stays invisible to resume even after we find it. This exercises
+# the real command path with a stub `codex` and asserts on its argv/output.
+#
+# SCOPE: the operator-side bulk `sessions-archive` tree (a retention script's
+# doing; the Codex binary contains no such string). Codex's OWN built-in
+# `archived_sessions` + rollout-compression pipeline is a DIFFERENT mechanism and
+# is deliberately not touched here.
+(
+  export WASPFLOW_HOME="$state_home"
+  jr="$(mktemp -d "$scratch/waspflow-codex-journey-XXXXXX")"
+  mkdir -p "$jr/live" "$jr/live-archive/2026/08/21" "$jr/bin" "$jr/cwd"
+  ( cd "$jr/cwd" && git init -q && git config user.email t@e.invalid && git config user.name T \
+    && echo x > f.txt && git add -A && git commit -q -m x )
+  jsid="01a02536-2c0d-7ce0-ab32-4284ed5a541c"
+  jrel="2026/08/21/rollout-2026-08-21T11-45-02-$jsid.jsonl"
+  cat >"$jr/live-archive/$jrel" <<JSONL
+{"type":"session_meta","payload":{"id":"$jsid","cwd":"$jr/cwd"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"WASPFLOW_LANE_MARKER:journey:qqq"}}
+{"type":"event_msg","payload":{"type":"task_complete"}}
+JSONL
+  archive_before="$(cksum <"$jr/live-archive/$jrel")"
+  # Stub codex: records argv, and FAILS if the session file is not in the live
+  # tree — mirroring the real CLI's id-based lookup.
+  cat >"$jr/bin/codex" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$jr/argv.log"
+case "\$*" in
+  *"exec"*"resume"*)
+    if [[ -f "$jr/live/$jrel" ]]; then
+      for a in "\$@"; do [[ "\$prev" == "-o" ]] && printf 'RESUMED-OK\n' > "\$a"; prev="\$a"; done
+      exit 0
+    fi
+    echo "session not found" >&2; exit 1 ;;
+  *"login status"*) echo "Logged in"; exit 0 ;;
+esac
+exit 0
+STUB
+  chmod +x "$jr/bin/codex"
+  export PATH="$jr/bin:$PATH"
+  export CODEX_SESSIONS_DIR="$jr/live"
+  unset CODEX_SESSIONS_ARCHIVE_DIR
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/codex.sh"
+
+  lane_set journey provider codex status reaped cwd "$jr/cwd" \
+    codex_marker "WASPFLOW_LANE_MARKER:journey:qqq" session_id "$jsid"
+
+  # THE JOURNEY: revise an EXITED lane (no tmux window) whose rollout is archived.
+  out="$jr/reply.txt"
+  codex_revise journey "continue please" "$out" >/dev/null 2>&1
+
+  # 1. resume actually ran and SUCCEEDED (the stub fails unless materialized).
+  [[ -f "$out" && "$(cat "$out")" == "RESUMED-OK" ]] \
+    || { echo "journey: archived-lane resume did not produce a successful turn" >&2; exit 1; }
+  # 2. the real command carried the session id.
+  grep -q "resume $jsid" "$jr/argv.log" \
+    || { echo "journey: codex exec resume was not invoked with the session id" >&2; exit 1; }
+  # 3. the rollout was materialized into the live tree.
+  [[ -f "$jr/live/$jrel" ]] \
+    || { echo "journey: archived rollout was never materialized for resume" >&2; exit 1; }
+  # 4. ORIGINAL PRESERVED — copy, never move.
+  [[ -f "$jr/live-archive/$jrel" && "$(cksum <"$jr/live-archive/$jrel")" == "$archive_before" ]] \
+    || { echo "journey: the archived original was moved or modified" >&2; exit 1; }
+  # 5. no stray temp files left in the live tree.
+  [[ -z "$(find "$jr/live" -name '.wf-restore.*' 2>/dev/null)" ]] \
+    || { echo "journey: a restore temp file was left behind" >&2; exit 1; }
+
+  # 6. COLLISION REFUSAL: a DIFFERENT live file at the same path must never be
+  #    overwritten — it may be a session Codex is actively appending to — and the
+  #    call must FAIL. Returning success there would hand the caller a path whose
+  #    contents are not the session it asked for, so assert the exit code, not
+  #    only the bytes.
+  printf 'LIVE-DO-NOT-CLOBBER\n' > "$jr/live/$jrel"
+  live_before="$(cksum <"$jr/live/$jrel")"
+  coll_rc=0
+  _codex_materialize_archived_rollout "$jr/live-archive/$jrel" >/dev/null 2>&1 || coll_rc=$?
+  [[ "$coll_rc" -ne 0 ]] \
+    || { echo "journey: materialization reported SUCCESS on a differing destination" >&2; exit 1; }
+  [[ "$(cksum <"$jr/live/$jrel")" == "$live_before" ]] \
+    || { echo "journey: materialization clobbered an existing live rollout" >&2; exit 1; }
+  [[ "$(cksum <"$jr/live-archive/$jrel")" == "$archive_before" ]] \
+    || { echo "journey: the archived original changed during a refused collision" >&2; exit 1; }
+
+  # 6b. IDEMPOTENT re-run: a byte-IDENTICAL destination is not a conflict; it
+  #     must succeed and echo the live path, so a retried recovery is safe.
+  cp "$jr/live-archive/$jrel" "$jr/live/$jrel"
+  idem_rc=0
+  idem_out="$(_codex_materialize_archived_rollout "$jr/live-archive/$jrel" 2>/dev/null)" || idem_rc=$?
+  [[ "$idem_rc" -eq 0 && "$idem_out" == "$jr/live/$jrel" ]] \
+    || { echo "journey: an identical existing rollout was not treated as idempotent" >&2; exit 1; }
+
+  # 7. Opt-out and scope: with the archive disabled nothing is materialized.
+  rm -f "$jr/live/$jrel"
+  CODEX_SESSIONS_ARCHIVE_DIR="" _codex_materialize_archived_rollout "$jr/live-archive/$jrel" >/dev/null 2>&1 \
+    && { echo "journey: materialized despite a disabled archive root" >&2; exit 1; }
+  [[ ! -f "$jr/live/$jrel" ]] \
+    || { echo "journey: a file appeared in the live tree with the archive disabled" >&2; exit 1; }
 )
 
 # Spawn receipt needs the complete initial prompt, not only the durable marker:
@@ -4011,4 +4183,114 @@ DSH
   grep -q 'dsh (deepseek)' <<<"$doctor_text"
 )
 
+
+
+# ULTRA EFFORT (2026-09-05). Codex shipped a sixth reasoning level. Verified live
+# against gpt-5.6-terra: `-c model_reasoning_effort=ultra` completed a turn while
+# a bogus value on the same command returned HTTP 400, so the level is honored
+# rather than silently ignored. The syntactic gate must accept it; the real
+# per-provider gate stays the capabilities-derived whitelist.
+(
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  [[ "$WASPFLOW_EFFORT_TOKENS" == *ultra* ]] \
+    || { echo "effort: ultra missing from the syntactic token set" >&2; exit 1; }
+  [[ "$WASPFLOW_EFFORTS_CODEX" == *ultra* ]] \
+    || { echo "effort: ultra missing from the codex capabilities whitelist" >&2; exit 1; }
+  # Claude's CLI advertises only low..max — ultra must NOT leak across providers.
+  [[ "$WASPFLOW_EFFORTS_CLAUDE" != *ultra* ]] \
+    || { echo "effort: ultra wrongly present in the claude whitelist" >&2; exit 1; }
+)
+# The generator must not silently drop a level it does not recognize: that is how
+# a newly-shipped provider level becomes an unexplained CLI rejection.
+grep -q 'extra = sorted(provider_efforts\[prov\] - set(ORDER))' "$root/scripts/gen_effort_whitelists.py" \
+  || { echo "effort: generator can still drop unknown levels" >&2; exit 1; }
+
+# ULTRA REACHES EVERY REAL CODEX LAUNCH ARM. Constants are not proof: these
+# tests call the production functions, mock only their process/tmux boundaries,
+# and inspect the command actually handed to those boundaries.
+(
+  ur="$(mktemp -d "$scratch/waspflow-ultra-XXXXXX")"
+  mkdir -p "$ur/cwd" "$ur/live/2026/09/05"
+  ( cd "$ur/cwd" && git init -q && git config user.email t@e.invalid && git config user.name T \
+    && echo x > f.txt && git add -A && git commit -q -m x )
+  export WASPFLOW_HOME="$state_home" CODEX_SESSIONS_DIR="$ur/live"
+  unset CODEX_SESSIONS_ARCHIVE_DIR
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/codex.sh"
+  usid="01a0aaaa-0000-7000-8000-00000000ffff"
+  rollout="$CODEX_SESSIONS_DIR/2026/09/05/rollout-2026-09-05T00-00-00-$usid.jsonl"
+  printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$usid" "$ur/cwd" > "$rollout"
+
+  # Spawn: codex_spawn builds the interactive argv before asking core to create
+  # its owned pane. Capture that real shell command at the tmux boundary.
+  spawn_command="$ur/spawn-command"
+  tmux_create_owned_lane_window() { printf '%s\n' "$3" >"$spawn_command"; printf 'fake:0\n'; }
+  tmux() { :; }
+  _codex_clear_trust_prompt() { :; }
+  _codex_wait_composer_ready() { :; }
+  _codex_submit_prompt() { :; }
+  lane_set ultra-spawn provider codex cwd "$ur/cwd" effort ultra mcp_requested inherit
+  codex_spawn ultra-spawn "$ur/cwd" gpt-5.6-terra '' "$ur/spawn.log" 'go'
+  [[ -s "$spawn_command" && "$(<"$spawn_command")" == *'model_reasoning_effort=ultra'* ]] \
+    || { echo "ultra: codex_spawn did not hand ultra to its pane command" >&2; exit 1; }
+
+  # Headless revise must prefer effort_passed, then fall back to effort_requested.
+  headless_argv=""
+  tmux_run_owned_lane_command() { headless_argv="$(printf '%q ' "${@:5}")"; printf 'OK\n' > "${!#}"; }
+  lane_set ultra-passed provider codex status reaped cwd "$ur/cwd" session_id "$usid" effort_passed ultra mcp_requested inherit
+  codex_revise ultra-passed 'go' "$ur/out-passed.txt"
+  [[ -s "$ur/out-passed.txt" && "$headless_argv" == *'model_reasoning_effort=ultra'* && "$headless_argv" == *"resume $usid"* ]] \
+    || { echo "ultra: effort_passed was not carried by real codex_revise" >&2; exit 1; }
+  headless_argv=""
+  lane_set ultra-requested provider codex status reaped cwd "$ur/cwd" session_id "$usid" effort_requested ultra mcp_requested inherit
+  codex_revise ultra-requested 'go' "$ur/out-requested.txt"
+  [[ -s "$ur/out-requested.txt" && "$headless_argv" == *'model_reasoning_effort=ultra'* ]] \
+    || { echo "ultra: effort_requested fallback was not carried by real codex_revise" >&2; exit 1; }
+
+  # Resume-with-arm needs an owned provisional transition. Its tmux helpers are
+  # the external boundary; validate that exact ownership shape and command.
+  resume_command=""; submitted_marker=""
+  tmux_window_if_owned() {
+    jq -e '.tmux_session == "isolated" and .tmux_window == "@42" and .tmux_pane_pid == 4242' <<<"$1" >/dev/null
+    printf '@42\n'
+  }
+  tmux_send_owned_window_shell_command() { resume_command="$2"; }
+  _codex_submit_prompt() { submitted_marker="$5"; }
+  uown='{"tmux_session":"isolated","tmux_window":"@42","tmux_pane_pid":4242}'
+  lane_set ultra-arm provider codex status escalating cwd "$ur/cwd" session_id "$usid" \
+    pending_transition "$(jq -cn --arg sid "$usid" --argjson ownership "$uown" '{to_arm:{model:"gpt-5.6-terra",effort:"ultra"},submission_marker:"WASPFLOW_LANE_MARKER:ultra:arm",provisional_session:{session_id:$sid,ownership:$ownership}}')"
+  codex_resume_with_arm ultra-arm 'go again'
+  [[ -n "$resume_command" && "$resume_command" == *'model_reasoning_effort=ultra'* && "$resume_command" == *resume*"$usid"* && "$submitted_marker" == WASPFLOW_LANE_MARKER:ultra:arm ]] \
+    || { echo "ultra: real codex_resume_with_arm omitted ultra or transition ownership" >&2; exit 1; }
+)
+
+# Exec is a separate provider arm. Use its real public parser and the fake Codex
+# binary only at the provider process boundary.
+(
+  er="$(mktemp -d "$scratch/waspflow-ultra-exec-XXXXXX")"
+  mkdir -p "$er/bin" "$er/cwd"
+  cat >"$er/bin/codex" <<STUB
+#!/usr/bin/env bash
+printf '%q ' "\$@" >> "$er/argv.log"
+printf '\n' >> "$er/argv.log"
+case "\$1 \${2:-}" in
+  'debug models') printf '{"models":[]}\n' ;;
+  'mcp list') printf '[]\n' ;;
+esac
+previous=''
+for arg in "\$@"; do
+  [[ "\$previous" == -o ]] && printf 'OK\n' >"\$arg"
+  previous="\$arg"
+done
+exit 0
+STUB
+  chmod +x "$er/bin/codex"
+  export PATH="$er/bin:$PATH" WASPFLOW_HOME="$state_home"
+  "$root/bin/waspflow" exec --provider codex --accept-provider-default --effort ultra --mcp inherit --cwd "$er/cwd" -- 'noop'
+  [[ -s "$er/argv.log" && "$(cat "$er/argv.log")" == *'model_reasoning_effort=ultra'* ]] \
+    || { echo "ultra: real exec_run did not invoke Codex with ultra" >&2; exit 1; }
+)
 echo "waspflow verify: ok"

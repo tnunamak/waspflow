@@ -280,8 +280,8 @@ cmd_spawn() {
   provenance_validate_parent_ref "$parent_ref"
   cwd="$(cd "$cwd" && pwd)" || die "spawn: --cwd does not exist"
   guard_cwd "$cwd"   # never hand a worker '/' silently (known grok --cwd / crash)
-  if [[ -n "$effort" && ! "$effort" =~ ^(none|minimal|low|medium|high|xhigh|max)$ ]]; then
-    die "spawn: --effort must be one of none|minimal|low|medium|high|xhigh|max (got: $effort)"
+  if [[ -n "$effort" && ! "$effort" =~ ^($WASPFLOW_EFFORT_TOKENS)$ ]]; then
+    die "spawn: --effort must be one of ${WASPFLOW_EFFORT_TOKENS//|/, } (got: $effort)"
   fi
 
   # Enforced selection runs before tmux/lane creation. The selected fallback is

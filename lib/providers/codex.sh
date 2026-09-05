@@ -20,6 +20,123 @@
 #     configurable health URL ($WASPFLOW_CODEX_BACKEND_HEALTH_URL) when set.
 
 CODEX_SESSIONS_DIR="${CODEX_SESSIONS_DIR:-$HOME/.codex/sessions}"
+# Where an operator-side retention pass moves older rollouts, conventionally a
+# sibling `sessions-archive` tree. This is NOT a Codex concept: the CLI binary
+# contains no such string, and Codex's own built-in `archived_sessions` /
+# rollout-compression mechanism is a different thing that we never touch.
+#
+# Discovery must search here too. A bulk archive whose age cutoff is younger than
+# the crash-recovery resume horizon moves a still-resumable session out of the
+# searched tree; resume then reports "no session" rather than an error, so the
+# failure is silent — nothing to restore, and no indication why.
+#
+# The default is DERIVED FROM the sessions dir rather than pinned to $HOME.
+# Overriding CODEX_SESSIONS_DIR — which every hermetic test and any relocated
+# Codex install does — must not leave discovery still reading the real ~/.codex
+# archive, or unrelated rollouts leak into an isolated fixture and tests become
+# dependent on whatever history the running machine happens to hold. Deriving it
+# also matches the conventional on-disk layout. Set empty to disable entirely.
+CODEX_SESSIONS_ARCHIVE_DIR="${CODEX_SESSIONS_ARCHIVE_DIR-${CODEX_SESSIONS_DIR%/}-archive}"
+
+# Every root a rollout may live in, LIVE FIRST so an archived copy can never
+# shadow the file Codex is actively appending to.
+_codex_rollout_roots() {
+  local d
+  for d in "$CODEX_SESSIONS_DIR" "$CODEX_SESSIONS_ARCHIVE_DIR"; do
+    [[ -n "$d" && -d "$d" ]] && printf '%s\n' "$d"
+  done
+}
+
+# Resolve a session id to its rollout path across every root. Sole owner of
+# "where do rollouts live", so a new root is added in one place rather than at
+# each call site. Echoes nothing and returns 1 when unresolvable.
+# Args: session_id
+_codex_rollout_for_session() {
+  local sid="$1" root hit
+  [[ -n "$sid" ]] || return 1
+  while IFS= read -r root; do
+    hit="$(find "$root" -type f -name "*${sid}.jsonl" 2>/dev/null | head -1)"
+    [[ -n "$hit" ]] && { printf '%s\n' "$hit"; return 0; }
+  done < <(_codex_rollout_roots)
+  return 1
+}
+
+# Newest-first rollout listing across every root, live before archive. The
+# marker/prompt scans use this so crash recovery can also reach an archived
+# session. Ordering within a root is unchanged (filename descending).
+_codex_rollout_listing() {
+  local root
+  while IFS= read -r root; do
+    find "$root" -type f -name 'rollout-*.jsonl' -printf '%f\t%p\n' 2>/dev/null | sort -r | cut -f2-
+  done < <(_codex_rollout_roots)
+}
+
+# Make an archived rollout resumable, and echo nothing otherwise.
+#
+# WHY THIS IS NEEDED AT ALL. Finding the file is not enough: `codex exec resume`
+# takes "a session id or --last" and has NO path argument (verified against the
+# installed CLI's own --help), so Codex resolves the id against ITS OWN sessions
+# dir. A rollout that only exists under the operator's bulk archive is invisible
+# to resume even after discovery locates it, so the file has to be placed back
+# where Codex looks — a non-overwriting copy is the whole mechanism.
+#
+# TERMINOLOGY — two different things, do not conflate:
+#   * this function's concern is the OPERATOR-SIDE bulk archive (a retention
+#     script's sibling `sessions-archive` tree). The Codex binary contains no
+#     such string.
+#   * Codex separately has its own built-in `archived_sessions` concept with a
+#     rollout-compression pipeline. That is internal to Codex, is not what this
+#     touches, and must not be "restored" by us.
+#
+# SAFETY: copy, never move — the archive keeps its copy. Refuse on ANY collision
+# rather than overwriting, because the live path may be a session Codex is
+# actively appending to. Copy to a temp name in the destination dir and link it
+# into place with `ln` (fails if the target exists) so a concurrent writer cannot
+# be clobbered by a racing check-then-write.
+# Args: rollout_path ; echoes the live path on success, returns 1 otherwise.
+_codex_materialize_archived_rollout() {
+  local src="$1" rel root dest tmp
+  [[ -n "$src" && -f "$src" ]] || return 1
+  [[ -n "$CODEX_SESSIONS_ARCHIVE_DIR" ]] || return 1
+  # Only act on files that actually live under the archive root.
+  case "$src" in "$CODEX_SESSIONS_ARCHIVE_DIR"/*) ;; *) return 1 ;; esac
+  rel="${src#"$CODEX_SESSIONS_ARCHIVE_DIR"/}"
+  dest="$CODEX_SESSIONS_DIR/$rel"
+  # An occupied destination is only OK when it is byte-identical to the archived
+  # copy (idempotent re-run). A DIFFERING file at that path is a real conflict —
+  # very likely a live session Codex is appending to — and returning success
+  # there would hand the caller a path whose contents are not the session it
+  # asked for. Fail loudly instead, and never touch the bytes.
+  if [[ -e "$dest" ]]; then
+    if cmp -s "$src" "$dest"; then
+      printf '%s\n' "$dest"; return 0
+    fi
+    err "codex: refusing to overwrite a DIFFERENT existing rollout at $dest (archived copy left untouched at $src)"
+    return 1
+  fi
+  mkdir -p "$(dirname "$dest")" 2>/dev/null || return 1
+  # `cp`/`ln` operands here are always absolute paths built from the two roots,
+  # so `--` is unnecessary; omitting it keeps this portable to BSD/macOS, whose
+  # `ln` does not accept `--`.
+  tmp="$(mktemp "$(dirname "$dest")/.wf-restore.XXXXXX" 2>/dev/null)" || return 1
+  if ! cp "$src" "$tmp" 2>/dev/null; then rm -f "$tmp"; return 1; fi
+  # `ln` (no -f) fails if dest exists, so the create is atomic against a racing
+  # writer rather than a check-then-write.
+  if ln "$tmp" "$dest" 2>/dev/null; then
+    rm -f "$tmp"
+    log "codex: restored archived rollout for resume -> $dest (archive copy left in place)"
+    printf '%s\n' "$dest"; return 0
+  fi
+  rm -f "$tmp"
+  # Lost the race: something else created dest. Apply the SAME rule as above —
+  # identical is fine, differing is a conflict.
+  if [[ -e "$dest" ]] && cmp -s "$src" "$dest"; then
+    printf '%s\n' "$dest"; return 0
+  fi
+  err "codex: refusing to overwrite an existing rollout at $dest"
+  return 1
+}
+
 # The local cache is only a fallback. `codex debug models` is the
 # provider-owned, auth-scoped source of truth at launch time.
 CODEX_MODELS_CACHE="${CODEX_MODELS_CACHE:-$HOME/.codex/models_cache.json}"
@@ -207,12 +324,12 @@ codex_spawn() {
   effort="$(lane_get "$lane" effort)"
   case "$effort" in
     "" ) ;;
-    minimal|low|medium|high|xhigh|max)
+    minimal|low|medium|high|xhigh|max|ultra)
       effort_args=(-c "model_reasoning_effort=${effort}")
       passed_effort="$effort"
       ;;
     *)
-      die "codex: unsupported effort '$effort' (valid: minimal|low|medium|high|xhigh|max)"
+      die "codex: unsupported effort '$effort' (valid: minimal|low|medium|high|xhigh|max|ultra)"
       ;;
   esac
   # requested vs passed (org-side caps may still alter observed effort later)
@@ -368,7 +485,7 @@ codex_resume_with_arm() {
   target="$(tmux_window_if_owned "$ownership")" || { err "codex escalation: provisional window is not owned"; return 1; }
   local model_args=() effort_args=()
   [[ -n "$model" ]] && model_args=(-m "$model")
-  case "$effort" in "") ;; minimal|low|medium|high|xhigh) effort_args=(-c "model_reasoning_effort=${effort}") ;; *) err "codex escalation: unsupported effort '$effort'"; return 1 ;; esac
+  case "$effort" in "") ;; minimal|low|medium|high|xhigh|max|ultra) effort_args=(-c "model_reasoning_effort=${effort}") ;; *) err "codex escalation: unsupported effort '$effort' (valid: minimal|low|medium|high|xhigh|max|ultra)"; return 1 ;; esac
   marker="$(jq -r '.submission_marker // empty' <<<"$transition")"
   [[ -n "$marker" ]] || { err "codex escalation: transition has no submission marker"; return 1; }
   if [[ "$fresh" == true ]]; then
@@ -431,7 +548,7 @@ _codex_rollout_session_id() {
 _codex_find_rollout_for_marker() {
   local cwd="$1" marker="$2" f fcwd
   [[ -n "$marker" ]] || return 1
-  local listing; listing="$(find "$CODEX_SESSIONS_DIR" -type f -name 'rollout-*.jsonl' -printf '%f\t%p\n' 2>/dev/null | sort -r | cut -f2-)"
+  local listing; listing="$(_codex_rollout_listing)"
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
     fcwd="$(head -1 "$f" 2>/dev/null | jq -rc 'select(.type=="session_meta") | .payload.cwd // empty' 2>/dev/null)"
@@ -449,7 +566,7 @@ _codex_find_rollout_for_marker() {
 # the complete task crossed the tmux/Codex boundary. Args: cwd full_prompt
 _codex_find_rollout_for_submitted_prompt() {
   local cwd="$1" full_prompt="$2" f fcwd
-  local listing; listing="$(find "$CODEX_SESSIONS_DIR" -type f -name 'rollout-*.jsonl' -printf '%f\t%p\n' 2>/dev/null | sort -r | cut -f2-)"
+  local listing; listing="$(_codex_rollout_listing)"
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
     fcwd="$(head -1 "$f" 2>/dev/null | jq -rc 'select(.type=="session_meta") | .payload.cwd // empty' 2>/dev/null)"
@@ -494,7 +611,7 @@ codex_refresh_runtime_settings() {
   }
   rollout="$(lane_get "$lane" rollout)"
   if [[ -z "$rollout" || ! -f "$rollout" ]]; then
-    rollout="$(find "$CODEX_SESSIONS_DIR" -type f -name "*${sid}.jsonl" 2>/dev/null | head -1 || true)"
+    rollout="$(_codex_rollout_for_session "$sid" || true)"
   fi
   [[ -n "$rollout" && -f "$rollout" ]] || {
     _codex_runtime_refresh_health unknown missing-rollout
@@ -587,7 +704,7 @@ codex_is_idle() {
   [[ -n "$sid" ]] || return 1
   rollout="$(lane_get "$lane" rollout)"
   if [[ -z "$rollout" || ! -f "$rollout" ]]; then
-    rollout="$(find "$CODEX_SESSIONS_DIR" -type f -name "*${sid}.jsonl" 2>/dev/null | head -1)"
+    rollout="$(_codex_rollout_for_session "$sid" || true)"
   fi
   [[ -n "$rollout" && -f "$rollout" ]] || return 1
   last="$(tail -1 "$rollout" 2>/dev/null \
@@ -604,7 +721,7 @@ codex_turn_mark() {
   [[ -n "$sid" ]] || { echo 0; return 0; }
   rollout="$(lane_get "$lane" rollout)"
   if [[ -z "$rollout" || ! -f "$rollout" ]]; then
-    rollout="$(find "$CODEX_SESSIONS_DIR" -type f -name "*${sid}.jsonl" 2>/dev/null | head -1)"
+    rollout="$(_codex_rollout_for_session "$sid" || true)"
   fi
   [[ -n "$rollout" && -f "$rollout" ]] || { echo 0; return 0; }
   jq -rc 'select((.payload.type // .type) == "task_complete") | 1' "$rollout" 2>/dev/null | wc -l
@@ -670,7 +787,7 @@ codex_revise() {
     # search (same hazard class as the discovery path itself).
     rollout="$(lane_get "$lane" rollout)"
     if [[ -z "$rollout" || ! -f "$rollout" ]]; then
-      rollout="$(find "$CODEX_SESSIONS_DIR" -type f -name "*${sid}.jsonl" 2>/dev/null | head -1)"
+      rollout="$(_codex_rollout_for_session "$sid" || true)"
     fi
     [[ -n "$rollout" && -f "$rollout" ]] || {
       lane_set "$lane" revise_submitted false \
@@ -725,7 +842,7 @@ codex_revise() {
   [[ -n "$effort" ]] || effort="$(lane_get "$lane" effort_requested)"
   case "$effort" in
     "") ;;
-    minimal|low|medium|high|xhigh) effort_args=(-c "model_reasoning_effort=${effort}") ;;
+    minimal|low|medium|high|xhigh|max|ultra) effort_args=(-c "model_reasoning_effort=${effort}") ;;
     *) err "codex revise: stored effort '$effort' cannot be reasserted honestly"; return 1 ;;
   esac
   codex_load_process_mcp_policy "$lane" "$cwd" revise || return 1
@@ -747,6 +864,22 @@ codex_revise() {
     if [[ "$recovery_report_dir" != "$normalized_cwd" && "$recovery_report_dir" != "$normalized_cwd/"* ]]; then
       recovery_dir_args=(--add-dir "$recovery_report_dir")
     fi
+  fi
+  # HEADLESS RESUME ONLY. `codex exec resume` takes an id, never a path, so a
+  # rollout that lives solely under the operator's bulk archive is invisible to
+  # Codex even though discovery just found it. Copy it back (non-overwriting)
+  # before resuming; the archive keeps its copy and a collision is refused.
+  local resume_rollout
+  resume_rollout="$(_codex_rollout_for_session "$sid" || true)"
+  if [[ -n "$resume_rollout" && -n "$CODEX_SESSIONS_ARCHIVE_DIR" ]]; then
+    case "$resume_rollout" in
+      "$CODEX_SESSIONS_ARCHIVE_DIR"/*)
+        _codex_materialize_archived_rollout "$resume_rollout" >/dev/null || {
+          err "codex revise: lane '$lane' session $sid exists only in the archive and could not be restored for resume"
+          return 1
+        }
+        ;;
+    esac
   fi
   local tmp; tmp="${out_file:-$(mktemp)}"
   tmux_run_owned_lane_command "$lane" "${cwd:-$PWD}" headless-revise -- \

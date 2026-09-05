@@ -5,8 +5,8 @@
 # claude valid efforts: low medium high xhigh max
 WASPFLOW_EFFORTS_CLAUDE="low|medium|high|xhigh|max"
 
-# codex valid efforts: none minimal low medium high xhigh max
-WASPFLOW_EFFORTS_CODEX="none|minimal|low|medium|high|xhigh|max"
+# codex valid efforts: none minimal low medium high xhigh max ultra
+WASPFLOW_EFFORTS_CODEX="none|minimal|low|medium|high|xhigh|max|ultra"
 
 # grok valid efforts: none minimal low medium high xhigh max
 WASPFLOW_EFFORTS_GROK="none|minimal|low|medium|high|xhigh|max"
