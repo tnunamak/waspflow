@@ -216,8 +216,8 @@
       "constraint_family": "accuracy-first",
       "expands_to": {
         "provider": "codex",
-        "model": "gpt-5.6-sol",
-        "effort": "xhigh",
+        "model": "gpt-6-astra",
+        "effort": "high",
         "mode": "standard"
       },
       "frontier_assumption": {
@@ -228,9 +228,9 @@
         "frontier_status": "likely_efficient_when_failure_is_expensive"
       },
       "evidence_refs": [
-        "catalog://performance/openai-gpt-5-6-launch-2026-07",
-        "catalog://pricing/openai-api-2026-07",
-        "source://openai-gpt-5-6-2026-07-09"
+        "catalog://performance/openai-gpt-6-astra-launch-2026-09",
+        "catalog://performance/terminal-bench-4-astra-audit-2026-09",
+        "source://openai-gpt-6-astra-launch-2026-09-05"
       ],
       "use_when": [
         "Hard implementation where rework is costly",
@@ -257,8 +257,8 @@
       "constraint_family": "accuracy-first",
       "expands_to": {
         "provider": "codex",
-        "model": "gpt-5.6-sol",
-        "effort": "xhigh",
+        "model": "gpt-6-astra",
+        "effort": "high",
         "mode": "standard"
       },
       "frontier_assumption": {
@@ -270,9 +270,9 @@
         "basis": "expert_prior_plus_harness_smoke"
       },
       "evidence_refs": [
-        "catalog://performance/openai-quality-2026-07",
-        "catalog://pricing/codex-credits-2026-07",
-        "catalog://performance/local-evals-2026-07"
+        "catalog://performance/openai-gpt-6-astra-launch-2026-09",
+        "catalog://performance/terminal-bench-4-astra-audit-2026-09",
+        "source://openai-gpt-6-astra-launch-2026-09-05"
       ],
       "use_when": [
         "Independent review of another agent's work",
@@ -335,8 +335,8 @@
       "constraint_family": "balanced",
       "expands_to": {
         "provider": "codex",
-        "model": "gpt-5.6-sol",
-        "effort": "high",
+        "model": "gpt-6-astra",
+        "effort": "medium",
         "mode": "standard"
       },
       "frontier_assumption": {
@@ -347,7 +347,9 @@
         "frontier_status": "unknown_locally"
       },
       "evidence_refs": [
-        "catalog://performance/openai-gpt-5-6-launch-2026-07"
+        "catalog://performance/openai-gpt-6-astra-launch-2026-09",
+        "catalog://performance/terminal-bench-4-astra-audit-2026-09",
+        "source://openai-gpt-6-astra-launch-2026-09-05"
       ],
       "use_when": [
         "UI / browser / OSWorld-style computer use",

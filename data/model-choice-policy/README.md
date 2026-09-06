@@ -57,13 +57,17 @@ Waspflow resolves from (first hit):
 | `docs.lookup` | claude / sonnet-5 / low |
 | `implement.standard` | claude / sonnet-5 / medium |
 | `implement.quota-tight` | claude / sonnet-5 / low |
-| `implement.accuracy-first` | codex / gpt-5.6-sol / xhigh |
-| `review.audit` | codex / gpt-5.6-sol / xhigh |
+| `implement.accuracy-first` | codex / gpt-6-astra / high |
+| `review.audit` | codex / gpt-6-astra / high |
 | `advisor.deep` | claude / sonnet-5 / high |
-| `ui.computer-use` | codex / gpt-5.6-sol / high |
+| `ui.computer-use` | codex / gpt-6-astra / medium |
 | `grok.explore-only` | grok / grok-4.5 / high |
 
 ## Changelog
+
+### v0.1.6 — 2026-09-06
+
+- Codex operating points move to **gpt-6-astra** (GA; verified locally). Effort follows the launch data (vendor-published, no CIs): medium→high buys +0.2 to +4 points for 17–32% more cost, high→xhigh is mixed for ~10% more, max is equal or worse at +50–80%. So `implement.accuracy-first` and `review.audit` run at **high**, `ui.computer-use` at **medium**; xhigh/max are never defaults.
 
 ### v0.1.5 — 2026-07-11
 
