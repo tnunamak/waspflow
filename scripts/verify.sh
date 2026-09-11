@@ -132,6 +132,32 @@ grep -Eq 'catalog_ref' "$root/bin/waspflow"
 ! grep -Fq 'high|xhigh|max' "$root/lib/providers/codex.sh"
 ! grep -Fq 'high|xhigh|max' "$root/lib/exec.sh"
 
+# Claude folder-trust gate. Two independent bugs made an untrusted --cwd fatal:
+# the pane text is strip_ansi'd so its padding collapses ("Yes,Itrustthisfolder"),
+# which the old literal patterns could never match; and the answer was a
+# hardcoded "1" while the live dialog lists "No, exit" first. A lane then died
+# before a session id existed, which also defeats `revise`. Assert the behaviour,
+# not the text: run the real matcher against a real collapsed pane capture, and
+# require the option be chosen by name rather than by position.
+(
+  # shellcheck source=/dev/null
+  strip_ansi() { cat; }
+  eval "$(sed -n '/^_claude_trust_prompt_visible()/,/^}/p' "$root/lib/providers/claude.sh")"
+  eval "$(sed -n '/^_claude_trust_option_number()/,/^}/p' "$root/lib/providers/claude.sh")"
+  collapsed='Quicksafetycheck:Isthisaprojectyoucreatedoroneyoutrust?(Likeyourowncode)
+❯No,exit
+Yes,Itrustthisfolder'
+  _claude_trust_prompt_visible "$collapsed" \
+    || { echo "claude trust gate: matcher misses a real collapsed pane capture" >&2; exit 1; }
+  # Position independence: the digit must follow the wording, either order.
+  trust_second=$'  1. No, exit\n  2. Yes, I trust this folder'
+  trust_first=$'  1. Yes, I trust this folder\n  2. No, exit'
+  [[ "$(_claude_trust_option_number "$trust_second")" == "2" ]] \
+    || { echo "claude trust gate: option number not read from the trust wording" >&2; exit 1; }
+  [[ "$(_claude_trust_option_number "$trust_first")" == "1" ]] \
+    || { echo "claude trust gate: option number regressed on legacy ordering" >&2; exit 1; }
+) || exit 1
+
 fixture="$(mktemp -d "$scratch/waspflow-verify-XXXXXX")"
 state_home="$(mktemp -d "$scratch/waspflow-state-XXXXXX")"
 

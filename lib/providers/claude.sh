@@ -122,19 +122,65 @@ claude_spawn() {
 # Pane snapshot, de-escaped.
 _claude_pane() { tmux capture-pane -p -t "$1" -S -60 2>/dev/null | strip_ansi; }
 
-# Answer Claude's folder-trust prompt ("Yes, I trust this folder" = option 1)
-# if/when it appears. No-op for already-trusted dirs.
+# True when a pane is showing the folder-trust gate.
+#
+# Every space in the pattern is optional. `_claude_pane` runs the capture
+# through strip_ansi, and the dialog's padding collapses, so the rendered row
+# reads "Quicksafetycheck:Isthisaprojectyoucreatedoroneyoutrust?" and
+# "Yes,Itrustthisfolder". The earlier literal patterns ("trust this folder",
+# "Is this a project you") therefore never matched a real pane: waspflow was not
+# choosing the wrong option, it never saw the gate at all and left the worker
+# parked at the dialog until it timed out.
+_claude_trust_prompt_visible() {
+  grep -qiE 'trust ?this ?folder|Is ?this ?a ?project ?you' <<<"$1"
+}
+
+_claude_trust_option_number() {
+  # Echoes the digit labelling the "trust" option, or nothing when unnumbered.
+  sed -n 's/.*\([0-9]\)[.)][[:space:]]*[Yy]es,[[:space:]]*I[[:space:]]*trust.*/\1/p' <<<"$1" |
+    head -n 1
+}
+
+# Answer Claude's folder-trust prompt if/when it appears. No-op for
+# already-trusted dirs (a dir present in the "projects" map of ~/.claude.json).
+#
+# Never assume the trust option's POSITION. This sent a hardcoded "1" on the
+# premise that option 1 was "Yes, I trust this folder". The live dialog renders
+#     ❯ No, exit
+#       Yes, I trust this folder
+# so "1" selects EXIT. Combined with the detection bug above, a lane in an
+# untrusted cwd died before a session id existed, which also defeats rescue:
+# `revise` reports "No conversation found with session ID" and spawn can only
+# report a generic unconfirmed launch. Read the option that actually says
+# "trust" and send that number, so a future reordering cannot invert the answer.
 _claude_clear_trust_prompt() {
-  local target="$1" i pane
+  local target="$1" i pane choice
   for i in $(seq 1 20); do
     pane="$(_claude_pane "$target")"
-    if grep -qiE "trust this folder|Is this a project you" <<<"$pane"; then
-      tmux send-keys -t "$target" "1"
-      sleep 1
-      tmux send-keys -t "$target" Enter
+    if _claude_trust_prompt_visible "$pane"; then
+      choice="$(_claude_trust_option_number "$pane")"
+      if [[ -n "$choice" ]]; then
+        tmux send-keys -t "$target" "$choice"
+        sleep 1
+        tmux send-keys -t "$target" Enter
+      else
+        # Unnumbered list: step the highlight onto the trust row, then confirm.
+        # Bounded so a dialog we cannot read never loops forever.
+        # The pane capture collapses runs of spaces, so the row reads
+        # "❯Yes,Itrustthisfolder" — match without anchoring or requiring
+        # separators.
+        local k
+        for k in $(seq 1 5); do
+          grep -qiE '[❯>][[:space:]]*[Yy]es,[[:space:]]*I[[:space:]]*trust' \
+            <<<"$(_claude_pane "$target")" && break
+          tmux send-keys -t "$target" Down
+          sleep 1
+        done
+        tmux send-keys -t "$target" Enter
+      fi
       local j
       for j in $(seq 1 10); do
-        grep -qiE "trust this folder|Is this a project you" <<<"$(_claude_pane "$target")" || return 0
+        _claude_trust_prompt_visible "$(_claude_pane "$target")" || return 0
         sleep 1
       done
       return 0
@@ -174,7 +220,7 @@ _claude_verify_started() {
     fi
     pane="$(_claude_pane "$target")"
     # Re-clear the trust gate if it (re)appeared.
-    if grep -qiE "trust this folder|Is this a project you" <<<"$pane"; then
+    if _claude_trust_prompt_visible "$pane"; then
       tmux send-keys -t "$target" "1"; sleep 1; tmux send-keys -t "$target" Enter
     fi
     sleep 1
