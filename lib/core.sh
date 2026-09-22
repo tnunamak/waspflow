@@ -190,6 +190,37 @@ validate_model() {
   fi
 }
 
+# Runtime-attestation corroboration, shared by every provider that compares an
+# observed served model id against the id waspflow requested. A requested id
+# corroborates if: it is empty (nothing pinned); it equals the served id
+# exactly; it equals the served id with an 8-digit date-snapshot suffix
+# stripped (a dated pin like "claude-opus-4-5-20251101" IS the model it dates,
+# not a different one); or it is a provider-owned FAMILY ALIAS — an id with no
+# trailing version digit, e.g. "opus"/"sonnet"/"haiku"/"fable" or the
+# "claude-opus"-style prefixed form — and the served id's dash-delimited
+# family segment matches that alias. A requested id that itself carries a
+# version component (e.g. "claude-opus-5") must NOT match a served id that
+# only extends that version with another numeric component (e.g.
+# "claude-opus-5-5" or "grok-4.5" vs "grok-4"): that is drift, not an alias.
+# Args: served requested -> prints true|false
+model_id_corroborates_request() {
+  local served="$1" requested="$2" served_base
+  [[ -z "$requested" ]] && { echo true; return; }
+  [[ "$served" == "$requested" ]] && { echo true; return; }
+  served_base="$served"
+  [[ "$served_base" =~ ^(.+)-[0-9]{8}$ ]] && served_base="${BASH_REMATCH[1]}"
+  [[ "$served_base" == "$requested" ]] && { echo true; return; }
+  if [[ ! "$requested" =~ [0-9]$ ]]; then
+    case "-$served_base-" in
+      *"-$requested-"*) echo true; return ;;
+    esac
+    case "-$served_base-" in
+      *"-claude-$requested-"*) echo true; return ;;
+    esac
+  fi
+  echo false
+}
+
 # Resolve the public MCP policy through the provider adapter. The adapter returns
 # a compact command description, keeping provider flags, environment knobs, and
 # discovery out of cmd_spawn/exec. Globals are deliberately grouped here because

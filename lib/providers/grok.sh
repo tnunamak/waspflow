@@ -327,16 +327,12 @@ grok_refresh_runtime_settings() {
   [[ -n "$requested" ]] || requested="$(lane_get "$lane" model)"
   requested_effort="$(lane_get "$lane" effort_requested)"
   [[ -n "$requested_effort" ]] || requested_effort="$(lane_get "$lane" effort)"
-  # Token-boundary containment: a provider-owned family alias like "opus"
-  # matches whatever canonical id served it ("claude-opus-4-8" or "claude-opus-5"
-  # both corroborate, no default asserted), but "grok-4" must NOT match "grok-4.5"
-  # (that is drift, not an alias). Grok attests BOTH axes, so a requested-but-not-
-  # served effort is drift too.
-  if [[ -z "$requested" || "$model" == "$requested" || "-$model-" == *"-$requested-"* ]]; then
-    match=true
-  else
-    match=false
-  fi
+  # Shared corroboration rule (model_id_corroborates_request in core.sh): a
+  # provider-owned family alias like "opus" matches whatever canonical id
+  # served it, but "grok-4" must NOT match "grok-4.5" (that is drift, not an
+  # alias). Grok attests BOTH axes, so a requested-but-not-served effort is
+  # drift too.
+  match="$(model_id_corroborates_request "$model" "$requested")"
   # Grok attests BOTH axes (SCHEMAS_V1). A requested effort the session summary
   # does NOT confirm is unattested, not a match — fail CLOSED, as codex does on
   # an unobserved effort. (F4: the old `-n "$effort"` guard let an effort-less

@@ -3146,6 +3146,50 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus5-drift
   [[ "$(lane_get att-opus5-drift runtime_settings_match_requested)" == false && "$(lane_get att-opus5-drift runtime_model)" == claude-opus-5 ]]
 
+  # Opus 5.5 regression (2026-09-22): a pinned VERSIONED id must not match a
+  # served id that merely EXTENDS that version with another numeric component
+  # ("-claude-opus-5-5-" contains "-claude-opus-5-" as a bare substring, which
+  # is exactly the false-match the old predicate had). Same rule both
+  # directions, plus the alias and date-snapshot cases that must keep matching.
+  { printf '%s\n' '{"message":{"model":"claude-opus-5-5"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus55-drift.jsonl"
+  lane_set att-opus55-drift provider claude status live result "" session_id c-sid-opus55-drift model claude-opus-5 model_passed claude-opus-5 model_requested claude-opus-5
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus55-drift
+  [[ "$(lane_get att-opus55-drift runtime_settings_match_requested)" == false && "$(lane_get att-opus55-drift runtime_model)" == claude-opus-5-5 ]] || { echo "att-opus55-drift: claude-opus-5 must not match served claude-opus-5-5" >&2; exit 1; }
+
+  { printf '%s\n' '{"message":{"model":"claude-opus-5-5"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus55-exact.jsonl"
+  lane_set att-opus55-exact provider claude status live result "" session_id c-sid-opus55-exact model claude-opus-5-5 model_passed claude-opus-5-5 model_requested claude-opus-5-5
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus55-exact
+  [[ "$(lane_get att-opus55-exact runtime_settings_match_requested)" == true && "$(lane_get att-opus55-exact runtime_model)" == claude-opus-5-5 ]] || { echo "att-opus55-exact: exact-equal pinned claude-opus-5-5 must match" >&2; exit 1; }
+
+  { printf '%s\n' '{"message":{"model":"claude-opus-5-5"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus55-alias.jsonl"
+  lane_set att-opus55-alias provider claude status live result "" session_id c-sid-opus55-alias model opus model_passed opus model_requested opus
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus55-alias
+  [[ "$(lane_get att-opus55-alias runtime_settings_match_requested)" == true && "$(lane_get att-opus55-alias runtime_model)" == claude-opus-5-5 ]] || { echo "att-opus55-alias: family alias opus must match served claude-opus-5-5" >&2; exit 1; }
+
+  { printf '%s\n' '{"message":{"model":"claude-opus-5"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus55-reverse.jsonl"
+  lane_set att-opus55-reverse provider claude status live result "" session_id c-sid-opus55-reverse model claude-opus-5-5 model_passed claude-opus-5-5 model_requested claude-opus-5-5
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus55-reverse
+  [[ "$(lane_get att-opus55-reverse runtime_settings_match_requested)" == false && "$(lane_get att-opus55-reverse runtime_model)" == claude-opus-5 ]] || { echo "att-opus55-reverse: pinned claude-opus-5-5 must not match served claude-opus-5" >&2; exit 1; }
+
+  { printf '%s\n' '{"message":{"model":"claude-opus-4-5-20251101"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus45-snapshot.jsonl"
+  lane_set att-opus45-snapshot provider claude status live result "" session_id c-sid-opus45-snapshot model claude-opus-4-5 model_passed claude-opus-4-5 model_requested claude-opus-4-5
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus45-snapshot
+  [[ "$(lane_get att-opus45-snapshot runtime_settings_match_requested)" == true && "$(lane_get att-opus45-snapshot runtime_model)" == claude-opus-4-5-20251101 ]] || { echo "att-opus45-snapshot: dated snapshot of the same version must match" >&2; exit 1; }
+
+  # Grok equivalent negative: pinned grok-4.5 must not match a served id that
+  # extends it further (grok's own family uses "." not "-", but the same
+  # version-extension rule must hold via the shared predicate).
+  mkdir -p "$att_home/grok-sessions/enc/g-sid-45ext"
+  printf '%s\n' '{"current_model_id":"grok-4.5.1","reasoning_effort":"high"}' >"$att_home/grok-sessions/enc/g-sid-45ext/summary.json"
+  lane_set att-grok45ext provider grok status live result "" session_id g-sid-45ext model grok-4.5 model_passed grok-4.5 model_requested grok-4.5 effort high effort_requested high
+  GROK_SESSIONS_DIR="$att_home/grok-sessions" grok_refresh_runtime_settings att-grok45ext
+  [[ "$(lane_get att-grok45ext runtime_settings_match_requested)" == false ]] || { echo "att-grok45ext: pinned grok-4.5 must not match served grok-4.5.1" >&2; exit 1; }
+
   # receipts summary: aggregates the ledger, tolerates malformed lines,
   # rejects unknown flags, and reports the eligible fraction. Malformed-line
   # tolerance runs against a scratch copy so the shared ledger stays clean.
