@@ -11,14 +11,14 @@ contaminate pricing or benchmark evidence.
 
 | | |
 |---|---|
-| **This version** | Tag **`data-model-choice-policy-v0.1.5`** |
+| **This version** | [data-model-choice-policy-v0.1.9](https://github.com/tnunamak/minnows/releases/tag/data-model-choice-policy-v0.1.9) — published by CI on push to main |
 | **Latest** | [releases](https://github.com/tnunamak/minnows/releases?q=data-model-choice-policy&expanded=true) |
 | **Facts catalog** | [model-catalog](../model-catalog/) — pin is `catalog_ref` in the policy file |
 
 ```bash
 ./scripts/fetch-data-pack.sh model-choice-policy
 # or
-TAG=data-model-choice-policy-v0.1.5
+TAG=data-model-choice-policy-v0.1.9
 curl -fsSL -L \
   "https://github.com/tnunamak/minnows/releases/download/${TAG}/${TAG}.tar.gz" \
   | tar -xz
@@ -57,13 +57,39 @@ Waspflow resolves from (first hit):
 | `docs.lookup` | claude / sonnet-5 / low |
 | `implement.standard` | claude / sonnet-5 / medium |
 | `implement.quota-tight` | claude / sonnet-5 / low |
-| `implement.accuracy-first` | codex / gpt-5.6-sol / xhigh |
-| `review.audit` | codex / gpt-5.6-sol / xhigh |
-| `advisor.deep` | claude / sonnet-5 / high |
-| `ui.computer-use` | codex / gpt-5.6-sol / high |
+| `implement.accuracy-first` | claude / opus-5-5 / high |
+| `review.audit` | codex / gpt-6-astra / high |
+| `advisor.deep` | claude / opus-5-5 / high |
+| `ui.computer-use` | codex / gpt-6-astra / medium |
 | `grok.explore-only` | grok / grok-4.5 / high |
 
 ## Changelog
+
+### v0.1.9 — 2026-09-22
+
+- Move `advisor.deep` (sonnet-5/high) and `implement.accuracy-first` (codex gpt-6-astra/high) to **claude-opus-5-5 / high**. Evidence, all in catalog v0.5.5:
+  - AA Intelligence Index v4.3.2 (grade B, one snapshot): Opus 5.5 57.6 at max, 54 at high ($1.82/task), 51.2 at medium. Fable 5.1 53.4, GPT-6 Astra 52.7, Opus 5 50.8 (all at max). Sonnet 5 is not in the top 32.
+  - vals.ai Terminal-Bench 4.0 (grade C): Opus 5.5 61.6%, GPT-6 Astra 57.1%, Fable 5.1 49.5%, Opus 5 45.5%, Sonnet 5 8.1%.
+  - Vendor effort curves (grade C): Terminal-Bench 4.0 at high, Opus 5.5 64.2% for $3.88/task vs GPT-6 Astra 57.9% for $7.21/task.
+- `implement.accuracy-first → review.audit` now crosses model families (Claude implements, Codex audits). Before this change it was a same-arm edge that waspflow skipped.
+- `evidence_confidence` stays **medium**: the independent evidence is one AA snapshot and one secondary board, with no local eval.
+- The Sonnet 5 ops are unchanged. No benchmark compares Sonnet 5 with Opus 5.5 on bounded edits or reading tasks.
+- Catalog pin: **v0.5.5**.
+
+### v0.1.8 — 2026-09-09
+
+- Move Codex ops to GA **gpt-6-astra** per owner model policy (retire gpt-5.6-sol): `review.audit` and `implement.accuracy-first` to effort **high** (never xhigh/max by default), `ui.computer-use` to effort **medium** (mechanical/implementation-shaped work). Trigger: `waspflow doctor`'s stale-edge warning on the `preferred_over` entry below, surfaced after gpt-6-astra reached GA.
+- Retire the `gpt-5.6-luna over gpt-5.4-mini` `preferred_over` edge — it was authored rot-aware and the owner policy no longer prefers any 5.x model. No replacement edge added: the catalog's gpt-6 family has only `gpt-6-astra` as GA, no cheap-tier gpt-6 model yet, so there is nothing to prefer over gpt-5.6-luna without inventing evidence.
+- `evidence_refs` re-pointed at existing catalog rows for gpt-6-astra (`performance/openai-gpt-6-astra-launch-2026-09`, `performance/terminal-bench-4-astra-audit-2026-09`, `pricing/openai-api-2026-07`, `pricing/codex-credits-2026-07`). `evidence_confidence` held at **medium**, not raised — the model/effort swap is owner-policy + GA-status driven, not new local evidence (the cited terminal-bench-4 audit row is itself grade C / `comparable: false`).
+- Catalog pin carries forward unchanged from v0.1.7: **v0.5.4**.
+
+### v0.1.7 — 2026-09-05
+
+- Pin catalog **v0.5.4**. Operating-point recommendations are unchanged.
+
+### v0.1.6 — 2026-08-02
+
+- Pin catalog **v0.5.3** after the GPT-5.6 Codex effort-tier value-claim check.
 
 ### v0.1.5 — 2026-07-11
 

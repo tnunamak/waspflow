@@ -1,14 +1,14 @@
 {
   "id": "model-choice-policy",
   "schema_version": 1,
-  "policy_version": "0.1.5",
-  "generated_at": "2026-07-11",
-  "catalog_ref": "data-model-catalog-v0.5.2",
+  "policy_version": "0.1.9",
+  "generated_at": "2026-09-22",
+  "catalog_ref": "data-model-catalog-v0.5.5",
   "doctrine": [
     "Task-shaped operating points, not cheap/default/max ladders",
     "Enumerate and explain; no silent auto-routing",
     "Quota and API dollars are non-fungible",
-    "Missing evidence stays missing \u2014 never invent Grok quality curves",
+    "Missing evidence stays missing — never invent Grok quality curves",
     "explicit_flags_win over --op expansion"
   ],
   "operating_points": [
@@ -88,7 +88,7 @@
         "recover.report"
       ],
       "known_gaps": [
-        "Local harness smoke only (answer-contaminated single seed) \u2014 not grade-A quality evidence (Sol+Fable P0.2)",
+        "Local harness smoke only (answer-contaminated single seed) — not grade-A quality evidence (Sol+Fable P0.2)",
         "Cross-vendor fan-out cost comparison unmeasured"
       ],
       "override_policy": "explicit_flags_win"
@@ -168,7 +168,7 @@
         "recover.report"
       ],
       "known_gaps": [
-        "Local harness smoke only (answer-contaminated single seed) \u2014 not grade-A quality evidence (Sol+Fable P0.2)",
+        "Local harness smoke only (answer-contaminated single seed) — not grade-A quality evidence (Sol+Fable P0.2)",
         "Single local-eval cell; expand multi-seed later"
       ],
       "override_policy": "explicit_flags_win"
@@ -215,22 +215,24 @@
       "task_family": "implementation",
       "constraint_family": "accuracy-first",
       "expands_to": {
-        "provider": "codex",
-        "model": "gpt-5.6-sol",
-        "effort": "xhigh",
+        "provider": "claude",
+        "model": "claude-opus-5-5",
+        "effort": "high",
         "mode": "standard"
       },
       "frontier_assumption": {
-        "cost_basis": "high",
+        "cost_basis": "medium",
         "quota_basis": "high",
         "expected_strength": "high_ceiling_coding",
         "evidence_confidence": "medium",
         "frontier_status": "likely_efficient_when_failure_is_expensive"
       },
       "evidence_refs": [
-        "catalog://performance/openai-gpt-5-6-launch-2026-07",
-        "catalog://pricing/openai-api-2026-07",
-        "source://openai-gpt-5-6-2026-07-09"
+        "catalog://performance/anthropic-opus5-5-digitized-2026-09",
+        "catalog://performance/artificial-analysis-intelligence-index-opus-5-5-2026-09",
+        "catalog://performance/terminal-bench-4-vals-opus-5-5-2026-09",
+        "catalog://performance/anthropic-opus-5-5-system-card-2026-09",
+        "catalog://pricing/anthropic-api-2026-07"
       ],
       "use_when": [
         "Hard implementation where rework is costly",
@@ -247,7 +249,9 @@
         "implement.standard"
       ],
       "known_gaps": [
-        "Vendor harnesses not cross-vendor comparable; local eval pending"
+        "Vendor harnesses not cross-vendor comparable; independent support is vals.ai Terminal-Bench 4.0 (grade C: Opus 5.5 61.6% vs GPT-6 Astra 57.1%) and AA Intelligence Index v4.3.2 (grade B: 57.6 vs 52.7 at max)",
+        "Moves load from the Codex pool to the Claude pool; check clawmeter headroom before bulk use",
+        "Effort 'high' chosen from vendor curves: Terminal-Bench 4.0 high 64.2% at $3.88/task vs xhigh 66.4% at $7.35/task"
       ],
       "override_policy": "explicit_flags_win"
     },
@@ -257,8 +261,8 @@
       "constraint_family": "accuracy-first",
       "expands_to": {
         "provider": "codex",
-        "model": "gpt-5.6-sol",
-        "effort": "xhigh",
+        "model": "gpt-6-astra",
+        "effort": "high",
         "mode": "standard"
       },
       "frontier_assumption": {
@@ -270,7 +274,7 @@
         "basis": "expert_prior_plus_harness_smoke"
       },
       "evidence_refs": [
-        "catalog://performance/openai-quality-2026-07",
+        "catalog://performance/terminal-bench-4-astra-audit-2026-09",
         "catalog://pricing/codex-credits-2026-07",
         "catalog://performance/local-evals-2026-07"
       ],
@@ -287,8 +291,9 @@
         "implement.standard"
       ],
       "known_gaps": [
-        "Local harness smoke only (answer-contaminated single seed) \u2014 not grade-A quality evidence (Sol+Fable P0.2)",
-        "Prefer different provider than implementer when possible \u2014 still operator choice"
+        "Local harness smoke only (answer-contaminated single seed) — not grade-A quality evidence (Sol+Fable P0.2)",
+        "Prefer different provider than implementer when possible — still operator choice",
+        "Model swapped gpt-5.6-sol → gpt-6-astra and effort xhigh → high on owner-policy basis (never xhigh/max by default); the cited terminal-bench-4-astra-audit-2026-09 evidence is graded C (secondary/indirect board read, comparable=false) — evidence_confidence held at medium, not raised, on the model swap alone"
       ],
       "override_policy": "explicit_flags_win"
     },
@@ -298,7 +303,7 @@
       "constraint_family": "accuracy-first",
       "expands_to": {
         "provider": "claude",
-        "model": "claude-sonnet-5",
+        "model": "claude-opus-5-5",
         "effort": "high",
         "mode": "standard"
       },
@@ -310,8 +315,11 @@
         "frontier_status": "likely_efficient"
       },
       "evidence_refs": [
-        "catalog://performance/anthropic-effort-quality-2026-07",
-        "catalog://performance/anthropic-sonnet5-digitized-2026-07"
+        "catalog://performance/anthropic-opus5-5-digitized-2026-09",
+        "catalog://performance/artificial-analysis-intelligence-index-opus-5-5-2026-09",
+        "catalog://performance/terminal-bench-4-vals-opus-5-5-2026-09",
+        "catalog://performance/anthropic-opus-5-5-system-card-2026-09",
+        "catalog://pricing/anthropic-api-2026-07"
       ],
       "use_when": [
         "Design / architecture advice",
@@ -326,7 +334,10 @@
       "deescalate_to": [
         "docs.lookup"
       ],
-      "known_gaps": [],
+      "known_gaps": [
+        "No benchmark measures design/synthesis advice directly; choice rests on Opus 5.5 dominating Sonnet 5, Opus 5 and Fable 5.1 on AA Intelligence Index v4.3.2 (grade B) and agentic-coding curves (vendor, grade C)",
+        "Claude-family advisor reviewing Claude-family implementers is not a cross-model check; escalate to review.audit for independence"
+      ],
       "override_policy": "explicit_flags_win"
     },
     {
@@ -335,19 +346,19 @@
       "constraint_family": "balanced",
       "expands_to": {
         "provider": "codex",
-        "model": "gpt-5.6-sol",
-        "effort": "high",
+        "model": "gpt-6-astra",
+        "effort": "medium",
         "mode": "standard"
       },
       "frontier_assumption": {
-        "cost_basis": "medium_high",
-        "quota_basis": "medium_high",
+        "cost_basis": "medium",
+        "quota_basis": "medium",
         "expected_strength": "computer_use_and_frontend",
         "evidence_confidence": "medium",
         "frontier_status": "unknown_locally"
       },
       "evidence_refs": [
-        "catalog://performance/openai-gpt-5-6-launch-2026-07"
+        "catalog://performance/openai-gpt-6-astra-launch-2026-09"
       ],
       "use_when": [
         "UI / browser / OSWorld-style computer use",
@@ -363,7 +374,8 @@
         "implement.standard"
       ],
       "known_gaps": [
-        "Local computer-use success rate unmeasured"
+        "Local computer-use success rate unmeasured",
+        "Model swapped gpt-5.6-sol → gpt-6-astra on owner-policy/GA basis (mechanical work defaults to medium effort); no new local computer-use evidence, so evidence_confidence held at medium"
       ],
       "override_policy": "explicit_flags_win"
     },
@@ -402,10 +414,11 @@
         "recover.report"
       ],
       "known_gaps": [
-        "No repo-repair quality curve \u2014 deliberately not invented"
+        "No repo-repair quality curve — deliberately not invented"
       ],
       "override_policy": "explicit_flags_win",
       "notes": "Visible exploration point; not a recommended default."
     }
-  ]
+  ],
+  "preferred_over": []
 }

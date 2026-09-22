@@ -2251,7 +2251,7 @@ PROV
   rm -rf "$mcplib" "$mcphome" "$mcpdir"
 )
 
-# Active guidance and live-soak must stay on the current GPT-5.6 operating point;
+# Active guidance and live-soak must not regress to retired Codex models (gpt-5.5, gpt-5.4-mini);
 # deliberately exclude historical incident/confidence records from this check.
 ! rg -n 'gpt-5\.5|gpt-5\.4-mini' \
   "$root/data/model-choice-policy" "$root/scripts/live-soak.sh" "$root/docs/operating-points.md" "$root/README.md" "$root/skill/SKILL.md" \
