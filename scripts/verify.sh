@@ -2252,9 +2252,11 @@ PROV
 )
 
 # Active guidance and live-soak must not regress to retired Codex models (gpt-5.5, gpt-5.4-mini);
-# deliberately exclude historical incident/confidence records from this check.
+# deliberately exclude historical incident/confidence records from this check. For the
+# bundled policy pack only operating-points.json routes; its README changelog and
+# pack.json description are history and stay byte-identical to the released pack.
 ! rg -n 'gpt-5\.5|gpt-5\.4-mini' \
-  "$root/data/model-choice-policy" "$root/scripts/live-soak.sh" "$root/docs/operating-points.md" "$root/README.md" "$root/skill/SKILL.md" \
+  "$root/data/model-choice-policy/operating-points.json" "$root/scripts/live-soak.sh" "$root/docs/operating-points.md" "$root/README.md" "$root/skill/SKILL.md" \
   || { echo "active model guidance still references an old Codex model" >&2; exit 1; }
 
 # Thin bundle-before-reap (2026-07-10): archive only the lane's OWN commits
