@@ -2,9 +2,9 @@
   "$schema": "../schemas/pack-v1.schema.json",
   "name": "model-choice-policy",
   "schema_version": 1,
-  "tag": "data-model-choice-policy-v0.1.9",
+  "tag": "data-model-choice-policy-v0.1.10",
   "generated_at": "2026-09-22",
-  "description": "Task-shaped operating points. Pins catalog v0.5.4; moves Codex ops (review.audit, implement.accuracy-first, ui.computer-use) to GA gpt-6-astra per owner model policy; retires the rotted gpt-5.6-luna-over-gpt-5.4-mini preferred_over edge; evidence_confidence remains medium for top-3 ops.",
+  "description": "Task-shaped operating points. Pins catalog v0.5.5. advisor.deep and implement.accuracy-first run on claude-opus-5-5/high; review.audit and ui.computer-use on gpt-6-astra; bounded Claude work on claude-sonnet-5; grok.explore-only on grok-4.6. evidence_confidence stays medium.",
   "files": [
     "README.md",
     "SCHEMA.md",

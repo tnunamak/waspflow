@@ -11,14 +11,14 @@ contaminate pricing or benchmark evidence.
 
 | | |
 |---|---|
-| **This version** | [data-model-choice-policy-v0.1.9](https://github.com/tnunamak/minnows/releases/tag/data-model-choice-policy-v0.1.9) — published by CI on push to main |
+| **This version** | [data-model-choice-policy-v0.1.10](https://github.com/tnunamak/minnows/releases/tag/data-model-choice-policy-v0.1.10) — published by CI on push to main |
 | **Latest** | [releases](https://github.com/tnunamak/minnows/releases?q=data-model-choice-policy&expanded=true) |
 | **Facts catalog** | [model-catalog](../model-catalog/) — pin is `catalog_ref` in the policy file |
 
 ```bash
 ./scripts/fetch-data-pack.sh model-choice-policy
 # or
-TAG=data-model-choice-policy-v0.1.9
+TAG=data-model-choice-policy-v0.1.10
 curl -fsSL -L \
   "https://github.com/tnunamak/minnows/releases/download/${TAG}/${TAG}.tar.gz" \
   | tar -xz
@@ -61,9 +61,14 @@ Waspflow resolves from (first hit):
 | `review.audit` | codex / gpt-6-astra / high |
 | `advisor.deep` | claude / opus-5-5 / high |
 | `ui.computer-use` | codex / gpt-6-astra / medium |
-| `grok.explore-only` | grok / grok-4.5 / high |
+| `grok.explore-only` | grok / grok-4.6 / high |
 
 ## Changelog
+
+### v0.1.10 — 2026-09-22
+
+- Move `grok.explore-only` from grok-4.5 to **grok-4.6** / high. grok-4.6 is the newest GA Grok model, the grok CLI default, and the catalog's `grok` family default. There is no same-snapshot quality comparison with grok-4.5 (AA v4.2: grok-4.6 51 at high).
+- Correct the `pack.json` description, which still described v0.1.8 (catalog v0.5.4).
 
 ### v0.1.9 — 2026-09-22
 

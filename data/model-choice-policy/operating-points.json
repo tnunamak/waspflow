@@ -1,7 +1,7 @@
 {
   "id": "model-choice-policy",
   "schema_version": 1,
-  "policy_version": "0.1.9",
+  "policy_version": "0.1.10",
   "generated_at": "2026-09-22",
   "catalog_ref": "data-model-catalog-v0.5.5",
   "doctrine": [
@@ -385,7 +385,7 @@
       "constraint_family": "balanced",
       "expands_to": {
         "provider": "grok",
-        "model": "grok-4.5",
+        "model": "grok-4.6",
         "effort": "high",
         "mode": "standard"
       },
@@ -397,7 +397,9 @@
         "frontier_status": "evidence_missing"
       },
       "evidence_refs": [
-        "catalog://pricing/xai-api-2026-07"
+        "catalog://pricing/xai-api-2026-07",
+        "catalog://capabilities/effort-surfaces-2026-07",
+        "catalog://performance/artificial-analysis-intelligence-index-2026-09"
       ],
       "use_when": [
         "Explicit exploration of Grok surface",
@@ -414,7 +416,9 @@
         "recover.report"
       ],
       "known_gaps": [
-        "No repo-repair quality curve — deliberately not invented"
+        "No repo-repair quality curve — deliberately not invented",
+        "Moved grok-4.5 → grok-4.6 because it is the newest GA Grok model, the grok CLI default, and the catalog's `grok` family default. No same-snapshot grok-4.5 vs grok-4.6 comparison exists (AA v4.2: grok-4.6 51 at high).",
+        "The catalog has an api effort surface for grok-4.6 but no grok_cli surface yet"
       ],
       "override_policy": "explicit_flags_win",
       "notes": "Visible exploration point; not a recommended default."
