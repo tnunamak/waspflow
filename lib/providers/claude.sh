@@ -454,12 +454,16 @@ claude_revise() {
 # <sid>.jsonl): the authoritative record of which model actually served each
 # message. Claude does not expose a per-session effort in the log, so
 # runtime_effort stays empty (receipts record null — observed, not guessed).
-# v1 observes only; no drift comparison. "opus" is a PROVIDER-OWNED family alias:
-# Claude Code resolves it to whichever canonical Opus id the provider currently
-# serves, which the session log then attests (this repo does not decide, or claim
-# to know, which id is current). Attestation has served both "claude-opus-4-8" and
-# "claude-opus-5" under the same "opus" request, so naive equality would false-alarm;
-# corroboration must accept any canonical Opus id, not one hard-coded default.
+# v1 observes only; no drift comparison. A PROVIDER-OWNED family alias (e.g.
+# "opus", with no trailing version digit) is corroborated by whatever
+# canonical id in that family actually served the request — Claude Code
+# resolves the alias, and the session log attests which canonical id it
+# resolved to; this repo does not decide, or claim to know, which id is
+# current. A request that itself pins a version (e.g. "claude-opus-5") is
+# corroborated only by an exact match or a dated snapshot of that same
+# version, never by a served id that extends the version further (see
+# model_id_corroborates_request in core.sh for the shared rule both
+# providers use).
 # The (arm_generation, session_id) snapshot mirrors codex: a refresh that
 # straddles an escalation must never commit stale evidence.
 claude_refresh_runtime_settings() {
@@ -498,22 +502,15 @@ claude_refresh_runtime_settings() {
   fi
   model="$models"
   # Alias-tolerant corroboration: the provider-owned family alias "opus" is
-  # corroborated by whatever canonical Opus id actually served — "claude-opus-4-8"
-  # and "claude-opus-5" are both accepted, without asserting which one "opus"
-  # currently resolves to (that is the provider's decision, read from the log).
+  # corroborated by whatever canonical Opus id actually served, without
+  # asserting which one "opus" currently resolves to (that is the provider's
+  # decision, read from the log).
+  # A version-carrying request must NOT accept a served id that merely extends
+  # that version (see model_id_corroborates_request in core.sh for the full rule).
   local requested match
   requested="$(lane_get "$lane" model_requested)"
   [[ -n "$requested" ]] || requested="$(lane_get "$lane" model)"
-  # Token-boundary containment: family alias "opus" matches "claude-opus-4-8"
-  # or "claude-opus-5" (either canonical Opus corroborates the alias), but
-  # "grok-4" must NOT match "grok-4.5" (that is drift, not an alias) — and a
-  # pinned id like "claude-opus-4-8" must NOT match a different served id like
-  # "claude-opus-5" (same rule, opposite direction).
-  if [[ -z "$requested" || "$model" == "$requested" || "-$model-" == *"-$requested-"* ]]; then
-    match=true
-  else
-    match=false
-  fi
+  match="$(model_id_corroborates_request "$model" "$requested")"
   lane_update_if "$lane" "$expected_generation" "$expected_session" \
     runtime_settings_state observed runtime_settings_error "" \
     runtime_model "$model" runtime_effort "" \

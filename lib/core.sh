@@ -24,12 +24,12 @@ WASPFLOW_ROOT="${WASPFLOW_ROOT:-$(cd "$WASPFLOW_LIB/.." && pwd)}"
 # error. What a given provider/model actually accepts is the per-provider
 # whitelist below (capabilities-derived) plus the provider's own hard-fail.
 #
-# `ultra` is Codex-only, verified live 2026-08-30 against gpt-5.6-terra:
+# `ultra` is Codex-only, verified live 2026-09-05 against gpt-5.6-terra:
 # `-c model_reasoning_effort=ultra` completed a turn, while a bogus value on the
 # same command returned HTTP 400 — so the level is honored, not silently ignored.
 # `codex debug models` lists it for gpt-6-astra, gpt-5.6-sol and gpt-5.6-terra.
 # Claude's CLI help advertises only low/medium/high/xhigh/max, so it is NOT
-# universal — keep the per-provider whitelist as the real gate.
+# universal — the per-provider whitelist stays the real gate.
 WASPFLOW_EFFORT_TOKENS="none|minimal|low|medium|high|xhigh|max|ultra"
 
 # Generated effort unions from minnows capabilities (optional; adapters hard-fail themselves).
@@ -213,6 +213,37 @@ validate_model() {
   elif [[ "$source" == live_query ]]; then
     warn "$verb: model '$model' is missing from the default $provider catalog, but invocation scope is mismatched; proceeding."
   fi
+}
+
+# Runtime-attestation corroboration, shared by every provider that compares an
+# observed served model id against the id waspflow requested. A requested id
+# corroborates if: it is empty (nothing pinned); it equals the served id
+# exactly; it equals the served id with an 8-digit date-snapshot suffix
+# stripped (a dated pin like "claude-opus-4-5-20251101" IS the model it dates,
+# not a different one); or it is a provider-owned FAMILY ALIAS — an id with no
+# trailing version digit, e.g. "opus"/"sonnet"/"haiku"/"fable" or the
+# "claude-opus"-style prefixed form — and the served id's dash-delimited
+# family segment matches that alias. A requested id that itself carries a
+# version component (e.g. "claude-opus-5") must NOT match a served id that
+# only extends that version with another numeric component (e.g.
+# "claude-opus-5-5" or "grok-4.5" vs "grok-4"): that is drift, not an alias.
+# Args: served requested -> prints true|false
+model_id_corroborates_request() {
+  local served="$1" requested="$2" served_base
+  [[ -z "$requested" ]] && { echo true; return; }
+  [[ "$served" == "$requested" ]] && { echo true; return; }
+  served_base="$served"
+  [[ "$served_base" =~ ^(.+)-[0-9]{8}$ ]] && served_base="${BASH_REMATCH[1]}"
+  [[ "$served_base" == "$requested" ]] && { echo true; return; }
+  if [[ ! "$requested" =~ [0-9]$ ]]; then
+    case "-$served_base-" in
+      *"-$requested-"*) echo true; return ;;
+    esac
+    case "-$served_base-" in
+      *"-claude-$requested-"*) echo true; return ;;
+    esac
+  fi
+  echo false
 }
 
 # Resolve the public MCP policy through the provider adapter. The adapter returns

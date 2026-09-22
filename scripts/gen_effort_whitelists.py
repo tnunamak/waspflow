@@ -37,9 +37,9 @@ lines = [
 unknown_seen = set()
 for prov in ("claude", "codex", "grok", "antigravity"):
     known = [e for e in ORDER if e in provider_efforts[prov]]
-    # Sort by ORDER, but KEEP anything ORDER hasn't heard of (appended, sorted for
-    # determinism) so a new provider level reaches the whitelist instead of being
-    # dropped into a confusing "not in capabilities whitelist" rejection.
+    # Sort by ORDER, but KEEP anything ORDER hasn't heard of (appended, sorted
+    # for determinism) so a new provider level reaches the whitelist instead of
+    # being dropped into a confusing "not in capabilities whitelist" rejection.
     extra = sorted(provider_efforts[prov] - set(ORDER))
     unknown_seen.update(extra)
     effs = known + extra
@@ -51,9 +51,9 @@ out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text("\n".join(lines) + "\n")
 print(f"wrote {out}")
 if unknown_seen:
-    # Not an error: the catalog is the source of truth and may legitimately ship a
-    # level before this script learns its depth ordering. Say so, so the ordering
-    # can be corrected deliberately rather than discovered as a mis-sorted ladder.
+    # Not an error: the catalog is the source of truth and may legitimately ship
+    # a level before this script learns its depth ordering. Say so, so the order
+    # can be corrected deliberately rather than found as a mis-sorted ladder.
     print(
         f"note: effort level(s) not in ORDER, appended last: {', '.join(sorted(unknown_seen))}\n"
         f"      add them to ORDER in {Path(__file__).name} to place them by reasoning depth.",

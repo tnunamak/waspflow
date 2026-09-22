@@ -117,8 +117,8 @@ CODEX
 # Codex effort honesty: xhigh and max must pass through unchanged.
 grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/providers/codex.sh"
 grep -Eq 'model_reasoning_effort=\$\{?effort\}?' "$root/lib/exec.sh"
-# Codex gained `ultra` (2026-09-05, verified live); the arms must list it and must
-# still list every prior level — a silent demote or drop is the hazard here.
+# Codex gained `ultra` (2026-09-05, verified live); the arms must list it and
+# must still list every prior level — a silent demote or drop is the hazard here.
 grep -Fq 'minimal|low|medium|high|xhigh|max|ultra)' "$root/lib/providers/codex.sh"
 grep -Fq 'minimal|low|medium|high|xhigh|max|ultra)' "$root/lib/exec.sh"
 # Grok effort honesty: unsupported values hard-fail (never silent-drop)
@@ -3104,10 +3104,12 @@ PROV
   rm -rf "$mcplib" "$mcphome" "$mcpdir"
 )
 
-# Active guidance and live-soak must stay on the current GPT-5.6 operating point;
-# deliberately exclude historical incident/confidence records from this check.
+# Active guidance and live-soak must not regress to retired Codex models (gpt-5.5, gpt-5.4-mini);
+# deliberately exclude historical incident/confidence records from this check. For the
+# bundled policy pack only operating-points.json routes; its README changelog and
+# pack.json description are history and stay byte-identical to the released pack.
 ! rg -n 'gpt-5\.5|gpt-5\.4-mini' \
-  "$root/data/model-choice-policy" "$root/scripts/live-soak.sh" "$root/docs/operating-points.md" "$root/README.md" "$root/skill/SKILL.md" \
+  "$root/data/model-choice-policy/operating-points.json" "$root/scripts/live-soak.sh" "$root/docs/operating-points.md" "$root/README.md" "$root/skill/SKILL.md" \
   || { echo "active model guidance still references an old Codex model" >&2; exit 1; }
 
 # Thin bundle-before-reap (2026-07-10): archive only the lane's OWN commits
@@ -3539,8 +3541,33 @@ PROV
   spawn_scope_lane() { ( cd "$scopework" && "$root/bin/waspflow" spawn --provider scopep --lane "$1" "${@:3}" -- "$2" >/dev/null ); }
 
   # Normal completion gets a real scope receipt before its short command exits.
-  spawn_scope_lane normal-done 'true'
+  #
+  # The pane command must NOT exit on its own. `true` returns instantly, so the
+  # window could vanish before spawn finished capturing its ownership, and spawn
+  # then correctly reported "provider reported success but created no owned tmux
+  # window" — a genuine race in the fixture, not in the code under test. Instead
+  # of padding with a sleep (which only moves the race), the pane blocks on a
+  # sentinel file the test creates once it has the evidence it needs. That makes
+  # the ordering explicit: spawn -> receipt observed -> release -> pane exits.
+  scope_release="$scopework/normal-done-release"
+  rm -f "$scope_release"
+  spawn_scope_lane normal-done "until [ -e '$scope_release' ]; do sleep 0.05; done"
   wait_for_receipts normal-done 1 || { echo "scope: normal pane receipt missing" >&2; exit 1; }
+  : > "$scope_release"
+  # Wait for the pane to actually exit, so reap runs against a finished command
+  # rather than racing it — the condition this case is meant to exercise.
+  for _ in $(seq 1 100); do
+    tmux list-windows -t "$scopesession" -F '#{window_name}' 2>/dev/null \
+      | grep -qx 'normal-done' || break
+    sleep 0.1
+  done
+  # Assert the exit rather than letting the poll fall through. Without this, a
+  # timed-out poll would proceed to reap, reap would kill the still-live pane,
+  # and the lane would reach `reaped` anyway — the case would pass while proving
+  # the opposite of what it claims (completion, not termination).
+  tmux list-windows -t "$scopesession" -F '#{window_name}' 2>/dev/null \
+    | grep -qx 'normal-done' \
+    && { echo "scope: normal pane still running after its release sentinel" >&2; exit 1; }
   "$root/bin/waspflow" reap normal-done --no-archive >/dev/null
   [[ "$(jq -r .status "$scopehome/lanes/normal-done/state.json")" == reaped ]] \
     || { echo "scope: normal completion did not reap" >&2; exit 1; }
@@ -3666,9 +3693,13 @@ exit 73
 FAIL
   chmod +x "$failbin/systemd-run"
   old_path="$PATH"; export PATH="$failbin:$PATH"
-  # Keep the pane alive long enough to capture its immutable ownership before
-  # the intentionally failed cgroup launcher falls back to the original command.
-  spawn_scope_lane scope-fallback 'sleep 5; printf fallback > fallback-ran'
+  # The trailing sleep keeps the pane alive long enough to capture its immutable
+  # ownership after the intentionally failed cgroup launcher falls back to the
+  # original command. Write the proof marker FIRST: with the sleep leading, the
+  # marker could not appear for 5s of the 15s poll budget, leaving only 10s of
+  # slack — enough on a fast machine, not on a loaded CI runner. Order alone
+  # decides this; the assertions below are unchanged.
+  spawn_scope_lane scope-fallback 'printf fallback > fallback-ran; sleep 5'
   for _ in $(seq 1 150); do [[ -f "$scopework/fallback-ran" ]] && break; sleep 0.1; done
   [[ -f "$scopework/fallback-ran" ]] || { echo "scope: launch failure skipped original pane command" >&2; exit 1; }
   jq -e '(.cgroup_scope_receipts // []) == [] and .cgroup_fallbacks[-1].reason == "scope-launch-failed" and .tmux_window != ""' \
@@ -4072,6 +4103,50 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   lane_set att-opus5-drift provider claude status live result "" session_id c-sid-opus5-drift model claude-opus-4-8 model_passed claude-opus-4-8 model_requested claude-opus-4-8
   CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus5-drift
   [[ "$(lane_get att-opus5-drift runtime_settings_match_requested)" == false && "$(lane_get att-opus5-drift runtime_model)" == claude-opus-5 ]]
+
+  # Opus 5.5 regression (2026-09-22): a pinned VERSIONED id must not match a
+  # served id that merely EXTENDS that version with another numeric component
+  # ("-claude-opus-5-5-" contains "-claude-opus-5-" as a bare substring, which
+  # is exactly the false-match the old predicate had). Same rule both
+  # directions, plus the alias and date-snapshot cases that must keep matching.
+  { printf '%s\n' '{"message":{"model":"claude-opus-5-5"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus55-drift.jsonl"
+  lane_set att-opus55-drift provider claude status live result "" session_id c-sid-opus55-drift model claude-opus-5 model_passed claude-opus-5 model_requested claude-opus-5
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus55-drift
+  [[ "$(lane_get att-opus55-drift runtime_settings_match_requested)" == false && "$(lane_get att-opus55-drift runtime_model)" == claude-opus-5-5 ]] || { echo "att-opus55-drift: claude-opus-5 must not match served claude-opus-5-5" >&2; exit 1; }
+
+  { printf '%s\n' '{"message":{"model":"claude-opus-5-5"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus55-exact.jsonl"
+  lane_set att-opus55-exact provider claude status live result "" session_id c-sid-opus55-exact model claude-opus-5-5 model_passed claude-opus-5-5 model_requested claude-opus-5-5
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus55-exact
+  [[ "$(lane_get att-opus55-exact runtime_settings_match_requested)" == true && "$(lane_get att-opus55-exact runtime_model)" == claude-opus-5-5 ]] || { echo "att-opus55-exact: exact-equal pinned claude-opus-5-5 must match" >&2; exit 1; }
+
+  { printf '%s\n' '{"message":{"model":"claude-opus-5-5"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus55-alias.jsonl"
+  lane_set att-opus55-alias provider claude status live result "" session_id c-sid-opus55-alias model opus model_passed opus model_requested opus
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus55-alias
+  [[ "$(lane_get att-opus55-alias runtime_settings_match_requested)" == true && "$(lane_get att-opus55-alias runtime_model)" == claude-opus-5-5 ]] || { echo "att-opus55-alias: family alias opus must match served claude-opus-5-5" >&2; exit 1; }
+
+  { printf '%s\n' '{"message":{"model":"claude-opus-5"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus55-reverse.jsonl"
+  lane_set att-opus55-reverse provider claude status live result "" session_id c-sid-opus55-reverse model claude-opus-5-5 model_passed claude-opus-5-5 model_requested claude-opus-5-5
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus55-reverse
+  [[ "$(lane_get att-opus55-reverse runtime_settings_match_requested)" == false && "$(lane_get att-opus55-reverse runtime_model)" == claude-opus-5 ]] || { echo "att-opus55-reverse: pinned claude-opus-5-5 must not match served claude-opus-5" >&2; exit 1; }
+
+  { printf '%s\n' '{"message":{"model":"claude-opus-4-5-20251101"},"type":"assistant"}'
+  } >"$att_home/claude-projects/proj/c-sid-opus45-snapshot.jsonl"
+  lane_set att-opus45-snapshot provider claude status live result "" session_id c-sid-opus45-snapshot model claude-opus-4-5 model_passed claude-opus-4-5 model_requested claude-opus-4-5
+  CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus45-snapshot
+  [[ "$(lane_get att-opus45-snapshot runtime_settings_match_requested)" == true && "$(lane_get att-opus45-snapshot runtime_model)" == claude-opus-4-5-20251101 ]] || { echo "att-opus45-snapshot: dated snapshot of the same version must match" >&2; exit 1; }
+
+  # Grok equivalent negative: pinned grok-4.5 must not match a served id that
+  # extends it further (grok's own family uses "." not "-", but the same
+  # version-extension rule must hold via the shared predicate).
+  mkdir -p "$att_home/grok-sessions/enc/g-sid-45ext"
+  printf '%s\n' '{"current_model_id":"grok-4.5.1","reasoning_effort":"high"}' >"$att_home/grok-sessions/enc/g-sid-45ext/summary.json"
+  lane_set att-grok45ext provider grok status live result "" session_id g-sid-45ext model grok-4.5 model_passed grok-4.5 model_requested grok-4.5 effort high effort_requested high
+  GROK_SESSIONS_DIR="$att_home/grok-sessions" grok_refresh_runtime_settings att-grok45ext
+  [[ "$(lane_get att-grok45ext runtime_settings_match_requested)" == false ]] || { echo "att-grok45ext: pinned grok-4.5 must not match served grok-4.5.1" >&2; exit 1; }
 
   # receipts summary: aggregates the ledger, tolerates malformed lines,
   # rejects unknown flags, and reports the eligible fraction. Malformed-line
@@ -5139,6 +5214,8 @@ DSH
   grep -q 'dsh (deepseek)' <<<"$doctor_text"
 )
 
+
+
 # ULTRA EFFORT (2026-09-05). Codex shipped a sixth reasoning level. Verified live
 # against gpt-5.6-terra: `-c model_reasoning_effort=ultra` completed a turn while
 # a bogus value on the same command returned HTTP 400, so the level is honored
@@ -5247,5 +5324,4 @@ STUB
   [[ -s "$er/argv.log" && "$(cat "$er/argv.log")" == *'model_reasoning_effort=ultra'* ]] \
     || { echo "ultra: real exec_run did not invoke Codex with ultra" >&2; exit 1; }
 )
-
 echo "waspflow verify: ok"
