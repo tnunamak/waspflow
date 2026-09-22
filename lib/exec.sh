@@ -88,8 +88,8 @@ exec_run() {
     die "exec/deepseek: --effort is not supported by DeepSeek Harness (dsh v0.1 exposes reasoning effort only via global \$DSH_HOME/settings.yaml)"
   elif [[ "$provider" == antigravity && -n "$effort" && ! "$effort" =~ ^(low|medium|high)$ ]]; then
     die "exec/antigravity: unsupported effort '$effort' (valid: low|medium|high)"
-  elif [[ -n "$effort" && ! "$effort" =~ ^(none|minimal|low|medium|high|xhigh|max)$ ]]; then
-    die "exec: --effort must be one of none|minimal|low|medium|high|xhigh|max (got: $effort)"
+  elif [[ -n "$effort" && ! "$effort" =~ ^($WASPFLOW_EFFORT_TOKENS)$ ]]; then
+    die "exec: --effort must be one of ${WASPFLOW_EFFORT_TOKENS//|/, } (got: $effort)"
   fi
 
   load_provider "$provider"
@@ -249,11 +249,11 @@ _exec_codex() {
   local -a effort_args=()
   case "$effort" in
     "") ;;
-    minimal|low|medium|high|xhigh|max)
+    minimal|low|medium|high|xhigh|max|ultra)
       effort_args=(-c "model_reasoning_effort=${effort}")
       ;;
     *)
-      die "exec/codex: unsupported effort '$effort' (valid: minimal|low|medium|high|xhigh|max)"
+      die "exec/codex: unsupported effort '$effort' (valid: minimal|low|medium|high|xhigh|max|ultra)"
       ;;
   esac
 

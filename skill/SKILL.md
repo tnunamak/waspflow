@@ -181,11 +181,13 @@ waspflow revise <lane> --out /tmp/reply.txt -- "Summarize what you changed."
 
 `wait` polls durable turn-end evidence (Claude `end_turn`; Codex `task_complete`;
 Grok `turn_ended`; Antigravity's and Qwen's Waspflow-owned process receipt) — no need to
-poll `peek` to know an agent is done. **Preferred completion signal:** run
-`waspflow wait <lane> --timeout <s>` as
-a background process in your own harness (Claude Code: Bash `run_in_background`) —
-its process exit IS the notification; never poll `peek`/`status`/`list` in a loop
-to detect completion. Exit codes: `0` idle (done), `1` timeout, `4` **stalled** — the worker produced
+poll `peek` to know an agent is done. Run `waspflow wait <lane> --timeout <s>`
+through a completion mechanism that the calling harness owns. In Claude Code, a
+Claude-registered background Bash task can notify its still-live parent session.
+In Codex unified exec, a background PTY exit is only pollable: it does not wake or
+start a new owner turn, so the active owner must explicitly await/poll the tool
+session. Do not promise automatic notification unless a verified harness adapter
+is active. Exit codes: `0` idle (done), `1` timeout, `4` **stalled** — the worker produced
 no output for `WASPFLOW_STALL_SECONDS` (default 45) while its turn hadn't ended.
 That usually means it's waiting on a mid-run interactive prompt (a quota/model-
 downgrade offer, a security check, a y/n) but can also be a hang or a very slow tool.
@@ -204,8 +206,9 @@ attach before deciding what to do next. Its receipt is recorded in `status` as
 
 For a native background worker whose calling harness needs a completion signal,
 run `waspflow wait <lane> --reap`: it blocks while polling until the provider oracle
-verifies idle, then returns the final reap result. The process exit is the
-notification; waspflow does not run a daemon, event subscription, or callbacks.
+verifies idle, then returns the final reap result. The exit is pollable by the
+caller; it is not a cross-harness wake-up. Waspflow does not run a daemon, event
+subscription, or callback that re-invokes an idle model session.
 
 `waspflow park <lane>` is the non-destructive alternative for an owned,
 terminal-idle resumable lane: it stops only the recorded tmux window and keeps
