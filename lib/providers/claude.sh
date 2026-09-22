@@ -456,9 +456,9 @@ claude_refresh_runtime_settings() {
   fi
   model="$models"
   # Alias-tolerant corroboration: the provider-owned family alias "opus" is
-  # corroborated by whatever canonical Opus id actually served — "claude-opus-4-8"
-  # and "claude-opus-5" are both accepted, without asserting which one "opus"
-  # currently resolves to (that is the provider's decision, read from the log).
+  # corroborated by whatever canonical Opus id actually served, without
+  # asserting which one "opus" currently resolves to (that is the provider's
+  # decision, read from the log).
   # A version-carrying request must NOT accept a served id that merely extends
   # that version (see model_id_corroborates_request in core.sh for the full rule).
   local requested match
