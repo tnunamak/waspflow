@@ -2,9 +2,9 @@
   "$schema": "../schemas/pack-v1.schema.json",
   "name": "model-choice-policy",
   "schema_version": 1,
-  "tag": "data-model-choice-policy-v0.1.11",
-  "generated_at": "2026-09-22",
-  "description": "Task-shaped operating points. Pins catalog v0.5.6. Opus 5.5 runs implement.standard and fanout.explore (medium) and implement.accuracy-first and advisor.deep (high); gpt-6-astra runs review.audit and ui.computer-use; Sonnet 5 remains on recover.report, docs.lookup and implement.quota-tight pending low-effort evidence; grok.explore-only on grok-4.6. op-requirements.json (DRAFT) feeds scripts/recommend_ops.py.",
+  "tag": "data-model-choice-policy-v0.1.12",
+  "generated_at": "2026-09-23",
+  "description": "Task-shaped operating points. Pins catalog v0.5.7. Opus 5.5 runs implement.standard and fanout.explore (medium) and implement.accuracy-first and advisor.deep (high); gpt-6-astra runs review.audit and ui.computer-use; Sonnet 5 remains on recover.report, docs.lookup and implement.quota-tight pending low-effort evidence; grok.explore-only on grok-4.7 (medium). op-requirements.json (DRAFT) feeds scripts/recommend_ops.py.",
   "files": [
     "README.md",
     "SCHEMA.md",
@@ -12,7 +12,7 @@
     "operating-points.json"
   ],
   "related": {
-    "catalog": "data-model-catalog-v0.5.6",
+    "catalog": "data-model-catalog-v0.5.7",
     "doctrine": "Operating Point Resolver — task-shaped ops, not cheap/default/max, not silent auto-routing"
   }
 }

@@ -11,14 +11,14 @@ contaminate pricing or benchmark evidence.
 
 | | |
 |---|---|
-| **This version** | [data-model-choice-policy-v0.1.11](https://github.com/tnunamak/minnows/releases/tag/data-model-choice-policy-v0.1.11) — published by CI on push to main |
+| **This version** | [data-model-choice-policy-v0.1.12](https://github.com/tnunamak/minnows/releases/tag/data-model-choice-policy-v0.1.12) — published by CI on push to main |
 | **Latest** | [releases](https://github.com/tnunamak/minnows/releases?q=data-model-choice-policy&expanded=true) |
 | **Facts catalog** | [model-catalog](../model-catalog/) — pin is `catalog_ref` in the policy file |
 
 ```bash
 ./scripts/fetch-data-pack.sh model-choice-policy
 # or
-TAG=data-model-choice-policy-v0.1.11
+TAG=data-model-choice-policy-v0.1.12
 curl -fsSL -L \
   "https://github.com/tnunamak/minnows/releases/download/${TAG}/${TAG}.tar.gz" \
   | tar -xz
@@ -44,10 +44,12 @@ waspflow spawn --op implement.standard --lane fix -- "…"
 
 ## Derive ops from data (DRAFT)
 
-`op-requirements.json` holds the human-set slots for each op: evidence metrics,
-allowed lanes and efforts, quality bar, and constraints. `scripts/recommend_ops.py`
-derives a recommended arm from these slots and the catalog, or reports the exact
-missing coverage. It never edits `operating-points.json`. See
+`op-requirements.json` holds the human-set slots for each op: task families,
+allowed lanes and efforts, missed-failure cost, and constraints.
+`scripts/recommend_ops.py` derives a recommended arm from these slots and the
+catalog, or reports missing model/board coverage. It uses a 90-day price horizon
+and requires independent cross-model evidence for model changes. It never edits
+`operating-points.json`. See
 [SCHEMA.md](SCHEMA.md#op-requirementsjson-draft--owner-review-pending).
 
 ```bash
@@ -75,9 +77,15 @@ Waspflow resolves from (first hit):
 | `review.audit` | codex / gpt-6-astra / high |
 | `advisor.deep` | claude / opus-5-5 / high |
 | `ui.computer-use` | codex / gpt-6-astra / medium |
-| `grok.explore-only` | grok / grok-4.6 / high |
+| `grok.explore-only` | grok / grok-4.7 / medium |
 
 ## Changelog
+
+### v0.1.12 — 2026-09-23
+
+- Move `grok.explore-only` from grok-4.6/high to **grok-4.7/medium**. On 2026-09-23 the authenticated grok CLI offers only grok-4.7, so the grok-4.6 arm could no longer be dispatched. Rule 1 picks grok-4.7 as the only newest GA model in the lane, at the default effort (medium). An independent Claude Opus 5.5 review signed this off in both rounds.
+- No other routing change. `scripts/recommend_ops.py` now ranks by expected cost per task, with evidence gates, confidence intervals, a price horizon and robustness sweeps. The review found defects that block any move it would drive: the tie-break rule, an unwired pass@k field, wall-clock price dates, and board rows with no effort recorded. They are being fixed.
+- Catalog pin: **v0.5.7**.
 
 ### v0.1.11 — 2026-09-22
 
@@ -87,7 +95,7 @@ Waspflow resolves from (first hit):
   - `recover.report`, `docs.lookup`, `implement.quota-tight`: no independent low-effort evidence exists.
   - `review.audit`: "checker at least as strong as maker" and "different family" conflict while Opus 5.5 is the strongest maker.
   - `ui.computer-use`: no shared OSWorld harness covers Claude and GPT-6.
-- Catalog pin: **v0.5.6**.
+- Catalog pin: **v0.5.7**.
 
 ### v0.1.10 — 2026-09-22
 

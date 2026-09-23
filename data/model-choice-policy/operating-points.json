@@ -1,9 +1,9 @@
 {
   "id": "model-choice-policy",
   "schema_version": 1,
-  "policy_version": "0.1.11",
-  "generated_at": "2026-09-22",
-  "catalog_ref": "data-model-catalog-v0.5.6",
+  "policy_version": "0.1.12",
+  "generated_at": "2026-09-23",
+  "catalog_ref": "data-model-catalog-v0.5.7",
   "doctrine": [
     "Task-shaped operating points, not cheap/default/max ladders",
     "Enumerate and explain; no silent auto-routing",
@@ -397,8 +397,8 @@
       "constraint_family": "balanced",
       "expands_to": {
         "provider": "grok",
-        "model": "grok-4.6",
-        "effort": "high",
+        "model": "grok-4.7",
+        "effort": "medium",
         "mode": "standard"
       },
       "frontier_assumption": {
@@ -409,9 +409,9 @@
         "frontier_status": "evidence_missing"
       },
       "evidence_refs": [
-        "catalog://pricing/xai-api-2026-07",
         "catalog://capabilities/effort-surfaces-2026-07",
-        "catalog://performance/artificial-analysis-intelligence-index-2026-09"
+        "catalog://performance/xai-grok-4-7-launch-2026-09",
+        "catalog://pricing/xai-api-2026-07"
       ],
       "use_when": [
         "Explicit exploration of Grok surface",
@@ -429,8 +429,8 @@
       ],
       "known_gaps": [
         "No repo-repair quality curve — deliberately not invented",
-        "Moved grok-4.5 → grok-4.6 because it is the newest GA Grok model, the grok CLI default, and the catalog's `grok` family default. No same-snapshot grok-4.5 vs grok-4.6 comparison exists (AA v4.2: grok-4.6 51 at high).",
-        "The catalog has an api effort surface for grok-4.6 but no grok_cli surface yet"
+        "grok-4.7 chosen by rule 1, not by benchmark ranking: it is the only model the authenticated grok CLI offers (grok-4.6 and grok-4.5 left the list on 2026-09-23), and the newest GA model in xAI's flagship tier. Effort medium is rule 1's default; the vendor default is high.",
+        "Signed off by an independent Claude Opus 5.5 review (rounds 1 and 2, 2026-09-23)."
       ],
       "override_policy": "explicit_flags_win",
       "notes": "Visible exploration point; not a recommended default."
