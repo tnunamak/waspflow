@@ -54,8 +54,12 @@ converts to `p=1-rate`. Elo, indices, and partial-credit scores do not produce
 E. They cannot exclude a model. A group with only one candidate arm cannot
 exclude a model either. Where a row supplies `ci_lo`/`ci_hi` or `n`, the
 recommender carries a 95% success interval into an E interval. Overlapping E
-intervals are reported as ties, resolved by lower tier list price, then newer
-model. If `n` is present without CI, a Wilson interval is used.
+intervals are reported as ties. If the current `expands_to` is tied on an
+independent board and no other independent board contradicts it, the result is
+`RECOMMENDED=current`; missing comparisons still block moves. Other ties use
+point expected cost per task, then newer model.
+If `n` is present without CI, a Wilson interval is used. Published `pass_at_4`
+and general `pass_at_<k>` fields calibrate same-arm retry alongside `pass_at_k`.
 
 | Default | Value | Source and meaning |
 |---------|-------|--------------------|
@@ -98,19 +102,31 @@ Vendor charts choose efforts only among the publisher's own models. A model
 choice needs an independent cross-model board on which the arm meets the
 incumbent and every rival it beats. An independent board that picks a rival
 counts as a disagreement even if the arm is absent. Missing model/board pairs
-are reported. An independent success-rate group excludes an unmeasured allowed
+are reported. A measured candidate absent from the deciding board blocks a
+move until it has an independent comparison with the proposed arm. Independent
+board rows with unknown effort remain visible: if their model-level ranking
+contradicts an arm, the disagreement blocks that arm. A row explicitly marked
+`effort_convention: vendor_default` uses the catalog API default effort with a
+caveat. An independent success-rate group excludes an unmeasured allowed
 effort only when its best measured effort is both lower-scoring and no cheaper
 than a measured candidate. Vendor groups only flag this. `review.audit` excludes
 both makers' **vendors**, and shows maker and checker success rates side by side
 where available. If a maker is unresolved, its current `expands_to` supplies
-the vendor constraint.
+the vendor constraint. This vendor choice for `review.audit` is
+`OWNER_DECISION_PENDING`: the owner must decide vendor versus model-family
+independence. The recommender keeps the current vendor constraint meanwhile.
 
-The default policy horizon is 90 days. The recommender uses the price valid at
-the horizon end. If a promotion expires inside that horizon, it reports the
-current and later token prices. It scales benchmark task cost only when all
+The default policy horizon is 90 days from the pinned `defaults.price_as_of`
+(initially the pack's `generated_at` date); `--price-as-of` overrides it.
+The recommender uses the price valid at the horizon end. It scales each
+benchmark task cost from the rate valid on that row's `observed_at` to the
+horizon rate, including when `price_as_of` is after a promotion. It scales only when all
 published token rates change by the same factor; otherwise the future task
 cost is unknown and that arm cannot win on E. Pricing rows can record future
-rates in `post_valid_until`.
+rates in `post_valid_until`. `--availability` reads a `clawmeter status --json`
+snapshot and excludes arms whose relevant lane quota window is exhausted.
+Token counts are shown per task on quota lanes when rows provide structured
+counts and a task count.
 
 ### Assumption sensitivity
 
@@ -118,6 +134,6 @@ The dependency graph is rerun on the full overhead ($0.10–$2) × detection
 (0.25–0.95 for verified ops) × silent-failure-cost (0.5–2×) grid. Separate
 one-factor sweeps cover independent and vendor source weights (0.5–2), vendor
 factor (0.25–1), majority threshold (0.4–0.6), and high-confidence group count
-(1–3). `CLEAR` requires the same recommendation **and confidence** in every run.
+(1–3), plus tie rule, price date, and policy horizon. `CLEAR` requires the same recommendation **and confidence** in every run.
 The output names the first changed assumption and outcome; it does not claim
 a precise flip threshold between sampled values.
