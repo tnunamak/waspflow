@@ -1,0 +1,196 @@
+{
+  "$schema": "schemas/op-requirements-v1.schema.json",
+  "id": "model-choice-op-requirements",
+  "schema_version": 1,
+  "status": "DRAFT",
+  "generated_at": "2026-09-22",
+  "catalog_ref": "data-model-catalog-v0.5.6",
+  "notes": [
+    "Human-set slots for scripts/recommend_ops.py. Every entry is DRAFT until the owner reviews it; see SCHEMA.md 'op-requirements.json' for the justification of each entry.",
+    "The recommender only reads this file and the catalog. It never edits operating-points.json."
+  ],
+  "defaults": {
+    "allowed_providers": ["claude", "codex"],
+    "allowed_efforts": ["low", "medium", "high"],
+    "cost_basis": "usd_per_task",
+    "min_evidence_grade": "C",
+    "provider_restrictions": {
+      "grok": ["grok.explore-only"]
+    },
+    "source_weights": {
+      "third_party_board": 2,
+      "third_party_eval": 2,
+      "local_eval": 2,
+      "other": 1,
+      "vendor_table": 1,
+      "digitized_chart": 1
+    },
+    "vendor_cross_vendor_factor": 0.5
+  },
+  "ops": [
+    {
+      "op": "recover.report",
+      "status": "DRAFT",
+      "evidence_metrics": [
+        "factual-error-rate-difficult-prompts",
+        "artificial-analysis-intelligence-index-v4-3-2"
+      ],
+      "allowed_efforts": ["low", "medium"],
+      "bar": { "type": "within_points_of_best", "points": 10 },
+      "constraints": [],
+      "cost_basis": "usd_per_task",
+      "rationale": "Status notes and summaries: factual reliability plus general capability; a wide bar because errors are cheap to correct."
+    },
+    {
+      "op": "fanout.explore",
+      "status": "DRAFT",
+      "evidence_metrics": [
+        "browsecomp",
+        "terminal-bench-4-0",
+        "artificial-analysis-intelligence-index-v4-3-2"
+      ],
+      "allowed_efforts": ["low", "medium"],
+      "bar": { "type": "within_points_of_best", "points": 10 },
+      "constraints": [],
+      "cost_basis": "usd_per_task",
+      "rationale": "Parallel scouts: search/browse and terminal navigation; many lanes run at once, so cost dominates and the bar is wide."
+    },
+    {
+      "op": "docs.lookup",
+      "status": "DRAFT",
+      "evidence_metrics": [
+        "browsecomp",
+        "factual-error-rate-difficult-prompts",
+        "humanity-s-last-exam-with-tools"
+      ],
+      "allowed_efforts": ["low", "medium"],
+      "bar": { "type": "within_points_of_best", "points": 10 },
+      "constraints": [],
+      "cost_basis": "usd_per_task",
+      "rationale": "Find-and-cite: retrieval (BrowseComp), factual accuracy, and tool-assisted question answering."
+    },
+    {
+      "op": "implement.standard",
+      "status": "DRAFT",
+      "evidence_metrics": [
+        "terminal-bench-4-0",
+        "terminal-bench-2-1",
+        "frontiercode-1-1-main",
+        "deepswe-v1-1",
+        "deepswe-leaderboard-datacurve",
+        "swe-bench-pro",
+        "cursorbench-4-0",
+        "artificial-analysis-coding-agent-index-v1-4"
+      ],
+      "allowed_efforts": ["low", "medium"],
+      "bar": { "type": "within_points_of_best", "points": 5 },
+      "constraints": [],
+      "cost_basis": "usd_per_task",
+      "rationale": "Default coding work with tests and a review path: agentic-coding benchmarks; medium effort ceiling per rule 1; 5-point bar because a verify step catches misses."
+    },
+    {
+      "op": "implement.quota-tight",
+      "status": "DRAFT",
+      "evidence_metrics": [
+        "terminal-bench-4-0",
+        "terminal-bench-2-1",
+        "frontiercode-1-1-main",
+        "deepswe-v1-1",
+        "deepswe-leaderboard-datacurve",
+        "swe-bench-pro",
+        "cursorbench-4-0",
+        "artificial-analysis-coding-agent-index-v1-4"
+      ],
+      "allowed_efforts": ["low", "medium"],
+      "bar": { "type": "within_points_of_best", "points": 10 },
+      "constraints": [],
+      "cost_basis": "usd_per_task",
+      "rationale": "Small scoped patches when quota is scarce: same coding evidence, wider bar. usd_per_task is a proxy for quota burn; quota and dollars are not fungible (doctrine 4)."
+    },
+    {
+      "op": "implement.accuracy-first",
+      "status": "DRAFT",
+      "evidence_metrics": [
+        "terminal-bench-4-0",
+        "terminal-bench-2-1",
+        "frontiercode-1-1-main",
+        "deepswe-v1-1",
+        "deepswe-leaderboard-datacurve",
+        "swe-bench-pro",
+        "cursorbench-4-0",
+        "artificial-analysis-coding-agent-index-v1-4"
+      ],
+      "allowed_efforts": ["low", "medium", "high"],
+      "bar": { "type": "within_points_of_best", "points": 2 },
+      "constraints": [],
+      "cost_basis": "usd_per_task",
+      "rationale": "Hard implementation where rework is costly: same coding evidence, high effort allowed (hard agentic work), bar at 2 points of the best allowed arm."
+    },
+    {
+      "op": "review.audit",
+      "status": "DRAFT",
+      "evidence_metrics": [
+        "terminal-bench-4-0",
+        "terminal-bench-2-1",
+        "frontiercode-1-1-main",
+        "deepswe-v1-1",
+        "swe-bench-pro",
+        "cursorbench-4-0",
+        "artificial-analysis-intelligence-index-v4-3-2"
+      ],
+      "allowed_efforts": ["low", "medium", "high"],
+      "bar": { "type": "at_least_op", "op": "implement.standard" },
+      "constraints": [
+        "different_vendor_from:implement.standard",
+        "different_vendor_from:implement.accuracy-first"
+      ],
+      "cost_basis": "usd_per_task",
+      "rationale": "Independent audit: the checker must score at least as well as the default maker on shared evidence, and come from a different vendor than either implementer."
+    },
+    {
+      "op": "advisor.deep",
+      "status": "DRAFT",
+      "evidence_metrics": [
+        "artificial-analysis-intelligence-index-v4-3-2",
+        "humanity-s-last-exam-with-tools",
+        "gdpval-aa-v2-1",
+        "arc-agi-2"
+      ],
+      "allowed_efforts": ["low", "medium", "high"],
+      "bar": { "type": "within_points_of_best", "points": 2 },
+      "constraints": [],
+      "cost_basis": "usd_per_task",
+      "rationale": "Design and synthesis advice: broad reasoning and knowledge-work indices; judged work, so high effort is allowed and the bar is tight."
+    },
+    {
+      "op": "ui.computer-use",
+      "status": "DRAFT",
+      "evidence_metrics": [
+        "osworld-2-0",
+        "osworld-2-0-partial",
+        "osworld-2-0-strict",
+        "osworld-verified",
+        "automationbench"
+      ],
+      "allowed_efforts": ["low", "medium"],
+      "bar": { "type": "within_points_of_best", "points": 5 },
+      "constraints": [],
+      "cost_basis": "usd_per_task",
+      "rationale": "Computer use and browser automation: OSWorld variants plus AutomationBench; mechanical work, so medium effort ceiling."
+    },
+    {
+      "op": "grok.explore-only",
+      "status": "DRAFT",
+      "evidence_metrics": [
+        "artificial-analysis-intelligence-index-v4-2",
+        "terminal-bench-2-1"
+      ],
+      "allowed_providers": ["grok"],
+      "allowed_efforts": ["low", "medium", "high"],
+      "bar": { "type": "within_points_of_best", "points": 10 },
+      "constraints": [],
+      "cost_basis": "usd_per_task",
+      "rationale": "Visible Grok exploration point. The recommender cannot select a Grok arm today: xAI rows carry no tier in models.json, and grok-4.6 has no grok_cli surface."
+    }
+  ]
+}
