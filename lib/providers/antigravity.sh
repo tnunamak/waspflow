@@ -13,7 +13,8 @@ antigravity_valid_models() {
   models="$(agy models 2>/dev/null)" || { printf 'source=none\n'; return 0; }
   [[ -n "$models" ]] || { printf 'source=none\n'; return 0; }
   printf '%s\n' 'source=live_query'
-  printf '%s\n' "$models" | sed 's/[[:space:]]*$//' | awk 'NF && !seen[$0]++'
+  # `agy models` prints "<id><TAB><display name>"; only the id is a valid --model value.
+  printf '%s\n' "$models" | sed 's/[[:space:]]*$//' | awk -F'\t' 'NF && $1 != "" && !seen[$1]++ {print $1}'
 }
 
 # agy 1.1.5 has no MCP-disable flag in its supported headless contract.
