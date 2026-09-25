@@ -1405,8 +1405,15 @@ _revise_one() {
     lane_set "$lane" surface_changed "true"
   fi
   "${provider}_revise" "$lane" "$message" "$out" || return $?
-  # A delivered instruction supersedes one a failed deferred switch left behind.
-  [[ -z "$(lane_get "$lane" undelivered_message)" ]] || lane_set "$lane" undelivered_message ""
+  # A delivered instruction supersedes one a failed deferred switch left behind;
+  # if it was a different instruction, show what is being discarded.
+  local undelivered; undelivered="$(lane_get "$lane" undelivered_message)"
+  [[ -n "$undelivered" ]] || return 0
+  if [[ "$undelivered" != "$message" ]]; then
+    warn "revise: discarding an earlier undelivered message (it differs from the one just sent):"
+    printf '%s\n' "$undelivered" >&2
+  fi
+  lane_set "$lane" undelivered_message ""
 }
 
 cmd_attach() {

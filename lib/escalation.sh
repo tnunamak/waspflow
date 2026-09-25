@@ -371,10 +371,13 @@ escalate_run_locked() {
   if [[ "$phase" == prepared ]]; then
     segment_result=succeeded
     case "$(lane_get "$lane" verify_state)" in failed|timeout|infra) segment_result=verify_failed ;; esac
-    if [[ "$(lane_get "$lane" segment_entered_via_escalation)" == true && "$segment_result" == verify_failed && "$(jq -r '.poison_counted // false' <<<"$transition")" != true ]]; then
+    # Count a failed segment once, even when a transition that counted it was
+    # dropped at this phase and the operator starts another from the same segment.
+    if [[ "$(lane_get "$lane" segment_entered_via_escalation)" == true && "$segment_result" == verify_failed && "$(jq -r '.poison_counted // false' <<<"$transition")" != true \
+          && "$(lane_get "$lane" poison_counted_segment)" != "$(lane_get "$lane" segment_index)" ]]; then
       local consecutive
       consecutive="$(lane_get "$lane" consecutive_failed_segments)"; [[ "$consecutive" =~ ^[0-9]+$ ]] || consecutive=0
-      lane_set "$lane" consecutive_failed_segments "$((consecutive + 1))" pending_transition "$(jq -c '.poison_counted=true' <<<"$transition")"
+      lane_set "$lane" consecutive_failed_segments "$((consecutive + 1))" poison_counted_segment "$(lane_get "$lane" segment_index)" pending_transition "$(jq -c '.poison_counted=true' <<<"$transition")"
       transition="$(lane_get "$lane" pending_transition)"
     fi
     # Failure here is at `prepared` phase: nothing has been committed (no receipt
@@ -707,8 +710,23 @@ deferred_apply_before_revise_locked() {
   escalate_begin_locked "$lane" false "$(jq -c .to_arm <<<"$record")" "$(jq -r .to_op <<<"$record")" "$(jq -r .to_cursor <<<"$record")" \
     in_place "$(jq -r .trigger <<<"$record")" "$(jq -r .note <<<"$record")" false "$DEFERRED_BOUNDARY" "$message" || rc=$?
   if [[ "$rc" -ne 0 ]]; then
-    err "revise: the switch to $label failed and was dropped; decide again with waspflow escalate"
-    deferred_print_undelivered "$lane" revise
+    local pending phase
+    pending="$(lane_get "$lane" pending_transition)"
+    if [[ -z "$pending" ]]; then
+      err "revise: the switch to $label failed and was dropped; decide again with waspflow escalate"
+      deferred_print_undelivered "$lane" revise
+      return "$rc"
+    fi
+    # The transition is still journaled: recovery belongs to it, not to revise.
+    phase="$(jq -r '.phase // ""' <<<"$pending")"
+    err "revise: the switch to $label stopped at phase '$phase' and can be recovered: waspflow escalate $lane --resume-transition (or --abort-transition)"
+    if [[ "$phase" == confirmed ]]; then
+      err "  your message was submitted to the replacement session; resuming adopts it"
+    elif [[ "$phase" == launch_provisioned && "$(jq -r '.provisional_session.launch_attempted // false' <<<"$pending")" == true ]]; then
+      err "  your message may have reached the replacement session; resuming confirms it before sending again"
+    else
+      err "  your message has not been sent; resuming sends it on the new arm"
+    fi
     return "$rc"
   fi
   # The same stale-idle barrier a live revise records (see cmd_wait). A turn

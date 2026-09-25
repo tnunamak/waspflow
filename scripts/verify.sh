@@ -4374,6 +4374,11 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
     '{"type":"user","message":{"role":"user","content":"<command-name>/compact</command-name>\n<command-message>compact</command-message>"}}' \
     '{"type":"user","message":{"role":"user","content":"<local-command-stdout>Compacted</local-command-stdout>"}}' >>"$attach_log"
   deferred_lane_quiescent sig-attach || { echo "deferred signal: a finished /compact still read as an unanswered prompt" >&2; exit 1; }
+  # A failed or cancelled local command finishes with <local-command-stderr>.
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"/compact"}}' >>"$attach_log"
+  ! deferred_lane_quiescent sig-attach || { echo "deferred signal: a second running /compact was treated as quiescent" >&2; exit 1; }
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"<local-command-stderr>Error: Compaction canceled.</local-command-stderr>"}}' >>"$attach_log"
+  deferred_lane_quiescent sig-attach || { echo "deferred signal: a failed /compact (local-command-stderr) still blocked settling" >&2; exit 1; }
   unset -f tmux_window_exists
 
   codex_log="$sig_home/rollout-sig.jsonl"
@@ -4461,6 +4466,8 @@ codex_resume_with_arm() {
   WASPFLOW_PROVISIONAL_SESSION_ID="$lane-new-session"
   [[ "$(lane_get "$lane" fake_keep_session)" != yes ]] || WASPFLOW_PROVISIONAL_SESSION_ID="$(lane_get "$lane" session_id)"
   WASPFLOW_PROVISIONAL_ROLLOUT=""
+  # Simulate another writer between submission and commit: the commit CAS loses.
+  [[ "$(lane_get "$lane" fake_cas_break)" != yes ]] || lane_set "$lane" arm_generation 99
 }
 codex_confirm_escalation_submission() {
   local lane="$1" count
@@ -4860,7 +4867,8 @@ JSON
   # A failed deferred apply drops the switch (the operator re-decides) and keeps
   # the revise message in `undelivered_message`: printed verbatim on failure and
   # by cancel/abort/immediate escalate, cleared by the next successful send. The
-  # failed switch never re-fires, so it cannot bypass or double-count poison.
+  # failed switch never re-fires, so it cannot bypass the poison check; poison
+  # counts each failed segment once (poison_counted_segment, tested below).
   make_deferred_lane dfs-receipt-fail
   run_escalate dfs-receipt-fail --to codex/target/high --defer --force >/dev/null 2>&1
   compact_rollout dfs-receipt-fail
@@ -4909,6 +4917,46 @@ JSON
   jq -e '.model == "old" and .deferred_switch == "" and .undelivered_message == ""' "$eschome/lanes/dfs-abort/state.json" >/dev/null \
     && [[ "$(lane_get dfs-abort fake_revise_message)" == "abort message" ]] \
     || { echo "deferred abort: re-sending after abort fired the aborted switch" >&2; exit 1; }
+
+  # A failure that leaves the transition journaled points to its recovery and
+  # never calls a message undelivered when the phase shows it was submitted.
+  make_deferred_lane dfs-launch-fail
+  run_escalate dfs-launch-fail --to codex/target/high --defer --force >/dev/null 2>&1
+  compact_rollout dfs-launch-fail
+  lane_set dfs-launch-fail fake_launch_fail yes
+  set +e; run_waspflow revise dfs-launch-fail -- "launch message" 2>"$eschome/dfs-launch-fail.err"; rc=$?; set -e
+  [[ "$rc" -eq 2 ]] && grep -Fq -- 'escalate dfs-launch-fail --resume-transition' "$eschome/dfs-launch-fail.err" \
+    && grep -Fq 'may have reached the replacement session' "$eschome/dfs-launch-fail.err" \
+    && ! grep -Fq 'was dropped' "$eschome/dfs-launch-fail.err" && ! grep -Fq 'never delivered' "$eschome/dfs-launch-fail.err" \
+    || { cat "$eschome/dfs-launch-fail.err" >&2; echo "deferred pending failure: a resumable launch failure was reported as dropped" >&2; exit 1; }
+  make_deferred_lane dfs-cas-lost
+  run_escalate dfs-cas-lost --to codex/target/high --defer --force >/dev/null 2>&1
+  compact_rollout dfs-cas-lost
+  lane_set dfs-cas-lost fake_cas_break yes
+  set +e; run_waspflow revise dfs-cas-lost -- "cas message" 2>"$eschome/dfs-cas-lost.err"; rc=$?; set -e
+  [[ "$rc" -eq 2 && "$(jq -r '.pending_transition | fromjson | .phase' "$eschome/lanes/dfs-cas-lost/state.json")" == confirmed ]] \
+    && grep -Fq 'your message was submitted to the replacement session' "$eschome/dfs-cas-lost.err" \
+    && ! grep -Fq 'never delivered' "$eschome/dfs-cas-lost.err" && ! grep -Fq 'was dropped' "$eschome/dfs-cas-lost.err" \
+    || { cat "$eschome/dfs-cas-lost.err" >&2; echo "deferred pending failure: a submitted message was reported as never delivered" >&2; exit 1; }
+
+  # Poison counts a failed segment once: a deferred apply dropped at `prepared`
+  # and the operator's re-decision from the same segment must not both count it.
+  # A successful revise that discards a different undelivered message says so.
+  make_deferred_lane dfs-poison
+  lane_set dfs-poison segment_entered_via_escalation true verify_state failed verify_failure_class task consecutive_failed_segments 0
+  run_escalate dfs-poison --to codex/target/high --defer --force >/dev/null 2>&1
+  compact_rollout dfs-poison
+  set +e; WASPFLOW_ESCALATION_TEST_SEGMENT_FAIL=yes run_waspflow revise dfs-poison -- "first message" >/dev/null 2>&1; set -e
+  [[ "$(lane_get dfs-poison consecutive_failed_segments)" == 1 && "$(lane_get dfs-poison deferred_switch)" == "" ]] \
+    || { echo "deferred poison: the dropped apply did not count its failed segment once" >&2; exit 1; }
+  set +e; WASPFLOW_ESCALATION_TEST_SEGMENT_FAIL=yes run_escalate dfs-poison --to codex/target/high --force >/dev/null 2>&1; set -e
+  [[ "$(lane_get dfs-poison consecutive_failed_segments)" == 1 ]] \
+    || { echo "deferred poison: a dropped deferred apply and its re-decision counted one failed segment twice" >&2; exit 1; }
+  lane_set dfs-poison revise_barrier_mark ""
+  run_waspflow revise dfs-poison -- "second message" 2>"$eschome/dfs-discard.err"
+  grep -Fq 'discarding an earlier undelivered message' "$eschome/dfs-discard.err" && grep -Fxq 'first message' "$eschome/dfs-discard.err" \
+    && [[ "$(lane_get dfs-poison undelivered_message)" == "" && "$(lane_get dfs-poison fake_revise_message)" == "second message" ]] \
+    || { echo "deferred discard: a different undelivered message was cleared silently" >&2; exit 1; }
 
   # An attached tmux client can submit a prompt between the idle checks and the
   # replacement launch, so a deferred switch never auto-applies under one.

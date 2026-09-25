@@ -400,8 +400,9 @@ claude_compactions_since() {
 # through `attach` (its user row written, no assistant row yet) still looks idle.
 # Settled = no user row after the last completed turn. A local slash command
 # (e.g. /compact) writes its typed row when it starts and a <local-command-stdout>
-# row when it finishes; the meta, command-name and compact-summary rows between
-# are not prompts.
+# (or, when it fails or is cancelled, <local-command-stderr>) row when it
+# finishes; the meta, command-name and compact-summary rows between are not
+# prompts.
 claude_turn_settled() {
   local jsonl
   jsonl="$(claude_session_log "$1")" || return 1
@@ -409,7 +410,7 @@ claude_turn_settled() {
     if .type=="assistant" and .message.stop_reason=="end_turn" then "end"
     elif .type=="user" then
       ((.message.content // "") | if type=="string" then . elif type=="array" then (map(select(type=="object" and .type=="text") | .text) | join("")) else "" end) as $text
-      | if ($text | startswith("<local-command-stdout>")) then "end"
+      | if ($text | test("^<local-command-std(out|err)>")) then "end"
         elif .isMeta == true or .isCompactSummary == true or ($text | test("^\\s*<(command-name|command-message|local-command-caveat)>")) then empty
         else "user" end
     else empty end' "$jsonl" 2>/dev/null | tail -n 1)" == end ]]

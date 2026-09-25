@@ -57,7 +57,8 @@ message, it checks the lane:
    through `attach` writes its user row first and would otherwise look idle.
    (Codex's idle check already requires the rollout's last row to be
    `task_complete`.) A finished local slash command (its `<local-command-stdout>`
-   row) counts as a completed turn; one still running does not.
+   row, or `<local-command-stderr>` when it failed or was cancelled) counts as
+   a completed turn; one still running does not.
 3. No tmux client is attached to the lane window. An attached operator can
    submit a prompt after these checks and before the replacement session starts,
    and the switch would kill that turn. `status` reports this as
@@ -71,8 +72,13 @@ live revise records, if the session id carried over. If either check fails,
 `revise` sends on the current arm and the switch stays pending.
 
 Failure semantics are deliberately simple. Starting the transition consumes the
-deferred switch. If the switch fails at any phase, it is dropped and the operator
-decides again; there is no automatic retry. The revise message is saved first in
+deferred switch. If the switch fails, nothing retries automatically. A failure
+that abandons the transition drops the switch, and the operator decides again. A
+failure that leaves the transition journaled (`escalate_failed`) is recovered
+with `escalate --resume-transition` or `--abort-transition`; `revise` points
+there and says whether the phase shows the message was submitted. Poison counts
+each failed segment once (`poison_counted_segment`), even when a dropped
+transition and a later one start from the same segment. The revise message is saved first in
 the lane field `undelivered_message`: `revise` prints it verbatim on failure,
 `status` shows it, and `--cancel-deferred`, `--abort-transition` and an
 immediate escalate print it too. The next successful send on the lane clears it,
