@@ -4308,52 +4308,93 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
 
 # Deferred switches read cold-cache boundaries from the REAL provider logs:
 # Claude's top-level compact_boundary system row and Codex's top-level
-# "compacted" rollout item. Text that quotes a marker, or a nested object that
-# carries it, must not count. Providers without the hooks say so.
+# "compacted" rollout item, counted by their own timestamps against the deferral
+# time. Text that quotes a marker, a nested object that carries it, or a
+# compaction older than the deferral must not count.
 (
   sig_home="$(mktemp -d "$scratch/waspflow-deferred-signal-XXXXXX")"
   export WASPFLOW_HOME="$sig_home" WASPFLOW_LIB="$root/lib" CLAUDE_PROJECTS_DIR="$sig_home/claude-projects"
   unset WASPFLOW_CACHE_TTL_MINUTES_CLAUDE WASPFLOW_CACHE_TTL_MINUTES_CODEX
   source "$root/lib/core.sh"
   source "$root/lib/escalation.sh"
+  now="$(date +%s)"
+  stamp() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%S.123Z; }
   mkdir -p "$CLAUDE_PROJECTS_DIR/p"
   claude_log="$CLAUDE_PROJECTS_DIR/p/claude-sig.jsonl"
   printf '%s\n' '{"type":"user","message":{"content":"quoted {\"type\":\"system\",\"subtype\":\"compact_boundary\"}"}}' \
     '{"type":"user","message":{"content":[{"type":"system","subtype":"compact_boundary"}]}}' >"$claude_log"
   lane_set sig-claude provider claude session_id claude-sig
-  [[ "$(deferred_provider_signal sig-claude compaction_count)" == 0 ]] || { echo "deferred signal: Claude counted a quoted/nested compact marker" >&2; exit 1; }
-  printf '%s\n' '{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","compactMetadata":{"trigger":"auto"}}' >>"$claude_log"
-  [[ "$(deferred_provider_signal sig-claude compaction_count)" == 1 ]] || { echo "deferred signal: Claude compact_boundary row not counted" >&2; exit 1; }
-  deferred_boundary sig-claude '{"compactions_seen":0}' && [[ "$DEFERRED_BOUNDARY" == compaction ]] \
-    || { echo "deferred signal: Claude compaction boundary not detected" >&2; exit 1; }
-  # Idle rule: Claude defaults to its 60-minute cache TTL; 0 turns it off.
-  ! deferred_boundary sig-claude '{"compactions_seen":1}' && [[ "$DEFERRED_DETAIL" == *"no compaction since the switch was deferred"*"< 60m cache lifetime"* ]] \
-    || { echo "deferred signal: fresh Claude session reported a boundary ($DEFERRED_DETAIL)" >&2; exit 1; }
+  [[ "$(deferred_provider_signal sig-claude compactions_since 0)" == 0 ]] || { echo "deferred signal: Claude counted a quoted/nested compact marker" >&2; exit 1; }
+  printf '{"type":"system","subtype":"compact_boundary","timestamp":"%s","content":"Conversation compacted","compactMetadata":{"trigger":"auto"}}\n' "$(stamp "$now")" >>"$claude_log"
+  [[ "$(deferred_provider_signal sig-claude compactions_since 0)" == 1 ]] || { echo "deferred signal: Claude compact_boundary row not counted" >&2; exit 1; }
+  deferred_boundary sig-claude "{\"recorded_at\":$((now - 60))}" && [[ "$DEFERRED_BOUNDARY" == compaction ]] \
+    || { echo "deferred signal: Claude compaction after the deferral not detected" >&2; exit 1; }
+  # A compaction older than the deferral is not a boundary; the idle rule
+  # defaults to Claude's 60-minute cache TTL, and 0 turns it off.
+  ! deferred_boundary sig-claude "{\"recorded_at\":$((now + 60))}" && [[ "$DEFERRED_DETAIL" == *"no compaction since the switch was deferred"*"< 60m cache lifetime"* ]] \
+    || { echo "deferred signal: a pre-deferral compaction or fresh session reported a boundary ($DEFERRED_DETAIL)" >&2; exit 1; }
   touch -d '61 minutes ago' "$claude_log"
-  deferred_boundary sig-claude '{"compactions_seen":1}' && [[ "$DEFERRED_BOUNDARY" == idle ]] \
+  deferred_boundary sig-claude "{\"recorded_at\":$((now + 60))}" && [[ "$DEFERRED_BOUNDARY" == idle ]] \
     || { echo "deferred signal: Claude idle past 60m was not a boundary" >&2; exit 1; }
-  ! WASPFLOW_CACHE_TTL_MINUTES_CLAUDE=0 deferred_boundary sig-claude '{"compactions_seen":1}' && [[ "$DEFERRED_DETAIL" == *"idle rule off for claude"* ]] \
+  ! WASPFLOW_CACHE_TTL_MINUTES_CLAUDE=0 deferred_boundary sig-claude "{\"recorded_at\":$((now + 60))}" && [[ "$DEFERRED_DETAIL" == *"idle rule off for claude"* ]] \
     || { echo "deferred signal: WASPFLOW_CACHE_TTL_MINUTES_CLAUDE=0 did not disable the idle rule" >&2; exit 1; }
+
+  # Review F4: the switch is deferred before the session log exists; the log then
+  # appears already compacted. The compaction is after the deferral, so it holds.
+  lane_set sig-late provider claude session_id claude-late
+  ! deferred_boundary sig-late "{\"recorded_at\":$now}" && [[ "$DEFERRED_DETAIL" == "no session log yet"* ]] \
+    || { echo "deferred signal: a missing Claude log was not reported as missing ($DEFERRED_DETAIL)" >&2; exit 1; }
+  printf '%s\n' '{"type":"user","message":{"content":"task"}}' >"$CLAUDE_PROJECTS_DIR/p/claude-late.jsonl"
+  printf '{"type":"system","subtype":"compact_boundary","timestamp":"%s"}\n' "$(stamp $((now + 5)))" >>"$CLAUDE_PROJECTS_DIR/p/claude-late.jsonl"
+  deferred_boundary sig-late "{\"recorded_at\":$now}" && [[ "$DEFERRED_BOUNDARY" == compaction ]] \
+    || { echo "deferred signal: first compaction of a log that appeared after the deferral was missed" >&2; exit 1; }
+
+  # Review F2: a prompt typed through `attach` writes its user row before any
+  # assistant row. claude_is_idle still sees the previous end_turn; the deferred
+  # switch must not treat that live turn as quiescent.
+  tmux_window_exists() { return 0; }
+  attach_log="$CLAUDE_PROJECTS_DIR/p/claude-attach.jsonl"
+  printf '%s\n' '{"type":"user","message":{"content":"first task"}}' \
+    '{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}' >"$attach_log"
+  lane_set sig-attach provider claude session_id claude-attach revise_barrier_mark ""
+  deferred_lane_quiescent sig-attach || { echo "deferred signal: a settled Claude turn was not quiescent" >&2; exit 1; }
+  printf '%s\n' '{"type":"user","message":{"content":"typed through attach"}}' >>"$attach_log"
+  load_provider claude
+  claude_is_idle sig-attach || { echo "deferred signal: fixture no longer reproduces the stale end_turn idle" >&2; exit 1; }
+  ! deferred_lane_quiescent sig-attach || { echo "deferred signal: an attached Claude turn in flight was treated as quiescent" >&2; exit 1; }
+  printf '%s\n' '{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"attached done"}]}}' >>"$attach_log"
+  deferred_lane_quiescent sig-attach || { echo "deferred signal: the attached turn completed but was not quiescent" >&2; exit 1; }
+  unset -f tmux_window_exists
 
   codex_log="$sig_home/rollout-sig.jsonl"
   printf '%s\n' '{"type":"response_item","payload":{"type":"message","content":[{"type":"input_text","text":"quoted \"type\":\"compacted\""}]}}' \
     '{"type":"event_msg","payload":{"type":"compacted"}}' >"$codex_log"
   lane_set sig-codex provider codex session_id codex-sig rollout "$codex_log"
-  [[ "$(deferred_provider_signal sig-codex compaction_count)" == 0 ]] || { echo "deferred signal: Codex counted a quoted/nested compacted marker" >&2; exit 1; }
-  printf '%s\n' '{"timestamp":"2026-09-25T00:00:00.000Z","type":"compacted","payload":{"message":"","replacement_history":[]}}' \
-    '{"timestamp":"2026-09-25T00:00:00.001Z","type":"event_msg","payload":{"type":"context_compacted"}}' >>"$codex_log"
-  [[ "$(deferred_provider_signal sig-codex compaction_count)" == 1 ]] || { echo "deferred signal: Codex compacted item not counted exactly once" >&2; exit 1; }
+  [[ "$(deferred_provider_signal sig-codex compactions_since 0)" == 0 ]] || { echo "deferred signal: Codex counted a quoted/nested compacted marker" >&2; exit 1; }
+  printf '{"timestamp":"%s","type":"compacted","payload":{"message":"","replacement_history":[]}}\n{"timestamp":"%s","type":"event_msg","payload":{"type":"context_compacted"}}\n' "$(stamp "$now")" "$(stamp "$now")" >>"$codex_log"
+  [[ "$(deferred_provider_signal sig-codex compactions_since 0)" == 1 && "$(deferred_provider_signal sig-codex compactions_since $((now + 1)))" == 0 ]] \
+    || { echo "deferred signal: Codex compacted item not counted exactly once by time" >&2; exit 1; }
   touch -d '1 day ago' "$codex_log"
-  ! deferred_boundary sig-codex '{"compactions_seen":1}' && [[ "$DEFERRED_DETAIL" == *"idle rule off for codex"* ]] \
+  ! deferred_boundary sig-codex "{\"recorded_at\":$((now + 60))}" && [[ "$DEFERRED_DETAIL" == *"idle rule off for codex"* ]] \
     || { echo "deferred signal: Codex idle rule must be off by default" >&2; exit 1; }
   [[ "$(deferred_cache_ttl_minutes claude)" == 60 && "$(deferred_cache_ttl_minutes codex)" == 0 && "$(WASPFLOW_CACHE_TTL_MINUTES_CODEX=30 deferred_cache_ttl_minutes codex)" == 30 ]] \
     || { echo "deferred signal: cache TTL defaults/overrides are wrong" >&2; exit 1; }
-  WASPFLOW_CACHE_TTL_MINUTES_CODEX=30 deferred_boundary sig-codex '{"compactions_seen":1}' && [[ "$DEFERRED_BOUNDARY" == idle ]] \
+  WASPFLOW_CACHE_TTL_MINUTES_CODEX=30 deferred_boundary sig-codex "{\"recorded_at\":$((now + 60))}" && [[ "$DEFERRED_BOUNDARY" == idle ]] \
     || { echo "deferred signal: configured Codex idle rule did not apply" >&2; exit 1; }
 
   lane_set sig-grok provider grok session_id grok-sig
-  ! deferred_boundary sig-grok '{"compactions_seen":0}' && [[ "$DEFERRED_DETAIL" == *"compaction not detectable for grok"*"idle rule off for grok"* ]] \
+  ! deferred_boundary sig-grok '{"recorded_at":0}' && [[ "$DEFERRED_DETAIL" == *"compaction not detectable for grok"*"idle rule off for grok"* ]] \
     || { echo "deferred signal: provider without hooks must report no detectable signal ($DEFERRED_DETAIL)" >&2; exit 1; }
+  # Review F3: only providers that switch arms in place AND expose a boundary
+  # signal may defer. Grok switches arms but has no signal; the others lack hooks.
+  deferred_provider_capable claude && deferred_provider_capable codex \
+    || { echo "deferred signal: claude/codex must be able to defer" >&2; exit 1; }
+  ! deferred_provider_capable grok && [[ "$DEFERRED_INCAPABLE" == *"no cache-boundary signal"* ]] \
+    || { echo "deferred signal: grok has no boundary signal but was accepted" >&2; exit 1; }
+  for incapable in qwen deepseek antigravity; do
+    ! deferred_provider_capable "$incapable" && [[ "$DEFERRED_INCAPABLE" == *"cannot switch arms in place"* ]] \
+      || { echo "deferred signal: $incapable has no escalation hooks but was accepted" >&2; exit 1; }
+  done
   rm -rf "$sig_home"
 )
 
@@ -4378,7 +4419,8 @@ codex_session_resumable() { return 0; }
 codex_is_idle() { [[ "$(lane_get "$1" fake_busy)" != yes ]]; }
 codex_turn_mark() { printf '1\n'; }
 codex_revise() { lane_set "$1" fake_revise_message "$2"; }
-codex_session_log() { lane_get "$1" fake_session_log | grep .; }
+codex_session_log() { local f; f="$(lane_get "$1" fake_session_log)"; [[ -n "$f" && -f "$f" ]] && printf '%s\n' "$f"; }
+codex_arm_switch_supported() { :; }
 codex_valid_models() { printf 'source=live_query\ntarget\nother\n'; }
 codex_mcp_policy() { printf '%s\n' '{"resolved":"none","warning":"","argv":[],"env":{}}'; }
 codex_refresh_runtime_settings() { :; }
@@ -4402,8 +4444,8 @@ codex_confirm_escalation_submission() {
 PROV
   # The deferred-switch integration below counts compactions with the REAL
   # adapter function, fed by the stub's fixture rollout.
-  sed -n '/^codex_compaction_count()/,/^}/p' "$root/lib/providers/codex.sh" >>"$esclib/providers/codex.sh"
-  grep -q '^codex_compaction_count()' "$esclib/providers/codex.sh" || { echo "deferred: real codex_compaction_count not found" >&2; exit 1; }
+  sed -n '/^codex_compactions_since()/,/^}/p' "$root/lib/providers/codex.sh" >>"$esclib/providers/codex.sh"
+  grep -q '^codex_compactions_since()' "$esclib/providers/codex.sh" || { echo "deferred: real codex_compactions_since not found" >&2; exit 1; }
   cat >"$esclib/providers/qwen.sh" <<'PROV'
 qwen_spawn() { return 1; }
 qwen_preflight() { :; }
@@ -4411,7 +4453,8 @@ qwen_discover_session() { lane_get "$1" session_id; }
 qwen_session_resumable() { return 0; }
 qwen_is_idle() { return 0; }
 qwen_turn_mark() { printf '1\n'; }
-qwen_revise() { :; }
+qwen_revise() { lane_set "$1" fake_revise_message "$2"; }
+qwen_session_log() { local f; f="$(lane_get "$1" fake_session_log)"; [[ -n "$f" && -f "$f" ]] && printf '%s\n' "$f"; }
 qwen_valid_models() { printf 'source=live_query\ntarget\n'; }
 qwen_mcp_policy() { printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}'; }
 qwen_validate_model_effort() {
@@ -4705,7 +4748,7 @@ JSON
     lane_set "$1" fake_session_log "$eschome/$1-rollout.jsonl" verify_runs '[]' verify_state passed verify_failure_class ""
   }
   segment_rows() { jq -s --arg uuid "$1-uuid" 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane_segment"))' "$eschome/receipts.jsonl"; }
-  compact_rollout() { printf '%s\n' '{"timestamp":"t","type":"compacted","payload":{"message":""}}' >>"$eschome/$1-rollout.jsonl"; }
+  compact_rollout() { printf '{"timestamp":"%s","type":"compacted","payload":{"message":""}}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.500Z)" >>"$eschome/$1-rollout.jsonl"; }
 
   make_deferred_lane dfs-compact
   set +e; defer_json="$(run_escalate dfs-compact --to codex/target/high --defer --json 2>/dev/null)"; rc=$?; set -e
@@ -4714,7 +4757,7 @@ JSON
   defer_json="$(run_escalate dfs-compact --to codex/target/high --defer --force --json 2>/dev/null)"
   jq -e 'keys == ["exit_class","from_arm","ok","reason","segment_index","suggested_argv","to_arm"] and .ok and (.reason | contains("deferred until a cold-cache boundary")) and (.suggested_argv | index("waspflow escalate dfs-compact --cancel-deferred"))' <<<"$defer_json" >/dev/null \
     || { echo "deferred: record JSON contract changed" >&2; exit 1; }
-  jq -e '.model == "old" and .status == "live" and .pending_transition == "" and (.deferred_switch | fromjson | .to_arm.model == "target" and .trigger == "operator_forced" and .compactions_seen == 0)' "$eschome/lanes/dfs-compact/state.json" >/dev/null \
+  jq -e '.model == "old" and .status == "live" and .pending_transition == "" and (.deferred_switch | fromjson | .to_arm.model == "target" and .trigger == "operator_forced" and .session_id == "dfs-compact-old-session" and (.recorded_at | type) == "number")' "$eschome/lanes/dfs-compact/state.json" >/dev/null \
     || { echo "deferred: record did not persist as a pending decision" >&2; exit 1; }
   [[ "$(segment_rows dfs-compact | jq length)" == 0 ]] || { echo "deferred: recording a deferral closed a segment" >&2; exit 1; }
   run_waspflow status dfs-compact | jq -e '.deferred_switch_status.to_arm.model == "target" and .deferred_switch_status.boundary_now.holds == false and (.deferred_switch_status.boundary_now.detail | contains("no compaction since the switch was deferred") and contains("idle rule off for codex"))' >/dev/null \
@@ -4731,7 +4774,7 @@ JSON
     || { echo "deferred: switch applied while the worker turn was running" >&2; exit 1; }
   # The turn ends: status and wait report the boundary; the next revise switches, then sends.
   lane_set dfs-compact revise_barrier_mark "" fake_keep_session yes
-  run_waspflow status dfs-compact | jq -e '.deferred_switch_status.boundary_now == {holds:true,boundary:"compaction",detail:"session compacted since the switch was deferred (0 -> 1 compactions)"}' >/dev/null \
+  run_waspflow status dfs-compact | jq -e '.deferred_switch_status.boundary_now == {holds:true,boundary:"compaction",detail:"session compacted 1 time(s) since the switch was deferred"}' >/dev/null \
     || { echo "deferred: status did not report the compaction boundary" >&2; exit 1; }
   run_waspflow wait dfs-compact --timeout 5 --interval 1 >/dev/null 2>"$eschome/dfs-wait.err"
   grep -Fq 'wait: deferred switch to codex/target/high pending; boundary holds' "$eschome/dfs-wait.err" \
@@ -4785,6 +4828,71 @@ JSON
   set +e; blocked_json="$(run_escalate dfs-blocked --to codex/other/high --defer --force --json 2>/dev/null)"; rc=$?; set -e
   [[ "$rc" -eq 1 ]] && jq -e '(.reason | contains("before deferring")) and (.suggested_argv | index("waspflow escalate dfs-blocked --resume-transition"))' <<<"$blocked_json" >/dev/null \
     || { echo "deferred: --defer did not refuse behind a pending transition" >&2; exit 1; }
+  # Review F1: a failed receipt write abandons the transition before anything is
+  # sent. The revise message must stay recoverable in lane state, the switch stays
+  # pending, and the next revise completes it.
+  make_deferred_lane dfs-receipt-fail
+  run_escalate dfs-receipt-fail --to codex/target/high --defer --force >/dev/null 2>&1
+  compact_rollout dfs-receipt-fail
+  set +e; WASPFLOW_ESCALATION_TEST_SEGMENT_FAIL=yes run_waspflow revise dfs-receipt-fail -- "keep this message" 2>"$eschome/dfs-receipt-fail.err"; rc=$?; set -e
+  [[ "$rc" -eq 2 ]] || { cat "$eschome/dfs-receipt-fail.err" >&2; echo "deferred F1: receipt failure expected rc2, got $rc" >&2; exit 1; }
+  jq -e '.model == "old" and .pending_transition == "" and (.deferred_switch | fromjson | .to_arm.model == "target" and (.unsent_message | contains("keep this message")))' "$eschome/lanes/dfs-receipt-fail/state.json" >/dev/null \
+    && grep -Fq 'the message is saved in deferred_switch.unsent_message' "$eschome/dfs-receipt-fail.err" \
+    && [[ "$(lane_get dfs-receipt-fail fake_revise_message)" != *"keep this message"* ]] \
+    || { echo "deferred F1: the revise message was lost when the receipt write failed" >&2; exit 1; }
+  run_waspflow revise dfs-receipt-fail -- "keep this message" 2>/dev/null
+  jq -e '.model == "target" and .deferred_switch == ""' "$eschome/lanes/dfs-receipt-fail/state.json" >/dev/null \
+    && [[ "$(lane_get dfs-receipt-fail fake_escalation_prompt)" == *"keep this message"* ]] \
+    || { echo "deferred F1: the retried revise did not complete the switch" >&2; exit 1; }
+  # A crash right after `prepared` keeps both copies; resume delivers the message,
+  # and the record clears only when the receipt commits.
+  make_deferred_lane dfs-crash
+  run_escalate dfs-crash --to codex/target/high --defer --force >/dev/null 2>&1
+  compact_rollout dfs-crash
+  set +e; WASPFLOW_ESCALATION_TEST_CRASH_AFTER=prepared run_waspflow revise dfs-crash -- "crash message" >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 99 ]] && jq -e '((.pending_transition | fromjson) | .phase == "prepared" and .submission_message == "crash message") and (.deferred_switch | fromjson | .unsent_message == "crash message")' "$eschome/lanes/dfs-crash/state.json" >/dev/null \
+    || { echo "deferred F1: a prepared-phase crash lost the deferred record" >&2; exit 1; }
+  run_escalate dfs-crash --resume-transition >/dev/null 2>&1
+  jq -e '.model == "target" and .deferred_switch == "" and .pending_transition == ""' "$eschome/lanes/dfs-crash/state.json" >/dev/null \
+    && [[ "$(lane_get dfs-crash fake_escalation_prompt)" == *"crash message"* ]] \
+    || { echo "deferred F1: resume did not deliver the message and clear the record" >&2; exit 1; }
+  # Past the receipt the transition holds the only copy; an abort surfaces it.
+  make_deferred_lane dfs-abort
+  run_escalate dfs-abort --to codex/target/high --defer --force >/dev/null 2>&1
+  compact_rollout dfs-abort
+  set +e; WASPFLOW_ESCALATION_TEST_CRASH_AFTER=receipt_committed run_waspflow revise dfs-abort -- "abort message" >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 99 && "$(lane_get dfs-abort deferred_switch)" == "" ]] || { echo "deferred F1: receipt commit did not hand the message to the transition" >&2; exit 1; }
+  run_escalate dfs-abort --abort-transition >/dev/null 2>"$eschome/dfs-abort.err"
+  grep -Fq 'never delivered' "$eschome/dfs-abort.err" && grep -Fxq 'abort message' "$eschome/dfs-abort.err" \
+    || { echo "deferred F1: abort dropped an undelivered revise message silently" >&2; exit 1; }
+
+  # Review F4: the switch is deferred before the session log exists; the log then
+  # appears already compacted. That compaction is a boundary, not a new baseline.
+  make_deferred_lane dfs-late-log
+  rm -f "$eschome/dfs-late-log-rollout.jsonl"
+  run_escalate dfs-late-log --to codex/target/high --defer --force >/dev/null 2>&1
+  printf '%s\n' '{"type":"session_meta"}' >"$eschome/dfs-late-log-rollout.jsonl"
+  compact_rollout dfs-late-log
+  run_waspflow revise dfs-late-log -- "late log steer" 2>/dev/null
+  jq -e '.model == "target" and ((.arm_history | fromjson)[-1].boundary == "compaction")' "$eschome/lanes/dfs-late-log/state.json" >/dev/null \
+    || { echo "deferred F4: the first compaction of a late session log was missed" >&2; exit 1; }
+
+  # Review F3: a provider whose escalation hooks fail cannot defer, and a record
+  # that exists anyway never consumes a revise message into a doomed transition.
+  make_deferred_lane dfs-qwen
+  lane_set dfs-qwen provider qwen model old model_requested old model_passed old effort "" effort_requested "" effort_passed ""
+  set +e; qwen_defer_json="$(run_escalate dfs-qwen --to qwen/target --defer --force --json 2>/dev/null)"; rc=$?; set -e
+  [[ "$rc" -eq 1 ]] && jq -e '(.reason | contains("cannot defer: qwen cannot switch arms in place")) and .suggested_argv == ["waspflow escalate dfs-qwen --to qwen/target --force"]' <<<"$qwen_defer_json" >/dev/null \
+    && [[ -z "$(lane_get dfs-qwen deferred_switch)" ]] \
+    || { echo "deferred F3: qwen deferral was accepted" >&2; exit 1; }
+  lane_set dfs-qwen deferred_switch '{"to_arm":{"provider":"qwen","model":"target","effort":"","mode":"standard"},"to_op":"","to_cursor":"","trigger":"operator_forced","note":"","recorded_at":1}'
+  touch -d '10 minutes ago' "$eschome/dfs-qwen-rollout.jsonl"
+  set +e; WASPFLOW_CACHE_TTL_MINUTES_QWEN=1 run_waspflow revise dfs-qwen -- "qwen steer" 2>"$eschome/dfs-qwen.err"; rc=$?; set -e
+  [[ "$rc" -eq 0 && "$(lane_get dfs-qwen fake_revise_message)" == *"qwen steer"* ]] \
+    && jq -e '.status == "live" and .pending_transition == "" and .model == "old"' "$eschome/lanes/dfs-qwen/state.json" >/dev/null \
+    && grep -Fq 'cannot switch arms in place' "$eschome/dfs-qwen.err" \
+    || { cat "$eschome/dfs-qwen.err" >&2; echo "deferred F3: revise consumed its message into a failed qwen transition" >&2; exit 1; }
+
   # A handoff starts a fresh session: nothing to wait for, so --defer applies now.
   make_deferred_lane dfs-handoff
   run_escalate dfs-handoff --to codex/target/high --handoff --defer --force 2>"$eschome/dfs-handoff.err" >/dev/null

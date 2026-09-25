@@ -606,7 +606,9 @@ Switch now or defer:
   revise sends on the current arm. `status` shows the pending switch and whether
   a boundary holds. A handoff (or a switch to another provider) starts a fresh
   session, so --defer applies it at once. A later --defer replaces the pending
-  switch; any immediate switch supersedes it.
+  switch; any immediate switch supersedes it. Providers that cannot apply a
+  deferred switch (grok: no boundary signal; qwen, deepseek, antigravity: no
+  escalation hooks) refuse --defer.
 
 Examples:
   waspflow escalate fix --to review.audit

@@ -37,16 +37,26 @@ for the same reason.
 
 `escalate --defer` runs the same target selection and the same eligibility gate
 as an immediate escalation. A downgrade after a green checkpoint therefore needs
-`--force`, as before. Then it stores a decision, not a transition: the lane field
-`deferred_switch` holds `{to_arm, to_op, to_cursor, from_arm, trigger, note,
-recorded_at, compactions_seen}`. No segment closes, and the arm does not change.
+`--force`, as before. It then refuses a provider that could never apply the
+switch: the provider must switch arms in place (`<provider>_arm_switch_supported`)
+and expose a boundary signal (a compaction or session-log hook). Claude and Codex
+qualify. Grok switches arms but has no signal yet. Qwen, DeepSeek and Antigravity
+have no escalation hooks. The refusal suggests the immediate command. Then it
+stores a decision, not a transition: the lane field `deferred_switch` holds
+`{to_arm, to_op, to_cursor, from_arm, trigger, note, recorded_at, session_id}`.
+No segment closes, and the arm does not change.
 
 waspflow has no daemon, so the switch applies lazily. Before `revise` sends a
 message, it checks the lane:
 
 1. A cold-cache boundary holds (see below), and
-2. the worker is between turns: no live pane, or the provider reports idle and
-   the last revise barrier has cleared. waspflow never kills a running turn.
+2. the worker is between turns: no live pane, or the provider reports idle, the
+   last revise barrier has cleared, and, where the provider can tell, no user
+   row follows the last completed turn. The last check exists because
+   `claude_is_idle` reads only the last assistant `end_turn`: a prompt typed
+   through `attach` writes its user row first and would otherwise look idle.
+   (Codex's idle check already requires the rollout's last row to be
+   `task_complete`.) waspflow never kills a running turn.
 
 If both hold, `revise` runs the ordinary escalation transition (journal,
 closing `lane_segment` receipt, provisional window, confirmed submission, CAS
@@ -54,6 +64,15 @@ commit). The revise message is the transition's submission, so the message is
 sent once, on the new arm. It then records the same stale-idle barrier that a
 live revise records, if the session id carried over. If either check fails,
 `revise` sends on the current arm and the switch stays pending.
+
+The message must never be lost. Before the transition starts, `revise` saves it
+as `deferred_switch.unsent_message`, and the deferred record stays until the
+closing receipt commits, the first phase from which `--resume-transition`
+redelivers it. If the receipt write fails, the transition is abandoned as before,
+but the record, the message and the pending switch survive; `revise` exits 2 and
+says where the message is. After the receipt commits, the transition holds the
+only copy; `--abort-transition` prints the undelivered message so it can be sent
+again.
 
 The operator's message goes first and unchanged. A short trailing note says that
 the model/effort changed and carries the transition nonce, which the Claude
@@ -87,11 +106,15 @@ pending switch when the lane goes idle.
 |---|---|---|
 | claude | `{"type":"system","subtype":"compact_boundary"}` row in the session JSONL | 60 min (1-hour TTL, measured) |
 | codex | top-level `{"type":"compacted"}` item in the rollout (newer CLIs also write `event_msg` `context_compacted`; older ones do not) | off |
-| grok, antigravity, qwen, deepseek | not detected | off |
+| grok, antigravity, qwen, deepseek | not detected; `--defer` is refused | off |
 
-- **Compaction** holds when the count of compaction rows is higher than
-  `compactions_seen`, the count when the switch was deferred. So the rule means
-  "the session compacted after the switch was deferred", not "during the last
+- **Compaction** holds when a compaction row carries a timestamp at or after
+  `recorded_at`. Counting by the rows' own timestamps (both providers stamp them
+  from the local clock) means a session log that did not exist yet at deferral
+  time still yields its first compaction; an earlier design stored a count
+  baseline and missed it. A log that merely appears is not a boundary: its
+  session has been running and its cache is warm. So the rule means "the
+  session compacted after the switch was deferred", not "during the last
   turn". The saving is largest when the compaction was recent. The context that
   grew after the compaction is still re-read uncached.
 - **Idle** holds when the session log has not changed for at least the cache
@@ -108,9 +131,9 @@ pending switch when the lane goes idle.
   measure it, so a default could be wrong in either direction. On a lane that
   bills through the API on GPT-5.6+, `WASPFLOW_CACHE_TTL_MINUTES_CODEX=30`
   matches the documented TTL.
-- Providers without a signal keep a deferred switch pending until the operator
-  configures an idle lifetime, switches now, or cancels. `status` says which
-  signal is missing.
+- Providers without any boundary hook refuse `--defer` (see "How it works").
+  `status` names the missing signal when a rule cannot fire, for example "no
+  session log yet" or "idle rule off for codex".
 
 Hooks: a Claude Code `PreCompact`/`SessionStart(compact)` hook would observe the
 same event that the `compact_boundary` row records. Reading the row lazily needs

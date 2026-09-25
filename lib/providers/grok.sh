@@ -255,6 +255,9 @@ grok_revise() {
 # Args: lane escalation_prompt [fresh].  This mirrors Grok's supported
 # interactive resume syntax and leaves ownership provisional for the transition
 # state machine to adopt only after the turn start is observable.
+# Deferred switches (lib/escalation.sh): grok can switch arms in place, but it has
+# no compaction or session-log hook yet, so escalate --defer still refuses it.
+grok_arm_switch_supported() { :; }
 grok_resume_with_arm() {
   local lane="$1" prompt="$2" fresh="${3:-false}" transition arm model effort cwd sid target ownership quoted="" a
   transition="$(lane_get "$lane" pending_transition)"
