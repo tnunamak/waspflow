@@ -452,7 +452,10 @@ lane_operation_run() {
   local lockf
   mkdir -p "$WASPFLOW_LOCKS_DIR"
   lockf="$WASPFLOW_LOCKS_DIR/$lane.lock"
-  ( flock -x 9; "$@" ) 9>"$lockf"
+  # The outer subshell holds the lock; the operation runs with fd 9 closed, so
+  # nothing it starts (a verify oracle's daemons, a new tmux server, a provider's
+  # background shells) can inherit the lock and keep it after this CLI exits.
+  ( flock -x 9; ( "$@" ) 9>&- ) 9>"$lockf"
 }
 
 # The critical section: read → merge → atomic write. MUST run under the lane lock
@@ -501,8 +504,15 @@ lane_matches_project() {
 # All windows live in a dedicated session so we never disturb the user's tmux.
 tmux_ensure_session() {
   if ! tmux has-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null; then
-    # Create detached with a placeholder window we immediately leave alone.
-    tmux new-session -d -s "$WASPFLOW_TMUX_SESSION" -n _waspflow_home 2>/dev/null || true
+    # Create detached with a placeholder window we immediately leave alone. This
+    # may start a tmux server that outlives the CLI: never let it inherit a held
+    # lane lock (fd 9, or the claim fd of a spawn that is running this).
+    local held_lock_fd="${spawn_lock_fd:-}"
+    if [[ "$held_lock_fd" =~ ^[0-9]+$ ]]; then
+      tmux new-session -d -s "$WASPFLOW_TMUX_SESSION" -n _waspflow_home 9>&- {held_lock_fd}>&- 2>/dev/null || true
+    else
+      tmux new-session -d -s "$WASPFLOW_TMUX_SESSION" -n _waspflow_home 9>&- 2>/dev/null || true
+    fi
   fi
   if [[ -z "$WASPFLOW_TMUX_HISTORY_LIMIT" || "$WASPFLOW_TMUX_HISTORY_LIMIT" == 0 ]]; then
     tmux set-option -u -t "$WASPFLOW_TMUX_SESSION" history-limit 2>/dev/null || true

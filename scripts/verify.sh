@@ -4398,6 +4398,25 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   rm -rf "$sig_home"
 )
 
+# A tmux server started while spawn holds its lane-claim lock outlives the CLI;
+# it must not inherit that lock fd. (Operations run with fd 9 closed; see the
+# lock-leak case in the escalation block.)
+(
+  export WASPFLOW_HOME="$state_home/spawn-lock-fd" WASPFLOW_LIB="$root/lib"
+  source "$root/lib/core.sh"
+  export WASPFLOW_TMUX_SOCKET="wf-spawnlock-$$" WASPFLOW_TMUX_SESSION="waspflow-spawnlock-$$"
+  mkdir -p "$WASPFLOW_HOME"
+  spawn_lock_file="$WASPFLOW_HOME/claim.lock"
+  exec {spawn_lock_fd}>"$spawn_lock_file"
+  flock -x "$spawn_lock_fd"
+  tmux_ensure_session
+  exec {spawn_lock_fd}>&-
+  spawn_lock_free=true
+  flock -n "$spawn_lock_file" true || spawn_lock_free=false
+  tmux kill-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || true
+  [[ "$spawn_lock_free" == true ]] || { echo "spawn lock: a tmux server started under the claim lock inherited it" >&2; exit 1; }
+)
+
 # Escalation v1 is a persisted transaction, so exercise the public verb with a
 # stubbed Codex adapter rather than mocking the state machine. The adapter owns
 # real windows only on this script's isolated tmux socket; its provisional
@@ -4865,6 +4884,19 @@ JSON
   run_escalate dfs-abort --abort-transition >/dev/null 2>"$eschome/dfs-abort.err"
   grep -Fq 'never delivered' "$eschome/dfs-abort.err" && grep -Fxq 'abort message' "$eschome/dfs-abort.err" \
     || { echo "deferred F1: abort dropped an undelivered revise message silently" >&2; exit 1; }
+
+  # Lock-fd leak: a lane operation (here `verify`) whose child starts a detached
+  # daemon must not leave that daemon holding the lane lock after the CLI exits.
+  make_escalation_lane lock-leak
+  lane_set lock-leak verify_command "setsid sleep 300 >/dev/null 2>&1 </dev/null & echo \$! >$(printf '%q' "$eschome/lock-leak.pid")"
+  set +e; run_waspflow verify lock-leak >/dev/null 2>&1; set -e
+  leak_pid="$(cat "$eschome/lock-leak.pid" 2>/dev/null || true)"
+  [[ -n "$leak_pid" ]] && kill -0 "$leak_pid" 2>/dev/null || { echo "lock leak: the test daemon did not start" >&2; exit 1; }
+  if ! flock -n "$eschome/locks/lock-leak.lock" true; then
+    kill "$leak_pid" 2>/dev/null || true
+    echo "lock leak: a daemon started under the lane lock still holds it after verify exited" >&2; exit 1
+  fi
+  kill "$leak_pid" 2>/dev/null || true
 
   # Review F4: the switch is deferred before the session log exists; the log then
   # appears already compacted. That compaction is a boundary, not a new baseline.
