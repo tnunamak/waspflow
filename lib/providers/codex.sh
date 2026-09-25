@@ -783,6 +783,28 @@ codex_turn_mark() {
   jq -rc 'select((.payload.type // .type) == "task_complete") | 1' "$rollout" 2>/dev/null | wc -l
 }
 
+# Cold-cache boundary signals for deferred switches (lib/escalation.sh).
+# Every Codex compaction appends a top-level {"type":"compacted"} rollout item to
+# the SAME rollout (newer CLIs also emit event_msg context_compacted; older ones
+# do not, so count the item).
+codex_session_log() {
+  local sid rollout
+  rollout="$(lane_get "$1" rollout)"
+  if [[ -z "$rollout" || ! -f "$rollout" ]]; then
+    sid="$(codex_discover_session "$1")"
+    [[ -n "$sid" ]] || return 1
+    rollout="$(_codex_rollout_for_session "$sid" || true)"
+  fi
+  [[ -n "$rollout" && -f "$rollout" ]] || return 1
+  printf '%s\n' "$rollout"
+}
+codex_compaction_count() {
+  local rollout
+  rollout="$(codex_session_log "$1")" || return 1
+  { grep -F '"type":"compacted"' "$rollout" 2>/dev/null || true; } \
+    | jq -rc 'select(.type=="compacted") | 1' 2>/dev/null | wc -l
+}
+
 # Count started Codex turns in one rollout. A queued user_message is intentionally
 # not a receipt: only task_started proves Codex left the composer for that turn.
 _codex_task_started_mark() {

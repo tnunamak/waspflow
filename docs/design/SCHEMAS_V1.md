@@ -181,7 +181,10 @@ receipt: `receipt_id` (uuid), `lane_uuid` (new: uuid stamped at spawn), `waspflo
 escalated lane, that final row carries `segment: {index:<last>, closed_by:"reap"}`;
 a never-escalated legacy lane keeps `segment: null`. An escalation-closing row uses
 `receipt_kind: "lane_segment"` and
-`segment: {index, closed_by:"escalation", transition:<uuid>}`; checkpoint verify runs
+`segment: {index, closed_by:"escalation", transition:<uuid>, boundary}`, where
+`boundary` is the cache state the switch paid for: `compaction`, `idle` (deferred
+switches, `docs/deferred-switch.md`), `handoff`, or `none` (immediate in-place);
+rows written before 2026-09-25 omit it. Checkpoint verify runs
 are recorded in `verify_runs[]` within that closing row. Consumers that include
 segments key them by `(lane_uuid, segment.index)`; the lane directory's
 `receipt.json` is always the latest row.
@@ -239,7 +242,7 @@ residual duplicate detectable downstream.
     "evidence": "billing_path"
   },
   "result": "verified", "outcome": "harvested",
-  "escalation_path": []                     // reserved; Phase 3 appends {from_arm, to_arm, trigger, at}
+  "escalation_path": []                     // appends {from_arm, to_arm, trigger, at, mode, boundary}
 }
 ```
 

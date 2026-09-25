@@ -992,10 +992,14 @@ cmd_status() {
     scope_query_available=false
   fi
   lifecycle="$(waspflow_derived_lane_lifecycle "$record" "$active_scopes" "$scope_query_available")"
-  jq --arg lifecycle "$lifecycle" '
+  # A pending deferred switch also reports whether a cold-cache boundary holds now.
+  local deferred=null
+  [[ -z "$(jq -r '.deferred_switch // ""' <<<"$record")" ]] || deferred="$(deferred_status_json "$lane")"
+  jq --arg lifecycle "$lifecycle" --argjson deferred "$deferred" '
     (.status // "") as $record_status
     | .status = $lifecycle
     | .record_status = $record_status
+    | if $deferred == null then . else .deferred_switch_status = $deferred end
   ' <<<"$record"
 }
 
@@ -1142,6 +1146,7 @@ cmd_wait() {
       # intermediate idle between revise turns doesn't trigger premature recovery.
       artifacts_capture_after "$lane"
       log "wait: lane '$lane' is IDLE"
+      [[ "$reap_after_idle" -eq 1 ]] || deferred_report "$lane" wait
       # Preserve wait's timeout/stall semantics: cleanup is reached only through
       # the verified-idle path above. Its final result/rc belongs to reap, so a
       # blocking harness receives the same result it would get from a separate
@@ -1378,6 +1383,13 @@ _revise_one() {
   local provider; provider="$(lane_get "$lane" provider)"
   report="$(lane_get "$lane" report)"
   message="$(artifacts_report_prompt "$message" "$report")"
+  # A deferred switch applies here when a cold-cache boundary holds; the message
+  # then rides the switch as its submission (lib/escalation.sh).
+  if [[ -n "$(lane_get "$lane" deferred_switch)" ]]; then
+    local deferred_rc=0
+    deferred_apply_before_revise_locked "$lane" "$message" "$out" || deferred_rc=$?
+    [[ "$DEFERRED_ATTEMPTED" != true ]] || return "$deferred_rc"
+  fi
   load_provider "$provider"
   if tmux_window_exists "$lane"; then
     log "revise: steering live pane for lane '$lane'"

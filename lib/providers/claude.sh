@@ -376,6 +376,23 @@ claude_turn_mark() {
   jq -rc 'select(.type=="assistant" and .message.stop_reason=="end_turn") | 1' "$jsonl" 2>/dev/null | wc -l
 }
 
+# Cold-cache boundary signals for deferred switches (lib/escalation.sh).
+# The session log's mtime is the last provider activity; compaction writes a
+# {"type":"system","subtype":"compact_boundary"} row into the SAME session file.
+claude_session_log() {
+  local session_id
+  session_id="$(claude_discover_session "$1")"
+  [[ -n "$session_id" ]] || return 1
+  find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1 | grep .
+}
+claude_compaction_count() {
+  local jsonl
+  jsonl="$(claude_session_log "$1")" || return 1
+  # grep prefilters; jq rejects the string inside a message body.
+  { grep -F '"compact_boundary"' "$jsonl" 2>/dev/null || true; } \
+    | jq -rc 'select(.type=="system" and .subtype=="compact_boundary") | 1' 2>/dev/null | wc -l
+}
+
 # Revise: re-enter the session and run one turn. Two paths:
 #   - If the lane's tmux window is still live, steer in-pane via paste-buffer.
 #   - Otherwise resume headlessly:  claude --resume <session-id> --print "<msg>"

@@ -116,7 +116,10 @@ If the checkpoint is task-class, `verify` proposes (but never starts)
 `waspflow escalate fix`; `verify fix --json` exposes that command in
 `suggested_argv[]`. `revise` steers the SAME arm in-session; `escalate` deliberately
 switches arms and records a closing `lane_segment` receipt before a replacement window
-is adopted.
+is adopted. An in-place switch re-reads the whole transcript uncached, so switch now
+only when the arm blocks progress; for quota, phase changes and downgrades use
+`escalate fix --to <target> --force --defer`. The next `revise` applies it after a
+compaction or past the cache lifetime (`status fix` shows `deferred_switch_status`).
 
 Every reap also appends an outcome receipt to `$WASPFLOW_HOME/receipts.jsonl`
 (arm, billing path, availability evidence, verify outcome, wall time). Declare

@@ -228,7 +228,7 @@ escalate_abort_locked() {
   if [[ "$phase" != prepared ]]; then
     now="$(date +%s)"; index="$(jq -r '.segment_index // 0' <<<"$transition")"; [[ "$index" =~ ^[0-9]+$ ]] || index=0
     history="$(lane_get "$lane" arm_history)"; jq -e 'type=="array"' >/dev/null <<<"$history" 2>/dev/null || history='[]'
-    history="$(jq -c --argjson t "$transition" --argjson at "$now" '. + [{from_arm:$t.from_arm,to_arm:$t.to_arm,trigger:$t.trigger,at:$at,mode:$t.mode,outcome:"aborted"}]' <<<"$history")"
+    history="$(jq -c --argjson t "$transition" --argjson at "$now" '. + [{from_arm:$t.from_arm,to_arm:$t.to_arm,trigger:$t.trigger,at:$at,mode:$t.mode,boundary:($t.boundary // null),outcome:"aborted"}]' <<<"$history")"
     if ! lane_update_if "$lane" "$old_generation" "$old_session" arm_history "$history" segment_index "$((index+1))" segment_started_epoch "$now" segment_entered_via_escalation false verify_runs "[]" verify_state "" verify_failure_class "" verify_test_files_changed "" verify_checkpoint_epoch "" verify_checkpoint_fingerprint "" verify_epoch "" verify_exit_code "" prepare_state "" prepare_exit_code "" prepare_epoch "" baseline_oracle_ran "" baseline_oracle_state "" baseline_oracle_reason "" result "" status live pending_transition "" escalation_error ""; then
       escalate_emit "$json" 2 "abort lost the original arm/session snapshot; transition remains unresolved" "$(jq -c .from_arm <<<"$transition")" "$(jq -c .to_arm <<<"$transition")" "$index" "waspflow escalate $lane --resume-transition" "waspflow escalate $lane --abort-transition"
       return
@@ -255,9 +255,9 @@ escalate_commit_locked() {
   now="$(date +%s)"; index="$(lane_get "$lane" segment_index)"; [[ "$index" =~ ^[0-9]+$ ]] || index=0
   billing="$(billing_path_v1 "$provider" default false)"; availability="$(selection_observe_availability "$provider" "$model" default)"; quota="$(quota_observation_v1 "$provider")"
   history="$(lane_get "$lane" arm_history)"; jq -e 'type=="array"' >/dev/null <<<"$history" 2>/dev/null || history='[]'
-  history="$(jq -c --argjson from "$from" --argjson to "$to" --arg trigger "$(jq -r .trigger <<<"$transition")" --arg mode "$transition_mode" --argjson at "$now" '. + [{from_arm:$from,to_arm:$to,trigger:$trigger,at:$at,mode:$mode,outcome:"confirmed"}]' <<<"$history")"
+  history="$(jq -c --argjson from "$from" --argjson to "$to" --arg trigger "$(jq -r .trigger <<<"$transition")" --arg mode "$transition_mode" --argjson boundary "$(jq -c '.boundary // null' <<<"$transition")" --argjson at "$now" '. + [{from_arm:$from,to_arm:$to,trigger:$trigger,at:$at,mode:$mode,boundary:$boundary,outcome:"confirmed"}]' <<<"$history")"
   path="$(lane_get "$lane" escalation_path)"; jq -e 'type=="array"' >/dev/null <<<"$path" 2>/dev/null || path='[]'
-  path="$(jq -c --argjson from "$from" --argjson to "$to" --arg trigger "$(jq -r .trigger <<<"$transition")" --arg mode "$transition_mode" --argjson at "$now" '. + [{from_arm:$from,to_arm:$to,trigger:$trigger,at:$at,mode:$mode}]' <<<"$path")"
+  path="$(jq -c --argjson from "$from" --argjson to "$to" --arg trigger "$(jq -r .trigger <<<"$transition")" --arg mode "$transition_mode" --argjson boundary "$(jq -c '.boundary // null' <<<"$transition")" --argjson at "$now" '. + [{from_arm:$from,to_arm:$to,trigger:$trigger,at:$at,mode:$mode,boundary:$boundary}]' <<<"$path")"
   total="$(lane_get "$lane" escalations_total)"; [[ "$total" =~ ^[0-9]+$ ]] || total=0
   consecutive="$(lane_get "$lane" consecutive_failed_segments)"; [[ "$consecutive" =~ ^[0-9]+$ ]] || consecutive=0
   [[ "$transition_mode" == handoff ]] && consecutive=0
@@ -332,7 +332,7 @@ escalate_resume_launch_locked() {
   local lane="$1" json="$2" transition="$3" provider mode prompt fresh confirm_fn resume_fn attempted
   provider="$(jq -r .to_arm.provider <<<"$transition")"; mode="$(jq -r .mode <<<"$transition")"
   fresh=false; [[ "$mode" == handoff ]] && fresh=true
-  prompt="$(escalate_build_prompt "$lane" "$transition")"; load_provider "$provider"
+  prompt="$(escalate_submission_prompt "$lane" "$transition")"; load_provider "$provider"
   confirm_fn="${provider}_confirm_escalation_submission"
   WASPFLOW_PROVISIONAL_SESSION_ID=""; WASPFLOW_PROVISIONAL_ROLLOUT=""
   if "$confirm_fn" "$lane" "$prompt" "$fresh"; then
@@ -380,7 +380,7 @@ escalate_run_locked() {
     # that reap/revise ignore (F5). The lane stays on its original arm; a fresh
     # `escalate` may retry cleanly.
     if [[ "${WASPFLOW_ESCALATION_TEST_SEGMENT_FAIL:-}" == yes ]] \
-       || ! artifacts_emit_segment_receipt_v1 "$lane" "$(jq -r .id <<<"$transition")" "$segment_result"; then
+       || ! artifacts_emit_segment_receipt_v1 "$lane" "$(jq -r .id <<<"$transition")" "$segment_result" "$(jq -r '.boundary // ""' <<<"$transition")"; then
       lane_set "$lane" status escalate_failed escalation_error "closing segment receipt failed" pending_transition ""
       escalate_emit "$json" 2 "closing segment receipt failed" "$(jq -c .from_arm <<<"$transition")" "$(jq -c .to_arm <<<"$transition")" "$(jq -r .segment_index <<<"$transition")"; return
     fi
@@ -417,9 +417,11 @@ escalate_run_locked() {
 }
 
 escalate_locked() {
-  local lane="$1" requested="$2" handoff="$3" reset_tree="$4" force="$5" ack="$6" note="$7" json="$8" resume="$9" abort="${10}" transition from to mode index status
+  local lane="$1" requested="$2" handoff="$3" reset_tree="$4" force="$5" ack="$6" note="$7" json="$8" resume="$9" abort="${10}" defer="${11:-false}" cancel="${12:-false}" transition from to mode index status
   from="$(escalate_current_arm "$lane")"; index="$(lane_get "$lane" segment_index)"; [[ "$index" =~ ^[0-9]+$ ]] || index=0; transition="$(lane_get "$lane" pending_transition)"
   if [[ "$abort" == true ]]; then escalate_abort_locked "$lane" "$json"; return; fi
+  if [[ "$cancel" == true ]]; then deferred_cancel_locked "$lane" "$json" "$from" "$index"; return; fi
+  if [[ -n "$transition" && "$defer" == true ]]; then escalate_emit "$json" 1 "an escalation transition is pending; resume or abort it before deferring another switch" "$from" "$(jq -c .to_arm <<<"$transition")" "$index" "waspflow escalate $lane --resume-transition" "waspflow escalate $lane --abort-transition"; return; fi
   if [[ -n "$transition" ]]; then
     to="$(jq -c .to_arm <<<"$transition")"; mode="$(jq -r .mode <<<"$transition")"
     if [[ -n "$requested" || "$handoff" == true || "$reset_tree" == true ]]; then
@@ -442,26 +444,231 @@ escalate_locked() {
   local poison; poison="$(lane_get "$lane" consecutive_failed_segments)"; [[ "$poison" =~ ^[0-9]+$ ]] || poison=0
   if [[ "$poison" -ge 2 && "$mode" != handoff ]]; then escalate_emit "$json" 1 "two consecutive escalation-entered segments failed; in-place escalation is refused" "$from" "$to" "$index" "waspflow escalate $lane --to $(escalate_arm_label "$to") --handoff --reset-tree"; return; fi
   if ! escalate_check_eligibility "$lane" "$force"; then escalate_emit "$json" 1 "$ESC_REASON" "$from" "$to" "$index" "waspflow verify $lane"; return; fi
-  transition="$(jq -cn --arg id "$(new_uuid)" --argjson from "$from" --arg from_generation "$(lane_get "$lane" arm_generation)" --arg from_session "$(lane_get "$lane" session_id)" --arg from_tmux_session "$(lane_get "$lane" tmux_session)" --arg from_tmux_window "$(lane_get "$lane" tmux_window)" --arg from_tmux_pane_pid "$(lane_get "$lane" tmux_pane_pid)" --argjson index "$index" --argjson to "$to" --arg to_op "$ESC_OP" --arg to_cursor "$ESC_CURSOR" --arg mode "$mode" --arg trigger "$ESC_TRIGGER" --arg note "$note" --argjson reset_tree "$reset_tree" '{id:$id,phase:"prepared",from_arm:$from,from_generation:$from_generation,from_session:$from_session,from_tmux_session:$from_tmux_session,from_tmux_window:$from_tmux_window,from_tmux_pane_pid:$from_tmux_pane_pid,segment_index:$index,to_arm:$to,to_op:$to_op,to_cursor:$to_cursor,mode:$mode,trigger:$trigger,note:$note,reset_tree:$reset_tree,submission_marker:("WASPFLOW_LANE_MARKER:escalation:" + $id),submission_nonce:("WASPFLOW_ESCALATION_TRANSITION:" + $id)}')"
-  lane_set "$lane" status escalating pending_transition "$transition" escalation_error ""
-  escalate_maybe_test_crash_after_phase prepared || return $?
+  if [[ "$defer" == true && "$mode" == in_place ]]; then
+    deferred_record_locked "$lane" "$json" "$from" "$to" "$index" "$note"
+    return
+  fi
+  [[ "$defer" != true ]] || log "escalate: --defer has nothing to wait for — a handoff starts a fresh session, so the switch applies now"
   [[ -z "$ESC_WARNING" ]] || warn "escalate: $ESC_WARNING"
+  local boundary=none; [[ "$mode" == handoff ]] && boundary=handoff
+  escalate_begin_locked "$lane" "$json" "$to" "$ESC_OP" "$ESC_CURSOR" "$mode" "$ESC_TRIGGER" "$note" "$reset_tree" "$boundary" ""
+}
+
+# Journal a new transition at `prepared` and run it. `boundary` records the cache
+# state the switch paid for (compaction|idle|handoff|none) so receipts can measure
+# it. A non-empty `message` replaces the escalation prompt: a deferred switch
+# carries the revise instruction that found the boundary. Starting any transition
+# supersedes a deferred switch.
+escalate_begin_locked() {
+  local lane="$1" json="$2" to="$3" to_op="$4" to_cursor="$5" mode="$6" trigger="$7" note="$8" reset_tree="$9" boundary="${10}" message="${11:-}" index transition
+  index="$(lane_get "$lane" segment_index)"; [[ "$index" =~ ^[0-9]+$ ]] || index=0
+  transition="$(jq -cn --arg id "$(new_uuid)" --argjson from "$(escalate_current_arm "$lane")" --arg from_generation "$(lane_get "$lane" arm_generation)" --arg from_session "$(lane_get "$lane" session_id)" --arg from_tmux_session "$(lane_get "$lane" tmux_session)" --arg from_tmux_window "$(lane_get "$lane" tmux_window)" --arg from_tmux_pane_pid "$(lane_get "$lane" tmux_pane_pid)" --argjson index "$index" --argjson to "$to" --arg to_op "$to_op" --arg to_cursor "$to_cursor" --arg mode "$mode" --arg trigger "$trigger" --arg note "$note" --argjson reset_tree "$reset_tree" --arg boundary "$boundary" --arg message "$message" '{id:$id,phase:"prepared",from_arm:$from,from_generation:$from_generation,from_session:$from_session,from_tmux_session:$from_tmux_session,from_tmux_window:$from_tmux_window,from_tmux_pane_pid:$from_tmux_pane_pid,segment_index:$index,to_arm:$to,to_op:$to_op,to_cursor:$to_cursor,mode:$mode,trigger:$trigger,note:$note,reset_tree:$reset_tree,boundary:$boundary,submission_marker:("WASPFLOW_LANE_MARKER:escalation:" + $id),submission_nonce:("WASPFLOW_ESCALATION_TRANSITION:" + $id)} + (if $message == "" then {} else {submission_message:$message} end)')"
+  lane_set "$lane" status escalating pending_transition "$transition" escalation_error "" deferred_switch ""
+  escalate_maybe_test_crash_after_phase prepared || return $?
   escalate_run_locked "$lane" "$json"
 }
 
+# Deferred switches: decide a model/effort change now, apply it at a cold-cache
+# boundary. A mid-session switch makes the next call re-read the whole transcript
+# uncached (local Claude logs: median 520K tokens, 2% cache hit); the first call
+# after a compaction re-read ~12x less, and idle gaps past the 1-hour TTL lost the
+# cache anyway. waspflow has no daemon, so `revise` checks for a boundary before it
+# sends and, when one holds, runs the ordinary escalation transition with the
+# revise instruction as its submission. Only in-place switches defer: a handoff
+# starts a fresh session, so it has no cache to protect and applies at once.
+
+# The launch prompt for a transition. A deferred switch submits the revise
+# instruction unchanged and first; a trailing note carries the nonce the provider
+# adapter needs to confirm the submission. (Live 2026-09-25: a header in front of
+# the instruction read to the worker as a prompt injection, and it refused.)
+escalate_submission_prompt() {
+  local lane="$1" transition="$2"
+  if jq -e 'has("submission_message")' >/dev/null <<<"$transition"; then
+    printf '%s\n' "$(jq -r .submission_message <<<"$transition")" "" \
+      "[waspflow note: the operator changed this session's model/effort to $(escalate_arm_label "$(jq -c .to_arm <<<"$transition")") between turns. The next token is a delivery receipt for waspflow and needs no action: $(jq -r .submission_nonce <<<"$transition")]"
+    return
+  fi
+  escalate_build_prompt "$lane" "$transition"
+}
+
+# Minutes of provider inactivity after which its prompt cache is gone; 0 turns
+# the idle rule off. Claude: 60 (its 1-hour cache TTL; measured gaps over 60 min
+# kept a median 3% of the cache). Other providers: off, because their CLI cache
+# lifetime is neither documented nor measured here.
+deferred_cache_ttl_minutes() {
+  local provider="$1" default=0
+  [[ "$provider" == claude ]] && default=60
+  numeric_knob "WASPFLOW_CACHE_TTL_MINUTES_${provider^^}" "$default"
+}
+
+# Optional adapter hooks: <provider>_session_log (path) and
+# <provider>_compaction_count (integer). Absent hook = signal not detectable.
+deferred_provider_signal() {
+  local lane="$1" signal="$2" provider
+  provider="$(lane_get "$lane" provider)"; load_provider "$provider"
+  declare -F "${provider}_${signal}" >/dev/null || return 1
+  "${provider}_${signal}" "$lane"
+}
+
+# Sets DEFERRED_BOUNDARY (compaction|idle) and returns 0 when a cold-cache
+# boundary holds now; otherwise DEFERRED_DETAIL says why not.
+deferred_boundary() {
+  local lane="$1" record="$2" provider seen count ttl log age detail=""
+  DEFERRED_BOUNDARY=""; DEFERRED_DETAIL=""
+  provider="$(lane_get "$lane" provider)"
+  seen="$(jq -r '.compactions_seen // ""' <<<"$record")"
+  if count="$(deferred_provider_signal "$lane" compaction_count 2>/dev/null)" && [[ "$count" =~ ^[0-9]+$ ]]; then
+    if [[ "$seen" =~ ^[0-9]+$ && "$count" -gt "$seen" ]]; then
+      DEFERRED_BOUNDARY=compaction; DEFERRED_DETAIL="session compacted since the switch was deferred ($seen -> $count compactions)"; return 0
+    fi
+    [[ "$seen" =~ ^[0-9]+$ ]] && detail="no compaction since the switch was deferred" || detail="compaction baseline not recorded yet"
+  else
+    detail="compaction not detectable for $provider"
+  fi
+  ttl="$(deferred_cache_ttl_minutes "$provider")"
+  if [[ "$ttl" -eq 0 ]]; then
+    detail+="; idle rule off for $provider (WASPFLOW_CACHE_TTL_MINUTES_${provider^^})"
+  elif log="$(deferred_provider_signal "$lane" session_log 2>/dev/null)" && [[ -f "$log" ]]; then
+    age=$(( $(date +%s) - $(stat -c %Y "$log") ))
+    if [[ "$age" -ge $(( ttl * 60 )) ]]; then
+      DEFERRED_BOUNDARY=idle; DEFERRED_DETAIL="idle $(( age / 60 ))m >= ${ttl}m cache lifetime"; return 0
+    fi
+    detail+="; idle $(( age / 60 ))m < ${ttl}m cache lifetime"
+  else
+    detail+="; no session log to time idleness"
+  fi
+  DEFERRED_DETAIL="$detail"
+  return 1
+}
+
+deferred_status_json() {
+  local lane="$1" record holds=false
+  record="$(lane_get "$lane" deferred_switch)"
+  [[ -n "$record" ]] || { printf 'null\n'; return; }
+  deferred_boundary "$lane" "$record" && holds=true
+  jq -c --argjson holds "$holds" --arg boundary "$DEFERRED_BOUNDARY" --arg detail "$DEFERRED_DETAIL" \
+    '. + {boundary_now:{holds:$holds,boundary:(if $boundary == "" then null else $boundary end),detail:$detail}}' <<<"$record"
+}
+
+# One stderr line for observers such as `wait`.
+deferred_report() {
+  local lane="$1" verb="$2" record label
+  record="$(lane_get "$lane" deferred_switch)"; [[ -n "$record" ]] || return 0
+  label="$(escalate_arm_label "$(jq -c .to_arm <<<"$record")")"
+  if deferred_boundary "$lane" "$record"; then
+    log "$verb: deferred switch to $label pending; boundary holds ($DEFERRED_DETAIL), so the next revise applies it"
+  else
+    log "$verb: deferred switch to $label pending; no cold-cache boundary yet ($DEFERRED_DETAIL)"
+  fi
+}
+
+deferred_record_locked() {
+  local lane="$1" json="$2" from="$3" to="$4" index="$5" note="$6" previous seen record reason
+  previous="$(lane_get "$lane" deferred_switch)"
+  seen="$(deferred_provider_signal "$lane" compaction_count 2>/dev/null)" || seen=""
+  [[ "$seen" =~ ^[0-9]+$ ]] || seen=null
+  record="$(jq -cn --argjson from "$from" --argjson to "$to" --arg to_op "$ESC_OP" --arg to_cursor "$ESC_CURSOR" --arg trigger "$ESC_TRIGGER" --arg note "$note" --argjson at "$(date +%s)" --argjson seen "$seen" \
+    '{to_arm:$to,to_op:$to_op,to_cursor:$to_cursor,from_arm:$from,trigger:$trigger,note:$note,recorded_at:$at,compactions_seen:$seen}')"
+  lane_set "$lane" deferred_switch "$record"
+  [[ -z "$ESC_WARNING" ]] || warn "escalate: $ESC_WARNING"
+  reason="switch to $(escalate_arm_label "$to") deferred until a cold-cache boundary; the next revise that finds one applies it"
+  [[ -z "$previous" ]] || reason+=" (replaced the deferred switch to $(escalate_arm_label "$(jq -c .to_arm <<<"$previous")"))"
+  escalate_emit "$json" 0 "$reason" "$from" "$to" "$index" "waspflow status $lane" "waspflow escalate $lane --cancel-deferred"
+}
+
+deferred_cancel_locked() {
+  local lane="$1" json="$2" from="$3" index="$4" record
+  record="$(lane_get "$lane" deferred_switch)"
+  if [[ -z "$record" ]]; then escalate_emit "$json" 1 "no deferred switch is pending" "$from" null "$index"; return; fi
+  lane_set "$lane" deferred_switch ""
+  escalate_emit "$json" 0 "deferred switch to $(escalate_arm_label "$(jq -c .to_arm <<<"$record")") cancelled; the lane stays on its current arm" "$from" "$(jq -c .to_arm <<<"$record")" "$index"
+}
+
+# A live pane may switch only between turns: never kill a running turn.
+deferred_lane_quiescent() {
+  local lane="$1" provider barrier mark
+  tmux_window_exists "$lane" || return 0
+  provider="$(lane_get "$lane" provider)"; load_provider "$provider"
+  barrier="$(lane_get "$lane" revise_barrier_mark)"
+  if [[ -n "$barrier" ]]; then
+    mark="$("${provider}_turn_mark" "$lane" 2>/dev/null || echo 0)"
+    [[ "$barrier" =~ ^[0-9]+$ && "$mark" =~ ^[0-9]+$ && "$mark" -gt "$barrier" ]] || return 1
+  fi
+  "${provider}_is_idle" "$lane"
+}
+
+# Called by revise, under the lane lock, before it sends. When a boundary holds,
+# it switches with the message as the transition's submission, sets
+# DEFERRED_ATTEMPTED=true, and returns the transition's result as revise's. In
+# every other case the switch stays pending and revise sends on the current arm.
+# The poison and eligibility gates ran when the switch was deferred. Eligibility
+# is not re-run: the decision stands, and checkpoint freshness would fail after
+# any new work. Poison cannot rise meanwhile: only a running transition raises
+# it, and starting one clears the deferred switch.
+deferred_apply_before_revise_locked() {
+  local lane="$1" message="$2" out="$3" record label count status provider session mark rc
+  DEFERRED_ATTEMPTED=false
+  record="$(lane_get "$lane" deferred_switch)"; [[ -n "$record" ]] || return 0
+  label="$(escalate_arm_label "$(jq -c .to_arm <<<"$record")")"
+  if [[ "$(jq -cS .to_arm <<<"$record")" == "$(escalate_current_arm "$lane" | jq -cS .)" ]]; then
+    lane_set "$lane" deferred_switch ""
+    log "revise: dropped the deferred switch to $label; the lane already runs that arm"
+    return 0
+  fi
+  if [[ -z "$(jq -r '.compactions_seen // ""' <<<"$record")" ]] \
+     && count="$(deferred_provider_signal "$lane" compaction_count 2>/dev/null)" && [[ "$count" =~ ^[0-9]+$ ]]; then
+    record="$(jq -c --argjson n "$count" '.compactions_seen = $n' <<<"$record")"
+    lane_set "$lane" deferred_switch "$record"
+  fi
+  if [[ -n "$out" ]]; then
+    log "revise: deferred switch to $label stays pending; --out needs a headless reply from the current arm"
+    return 0
+  fi
+  if ! deferred_boundary "$lane" "$record"; then
+    log "revise: deferred switch to $label stays pending ($DEFERRED_DETAIL); sending on the current arm"
+    return 0
+  fi
+  if ! deferred_lane_quiescent "$lane"; then
+    log "revise: deferred switch to $label stays pending; the boundary holds ($DEFERRED_DETAIL) but the worker's turn has not ended; sending on the current arm"
+    return 0
+  fi
+  status="$(lane_get "$lane" status)"
+  case "$status" in
+    live|exited|parked|escalate_failed) ;;
+    *) log "revise: deferred switch to $label stays pending; lane status '$status' cannot switch arms"; return 0 ;;
+  esac
+  log "revise: cold-cache boundary ($DEFERRED_DETAIL); switching to $label, then sending"
+  DEFERRED_ATTEMPTED=true
+  provider="$(lane_get "$lane" provider)"; load_provider "$provider"
+  session="$(lane_get "$lane" session_id)"
+  mark="$("${provider}_turn_mark" "$lane" 2>/dev/null || echo 0)"
+  rc=0
+  escalate_begin_locked "$lane" false "$(jq -c .to_arm <<<"$record")" "$(jq -r .to_op <<<"$record")" "$(jq -r .to_cursor <<<"$record")" \
+    in_place "$(jq -r .trigger <<<"$record")" "$(jq -r .note <<<"$record")" false "$DEFERRED_BOUNDARY" "$message" || rc=$?
+  [[ "$rc" -eq 0 ]] || return "$rc"
+  # The same stale-idle barrier a live revise records (see cmd_wait). A turn
+  # count is only comparable inside one session, so set it only if the id held.
+  if [[ "$(lane_get "$lane" session_id)" == "$session" && "$mark" =~ ^[0-9]+$ ]]; then
+    lane_set "$lane" revise_barrier_mark "$mark"
+  fi
+}
+
 cmd_escalate() {
-  local lane="" requested="" handoff=false reset_tree=false force=false ack=false note="" json=false resume=false abort=false
+  local lane="" requested="" handoff=false reset_tree=false force=false ack=false note="" json=false resume=false abort=false defer=false cancel=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --to) requested="${2:-}"; [[ -n "$requested" ]] || { escalate_emit "$json" 1 "--to requires a value" null null null; return; }; shift 2 ;;
       --handoff) handoff=true; shift ;; --reset-tree) reset_tree=true; shift ;; --force) force=true; shift ;; --ack-deprecated) ack=true; shift ;;
       --note) note="${2:-}"; shift 2 ;; --json) json=true; shift ;; --resume-transition) resume=true; shift ;; --abort-transition) abort=true; shift ;;
+      --defer) defer=true; shift ;; --cancel-deferred) cancel=true; shift ;;
       -*) escalate_emit "$json" 1 "unknown option '$1'" null null null; return ;;
       *) if [[ -z "$lane" ]]; then lane="$1"; shift; else escalate_emit "$json" 1 "unexpected argument '$1'" null null null; return; fi ;;
     esac
   done
   if [[ -z "$lane" ]]; then escalate_emit "$json" 1 "escalate: <lane> required" null null null; return; fi
   if [[ "$resume" == true && "$abort" == true ]]; then escalate_emit "$json" 1 "--resume-transition and --abort-transition conflict" null null null; return; fi
+  if [[ "$cancel" == true && ( "$defer" == true || -n "$requested" || "$handoff" == true || "$reset_tree" == true || "$resume" == true || "$abort" == true ) ]]; then escalate_emit "$json" 1 "--cancel-deferred takes no other switch options" null null null; return; fi
+  if [[ "$defer" == true && ( "$resume" == true || "$abort" == true ) ]]; then escalate_emit "$json" 1 "--defer conflicts with --resume-transition and --abort-transition" null null null; return; fi
   if ! lane_exists "$lane"; then escalate_emit "$json" 1 "no such lane '$lane'" null null null; return; fi
-  lane_operation_run "$lane" escalate_locked "$lane" "$requested" "$handoff" "$reset_tree" "$force" "$ack" "$note" "$json" "$resume" "$abort"
+  lane_operation_run "$lane" escalate_locked "$lane" "$requested" "$handoff" "$reset_tree" "$force" "$ack" "$note" "$json" "$resume" "$abort" "$defer" "$cancel"
 }

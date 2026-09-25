@@ -464,6 +464,10 @@ Usage:
 Flags:
   --out <file>                Send the provider response to this file.
 
+A pending deferred switch (escalate --defer) applies first when a cold-cache
+boundary holds and the worker is between turns; the message is then sent on
+the new arm. Otherwise the message goes to the current arm.
+
 Examples:
   waspflow revise fix -- "Add a regression test too."
   waspflow revise fix --out reply.txt -- "Summarize remaining risk."
@@ -574,7 +578,8 @@ help_usage_escalate() {
 Switch a failed lane to another operating point or provider arm.
 
 Usage:
-  waspflow escalate <lane> [--to <op-id|provider/model[/effort]>] [--handoff] [--reset-tree] [--force] [--ack-deprecated] [--note <text>] [--json] [--resume-transition | --abort-transition]
+  waspflow escalate <lane> [--to <op-id|provider/model[/effort]>] [--handoff] [--reset-tree] [--force] [--ack-deprecated] [--note <text>] [--defer] [--json] [--resume-transition | --abort-transition]
+  waspflow escalate <lane> --cancel-deferred [--json]
 
 Flags:
   --to <target>               Select the target operating point or provider/model[/effort].
@@ -583,13 +588,31 @@ Flags:
   --force                     Escalate without an eligible failed checkpoint.
   --ack-deprecated            Permit a deprecated target fallback.
   --note <text>               Record an escalation note in the transition.
+  --defer                     Record the switch as pending; the next revise applies it at a cold-cache boundary.
+  --cancel-deferred           Drop the pending deferred switch; the lane keeps its current arm.
   --json                      Emit escalation results as JSON.
   --resume-transition         Continue a persisted escalation transition.
   --abort-transition          Abort a persisted escalation transition.
 
+Switch now or defer:
+  An in-place switch makes the next call re-read the whole transcript without
+  the prompt cache (measured on Claude: median 520K uncached tokens). Switch now
+  only when the current arm blocks progress, for example a verify failure it
+  cannot fix. Defer for quota pressure, phase changes, and downgrades.
+  A deferred switch waits until the session compacted after the deferral, or
+  was idle longer than the provider cache lifetime
+  (WASPFLOW_CACHE_TTL_MINUTES_<PROVIDER>; claude 60, others 0 = off). Then the
+  next `revise` switches and sends its message on the new arm. Until then,
+  revise sends on the current arm. `status` shows the pending switch and whether
+  a boundary holds. A handoff (or a switch to another provider) starts a fresh
+  session, so --defer applies it at once. A later --defer replaces the pending
+  switch; any immediate switch supersedes it.
+
 Examples:
   waspflow escalate fix --to review.audit
   waspflow escalate fix --to review.audit --handoff --json
+  waspflow escalate fix --to claude/claude-sonnet-5/medium --force --defer
+  waspflow escalate fix --cancel-deferred
 EOF
 }
 

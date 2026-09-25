@@ -732,10 +732,11 @@ artifacts_emit_receipt_v1() {
 }
 
 artifacts_emit_segment_receipt_v1() {
-  local lane="$1" transition_id="$2" result="${3:-verify_failed}" index
+  # boundary: the cache state the switch paid for (compaction|idle|handoff|none).
+  local lane="$1" transition_id="$2" result="${3:-verify_failed}" boundary="${4:-}" index
   index="$(lane_get "$lane" segment_index)"; [[ "$index" =~ ^[0-9]+$ ]] || index=0
   artifacts_emit_receipt_v1 "$lane" "$result" \
-    "$(jq -cn --argjson index "$index" --arg transition "$transition_id" '{index:$index,closed_by:"escalation",transition:$transition}')"
+    "$(jq -cn --argjson index "$index" --arg transition "$transition_id" --arg boundary "$boundary" '{index:$index,closed_by:"escalation",transition:$transition} + (if $boundary == "" then {} else {boundary:$boundary} end)')"
 }
 
 _artifacts_write_skipped_verify() {

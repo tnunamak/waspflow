@@ -213,6 +213,10 @@ silently ignoring the new arm still does.
   `stats_eligible` computed as usual. Final receipt: `closed_by: "reap"` +
   `escalation_path[]` (`{from_arm, to_arm, trigger, at, mode}` — activates the Phase 1
   reserved field). `receipt.json` in the lane dir = the LATEST receipt (documented).
+- 2026-09-25: segment rows and `escalation_path[]`/`arm_history[]` entries also carry
+  `boundary` (`compaction|idle|handoff|none`). `escalate --defer` records a pending
+  decision that `revise` applies through this same transition at a cold-cache
+  boundary; see `docs/deferred-switch.md`.
 
 ## Poison: consecutive failures, reset on reset (sol P1 #6, grok #21/#25/#26/#27)
 
