@@ -237,10 +237,7 @@ escalate_abort_locked() {
     escalate_emit "$json" 2 "abort lost the original arm/session snapshot; transition remains unresolved" "$(jq -c .from_arm <<<"$transition")" "$(jq -c .to_arm <<<"$transition")" "$(jq -r .segment_index <<<"$transition")" "waspflow escalate $lane --resume-transition" "waspflow escalate $lane --abort-transition"
     return
   fi
-  if jq -e 'has("submission_message")' >/dev/null <<<"$transition"; then
-    warn "escalate: this deferred switch carried a revise message that was never delivered; re-send it with: waspflow revise $lane -- <message>"
-    printf '%s\n' "$(jq -r .submission_message <<<"$transition")" >&2
-  fi
+  deferred_print_undelivered "$lane" escalate
   escalate_emit "$json" 0 "transition aborted; old arm remains live" "$(jq -c .from_arm <<<"$transition")" "$(jq -c .to_arm <<<"$transition")" "$(lane_get "$lane" segment_index)"
 }
 
@@ -270,6 +267,8 @@ escalate_commit_locked() {
     escalate_emit "$json" 2 "transition CAS lost original arm/session snapshot" "$from" "$to" "$index"
     return
   fi
+  # A resumed deferred apply delivered the revise message it carried.
+  if jq -e 'has("submission_message")' >/dev/null <<<"$transition"; then lane_set "$lane" undelivered_message ""; fi
   tmux_kill_window_if_owned "$(jq -cn --arg tmux_session "$(jq -r '.from_tmux_session // ""' <<<"$transition")" --arg tmux_window "$(jq -r '.from_tmux_window // ""' <<<"$transition")" --arg tmux_pane_pid "$(jq -r '.from_tmux_pane_pid // ""' <<<"$transition")" '{tmux_session:$tmux_session,tmux_window:$tmux_window,tmux_pane_pid:$tmux_pane_pid}')" >/dev/null 2>&1 || true
   escalate_emit "$json" 0 "arm switched to $(escalate_arm_label "$to")" "$from" "$to" "$((index+1))"
 }
@@ -389,7 +388,7 @@ escalate_run_locked() {
       escalate_emit "$json" 2 "closing segment receipt failed" "$(jq -c .from_arm <<<"$transition")" "$(jq -c .to_arm <<<"$transition")" "$(jq -r .segment_index <<<"$transition")"; return
     fi
     escalate_maybe_test_crash_after_phase receipt_appended || return $?
-    lane_set "$lane" pending_transition "$(jq -c '.phase="receipt_committed"' <<<"$transition")" deferred_switch ""
+    lane_set "$lane" pending_transition "$(jq -c '.phase="receipt_committed"' <<<"$transition")"
     escalate_maybe_test_crash_after_phase receipt_committed || return $?
     transition="$(lane_get "$lane" pending_transition)"; phase=receipt_committed
   fi
@@ -454,6 +453,7 @@ escalate_locked() {
   fi
   [[ "$defer" != true ]] || log "escalate: --defer has nothing to wait for — a handoff starts a fresh session, so the switch applies now"
   [[ -z "$ESC_WARNING" ]] || warn "escalate: $ESC_WARNING"
+  deferred_print_undelivered "$lane" escalate
   local boundary=none; [[ "$mode" == handoff ]] && boundary=handoff
   escalate_begin_locked "$lane" "$json" "$to" "$ESC_OP" "$ESC_CURSOR" "$mode" "$ESC_TRIGGER" "$note" "$reset_tree" "$boundary" ""
 }
@@ -461,18 +461,13 @@ escalate_locked() {
 # Journal a new transition at `prepared` and run it. `boundary` records the cache
 # state the switch paid for (compaction|idle|handoff|none) so receipts can measure
 # it. A non-empty `message` replaces the escalation prompt: a deferred switch
-# carries the revise instruction that found the boundary. An immediate transition
-# supersedes a deferred switch at once; a deferred apply keeps its record (and the
-# unsent message) until the receipt commits, the first resumable phase.
+# carries the revise instruction that found the boundary. Starting any transition
+# consumes the deferred switch; if it fails, the operator re-decides.
 escalate_begin_locked() {
   local lane="$1" json="$2" to="$3" to_op="$4" to_cursor="$5" mode="$6" trigger="$7" note="$8" reset_tree="$9" boundary="${10}" message="${11:-}" index transition
   index="$(lane_get "$lane" segment_index)"; [[ "$index" =~ ^[0-9]+$ ]] || index=0
   transition="$(jq -cn --arg id "$(new_uuid)" --argjson from "$(escalate_current_arm "$lane")" --arg from_generation "$(lane_get "$lane" arm_generation)" --arg from_session "$(lane_get "$lane" session_id)" --arg from_tmux_session "$(lane_get "$lane" tmux_session)" --arg from_tmux_window "$(lane_get "$lane" tmux_window)" --arg from_tmux_pane_pid "$(lane_get "$lane" tmux_pane_pid)" --argjson index "$index" --argjson to "$to" --arg to_op "$to_op" --arg to_cursor "$to_cursor" --arg mode "$mode" --arg trigger "$trigger" --arg note "$note" --argjson reset_tree "$reset_tree" --arg boundary "$boundary" --arg message "$message" '{id:$id,phase:"prepared",from_arm:$from,from_generation:$from_generation,from_session:$from_session,from_tmux_session:$from_tmux_session,from_tmux_window:$from_tmux_window,from_tmux_pane_pid:$from_tmux_pane_pid,segment_index:$index,to_arm:$to,to_op:$to_op,to_cursor:$to_cursor,mode:$mode,trigger:$trigger,note:$note,reset_tree:$reset_tree,boundary:$boundary,submission_marker:("WASPFLOW_LANE_MARKER:escalation:" + $id),submission_nonce:("WASPFLOW_ESCALATION_TRANSITION:" + $id)} + (if $message == "" then {} else {submission_message:$message} end)')"
-  if [[ -z "$message" ]]; then
-    lane_set "$lane" status escalating pending_transition "$transition" escalation_error "" deferred_switch ""
-  else
-    lane_set "$lane" status escalating pending_transition "$transition" escalation_error ""
-  fi
+  lane_set "$lane" status escalating pending_transition "$transition" escalation_error "" deferred_switch ""
   escalate_maybe_test_crash_after_phase prepared || return $?
   escalate_run_locked "$lane" "$json"
 }
@@ -576,8 +571,11 @@ deferred_status_json() {
   record="$(lane_get "$lane" deferred_switch)"
   [[ -n "$record" ]] || { printf 'null\n'; return; }
   deferred_boundary "$lane" "$record" && holds=true
-  jq -c --argjson holds "$holds" --arg boundary "$DEFERRED_BOUNDARY" --arg detail "$DEFERRED_DETAIL" \
-    '. + {boundary_now:{holds:$holds,boundary:(if $boundary == "" then null else $boundary end),detail:$detail}}' <<<"$record"
+  local blocked=""
+  deferred_window_attached "$lane" && blocked="a tmux client is attached to the lane window"
+  jq -c --argjson holds "$holds" --arg boundary "$DEFERRED_BOUNDARY" --arg detail "$DEFERRED_DETAIL" --arg blocked "$blocked" \
+    '. + {boundary_now:{holds:$holds,boundary:(if $boundary == "" then null else $boundary end),detail:$detail}}
+     + (if $blocked == "" then {} else {apply_blocked:$blocked} end)' <<<"$record"
 }
 
 # One stderr line for observers such as `wait`.
@@ -590,6 +588,16 @@ deferred_report() {
   else
     log "$verb: deferred switch to $label pending; no cold-cache boundary yet ($DEFERRED_DETAIL)"
   fi
+}
+
+# A deferred apply stores its revise message in `undelivered_message` before the
+# switch starts; the next successful send clears it. Print it, verbatim, wherever
+# the operator could otherwise lose track of it.
+deferred_print_undelivered() {
+  local lane="$1" verb="$2" message
+  message="$(lane_get "$lane" undelivered_message)"; [[ -n "$message" ]] || return 0
+  warn "$verb: this revise message was never delivered (lane field undelivered_message); re-send it with: waspflow revise $lane -- <message>"
+  printf '%s\n' "$message" >&2
 }
 
 deferred_record_locked() {
@@ -613,9 +621,18 @@ deferred_record_locked() {
 deferred_cancel_locked() {
   local lane="$1" json="$2" from="$3" index="$4" record
   record="$(lane_get "$lane" deferred_switch)"
+  deferred_print_undelivered "$lane" escalate
   if [[ -z "$record" ]]; then escalate_emit "$json" 1 "no deferred switch is pending" "$from" null "$index"; return; fi
   lane_set "$lane" deferred_switch ""
   escalate_emit "$json" 0 "deferred switch to $(escalate_arm_label "$(jq -c .to_arm <<<"$record")") cancelled; the lane stays on its current arm" "$from" "$(jq -c .to_arm <<<"$record")" "$index"
+}
+
+# A client viewing the lane window can submit a prompt at any moment, including
+# after the idle checks and before the replacement session starts. Never switch
+# under an attached client.
+deferred_window_attached() {
+  tmux_window_exists "$1" || return 1
+  [[ "$(tmux display-message -p -t "$(tmux_window_target "$1")" '#{window_active_clients}' 2>/dev/null)" =~ ^[1-9] ]]
 }
 
 # A live pane may switch only between turns: never kill a running turn.
@@ -665,6 +682,10 @@ deferred_apply_before_revise_locked() {
     log "revise: deferred switch to $label stays pending ($DEFERRED_DETAIL); sending on the current arm"
     return 0
   fi
+  if deferred_window_attached "$lane"; then
+    log "revise: deferred switch to $label stays pending; a tmux client is attached to the lane window (detach first); sending on the current arm"
+    return 0
+  fi
   if ! deferred_lane_quiescent "$lane"; then
     log "revise: deferred switch to $label stays pending; the boundary holds ($DEFERRED_DETAIL) but the worker's turn has not ended; sending on the current arm"
     return 0
@@ -679,17 +700,15 @@ deferred_apply_before_revise_locked() {
   provider="$(lane_get "$lane" provider)"; load_provider "$provider"
   session="$(lane_get "$lane" session_id)"
   mark="$("${provider}_turn_mark" "$lane" 2>/dev/null || echo 0)"
-  # Until the receipt commits, the deferred record is the only durable copy of
-  # the message: a failed prepared phase abandons its transition.
-  lane_set "$lane" deferred_switch "$(jq -c --arg message "$message" --argjson at "$(date +%s)" '. + {unsent_message:$message,unsent_at:$at}' <<<"$record")"
+  # The transition consumes the deferred switch. Keep the message where a failed
+  # switch cannot take it with it; the next successful send clears it.
+  lane_set "$lane" undelivered_message "$message"
   rc=0
   escalate_begin_locked "$lane" false "$(jq -c .to_arm <<<"$record")" "$(jq -r .to_op <<<"$record")" "$(jq -r .to_cursor <<<"$record")" \
     in_place "$(jq -r .trigger <<<"$record")" "$(jq -r .note <<<"$record")" false "$DEFERRED_BOUNDARY" "$message" || rc=$?
   if [[ "$rc" -ne 0 ]]; then
-    if [[ -z "$(lane_get "$lane" pending_transition)" && -n "$(lane_get "$lane" deferred_switch)" ]]; then
-      err "revise: the switch failed before your message was sent; the lane stays on its current arm and the switch stays pending"
-      err "  the message is saved in deferred_switch.unsent_message (waspflow status $lane); re-send it with: waspflow revise $lane -- <message>"
-    fi
+    err "revise: the switch to $label failed and was dropped; decide again with waspflow escalate"
+    deferred_print_undelivered "$lane" revise
     return "$rc"
   fi
   # The same stale-idle barrier a live revise records (see cmd_wait). A turn

@@ -1404,7 +1404,9 @@ _revise_one() {
     log "revise: lane '$lane' window exited; resuming session headlessly"
     lane_set "$lane" surface_changed "true"
   fi
-  "${provider}_revise" "$lane" "$message" "$out"
+  "${provider}_revise" "$lane" "$message" "$out" || return $?
+  # A delivered instruction supersedes one a failed deferred switch left behind.
+  [[ -z "$(lane_get "$lane" undelivered_message)" ]] || lane_set "$lane" undelivered_message ""
 }
 
 cmd_attach() {

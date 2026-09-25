@@ -398,11 +398,21 @@ claude_compactions_since() {
 }
 # claude_is_idle reads only the last assistant stop_reason, so a prompt typed
 # through `attach` (its user row written, no assistant row yet) still looks idle.
-# Settled = no user row after the last completed assistant turn.
+# Settled = no user row after the last completed turn. A local slash command
+# (e.g. /compact) writes its typed row when it starts and a <local-command-stdout>
+# row when it finishes; the meta, command-name and compact-summary rows between
+# are not prompts.
 claude_turn_settled() {
   local jsonl
   jsonl="$(claude_session_log "$1")" || return 1
-  [[ "$(jq -rc 'if .type=="assistant" and .message.stop_reason=="end_turn" then "end" elif .type=="user" then "user" else empty end' "$jsonl" 2>/dev/null | tail -n 1)" == end ]]
+  [[ "$(jq -rc '
+    if .type=="assistant" and .message.stop_reason=="end_turn" then "end"
+    elif .type=="user" then
+      ((.message.content // "") | if type=="string" then . elif type=="array" then (map(select(type=="object" and .type=="text") | .text) | join("")) else "" end) as $text
+      | if ($text | startswith("<local-command-stdout>")) then "end"
+        elif .isMeta == true or .isCompactSummary == true or ($text | test("^\\s*<(command-name|command-message|local-command-caveat)>")) then empty
+        else "user" end
+    else empty end' "$jsonl" 2>/dev/null | tail -n 1)" == end ]]
 }
 
 # Revise: re-enter the session and run one turn. Two paths:

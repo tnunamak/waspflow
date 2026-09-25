@@ -56,7 +56,12 @@ message, it checks the lane:
    `claude_is_idle` reads only the last assistant `end_turn`: a prompt typed
    through `attach` writes its user row first and would otherwise look idle.
    (Codex's idle check already requires the rollout's last row to be
-   `task_complete`.) waspflow never kills a running turn.
+   `task_complete`.) A finished local slash command (its `<local-command-stdout>`
+   row) counts as a completed turn; one still running does not.
+3. No tmux client is attached to the lane window. An attached operator can
+   submit a prompt after these checks and before the replacement session starts,
+   and the switch would kill that turn. `status` reports this as
+   `deferred_switch_status.apply_blocked`. waspflow never kills a running turn.
 
 If both hold, `revise` runs the ordinary escalation transition (journal,
 closing `lane_segment` receipt, provisional window, confirmed submission, CAS
@@ -65,14 +70,13 @@ sent once, on the new arm. It then records the same stale-idle barrier that a
 live revise records, if the session id carried over. If either check fails,
 `revise` sends on the current arm and the switch stays pending.
 
-The message must never be lost. Before the transition starts, `revise` saves it
-as `deferred_switch.unsent_message`, and the deferred record stays until the
-closing receipt commits, the first phase from which `--resume-transition`
-redelivers it. If the receipt write fails, the transition is abandoned as before,
-but the record, the message and the pending switch survive; `revise` exits 2 and
-says where the message is. After the receipt commits, the transition holds the
-only copy; `--abort-transition` prints the undelivered message so it can be sent
-again.
+Failure semantics are deliberately simple. Starting the transition consumes the
+deferred switch. If the switch fails at any phase, it is dropped and the operator
+decides again; there is no automatic retry. The revise message is saved first in
+the lane field `undelivered_message`: `revise` prints it verbatim on failure,
+`status` shows it, and `--cancel-deferred`, `--abort-transition` and an
+immediate escalate print it too. The next successful send on the lane clears it,
+and so does a `--resume-transition` that delivers it.
 
 The operator's message goes first and unchanged. A short trailing note says that
 the model/effort changed and carries the transition nonce, which the Claude
@@ -84,8 +88,8 @@ applies a deferred switch.
 
 A slash command sent with `revise` (for example `revise lane -- /compact`)
 completes no model turn. The revise barrier therefore stays set, and the switch
-applies one ordinary turn later. This keeps the rule "never interrupt a turn"
-without a Claude-specific exception.
+applies one ordinary turn later. A slash command typed through `attach` sets no
+barrier, so the switch can apply once it finishes and the client detaches.
 
 Other rules:
 

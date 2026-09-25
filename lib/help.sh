@@ -603,10 +603,13 @@ Switch now or defer:
   was idle longer than the provider cache lifetime
   (WASPFLOW_CACHE_TTL_MINUTES_<PROVIDER>; claude 60, others 0 = off). Then the
   next `revise` switches and sends its message on the new arm. Until then,
-  revise sends on the current arm. `status` shows the pending switch and whether
-  a boundary holds. A handoff (or a switch to another provider) starts a fresh
-  session, so --defer applies it at once. A later --defer replaces the pending
-  switch; any immediate switch supersedes it. Providers that cannot apply a
+  revise sends on the current arm; it also waits while a tmux client is
+  attached to the lane window. `status` shows the pending switch and whether a
+  boundary holds. If the switch fails, it is dropped and the message is kept in
+  the lane field undelivered_message. A handoff (or a switch to another
+  provider) starts a fresh session, so --defer applies it at once. A later
+  --defer replaces the pending switch; any immediate switch supersedes it.
+  Providers that cannot apply a
   deferred switch (grok: no boundary signal; qwen, deepseek, antigravity: no
   escalation hooks) refuse --defer.
 
