@@ -299,7 +299,7 @@ codex_preflight() {
 # lanes and later causing a connection-refused/dead lane to read as "idle" and
 # get "recovered" against someone else's session.
 codex_discover_session() {
-  local lane="$1" recorded lane_cwd marker
+  local lane="$1" recorded lane_cwd marker spawn_epoch
   recorded="$(lane_get "$lane" session_id)"
   if [[ -n "$recorded" ]]; then echo "$recorded"; return 0; fi
 
@@ -307,15 +307,89 @@ codex_discover_session() {
   [[ -n "$lane_cwd" ]] || { echo ""; return 0; }
   marker="$(lane_get "$lane" codex_marker)"
   [[ -n "$marker" ]] || { echo ""; return 0; }
+  spawn_epoch="$(lane_get "$lane" spawn_epoch)"
 
   local marker_match marker_sid
-  marker_match="$(_codex_find_rollout_for_marker "$lane_cwd" "$marker" || true)"
+  marker_match="$(_codex_find_rollout_for_marker "$lane_cwd" "$marker" "$spawn_epoch" || true)"
   if [[ -n "$marker_match" ]]; then
     marker_sid="$(_codex_rollout_session_id "$marker_match")"
     [[ -n "$marker_sid" ]] && { echo "$marker_sid"; return 0; }
   fi
   echo ""
   return 0
+}
+
+# Resolve a lane's Codex session id and, when the scan below finds one, cache
+# it durably in lane state — the same session_id/rollout fields codex_spawn's
+# own success path already writes. codex_discover_session above is left a pure
+# read-only oracle on purpose (gc's dry-run scan and the archived-lane journey
+# test depend on that), but every REPEATED caller of that oracle — wait's poll
+# loop, park's safety predicate, revise — used to pay a fresh marker/content
+# scan on EVERY call whenever session_id was never recorded (a crash-recovered
+# or submission-race lane). That is the O(all-history)-per-poll defect behind
+# the 2026-09-25 IO storm: ~45 concurrent `waspflow wait` processes, each
+# re-running `rg -l -F --glob 'rollout-*.jsonl' -- WASPFLOW_LANE_MARKER:<lane>`
+# over 15GB / 2339 rollout files on a 2s poll interval, drove load to 122 and
+# IO pressure to ~68%.
+#
+# Two independent throttles, because either alone is insufficient:
+#   - PER-LANE RATE LIMIT: a lane that never resolves must not be re-scanned
+#     faster than WASPFLOW_CODEX_DISCOVERY_MIN_INTERVAL_SECONDS, no matter how
+#     tight the caller's poll interval is.
+#   - GLOBAL SERIALIZATION: distinct lanes needing a first-time scan at the
+#     same moment (a fleet spawn burst) must not run their scans concurrently.
+#     One flock makes them queue; the double-checked re-read inside the lock
+#     means a queued waiter that finds the answer already cached (by whoever
+#     held the lock before it) skips the scan entirely instead of repeating it.
+# Args: lane
+_codex_discover_session_cached() {
+  local lane="$1" sid min_interval last_attempt now
+  sid="$(lane_get "$lane" session_id)"
+  [[ -n "$sid" ]] && { echo "$sid"; return 0; }
+
+  min_interval="$(numeric_knob WASPFLOW_CODEX_DISCOVERY_MIN_INTERVAL_SECONDS 5)"
+  last_attempt="$(lane_get "$lane" codex_discovery_attempted_at)"
+  now="$(date +%s)"
+  if [[ "$last_attempt" =~ ^[0-9]+$ ]] && (( now - last_attempt < min_interval )); then
+    echo ""; return 0
+  fi
+
+  _codex_discover_session_cached_locked() {
+    # Re-check inside the lock: another waiter may have JUST resolved (or just
+    # attempted) this same lane while we queued. Without this re-check, N
+    # queued waiters would still run N scans serially — merely slower, not
+    # fewer, which is exactly what the required "at most one scan" bound rules
+    # out.
+    local sid2 last2 now2
+    sid2="$(lane_get "$lane" session_id)"
+    if [[ -n "$sid2" ]]; then echo "$sid2"; return 0; fi
+    last2="$(lane_get "$lane" codex_discovery_attempted_at)"
+    now2="$(date +%s)"
+    if [[ "$last2" =~ ^[0-9]+$ ]] && (( now2 - last2 < min_interval )); then
+      echo ""; return 0
+    fi
+    local found; found="$(codex_discover_session "$lane")"
+    lane_set "$lane" codex_discovery_attempted_at "$now2"
+    if [[ -n "$found" ]]; then
+      local rollout; rollout="$(_codex_rollout_for_session "$found" || true)"
+      if [[ -n "$rollout" ]]; then
+        lane_set "$lane" session_id "$found" rollout "$rollout"
+      else
+        lane_set "$lane" session_id "$found"
+      fi
+    fi
+    echo "$found"
+  }
+
+  local lockdir="$WASPFLOW_HOME/locks" lockf
+  mkdir -p "$lockdir" 2>/dev/null || true
+  lockf="$lockdir/codex-rollout-discovery.lock"
+  if command -v flock >/dev/null 2>&1; then
+    sid="$( ( flock -w 30 9 || exit 0; _codex_discover_session_cached_locked ) 9>"$lockf" )"
+  else
+    sid="$(_codex_discover_session_cached_locked)"
+  fi
+  echo "$sid"
 }
 
 # Spawn an interactive codex into the lane's tmux window (real PTY).
@@ -442,6 +516,7 @@ _codex_wait_composer_ready() {
 # Enter racing hook output). Up to a few attempts.
 _codex_submit_prompt() {
   local lane="$1" cwd="$2" target="$3" prompt="$4" marker="${5:-}" provisional="${6:-false}" attempt
+  local spawn_epoch; spawn_epoch="$(lane_get "$lane" spawn_epoch)"
   # A marker is REQUIRED to confirm submission safely: codex_spawn always sets
   # one before calling here. Without it, the only way to find "our" rollout is
   # cwd alone, which is AMBIGUOUS — any other lane (or a stale rollout from
@@ -474,7 +549,7 @@ $prompt"
     local j
     for j in $(seq 1 6); do
       local rollout=""
-      rollout="$(_codex_find_rollout_for_submitted_prompt "$cwd" "$full_prompt" || true)"
+      rollout="$(_codex_find_rollout_for_submitted_prompt "$cwd" "$full_prompt" "$spawn_epoch" || true)"
       if [[ -n "$rollout" ]]; then
         local sid
         sid="$(_codex_rollout_session_id "$rollout")"
@@ -538,15 +613,16 @@ codex_resume_with_arm() {
 # effect. The transition marker makes a prior escalation's user event in the same
 # Codex session ineligible evidence.
 codex_confirm_escalation_submission() {
-  local lane="$1" prompt="$2" _fresh="${3:-false}" transition cwd marker full_prompt rollout sid
+  local lane="$1" prompt="$2" _fresh="${3:-false}" transition cwd marker full_prompt rollout sid spawn_epoch
   transition="$(lane_get "$lane" pending_transition)"
   cwd="$(lane_get "$lane" cwd)"; marker="$(jq -r '.submission_marker // empty' <<<"$transition")"
   [[ -n "$marker" ]] || return 1
+  spawn_epoch="$(lane_get "$lane" spawn_epoch)"
   full_prompt="$marker
 Ignore the line above; it is for waspflow session correlation.
 
 $prompt"
-  rollout="$(_codex_find_rollout_for_submitted_prompt "$cwd" "$full_prompt" || true)"
+  rollout="$(_codex_find_rollout_for_submitted_prompt "$cwd" "$full_prompt" "$spawn_epoch" || true)"
   [[ -n "$rollout" ]] || return 1
   sid="$(_codex_rollout_session_id "$rollout")"
   [[ -n "$sid" ]] || return 1
@@ -579,13 +655,67 @@ _codex_rollout_session_id() {
 # (7,410 files vs 1,092 live on this host — §1 of the same inbox note is about
 # exactly this scan cost). Only crash recovery, where the target may have been
 # archived out from under us, pays for the second pass.
+#
+# DATE-BOUNDED LIVE SCAN (2026-09-25 IO storm). The live root is
+# YYYY/MM/DD-partitioned in real Codex installs (see the header comment). An
+# unbounded scan there is O(all history ever recorded on this machine) — on
+# the incident host, ~45 concurrent `waspflow wait` processes each ran this
+# exact rg over 15GB / 2339 files on a 2s poll, driving load to 122 and IO
+# pressure to ~68%. When a since_epoch is given AND the live root actually
+# uses the dated layout, restrict the search to the day directories from
+# (since_epoch - 1 day) through today (the 1-day pad absorbs UTC/local and
+# clock-skew boundary effects). A lane's own spawn_epoch is always a safe
+# lower bound: its rollout cannot predate its own spawn. Any other shape
+# (flat fixtures, an unpartitioned archive, a missing/garbage since_epoch)
+# fails OPEN to the prior full-root scan — correctness over speed.
+_codex_root_is_date_partitioned() {
+  local root="$1" d
+  for d in "$root"/[0-9][0-9][0-9][0-9]; do
+    [[ -d "$d" ]] && return 0
+  done
+  return 1
+}
+
+_codex_epoch_to_daydir() {
+  local epoch="$1"
+  date -u -d "@$epoch" +%Y/%m/%d 2>/dev/null || date -u -r "$epoch" +%Y/%m/%d 2>/dev/null
+}
+
+# Args: root since_epoch ; echoes the computed day-dir paths for the bounded
+# range, or nothing when no bound applies (caller must fail open in that case).
+#
+# Deliberately does NOT filter by whether each day dir exists yet: a lane that
+# just spawned may be discovered before Codex has created today's directory,
+# and rg/find already tolerate a nonexistent search path (stderr redirected to
+# /dev/null by the caller) by simply finding nothing there. Skipping a day dir
+# here because "it doesn't exist YET" would silently fall back to a full-root
+# scan on exactly the freshest, most common case — the opposite of the intent.
+_codex_bounded_day_dirs() {
+  local root="$1" since_epoch="$2" now day_epoch dir
+  [[ "$since_epoch" =~ ^[0-9]+$ ]] || return 1
+  _codex_root_is_date_partitioned "$root" || return 1
+  now="$(date +%s)"
+  day_epoch=$(( since_epoch - 86400 ))
+  while [[ "$day_epoch" -le "$now" ]]; do
+    dir="$root/$(_codex_epoch_to_daydir "$day_epoch")"
+    [[ -n "$dir" ]] && printf '%s\n' "$dir"
+    day_epoch=$(( day_epoch + 86400 ))
+  done
+}
+
+# Args: text [since_epoch]
 _codex_rollout_candidates_for_text() {
-  local text="$1" root out found=""
+  local text="$1" since_epoch="${2:-}" root out found=""
   while IFS= read -r root; do
+    local -a search_paths=()
+    if [[ "$root" == "$CODEX_SESSIONS_DIR" ]]; then
+      while IFS= read -r d; do search_paths+=("$d"); done < <(_codex_bounded_day_dirs "$root" "$since_epoch" || true)
+    fi
+    [[ "${#search_paths[@]}" -gt 0 ]] || search_paths=("$root")
     if command -v rg >/dev/null 2>&1; then
-      out="$(rg -l -F --glob 'rollout-*.jsonl' -- "$text" "$root" 2>/dev/null | sort -r)"
+      out="$(rg -l -F --glob 'rollout-*.jsonl' -- "$text" "${search_paths[@]}" 2>/dev/null | sort -r)"
     else
-      out="$(find "$root" -type f -name 'rollout-*.jsonl' -printf '%f\t%p\n' 2>/dev/null \
+      out="$(find "${search_paths[@]}" -type f -name 'rollout-*.jsonl' -printf '%f\t%p\n' 2>/dev/null \
         | sort -r | cut -f2- \
         | while IFS= read -r f; do grep -Fq "$text" "$f" 2>/dev/null && printf '%s\n' "$f"; done)"
     fi
@@ -594,10 +724,11 @@ _codex_rollout_candidates_for_text() {
   [[ -n "$found" ]]
 }
 
+# Args: cwd marker [since_epoch]
 _codex_find_rollout_for_marker() {
-  local cwd="$1" marker="$2" f fcwd
+  local cwd="$1" marker="$2" since_epoch="${3:-}" f fcwd
   [[ -n "$marker" ]] || return 1
-  local listing; listing="$(_codex_rollout_candidates_for_text "$marker")"
+  local listing; listing="$(_codex_rollout_candidates_for_text "$marker" "$since_epoch")"
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
     fcwd="$(head -1 "$f" 2>/dev/null | jq -rc 'select(.type=="session_meta") | .payload.cwd // empty' 2>/dev/null)"
@@ -612,12 +743,12 @@ _codex_find_rollout_for_marker() {
 # Echo the newest rollout in cwd containing the exact initial user message.
 # This is intentionally separate from marker lookup: marker-only lookup remains
 # the durable session-discovery key, while spawn receipt requires evidence that
-# the complete task crossed the tmux/Codex boundary. Args: cwd full_prompt
+# the complete task crossed the tmux/Codex boundary. Args: cwd full_prompt [since_epoch]
 _codex_find_rollout_for_submitted_prompt() {
-  local cwd="$1" full_prompt="$2" f fcwd marker listing
+  local cwd="$1" full_prompt="$2" since_epoch="${3:-}" f fcwd marker listing
   marker="${full_prompt%%$'\n'*}"
   if [[ "$marker" == WASPFLOW_LANE_MARKER:* ]]; then
-    listing="$(_codex_rollout_candidates_for_text "$marker")"
+    listing="$(_codex_rollout_candidates_for_text "$marker" "$since_epoch")"
   else
     # This helper is also used by narrow test fixtures.  A caller without the
     # spawn marker retains the former exhaustive, correctness-first behavior.
@@ -640,7 +771,7 @@ _codex_find_rollout_for_submitted_prompt() {
 # once we can discover the session it is resumable. Args: lane
 codex_session_resumable() {
   local lane="$1" sid
-  sid="$(codex_discover_session "$lane")"
+  sid="$(_codex_discover_session_cached "$lane")"
   [[ -n "$sid" ]]
 }
 
@@ -660,7 +791,7 @@ codex_refresh_runtime_settings() {
     # against the newly adopted arm.
     lane_update_if "$lane" "$expected_generation" "$expected_session" runtime_refresh_state "$1" runtime_refresh_error "${2:-}" runtime_refresh_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
   }
-  sid="$(codex_discover_session "$lane")"
+  sid="$(_codex_discover_session_cached "$lane")"
   [[ -n "$sid" ]] || {
     _codex_runtime_refresh_health unknown no-session
     return 0
@@ -756,7 +887,7 @@ codex_refresh_runtime_settings() {
 # Args: lane
 codex_is_idle() {
   local lane="$1" sid rollout last
-  sid="$(codex_discover_session "$lane")"
+  sid="$(_codex_discover_session_cached "$lane")"
   [[ -n "$sid" ]] || return 1
   rollout="$(lane_get "$lane" rollout)"
   if [[ -z "$rollout" || ! -f "$rollout" ]]; then
@@ -773,7 +904,7 @@ codex_is_idle() {
 # message — so the wait barrier clears exactly when the revised turn completes.
 codex_turn_mark() {
   local lane="$1" sid rollout
-  sid="$(codex_discover_session "$lane")"
+  sid="$(_codex_discover_session_cached "$lane")"
   [[ -n "$sid" ]] || { echo 0; return 0; }
   rollout="$(lane_get "$lane" rollout)"
   if [[ -z "$rollout" || ! -f "$rollout" ]]; then
@@ -794,7 +925,7 @@ codex_session_log() {
   local sid rollout
   rollout="$(lane_get "$1" rollout)"
   if [[ -z "$rollout" || ! -f "$rollout" ]]; then
-    sid="$(codex_discover_session "$1")"
+    sid="$(_codex_discover_session_cached "$1")"
     [[ -n "$sid" ]] || return 1
     rollout="$(_codex_rollout_for_session "$sid" || true)"
   fi
@@ -842,7 +973,7 @@ codex_revise() {
       revise_submission_state unconfirmed-pending \
       revise_submission_error pending revise_task_started_mark ""
   fi
-  sid="$(codex_discover_session "$lane")"
+  sid="$(_codex_discover_session_cached "$lane")"
   [[ -n "$sid" ]] || {
     if tmux_window_exists "$lane"; then
       lane_set "$lane" revise_submission_state unconfirmed-no-session revise_submission_error no-session
@@ -863,11 +994,12 @@ codex_revise() {
     # queued in Codex's composer without a task having started.
     local target rollout before after attempt j attempts polls
     target="$(tmux_window_target "$lane")"
-    # codex_discover_session is a read-only oracle (no lane_set side effect), so
-    # `rollout` may not be cached in lane state. Resolve it the same safe way
-    # codex_is_idle/codex_turn_mark do: the cached path if present, else a
-    # find scoped by the unique session UUID — NEVER an ambiguous cwd-only
-    # search (same hazard class as the discovery path itself).
+    # _codex_discover_session_cached already persists session_id/rollout on a
+    # successful resolution, but an OLDER cached lane may still be missing
+    # `rollout` alone (session_id known, rollout not yet resolved). Resolve it
+    # the same safe way codex_is_idle/codex_turn_mark do: the cached path if
+    # present, else a find scoped by the unique session UUID — NEVER an
+    # ambiguous cwd-only search (same hazard class as the discovery path itself).
     rollout="$(lane_get "$lane" rollout)"
     if [[ -z "$rollout" || ! -f "$rollout" ]]; then
       rollout="$(_codex_rollout_for_session "$sid" || true)"

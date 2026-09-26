@@ -1169,6 +1169,173 @@ JSONL
     || { echo "codex discovery: read-only oracle mutated lane state" >&2; exit 1; }
 )
 
+# DATE-BOUNDED LIVE SCAN (2026-09-25 IO storm). ~45 concurrent `waspflow wait`
+# processes each re-ran `rg -l -F --glob 'rollout-*.jsonl' -- WASPFLOW_LANE_MARKER:<lane>`
+# over the ENTIRE live sessions tree (15GB / 2339 files) on every 2s poll,
+# driving load to 122 and IO pressure to ~68%. The live root is date-
+# partitioned (YYYY/MM/DD) in real installs; a lane's own spawn_epoch is a safe
+# lower bound for where its rollout can live. Prove the bound is REAL, not
+# cosmetic: a marker that exists ONLY in a day outside the bounded window must
+# be invisible to a bounded scan, visible once the window covers it, and still
+# reachable when no bound is given (fail-open for flat/legacy fixtures).
+(
+  export WASPFLOW_HOME="$state_home"
+  bound_sessions="$(mktemp -d "$scratch/waspflow-codex-bound-XXXXXX")"
+  bound_cwd="$fixture"
+  old_day="2026/01/01"
+  old_epoch="$(date -u -d '2026-01-01T00:00:00Z' +%s)"
+  mkdir -p "$bound_sessions/$old_day"
+  cat >"$bound_sessions/$old_day/rollout-2026-01-01T00-00-01-33333333-3333-3333-3333-333333333333.jsonl" <<JSONL
+{"type":"session_meta","payload":{"id":"33333333-3333-3333-3333-333333333333","cwd":"$bound_cwd"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"WASPFLOW_LANE_MARKER:bounded-lane:only-in-old-day"}}
+{"type":"event_msg","payload":{"type":"task_complete"}}
+JSONL
+  export CODEX_SESSIONS_DIR="$bound_sessions"
+  unset CODEX_SESSIONS_ARCHIVE_DIR
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/codex.sh"
+
+  now_epoch="$(date +%s)"
+  found_recent="$(_codex_find_rollout_for_marker "$bound_cwd" "WASPFLOW_LANE_MARKER:bounded-lane:only-in-old-day" "$now_epoch" || true)"
+  [[ -z "$found_recent" ]] \
+    || { echo "bounded scan: a recent-window scan reached a rollout outside its date range" >&2; exit 1; }
+
+  found_covered="$(_codex_find_rollout_for_marker "$bound_cwd" "WASPFLOW_LANE_MARKER:bounded-lane:only-in-old-day" "$old_epoch" || true)"
+  [[ -n "$found_covered" ]] \
+    || { echo "bounded scan: a window covering the target day still missed it" >&2; exit 1; }
+
+  found_open="$(_codex_find_rollout_for_marker "$bound_cwd" "WASPFLOW_LANE_MARKER:bounded-lane:only-in-old-day" "" || true)"
+  [[ -n "$found_open" ]] \
+    || { echo "bounded scan: an absent since_epoch did not fail open to a full scan" >&2; exit 1; }
+)
+
+# KNOWN LANE NEVER SCANS (regression guard for the 2026-09-25 IO storm). Once a
+# lane's session_id (and rollout) is recorded, every hot poll path built on
+# _codex_discover_session_cached — is_idle, turn_mark, the discovery cache
+# itself — must resolve it purely from lane state, never re-running a
+# marker/content scan. Proven structurally with a spy `rg` in PATH: real
+# ripgrep behavior is preserved (the spy execs the real binary), but every
+# invocation is also counted, so a regression shows up as a nonzero count
+# instead of a timing fluke.
+(
+  export WASPFLOW_HOME="$state_home"
+  known_sessions="$(mktemp -d "$scratch/waspflow-codex-known-sessions-XXXXXX")"
+  known_cwd="$fixture"
+  ksid="44444444-4444-4444-4444-444444444444"
+  known_day="$(date -u +%Y/%m/%d)"
+  mkdir -p "$known_sessions/$known_day"
+  krollout="$known_sessions/$known_day/rollout-2026-09-25T00-00-01-$ksid.jsonl"
+  cat >"$krollout" <<JSONL
+{"type":"session_meta","payload":{"id":"$ksid","cwd":"$known_cwd"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"WASPFLOW_LANE_MARKER:known-lane:kkk"}}
+{"type":"event_msg","payload":{"type":"task_complete"}}
+JSONL
+
+  known_spy_bin="$(mktemp -d "$scratch/waspflow-codex-rg-spy-XXXXXX")"
+  known_spy_count="$known_spy_bin/.rg-calls"
+  known_real_rg="$(command -v rg)"
+  cat >"$known_spy_bin/rg" <<EOF
+#!/usr/bin/env bash
+printf '1\n' >>"$known_spy_count"
+exec "$known_real_rg" "\$@"
+EOF
+  chmod +x "$known_spy_bin/rg"
+
+  export PATH="$known_spy_bin:$PATH" CODEX_SESSIONS_DIR="$known_sessions"
+  unset CODEX_SESSIONS_ARCHIVE_DIR
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/codex.sh"
+
+  lane_set known-lane provider codex status live cwd "$known_cwd" \
+    codex_marker "WASPFLOW_LANE_MARKER:known-lane:kkk" session_id "$ksid" rollout "$krollout" \
+    spawn_epoch "$(date +%s)"
+
+  for _ in $(seq 1 10); do
+    [[ "$(_codex_discover_session_cached known-lane)" == "$ksid" ]] \
+      || { echo "known lane: cached discovery returned the wrong session id" >&2; exit 1; }
+    codex_is_idle known-lane >/dev/null 2>&1 || true
+    codex_turn_mark known-lane >/dev/null 2>&1 || true
+  done
+
+  [[ ! -f "$known_spy_count" ]] \
+    || { echo "known lane: a marker/content scan ran $(wc -l <"$known_spy_count") time(s) for a lane with a recorded session_id" >&2; exit 1; }
+)
+
+# 50 CONCURRENT WAITS -> AT MOST ONE DISCOVERY SCAN (direct reproduction of the
+# 2026-09-25 IO storm mechanism). A lane with only a spawn-time marker recorded
+# (session_id unknown — the crash-recovered/submission-race case that forced
+# EVERY poll to rescan before this fix) is discovered by 50 truly concurrent
+# processes at once. The rate limit alone cannot bound this (none of the 50 has
+# attempted yet), so this specifically exercises the global flock + the
+# double-checked re-read inside it. A spy `rg` counts real content scans.
+(
+  storm_sessions="$(mktemp -d "$scratch/waspflow-codex-storm-sessions-XXXXXX")"
+  storm_cwd="$fixture"
+  ssid="55555555-5555-5555-5555-555555555555"
+  storm_day="$(date -u +%Y/%m/%d)"
+  mkdir -p "$storm_sessions/$storm_day"
+  cat >"$storm_sessions/$storm_day/rollout-2026-09-25T00-00-02-$ssid.jsonl" <<JSONL
+{"type":"session_meta","payload":{"id":"$ssid","cwd":"$storm_cwd"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"WASPFLOW_LANE_MARKER:storm-lane:sss"}}
+{"type":"event_msg","payload":{"type":"task_complete"}}
+JSONL
+
+  storm_home="$(mktemp -d "$scratch/waspflow-codex-storm-home-XXXXXX")"
+  storm_spy_bin="$(mktemp -d "$scratch/waspflow-codex-storm-rg-spy-XXXXXX")"
+  storm_spy_count="$storm_spy_bin/.rg-calls"
+  storm_spy_lock="$storm_spy_bin/.rg-calls.lock"
+  storm_real_rg="$(command -v rg)"
+  cat >"$storm_spy_bin/rg" <<EOF
+#!/usr/bin/env bash
+( flock -x 200; printf '1\n' >>"$storm_spy_count" ) 200>"$storm_spy_lock"
+exec "$storm_real_rg" "\$@"
+EOF
+  chmod +x "$storm_spy_bin/rg"
+
+  export WASPFLOW_HOME="$storm_home" PATH="$storm_spy_bin:$PATH" CODEX_SESSIONS_DIR="$storm_sessions"
+  unset CODEX_SESSIONS_ARCHIVE_DIR
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/codex.sh"
+
+  lane_set storm-lane provider codex status live cwd "$storm_cwd" \
+    codex_marker "WASPFLOW_LANE_MARKER:storm-lane:sss" spawn_epoch "$(date +%s)"
+
+  storm_outdir="$(mktemp -d "$scratch/waspflow-codex-storm-out-XXXXXX")"
+  storm_pids=()
+  for i in $(seq 1 50); do
+    (
+      export WASPFLOW_HOME="$storm_home" PATH="$storm_spy_bin:$PATH" CODEX_SESSIONS_DIR="$storm_sessions"
+      # shellcheck disable=SC1090
+      source "$root/lib/core.sh"
+      # shellcheck disable=SC1090
+      source "$root/lib/providers/codex.sh"
+      _codex_discover_session_cached storm-lane >"$storm_outdir/$i.out" 2>"$storm_outdir/$i.err"
+    ) &
+    storm_pids+=("$!")
+  done
+  for storm_pid in "${storm_pids[@]}"; do wait "$storm_pid"; done
+
+  storm_calls="$(wc -l <"$storm_spy_count" 2>/dev/null || echo 0)"
+  [[ "$storm_calls" -le 1 ]] \
+    || { echo "storm: 50 concurrent discoveries ran $storm_calls content scans (expected at most 1)" >&2; exit 1; }
+
+  storm_mismatch=0
+  for i in $(seq 1 50); do
+    [[ "$(cat "$storm_outdir/$i.out" 2>/dev/null)" == "$ssid" ]] || storm_mismatch=$((storm_mismatch + 1))
+  done
+  [[ "$storm_mismatch" -eq 0 ]] \
+    || { echo "storm: $storm_mismatch of 50 concurrent waiters did not resolve the correct session id" >&2; exit 1; }
+
+  [[ "$(jq -r .session_id "$storm_home/lanes/storm-lane/state.json")" == "$ssid" ]] \
+    || { echo "storm: the resolved session id was not cached back into lane state" >&2; exit 1; }
+)
+
 # ARCHIVE-AWARE DISCOVERY (2026-09-05). A retention pass moves older rollouts to
 # a sibling sessions-archive tree. Its age cutoff was younger than the
 # crash-recovery resume horizon, so a still-resumable session was moved out of
