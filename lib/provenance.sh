@@ -290,7 +290,7 @@ provenance_emit_forensic_spawn_call() {
        lane:{id:$lane_uuid,label:$lane,provider:$provider},
        parent:{ref:$parent_ref,evidence_class:"forensic_spawn_call",root:{harness:(if $root_harness == "" then null else $root_harness end),session_id:$root_session_id}},
        evidence:{class:"forensic",method:"exact_spawn_tool_command_argument",matched_field:$matched_field,
-        command_fingerprint:"sha256:" + $command_hash,source:{path_fingerprint:"sha256:" + $source_path_hash,
+        command_fingerprint:("sha256:" + $command_hash),source:{path_fingerprint:("sha256:" + $source_path_hash),
         byte_offset:$source_offset,tool_observed_at:$tool_timestamp,spawn_delta_seconds:$spawn_delta}}}')" || return 1
   _provenance_append "$event_id" "$payload"
 }
