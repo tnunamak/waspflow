@@ -3143,7 +3143,7 @@ PROV
   MCPP_PARENT_REF_FILE="$child_parent_ref_file" \
     env -u WASPFLOW_PARENT_REF -u CODEX_THREAD_ID -u CLAUDE_CODE_SESSION_ID \
     WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
-    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-child-parent -- "test nested parent export" >/dev/null 2>&1
+    "$root/bin/waspflow" spawn --provider mcpp --lane mcp-child-parent -- "test nested parent export" || { echo "SPAWN-RC=$?" >&2; cat "$mcphome"/lanes/mcp-child-parent/*.log 2>/dev/null >&2; ls -la "$mcphome/lanes/mcp-child-parent" >&2; }
   for _ in $(seq 1 300); do [[ -s "$child_parent_ref_file" ]] && break; sleep 0.1; done
   child_lane_uuid="$(jq -r '.lane_uuid' "$mcphome/lanes/mcp-child-parent/state.json")"
   [[ "$(cat "$child_parent_ref_file")" == "waspflow:$child_lane_uuid" ]] \
