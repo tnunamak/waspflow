@@ -795,7 +795,7 @@ codex_session_resumable() {
 # `turn_context` is the best available observation. Missing/malformed logs stay
 # honest rather than turning the launch request into claimed runtime truth.
 codex_refresh_runtime_settings() {
-  local lane="$1" sid rollout snapshot snapshot_size last_byte line parsed source observed_at runtime_model runtime_effort expected_generation expected_session
+  local lane="$1" sid rollout snapshot snapshot_size last_byte line parsed source observed_at runtime_model runtime_effort expected_generation expected_session meta_line parent_sid parent_roll parent_meta parent_cwd chain_seen hops original_sid original_roll
   local line_number=0 last_line=0 malformed="" in_flight=0
   expected_generation="$(lane_get "$lane" arm_generation)"
   expected_session="$(lane_get "$lane" session_id)"
@@ -809,6 +809,9 @@ codex_refresh_runtime_settings() {
     _codex_runtime_refresh_health unknown no-session
     return 0
   }
+  # Discovery can legitimately repair stale session state before this receipt
+  # read, so anchor subsequent updates to the session it just selected.
+  expected_session="$(lane_get "$lane" session_id)"
   rollout="$(lane_get "$lane" rollout)"
   if [[ -z "$rollout" || ! -f "$rollout" ]]; then
     rollout="$(_codex_rollout_for_session "$sid" || true)"
@@ -817,6 +820,35 @@ codex_refresh_runtime_settings() {
     _codex_runtime_refresh_health unknown missing-rollout
     return 0
   }
+  original_sid="$sid"; original_roll="$rollout"
+
+  # Old lane state can still point at a subagent rollout. Follow only explicit
+  # parent_thread_id links, and only when each parent is an exact main rollout
+  # for this lane's cwd. Bound the walk and reject cycles/missing parents.
+  chain_seen="|$sid|"; hops=0
+  while :; do
+    meta_line="$(head -1 "$rollout" 2>/dev/null | jq -c 'select(.type == "session_meta") | .payload' 2>/dev/null)"
+    [[ -n "$meta_line" && "$(jq -r --arg sid "$sid" '.id // "" | select(. == $sid)' <<<"$meta_line")" == "$sid" ]] || break
+    [[ "$(jq -r 'if ((.source // {}) | type) == "object" and ((.source // {}) | has("subagent")) then 1 else 0 end' <<<"$meta_line")" == 1 ]] || break
+    parent_sid="$(jq -r '.source.subagent.thread_spawn.parent_thread_id // empty' <<<"$meta_line")"
+    [[ -n "$parent_sid" ]] || break
+    hops=$((hops + 1)); [[ "$hops" -le 32 && "$chain_seen" != *"|$parent_sid|"* ]] || break
+    parent_roll="$(_codex_rollout_for_session "$parent_sid" || true)"
+    [[ -n "$parent_roll" ]] || break
+    parent_meta="$(head -1 "$parent_roll" 2>/dev/null | jq -c --arg sid "$parent_sid" 'select(.type == "session_meta" and .payload.id == $sid) | .payload' 2>/dev/null)"
+    [[ -n "$parent_meta" ]] || break
+    parent_cwd="$(jq -r '.cwd // ""' <<<"$parent_meta")"
+    [[ "$parent_cwd" == "$(lane_get "$lane" cwd)" ]] || break
+    sid="$parent_sid"; rollout="$parent_roll"; chain_seen+="$sid|"
+  done
+  # Do not persist an intermediate subagent if a deeper parent link is broken.
+  if [[ "$(jq -r 'if ((.source // {}) | type) == "object" and ((.source // {}) | has("subagent")) then 1 else 0 end' <<<"${meta_line:-{}}" 2>/dev/null)" == 1 ]]; then
+    sid="$original_sid"; rollout="$original_roll"
+  elif [[ "$sid" != "$original_sid" ]]; then
+    if lane_update_if "$lane" "$expected_generation" "$expected_session" session_id "$sid" rollout "$rollout"; then
+      expected_session="$sid"
+    fi
+  fi
 
   # Codex writes append-only JSONL. Freeze the byte length first, then copy only
   # that prefix: later appends cannot change this snapshot's earlier records.
