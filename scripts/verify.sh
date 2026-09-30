@@ -4433,6 +4433,64 @@ JQ
   rm -rf "$batch_home"
 )
 
+# Plain table output uses bounded batches and preserves its byte format.
+(
+  table_home="$(mktemp -d "$scratch/waspflow-list-table-home-XXXXXX")"
+  table_bin="$table_home/bin"; mkdir -p "$table_bin" "$table_home/lanes"
+  cat >"$table_bin/systemctl" <<'SYSTEMCTL'
+#!/usr/bin/env bash
+exit 0
+SYSTEMCTL
+  chmod +x "$table_bin/systemctl"
+  cat >"$table_bin/jq" <<'JQ'
+#!/usr/bin/env bash
+[[ -z "${JQ_COUNTER_FILE:-}" ]] || printf 'call\n' >>"$JQ_COUNTER_FILE"
+exec "${REAL_JQ:-/usr/bin/jq}" "$@"
+JQ
+  chmod +x "$table_bin/jq"
+  mkdir -p "$table_home/lanes/byte-a"
+  jq -n '{provider:"codex",status:"reaped",cwd:"/fixture/a",model_requested:"m",effort_requested:"e",runtime_settings_state:"observed",runtime_model:"m",runtime_effort:"e",runtime_settings_match_requested:"true",runtime_refresh_state:"current"}' >"$table_home/lanes/byte-a/state.json"
+  mkdir -p "$table_home/lanes/byte"
+  jq -n '{provider:"claude",status:"reaped",cwd:"/fixture/byte",model:"sonnet",effort:"high",runtime_settings_state:"unknown",runtime_refresh_state:"unknown"}' >"$table_home/lanes/byte/state.json"
+  real_jq="$(command -v jq)"
+  cat >"$table_bin/jq" <<'JQ'
+#!/usr/bin/env bash
+[[ -z "${JQ_COUNTER_FILE:-}" ]] || printf 'call\n' >>"$JQ_COUNTER_FILE"
+exec "${REAL_JQ:-/usr/bin/jq}" "$@"
+JQ
+  chmod +x "$table_bin/jq"
+  jq_counter="$table_home/jq-calls"
+  table_actual="$(PATH="$table_bin:$PATH" REAL_JQ="$real_jq" JQ_COUNTER_FILE="$jq_counter" WASPFLOW_HOME="$table_home" "$root/bin/waspflow" list)"
+  diff -u "$root/scripts/fixtures/list-table.expected.txt" <(printf '%s\n' "$table_actual")
+  [[ "$(wc -l <"$jq_counter" | tr -d ' ')" == 2 ]] \
+    || { echo "list table batch: byte fixture did not use one batch and one liveness parse" >&2; exit 1; }
+  rm -rf "$table_home"
+
+  table_home="$(mktemp -d "$scratch/waspflow-list-table-count-home-XXXXXX")"
+  table_bin="$table_home/bin"; mkdir -p "$table_bin" "$table_home/lanes"
+  jq_counter="$table_home/jq-calls"
+  cat >"$table_bin/systemctl" <<'SYSTEMCTL'
+#!/usr/bin/env bash
+exit 0
+SYSTEMCTL
+  chmod +x "$table_bin/systemctl"
+  cat >"$table_bin/jq" <<'JQ'
+#!/usr/bin/env bash
+[[ -z "${JQ_COUNTER_FILE:-}" ]] || printf 'call\n' >>"$JQ_COUNTER_FILE"
+exec "${REAL_JQ:-/usr/bin/jq}" "$@"
+JQ
+  chmod +x "$table_bin/jq"
+  for i in $(seq 1 240); do
+    lane="table-$(printf '%04d' "$i")"; mkdir -p "$table_home/lanes/$lane"
+    jq -n --arg cwd "/fixture/$i" '{provider:"codex",status:"reaped",cwd:$cwd}' >"$table_home/lanes/$lane/state.json"
+  done
+  : >"$jq_counter"
+  PATH="$table_bin:$PATH" REAL_JQ="$real_jq" JQ_COUNTER_FILE="$jq_counter" WASPFLOW_HOME="$table_home" "$root/bin/waspflow" list >/dev/null
+  [[ "$(wc -l <"$jq_counter" | tr -d ' ')" == 3 ]] \
+    || { echo "list table batch: expected three jq calls for 240 healthy lanes" >&2; exit 1; }
+  rm -rf "$table_home"
+)
+
 # Batch liveness ignores pane identity entirely. A stored `live` record with no
 # active scope is interrupted even when its tmux pane still exists; pane PID
 # types therefore cannot change the result.

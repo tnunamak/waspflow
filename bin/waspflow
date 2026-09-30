@@ -676,6 +676,54 @@ JQ
   [[ ${#rows[@]} -eq 0 ]] && echo '[]' || printf '%s\n' "${rows[@]}" | jq -cs .
 }
 
+# Render healthy unfiltered table rows in the same bounded state-file batches
+# as the JSON inventory. A bad or missing record rejects the batch so cmd_list
+# can use its per-lane corruption reporting path unchanged.
+cmd_list_table_batch() {
+  local lanes="$1" active_scopes="$2" scope_query_available="$3" lane start=0 chunk_size=128 output jq_filter bad=0 state_file
+  local -a names=() files=() rows=()
+  jq_filter="$(waspflow_liveness_jq_defs; cat <<'JQ'
+input_filename as $file |
+($file | split("/") | .[-2]) as $lane |
+waspflow_derived_lifecycle($active_scopes; $scope_query_available) as $lifecycle |
+([ $lane, (.provider // ""), $lifecycle, (if (.outcome // "") == "" then "open" else .outcome end),
+   ((.model_requested // .model // "default") + "/" + (.effort_requested // .effort // "default") + " -> " +
+    (if (.runtime_settings_state // "unknown") == "observed" then
+      ((.runtime_model // "?") + "/" + (.runtime_effort // "?") + " " +
+       (if .runtime_settings_match_requested == "false" then "DRIFT" elif .runtime_settings_match_requested == "true" then "match" else "observed" end))
+     else (.runtime_settings_state // "unknown") end) + " [refresh=" + (.runtime_refresh_state // "unknown") +
+     (if (.runtime_refresh_error // "") != "" then ":" + .runtime_refresh_error else "" end) + "]"),
+   (.cwd // "") ] | join("\u001f"))
+JQ
+)"
+  mapfile -t names <<<"$lanes"
+  while [[ "$start" -lt "${#names[@]}" ]]; do
+    files=()
+    for ((i=start; i<start+chunk_size && i<${#names[@]}; i++)); do files+=("$(lane_state_file "${names[$i]}")"); done
+    if output="$(jq -r --argjson active_scopes "$active_scopes" \
+      --argjson scope_query_available "$scope_query_available" "$jq_filter" "${files[@]}" 2>/dev/null)"; then
+      while IFS= read -r lane; do [[ -n "$lane" ]] && rows+=("$lane"); done <<<"$output"
+    else
+      # Keep the old per-file validation and formatting for this chunk only.
+      for ((i=start; i<start+chunk_size && i<${#names[@]}; i++)); do
+        lane="${names[$i]}"; state_file="$(lane_state_file "$lane")"; bad=1
+        if [[ ! -f "$state_file" ]]; then
+          rows+=("$lane"$'\x1f?'$'\x1fMISSING_STATE_JSON'$'\x1f?'$'\x1funknown'$'\x1f(missing state.json; preserved)')
+        elif ! jq -c . "$state_file" >/dev/null 2>&1; then
+          rows+=("$lane"$'\x1f?'$'\x1fCORRUPT_UNPARSEABLE_STATE_JSON'$'\x1f?'$'\x1funknown'$'\x1f(unparseable state.json; preserved)')
+        else
+          output="$(jq -r --argjson active_scopes "$active_scopes" \
+            --argjson scope_query_available "$scope_query_available" "$jq_filter" "$state_file" 2>/dev/null)" || return 1
+          rows+=("$output")
+        fi
+      done
+    fi
+    start=$((start + chunk_size))
+  done
+  printf '%s\n' "${rows[@]}"
+  [[ "$bad" -eq 0 ]] || return 2
+}
+
 # The flywheel made visible: what the outcome ledger holds, and how much of it
 # is stats-eligible calibration data. Read-only over receipts.jsonl.
 cmd_receipts() {
@@ -763,6 +811,22 @@ cmd_list() {
   # healthy, unfiltered index without changing those semantics.
   if [[ "$json" -eq 1 && -z "$status_filter" && -z "$lifecycle_filter" && -z "$project" && -z "$limit" ]]; then
     if cmd_list_json_batch "$lanes" "$active_scopes" "$scope_query_available"; then return 0; fi
+  fi
+  if [[ "$json" -eq 0 && -z "$status_filter" && -z "$lifecycle_filter" && -z "$project" && -z "$limit" ]]; then
+    local table_rows table_row table_provider table_state table_outcome table_intent table_cwd
+    local table_batch_rc=0
+    table_rows="$(cmd_list_table_batch "$lanes" "$active_scopes" "$scope_query_available")" || table_batch_rc=$?
+    if [[ "$table_batch_rc" -eq 0 || "$table_batch_rc" -eq 2 ]]; then
+      while IFS= read -r table_row; do
+        IFS=$'\x1f' read -r lane table_provider table_state table_outcome table_intent table_cwd <<<"$table_row"
+        printf '%-20s %-8s %-11s %-11s %-48s %s\n' "$lane" "$table_provider" "$table_state" "$table_outcome" "$table_intent" "$table_cwd"
+      done <<<"$table_rows"
+      if [[ "$table_batch_rc" -eq 2 ]]; then
+        warn "list: one or more lanes have missing or unparseable state.json (shown with named conditions)"
+        return 2
+      fi
+      return 0
+    fi
   fi
   local lane matched=0 any_corrupt=0 emitted=0 slow_lifecycle_jq_filter
   local -a json_rows=()
