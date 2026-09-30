@@ -3001,6 +3001,78 @@ FAKE
   rm -rf "$argvbin"
 )
 
+# Claude print may exit zero after hitting its background-task wait ceiling.
+# Exercise the public exec command with a fake CLI, including both output
+# streams, and ensure requested output survives the failure.
+(
+  claude_ceiling_home="$(mktemp -d "$scratch/waspflow-claude-ceiling-XXXXXX")"
+  claude_ceiling_bin="$claude_ceiling_home/bin"
+  mkdir -p "$claude_ceiling_bin"
+  cat >"$claude_ceiling_bin/claude" <<'CLAUDE'
+#!/usr/bin/env bash
+printf 'partial worker output\n'
+if [[ "${CLAUDE_CEILING_MODE:-notice}" == stderr ]]; then
+  printf 'Background tasks still running after 600s; terminating. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.\n' >&2
+elif [[ "${CLAUDE_CEILING_MODE:-notice}" == notice ]]; then
+  printf 'Background tasks still running after 600s; terminating. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.\n'
+elif [[ "${CLAUDE_CEILING_MODE:-notice}" == quoted ]]; then
+  printf 'Quoted output: Background tasks still running after 600s; terminating. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.\n'
+  printf 'The quoted notice is context; the final answer is complete.\n'
+elif [[ "${CLAUDE_CEILING_MODE:-notice}" == ordinary ]]; then
+  printf 'Background tasks still running in another process; this turn completed normally.\n'
+fi
+if [[ "${CLAUDE_CEILING_MODE:-notice}" == stderr ]]; then
+  sleep 1
+  : >"${CLAUDE_CEILING_MARKER:?}"
+fi
+exit 0
+CLAUDE
+  chmod +x "$claude_ceiling_bin/claude"
+  export PATH="$claude_ceiling_bin:$PATH" WASPFLOW_HOME="$claude_ceiling_home/state" WASPFLOW_SELECTION_GATE=off
+  ceiling_out="$claude_ceiling_home/partial.out"
+  set +e
+  ceiling_err="$("$root/bin/waspflow" exec --provider claude --accept-provider-default -o "$ceiling_out" -- 'test task' 2>&1)"
+  ceiling_rc=$?
+  set -e
+  [[ "$ceiling_rc" -ne 0 && "$ceiling_err" == *'background-task wait ceiling'* \
+    && "$ceiling_err" == *'CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0'* \
+    && "$(cat "$ceiling_out")" == *'partial worker output'* ]] \
+    || { echo "claude exec: background ceiling was reported as success or output was lost" >&2; exit 1; }
+
+  ceiling_out="$claude_ceiling_home/stderr-partial.out"
+  ceiling_log="$claude_ceiling_home/stderr-live.log"
+  ceiling_marker="$claude_ceiling_home/stderr-finished"
+  set +e
+  CLAUDE_CEILING_MODE=stderr CLAUDE_CEILING_MARKER="$ceiling_marker" \
+    "$root/bin/waspflow" exec --provider claude --accept-provider-default -o "$ceiling_out" -- 'test task' >"$ceiling_log" 2>&1 &
+  ceiling_pid=$!
+  set -e
+  for _ in $(seq 1 40); do
+    grep -Fq 'Background tasks still running after 600s' "$ceiling_log" 2>/dev/null && break
+    sleep 0.05
+  done
+  [[ ! -e "$ceiling_marker" && "$(cat "$ceiling_log")" == *'Background tasks still running after 600s'* ]] \
+    || { echo "claude exec: stderr was not streamed while Claude was running" >&2; exit 1; }
+  set +e
+  wait "$ceiling_pid"
+  ceiling_rc=$?
+  set -e
+  ceiling_err="$(cat "$ceiling_log")"
+  [[ "$ceiling_rc" -ne 0 && "$ceiling_err" == *'CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0'* \
+    && "$(cat "$ceiling_out")" == *'partial worker output'* ]] \
+    || { echo "claude exec: stderr background ceiling was not detected" >&2; exit 1; }
+
+  ceiling_out="$claude_ceiling_home/quoted.out"
+  CLAUDE_CEILING_MODE=quoted "$root/bin/waspflow" exec --provider claude --accept-provider-default -o "$ceiling_out" -- 'test task'
+  grep -Fq 'The quoted notice is context; the final answer is complete.' "$ceiling_out" \
+    || { echo "claude exec: quoted notice in the body incorrectly failed" >&2; exit 1; }
+
+  ceiling_out="$claude_ceiling_home/ordinary.out"
+  CLAUDE_CEILING_MODE=ordinary "$root/bin/waspflow" exec --provider claude --accept-provider-default -o "$ceiling_out" -- 'test task'
+  grep -Fq 'this turn completed normally' "$ceiling_out" \
+    || { echo "claude exec: ordinary background-task text changed success behavior" >&2; exit 1; }
+)
+
 # Grok must not pretend it can provide a strict empty MCP boundary.
 (
   # shellcheck disable=SC1090
