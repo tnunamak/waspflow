@@ -5132,7 +5132,8 @@ JSON
   compact_rollout dfs-attached
   attached_window="$(lane_get dfs-attached tmux_window)"
   tmux select-window -t "$attached_window"
-  script -qfc "tmux attach-session -t $WASPFLOW_TMUX_SESSION" /dev/null >/dev/null 2>&1 &
+  # CI's TERM=dumb is not a usable tmux terminal, even inside script's pty.
+  TERM=xterm-256color script -qfc "tmux attach-session -t $WASPFLOW_TMUX_SESSION" /dev/null >/dev/null 2>&1 &
   attach_pid=$!
   for i in $(seq 1 50); do [[ "$(tmux display-message -p -t "$attached_window" '#{window_active_clients}')" -gt 0 ]] && break; sleep 0.1; done
   [[ "$(tmux display-message -p -t "$attached_window" '#{window_active_clients}')" -gt 0 ]] || { echo "deferred attached: could not attach a test client" >&2; exit 1; }
