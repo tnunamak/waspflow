@@ -1998,6 +1998,38 @@ JSONL
   lane_set fresh-uncorrelated provider codex status live cwd "$fixture" session_id "$other_sid" rollout "$unknown_roll" model gpt-5.6-terra effort medium runtime_receipt_enforced true runtime_receipt_version 2
   set +e; "$root/bin/waspflow" reap fresh-uncorrelated --no-archive >/dev/null 2>&1; uncorrelated_rc=$?; set -e
   [[ "$uncorrelated_rc" -eq 2 && "$(lane_get fresh-uncorrelated result)" == runtime_unverified ]] || { echo "runtime receipt: uncorrelated fresh lane did not fail closed" >&2; exit 1; }
+
+  # A stale runtime receipt remains guarded unless the operator explicitly
+  # forces finalization. The force is recorded, and never claims verification.
+  set +e; no_force_out="$("$root/bin/waspflow" reap fresh-unknown --no-archive 2>&1)"; no_force_rc=$?; set -e
+  [[ "$no_force_rc" -eq 2 && "$no_force_out" == *"--force"* ]] || { echo "runtime receipt: unknown receipt refusal omitted --force hint" >&2; exit 1; }
+  force_out="$("$root/bin/waspflow" reap fresh-unknown --no-archive --force 2>&1)"
+  [[ "$(lane_get fresh-unknown status)" == reaped && "$(lane_get fresh-unknown result)" == succeeded ]] || { echo "runtime receipt: --force did not finalize unknown receipt lane" >&2; exit 1; }
+  [[ "$(lane_get fresh-unknown runtime_forced_finalize)" == true && "$(lane_get fresh-unknown runtime_verification_state)" == unknown:unknown ]] || { echo "runtime receipt: forced finalize was not recorded accurately" >&2; exit 1; }
+  [[ "$force_out" == *"WITHOUT a verified Codex runtime receipt"* ]] || { echo "runtime receipt: forced finalize claimed verification" >&2; exit 1; }
+
+  # A gate refusal is not a terminal result. Once its observed drift is
+  # accepted, --force can pass the receipt gate and compute the real outcome.
+  reset_runtime
+  lane_set runtime runtime_receipt_enforced false
+  printf '%s\n' '{"type":"turn_context","timestamp":"2026-07-15T06:00:00Z","payload":{"model":"gpt-5.6-luna","effort":"low"}}' >>"$roll"
+  codex_refresh_runtime_settings runtime
+  set +e; "$root/bin/waspflow" reap runtime --no-archive >/dev/null 2>&1; drift_gate_rc=$?; set -e
+  [[ "$drift_gate_rc" -eq 2 && "$(lane_get runtime result)" == runtime_drift ]] || { echo "runtime receipt: drift gate did not refuse once" >&2; exit 1; }
+  "$root/bin/waspflow" accept-runtime runtime --reason "synthetic acceptance" >/dev/null
+  "$root/bin/waspflow" reap runtime --no-archive --force >/dev/null 2>&1
+  [[ "$(lane_get runtime result)" == succeeded && "$(lane_get runtime status)" == reaped ]] || { echo "runtime receipt: accepted drift became corrupt instead of a real result" >&2; exit 1; }
+
+  # Old versions may already have converted the gate marker to corrupt_result;
+  # recompute only when the saved prior_result proves that origin.
+  lane_set legacy-corrupt provider codex status live cwd "$fixture" result corrupt_result prior_result runtime_drift no_recovery true git_tracked false
+  "$root/bin/waspflow" reap legacy-corrupt --no-archive --force >/dev/null 2>&1
+  [[ "$(lane_get legacy-corrupt result)" == succeeded ]] || { echo "runtime receipt: legacy gate-marker corruption was not recomputed" >&2; exit 1; }
+
+  lane_set truly-corrupt provider codex status live cwd "$fixture" result mystery no_recovery true git_tracked false
+  set +e; "$root/bin/waspflow" reap truly-corrupt --no-archive --force >/dev/null 2>&1; corrupt_rc=$?; set -e
+  [[ "$corrupt_rc" -eq 2 && "$(lane_get truly-corrupt result)" == corrupt_result && "$(lane_get truly-corrupt prior_result)" == mystery ]] || { echo "runtime receipt: unrecognized result was not preserved as corruption" >&2; exit 1; }
+
   lane_set legacy-runtime provider codex status live cwd "$fixture" git_tracked false
   "$root/bin/waspflow" reap legacy-runtime --no-archive >/dev/null
   [[ "$(lane_get legacy-runtime result)" == succeeded ]] || { echo "runtime receipt: legacy lane behavior changed" >&2; exit 1; }

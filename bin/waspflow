@@ -1547,10 +1547,25 @@ _reap_one_locked() {
     accepted_at="$(lane_get "$lane" runtime_settings_accepted_observed_at)"
     if [[ "$runtime_health" != observed ]] || \
        { [[ "$runtime_match" != true ]] && [[ "$runtime_match" != false || "$accepted_at" != "$runtime_at" ]]; }; then
-      artifacts_capture_after "$lane"
-      lane_set "$lane" result "runtime_unverified" runtime_verification_state "${runtime_health:-unknown}:${runtime_match:-unknown}"
-      err "reap: lane '$lane' has no current verified Codex runtime receipt (refresh=${runtime_health:-unknown}, match=${runtime_match:-unknown}); inspect status or accept-runtime after reviewing an observed drift"
-      return 2
+      # `accept-runtime` is the intended remedy, but it only accepts an OBSERVED
+      # drift. Once a provider's rollout log ages out of the tail window the
+      # state is `unknown`, not `false`, so no command can ever satisfy this
+      # gate again -- the evidence is gone rather than contradictory. That
+      # leaves an old, worktree-less lane permanently unreapable and forces an
+      # operator to hand-edit state.json, which defeats the guard it is meant
+      # to enforce. `--force` is already documented as "force cleanup when
+      # normal checks refuse it", so honour it here too, recording that the
+      # receipt was never verified rather than laundering it to success.
+      if [[ "$force" == 1 ]]; then
+        warn "reap: lane '$lane' finalized WITHOUT a verified Codex runtime receipt (refresh=${runtime_health:-unknown}, match=${runtime_match:-unknown}) because --force was given"
+        lane_set "$lane" runtime_verification_state "${runtime_health:-unknown}:${runtime_match:-unknown}" runtime_forced_finalize true
+      else
+        artifacts_capture_after "$lane"
+        lane_set "$lane" result "runtime_unverified" runtime_verification_state "${runtime_health:-unknown}:${runtime_match:-unknown}"
+        err "reap: lane '$lane' has no current verified Codex runtime receipt (refresh=${runtime_health:-unknown}, match=${runtime_match:-unknown}); inspect status or accept-runtime after reviewing an observed drift"
+        err "  next: waspflow reap $lane --force   # if the receipt can no longer be observed (log aged out)"
+        return 2
+      fi
     fi
   fi
   if [[ "$(lane_get "$lane" runtime_settings_match_requested)" == false ]] && \
