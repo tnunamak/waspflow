@@ -2051,6 +2051,60 @@ JSONL
 {"type":"event_msg","payload":{"type":"user_message","message":"$marker"}}
 {"type":"turn_context","timestamp":"2026-07-15T04:57:00.000Z","payload":{"model":"gpt-5.5","effort":"low"}}
 JSONL
+  # Legacy state can point at the subagent. Refresh must repoint it to the
+  # explicit parent before computing the receipt.
+  lane_set runtime-legacy-child provider codex status live cwd "$fixture" codex_marker "$marker" \
+    session_id "$child_sid" rollout "$child_roll" model_requested gpt-5.6-terra effort_requested medium
+  codex_refresh_runtime_settings runtime-legacy-child
+  [[ "$(lane_get runtime-legacy-child session_id)" == "$parent_sid" && \
+     "$(lane_get runtime-legacy-child rollout)" == "$parent_roll" && \
+     "$(lane_get runtime-legacy-child runtime_model)" == gpt-5.6-terra && \
+     "$(lane_get runtime-legacy-child runtime_settings_match_requested)" == true ]] \
+    || { echo "runtime receipt: legacy subagent lane was not repointed to its parent" >&2; exit 1; }
+
+  middle_sid="55555555-5555-5555-5555-555555555556"
+  grandchild_sid="55555555-5555-5555-5555-555555555557"
+  middle_roll="$runtime_sessions/2026/07/15/rollout-2026-07-15T00-00-05-$middle_sid.jsonl"
+  grandchild_roll="$runtime_sessions/2026/07/15/rollout-2026-07-15T00-00-06-$grandchild_sid.jsonl"
+  cat >"$middle_roll" <<JSONL
+{"type":"session_meta","payload":{"id":"$middle_sid","cwd":"$fixture","source":{"subagent":{"thread_spawn":{"parent_thread_id":"$parent_sid"}}}}}
+JSONL
+  cat >"$grandchild_roll" <<JSONL
+{"type":"session_meta","payload":{"id":"$grandchild_sid","cwd":"$fixture","source":{"subagent":{"thread_spawn":{"parent_thread_id":"$middle_sid"}}}}}
+JSONL
+  lane_set runtime-depth-two provider codex status live cwd "$fixture" session_id "$grandchild_sid" rollout "$grandchild_roll" \
+    model_requested gpt-5.6-terra effort_requested medium
+  codex_refresh_runtime_settings runtime-depth-two
+  [[ "$(lane_get runtime-depth-two session_id)" == "$parent_sid" && \
+     "$(lane_get runtime-depth-two rollout)" == "$parent_roll" && \
+     "$(lane_get runtime-depth-two runtime_settings_match_requested)" == true ]] \
+    || { echo "runtime receipt: depth-two subagent lane did not reach the main parent" >&2; exit 1; }
+
+  missing_sid="55555555-5555-5555-5555-555555555553"
+  missing_roll="$runtime_sessions/2026/07/15/rollout-2026-07-15T00-00-03-$missing_sid.jsonl"
+  cat >"$missing_roll" <<JSONL
+{"type":"session_meta","payload":{"id":"$missing_sid","cwd":"$fixture","source":{"subagent":{"thread_spawn":{"parent_thread_id":"55555555-5555-5555-5555-555555555554"}}}}}
+JSONL
+  lane_set runtime-missing-parent provider codex status live cwd "$fixture" session_id "$missing_sid" rollout "$missing_roll"
+  codex_refresh_runtime_settings runtime-missing-parent
+  [[ "$(lane_get runtime-missing-parent runtime_refresh_state)" == unknown && \
+     "$(lane_get runtime-missing-parent runtime_refresh_error)" == subagent-rollout ]] \
+    || { echo "runtime receipt: missing parent did not fail closed" >&2; exit 1; }
+
+  mismatch_sid="55555555-5555-5555-5555-555555555559"
+  mismatch_roll="$runtime_sessions/2026/07/15/rollout-2026-07-15T00-00-04-$mismatch_sid.jsonl"
+  cat >"$mismatch_roll" <<JSONL
+{"type":"session_meta","payload":{"id":"$mismatch_sid","cwd":"/different/cwd","source":"cli"}}
+JSONL
+  cat >"$child_roll" <<JSONL
+{"type":"session_meta","payload":{"id":"$child_sid","cwd":"$fixture","source":{"subagent":{"thread_spawn":{"parent_thread_id":"$mismatch_sid"}}}}}
+JSONL
+  lane_set runtime-mismatch-parent provider codex status live cwd "$fixture" session_id "$child_sid" rollout "$child_roll"
+  codex_refresh_runtime_settings runtime-mismatch-parent
+  [[ "$(lane_get runtime-mismatch-parent runtime_refresh_state)" == unknown && \
+     "$(lane_get runtime-mismatch-parent runtime_refresh_error)" == subagent-rollout ]] \
+    || { echo "runtime receipt: cwd-mismatched parent did not fail closed" >&2; exit 1; }
+
   lane_set runtime-parent provider codex status live cwd "$fixture" codex_marker "$marker" \
     model_requested gpt-5.6-terra effort_requested medium model gpt-5.6-terra effort medium
   [[ "$(codex_discover_session runtime-parent)" == "$parent_sid" ]] \
