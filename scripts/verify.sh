@@ -4306,6 +4306,28 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings att-opus45-snapshot
   [[ "$(lane_get att-opus45-snapshot runtime_settings_match_requested)" == true && "$(lane_get att-opus45-snapshot runtime_model)" == claude-opus-4-5-20251101 ]] || { echo "att-opus45-snapshot: dated snapshot of the same version must match" >&2; exit 1; }
 
+  # Sonnet 5.5 uses the same version boundary as Opus 5.5. Exercise both
+  # provider refreshers so a pinned Sonnet 5 cannot corroborate Sonnet 5.5
+  # (or the reverse), while exact ids and the family alias still match.
+  for att_case in drift reverse exact alias; do
+    case "$att_case" in
+      drift)   att_requested=claude-sonnet-5;   att_served=claude-sonnet-5-5; att_expected=false ;;
+      reverse) att_requested=claude-sonnet-5-5; att_served=claude-sonnet-5;   att_expected=false ;;
+      exact)   att_requested=claude-sonnet-5-5; att_served=claude-sonnet-5-5; att_expected=true ;;
+      alias)   att_requested=sonnet;            att_served=claude-sonnet-5-5; att_expected=true ;;
+    esac
+    printf '{"message":{"model":"%s"},"type":"assistant"}\n' "$att_served" >"$att_home/claude-projects/proj/c-sid-sonnet55-$att_case.jsonl"
+    lane_set "att-sonnet55-claude-$att_case" provider claude status live result "" session_id "c-sid-sonnet55-$att_case" model "$att_requested" model_requested "$att_requested"
+    CLAUDE_PROJECTS_DIR="$att_home/claude-projects" claude_refresh_runtime_settings "att-sonnet55-claude-$att_case"
+    [[ "$(lane_get "att-sonnet55-claude-$att_case" runtime_settings_match_requested)" == "$att_expected" && "$(lane_get "att-sonnet55-claude-$att_case" runtime_model)" == "$att_served" ]] || { echo "att-sonnet55-claude-$att_case: expected $att_expected for $att_requested served by $att_served" >&2; exit 1; }
+
+    mkdir -p "$att_home/grok-sessions/enc/g-sid-sonnet55-$att_case"
+    printf '{"current_model_id":"%s","reasoning_effort":"medium"}\n' "$att_served" >"$att_home/grok-sessions/enc/g-sid-sonnet55-$att_case/summary.json"
+    lane_set "att-sonnet55-grok-$att_case" provider grok status live result "" session_id "g-sid-sonnet55-$att_case" model "$att_requested" model_requested "$att_requested" effort medium effort_requested medium
+    GROK_SESSIONS_DIR="$att_home/grok-sessions" grok_refresh_runtime_settings "att-sonnet55-grok-$att_case"
+    [[ "$(lane_get "att-sonnet55-grok-$att_case" runtime_settings_match_requested)" == "$att_expected" && "$(lane_get "att-sonnet55-grok-$att_case" runtime_model)" == "$att_served" ]] || { echo "att-sonnet55-grok-$att_case: expected $att_expected for $att_requested served by $att_served" >&2; exit 1; }
+  done
+
   # Grok equivalent negative: pinned grok-4.5 must not match a served id that
   # extends it further (grok's own family uses "." not "-", but the same
   # version-extension rule must hold via the shared predicate).
