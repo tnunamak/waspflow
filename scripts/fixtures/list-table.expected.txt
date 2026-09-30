@@ -1,0 +1,3 @@
+LANE                 PROVIDER STATE       OUTCOME     INTENT/RUNTIME                                   CWD
+byte                 claude   reaped      open        sonnet/high -> unknown [refresh=unknown]         /fixture/byte
+byte-a               codex    reaped      open        m/e -> m/e match [refresh=current]               /fixture/a
