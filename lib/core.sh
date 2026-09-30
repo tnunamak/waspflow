@@ -523,6 +523,28 @@ tmux_ensure_session() {
   tmux set-option -t "$WASPFLOW_TMUX_SESSION" history-limit "$WASPFLOW_TMUX_HISTORY_LIMIT" 2>/dev/null || true
 }
 
+# Resolve Claude's profile for a new lane. An explicit caller value wins;
+# otherwise use the environment that a new window in this lane session inherits.
+# A `-CLAUDE_CONFIG_DIR` entry is an explicit removal and means Claude default.
+tmux_resolve_claude_config_dir() {
+  local entry
+  if [[ ${CLAUDE_CONFIG_DIR+x} ]]; then
+    printf '%s\n' "$CLAUDE_CONFIG_DIR"
+    return 0
+  fi
+  entry="$(tmux show-environment -t "$WASPFLOW_TMUX_SESSION" CLAUDE_CONFIG_DIR 2>/dev/null || true)"
+  case "$entry" in
+    -CLAUDE_CONFIG_DIR) printf 'default\n'; return 0 ;;
+    CLAUDE_CONFIG_DIR=*) printf '%s\n' "${entry#*=}"; return 0 ;;
+  esac
+  entry="$(tmux show-environment -g CLAUDE_CONFIG_DIR 2>/dev/null || true)"
+  case "$entry" in
+    -CLAUDE_CONFIG_DIR) printf 'default\n' ;;
+    CLAUDE_CONFIG_DIR=*) printf '%s\n' "${entry#*=}" ;;
+    *) printf 'default\n' ;;
+  esac
+}
+
 tmux_window_target() {
   local recorded
   recorded="$(lane_get "$1" tmux_window)"

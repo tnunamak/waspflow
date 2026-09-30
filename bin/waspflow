@@ -374,7 +374,11 @@ cmd_spawn() {
   billing_path="$(billing_path_v1 "$provider" "$endpoint_profile" "$raw_provider_args")"
   auth_principal="$(billing_auth_principal "$provider")"
   lane_uuid="$(new_uuid)"
-  claude_config_dir="${CLAUDE_CONFIG_DIR:-default}"
+  if [[ "$provider" == claude ]]; then
+    claude_config_dir="$(tmux_resolve_claude_config_dir)"
+  else
+    claude_config_dir="${CLAUDE_CONFIG_DIR:-default}"
+  fi
   # Compute dispositions on every selected/explicit arm. Enforcement decides
   # whether to stop; explicit choice always continues after its warnings.
   if [[ -n "$op_id" ]]; then

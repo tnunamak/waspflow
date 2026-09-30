@@ -791,11 +791,26 @@ git commit -q -m init
   _claude_clear_trust_prompt() { :; }
   _claude_verify_started() { :; }
   lane_set claude-contract cwd "$fixture" report "$normalized_report" mcp_argv '[]' mcp_env '{}'
+  export ANTHROPIC_API_KEY='dummy-secret-must-not-be-in-command'
+  export CLAUDE_CONFIG_DIR=/x/caller
   claude_spawn claude-contract "$fixture" "" claude-session "$prompt_home/transcript" "$contract_prompt"
   claude_command="$(cat "$prompt_home/claude-command")"
   escaped_report="$(printf '%q' "$normalized_report")"
   [[ "$claude_command" == *"$escaped_report"* && ! -e "$sentinel" ]] \
     || { echo "claude prompt: exact contract did not cross argv safely" >&2; exit 1; }
+  [[ "$claude_command" == *"CLAUDE_CONFIG_DIR=/x/caller"* ]] \
+    || { echo "claude auth: spawn did not preserve caller profile and unset inherited API key" >&2; exit 1; }
+  [[ "$claude_command" != *"$ANTHROPIC_API_KEY"* && "${CLAUDE_AUTH_ENV[*]}" != *"$ANTHROPIC_API_KEY"* ]] \
+    || { echo "claude auth: API key leaked into generated command or auth overrides" >&2; exit 1; }
+  unset ANTHROPIC_API_KEY
+  claude_spawn claude-contract "$fixture" "" claude-session-no-key "$prompt_home/transcript" "$contract_prompt"
+  [[ "${CLAUDE_AUTH_ENV[*]}" == *"-u ANTHROPIC_API_KEY"* ]] \
+    || { echo "claude auth: absent caller key was not explicitly unset" >&2; exit 1; }
+  unset CLAUDE_CONFIG_DIR
+  claude_spawn claude-contract "$fixture" "" claude-session-unset "$prompt_home/transcript" "$contract_prompt"
+  claude_command="$(cat "$prompt_home/claude-command")"
+  [[ "${CLAUDE_AUTH_ENV[*]}" == *"-u CLAUDE_CONFIG_DIR"* && "${CLAUDE_AUTH_ENV[*]}" == *"-u ANTHROPIC_API_KEY"* ]] \
+    || { echo "claude auth: unset caller profile/key were not explicitly cleared" >&2; exit 1; }
 
   # shellcheck disable=SC1090
   source "$root/lib/providers/grok.sh"
@@ -1805,6 +1820,128 @@ JSONL
   [[ "$rc" -eq 1 ]] || { echo "claude_is_idle: expected rc=1 (parent not done), got $rc" >&2; exit 1; }
 
   rm -rf "$cproj"
+)
+
+# Claude lifecycle operations follow the lane's recorded profile even when the
+# shell running wait/revise has selected another account.
+(
+  profile_home="$(mktemp -d "$scratch/waspflow-claude-profile-XXXXXX")"
+  export WASPFLOW_HOME="$state_home"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/claude.sh"
+  profile_a="$profile_home/account-a"
+  profile_b="$profile_home/account-b"
+  profile_sid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+  export CLAUDE_CONFIG_DIR="$profile_b"
+  unset ANTHROPIC_API_KEY CLAUDE_PROJECTS_DIR
+  lane_set claude-default-profile claude_config_dir default
+  [[ "$(_claude_projects_dir claude-default-profile)" == "$HOME/.claude/projects" ]] \
+    || { echo "claude profile: default lane did not resolve to ~/.claude" >&2; exit 1; }
+  export CLAUDE_PROJECTS_DIR="$profile_home/override-projects"
+  mkdir -p "$profile_a/projects/profile-test"
+  printf '%s\n' '{"type":"assistant","message":{"stop_reason":"end_turn"}}' \
+    >"$profile_a/projects/profile-test/$profile_sid.jsonl"
+  lane_set claude-profile-lane provider claude status live session_id "$profile_sid" \
+    cwd "$fixture" claude_config_dir "$profile_a"
+  [[ "$(_claude_projects_dir claude-profile-lane)" == "$CLAUDE_PROJECTS_DIR" ]] \
+    || { echo "claude profile: explicit projects override lost precedence" >&2; exit 1; }
+  unset CLAUDE_PROJECTS_DIR
+  claude_is_idle claude-profile-lane \
+    || { echo "claude profile: idle lookup ignored the lane's recorded profile" >&2; exit 1; }
+
+  profile_command="$profile_home/revise-command"
+  tmux_window_exists() { return 1; }
+  billing_preflight_provider() { return 0; }
+  tmux_run_owned_lane_command() { printf '%s\n' "$@" >"$profile_command"; }
+  claude_revise claude-profile-lane "continue" "$profile_home/revise-out"
+  grep -Fqx -- "CLAUDE_CONFIG_DIR=$profile_a" "$profile_command" \
+    || { echo "claude profile: headless revise did not use the lane's profile" >&2; exit 1; }
+  ! grep -Fq -- "CLAUDE_CONFIG_DIR=$profile_b" "$profile_command" \
+    || { echo "claude profile: headless revise used the current caller's profile" >&2; exit 1; }
+  rm -rf "$profile_home"
+)
+
+# A new Claude lane records and launches with caller > tmux session/global >
+# default profile precedence. This uses the verifier's private tmux socket.
+(
+  spawn_profile_home="$(mktemp -d "$scratch/waspflow-claude-spawn-profile-XXXXXX")"
+  spawn_profile_state="$spawn_profile_home/state"
+  spawn_profile_session="claude-profile-$$"
+  spawn_profile_lib="$spawn_profile_home/lib"
+  previous_wf_socket="$WASPFLOW_TMUX_SOCKET"
+  export WASPFLOW_TMUX_SOCKET="claude-profile-$$"
+  cleanup_spawn_profile_tmux() {
+    env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$TMUX_TMPDIR" "$real_tmux" -L "$WASPFLOW_TMUX_SOCKET" \
+      kill-session -t "$spawn_profile_session" 2>/dev/null || true
+  }
+  trap cleanup_spawn_profile_tmux EXIT
+  mkdir -p "$spawn_profile_lib/providers"
+  cp "$root"/lib/*.sh "$spawn_profile_lib/"
+  cp -r "$root/lib/generated" "$spawn_profile_lib/"
+  cat >"$spawn_profile_lib/providers/claude.sh" <<'CLAUDE_PROVIDER'
+claude_valid_models() { printf 'source=non_enumerable\n'; }
+claude_mcp_policy() { printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}'; }
+claude_preflight() { :; }
+claude_discover_session() { lane_get "$1" session_id; }
+claude_session_resumable() { return 0; }
+claude_is_idle() { return 1; }
+claude_turn_mark() { echo 0; }
+claude_mcp_validate_extra() { :; }
+claude_revise() { :; }
+claude_spawn() { tmux_create_owned_lane_window "$1" "$2" 'exec sleep 60' >/dev/null; }
+CLAUDE_PROVIDER
+  export WASPFLOW_LIB="$spawn_profile_lib" WASPFLOW_HOME="$spawn_profile_state" \
+    WASPFLOW_TMUX_SESSION="$spawn_profile_session"
+  # shellcheck disable=SC1090
+  source "$spawn_profile_lib/core.sh"
+  unset CLAUDE_CONFIG_DIR
+  tmux new-session -d -s "$spawn_profile_session" -n _waspflow_home
+  spawn_profile_a="$spawn_profile_home/account-a"
+  spawn_profile_odl="$spawn_profile_home/account-odl"
+
+  run_profile_spawn() {
+    local lane="$1" expected="$2"
+    "$root/bin/waspflow" spawn --provider claude --lane "$lane" --cwd "$fixture" -- "$lane prompt" >/dev/null
+    [[ "$(jq -r '.claude_config_dir' "$spawn_profile_state/lanes/$lane/state.json")" == "$expected" ]] \
+      || { echo "claude profile spawn: state for '$lane' did not record '$expected'" >&2; return 1; }
+    lane_set "$lane" mcp_argv '[]' mcp_env '{}'
+    source "$root/lib/providers/claude.sh"
+    mcp_policy_load_lane() { MCP_ARGV=(); MCP_ENV=(); }
+    tmux() { :; }
+    tmux_create_owned_lane_window() { printf '%s' "$3" >"$spawn_profile_home/$lane.command"; printf '%s:0\n' "$lane"; }
+    _claude_clear_trust_prompt() { :; }
+    _claude_verify_started() { :; }
+    claude_spawn "$lane" "$fixture" '' "test-$lane" "$spawn_profile_home/$lane.log" "$lane prompt"
+    local launch_command
+    launch_command="$(cat "$spawn_profile_home/$lane.command")"
+    if [[ "$expected" == default ]]; then
+      [[ "$launch_command" == *"-u\\ CLAUDE_CONFIG_DIR"* ]] \
+        || { echo "claude profile spawn: '$lane' did not explicitly select the default profile" >&2; return 1; }
+    else
+      [[ "$launch_command" == *"CLAUDE_CONFIG_DIR=$expected"* ]] \
+        || { echo "claude profile spawn: child command for '$lane' did not use '$expected'" >&2; return 1; }
+    fi
+    unset -f tmux tmux_create_owned_lane_window _claude_clear_trust_prompt _claude_verify_started
+    tmux kill-window -t "$spawn_profile_session:$lane" 2>/dev/null || true
+  }
+
+  tmux set-environment -g CLAUDE_CONFIG_DIR "$spawn_profile_odl"
+  run_profile_spawn claude-global-profile "$spawn_profile_odl"
+
+  export CLAUDE_CONFIG_DIR="$spawn_profile_a"
+  run_profile_spawn claude-caller-profile "$spawn_profile_a"
+
+  unset CLAUDE_CONFIG_DIR
+  tmux set-environment -g -u CLAUDE_CONFIG_DIR
+  run_profile_spawn claude-default-profile default
+
+  tmux set-environment -g -u CLAUDE_CONFIG_DIR 2>/dev/null || true
+  tmux kill-session -t "$spawn_profile_session" 2>/dev/null || true
+  trap - EXIT
+  export WASPFLOW_TMUX_SOCKET="$previous_wf_socket"
+  rm -rf "$spawn_profile_home"
 )
 
 # codex_is_idle: last rollout event payload.type == task_complete => idle.
