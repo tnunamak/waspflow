@@ -4362,6 +4362,44 @@ SYSTEMCTL
   rm -rf "$index_home"
 )
 
+# Healthy JSON list uses its batch parser instead of falling back per lane.
+(
+  batch_home="$(mktemp -d "$scratch/waspflow-list-batch-home-XXXXXX")"
+  batch_bin="$batch_home/bin"; mkdir -p "$batch_bin" "$batch_home/lanes"
+  batch_query_log="$batch_home/scope-queries"
+  cat >"$batch_bin/systemctl" <<'SYSTEMCTL'
+#!/usr/bin/env bash
+printf 'queried\n' >>"${WASPFLOW_SCOPE_QUERY_LOG:?}"
+exit 0
+SYSTEMCTL
+  chmod +x "$batch_bin/systemctl"
+  for i in $(seq 1 240); do
+    lane="batch-$(printf '%04d' "$i")"; mkdir -p "$batch_home/lanes/$lane"
+    jq -n --arg cwd "/fixture/$i" '{provider:"codex",status:"reaped",cwd:$cwd,runtime_model:"saved"}' >"$batch_home/lanes/$lane/state.json"
+  done
+  real_jq="$(command -v jq)"
+  cat >"$batch_bin/jq" <<'JQ'
+#!/usr/bin/env bash
+jq_bin="${REAL_JQ:-/usr/bin/jq}"
+[[ -z "${JQ_COUNTER_FILE:-}" ]] || printf 'call\n' >>"$JQ_COUNTER_FILE"
+exec "$jq_bin" "$@"
+JQ
+  chmod +x "$batch_bin/jq"
+  jq_counter="$batch_home/jq-calls"
+  before_hash="$(find "$batch_home/lanes" -name state.json -print0 | sort -z | xargs -0 sha256sum | sha256sum)"
+  batched="$(PATH="$batch_bin:$PATH" REAL_JQ="$real_jq" JQ_COUNTER_FILE="$jq_counter" \
+    WASPFLOW_HOME="$batch_home" WASPFLOW_SCOPE_QUERY_LOG="$batch_query_log" \
+    "$root/bin/waspflow" list --json)"
+  jq -e 'length == 240' <<<"$batched" >/dev/null \
+    || { echo "list batch: healthy batch omitted rows" >&2; exit 1; }
+  [[ "$(wc -l <"$jq_counter" | tr -d ' ')" == 4 ]] \
+    || { echo "list batch: healthy JSON batch fell back to per-lane jq" >&2; exit 1; }
+  after_hash="$(find "$batch_home/lanes" -name state.json -print0 | sort -z | xargs -0 sha256sum | sha256sum)"
+  [[ "$before_hash" == "$after_hash" ]] \
+    || { echo "list batch: JSON list mutated persisted state" >&2; exit 1; }
+  rm -rf "$batch_home"
+)
+
 # Batch liveness ignores pane identity entirely. A stored `live` record with no
 # active scope is interrupted even when its tmux pane still exists; pane PID
 # types therefore cannot change the result.

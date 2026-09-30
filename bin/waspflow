@@ -645,11 +645,11 @@ EOF
 cmd_list_json_batch() {
   local lanes="$1" active_scopes="$2" scope_query_available="$3" lane start=0 chunk_size=128 output jq_filter
   local -a names=() files=() rows=()
-  jq_filter="$(waspflow_liveness_jq_defs)
-input_filename as \$file |
-(\$file | split("/") | .[-2]) as \$lane |
-waspflow_derived_lifecycle(\$active_scopes; \$scope_query_available) as \$lifecycle |
-{lane:\$lane,provider:(.provider // ""),lifecycle_state:\$lifecycle,
+  jq_filter="$(waspflow_liveness_jq_defs; cat <<'JQ'
+input_filename as $file |
+($file | split("/") | .[-2]) as $lane |
+waspflow_derived_lifecycle($active_scopes; $scope_query_available) as $lifecycle |
+{lane:$lane,provider:(.provider // ""),lifecycle_state:$lifecycle,
  record_status:(.status // ""),outcome:(if (.outcome // "") == "" then "open" else .outcome end),result:(.result // ""),
  cwd:(.cwd // ""),origin_cwd:(.origin_cwd // ""),repo_root:(.repo_root // ""),
  requested_model:(.model_requested // .model // ""),requested_effort:(.effort_requested // .effort // ""),
@@ -660,7 +660,9 @@ waspflow_derived_lifecycle(\$active_scopes; \$scope_query_available) as \$lifecy
  runtime_refresh_error:(.runtime_refresh_error // ""),runtime_receipt_enforced:(.runtime_receipt_enforced // "false"),spawn_epoch:(.spawn_epoch // ""),
  updated_at:(.updated_at // ""),parked_at:(.parked_at // ""),spawn_submitted:(.spawn_submitted // ""),
  mcp_requested:(.mcp_requested // ""),mcp_resolved:(.mcp_resolved // ""),mcp_warning:(.mcp_warning // ""),
- tmux_session:(.tmux_session // ""),tmux_window:(.tmux_window // ""),tmux_pane_pid:(.tmux_pane_pid // "")}"
+ tmux_session:(.tmux_session // ""),tmux_window:(.tmux_window // ""),tmux_pane_pid:(.tmux_pane_pid // "")}
+JQ
+)"
   mapfile -t names <<<"$lanes"
   while [[ "$start" -lt "${#names[@]}" ]]; do
     files=()
