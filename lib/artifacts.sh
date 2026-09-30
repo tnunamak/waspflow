@@ -164,9 +164,21 @@ artifacts_report_present() {
 artifacts_finalize() {
   local lane="$1" provider="$2" existing report
   existing="$(lane_get "$lane" result)"
+  # `runtime_unverified` and `runtime_drift` are not outcomes: _reap_one_locked
+  # writes them when a runtime-receipt gate REFUSES the reap. A later reap only
+  # reaches this function once that gate has passed (via --force or
+  # accept-runtime), so the refusal marker is stale and the real result must be
+  # computed. Treating it as an unrecognized value stranded such lanes
+  # permanently as corrupt_result. The same applies to a corrupt_result that was
+  # produced from one of those markers by an earlier version of this code.
+  if [[ "$existing" == corrupt_result ]]; then
+    case "$(lane_get "$lane" prior_result)" in
+      runtime_unverified|runtime_drift) existing="" ;;
+    esac
+  fi
   case "$existing" in
     succeeded|recovered|failed|report_missing|verified|verify_failed|abandoned) echo "$existing"; return 0 ;;
-    "") ;;   # not finalized yet — proceed to compute the result below
+    ""|runtime_unverified|runtime_drift) ;;   # not finalized yet (or a stale gate-refusal marker) — compute below
     *)
       # A NON-EMPTY but UNRECOGNIZED result means the state was tampered with or
       # written by an incompatible version. Do NOT launder it into "succeeded"

@@ -104,7 +104,7 @@ split_after_ddash() {
 # ============================================================================
 
 cmd_spawn() {
-  local provider="" lane="" model="" cwd="$PWD" isolate=0 effort="" mcp="auto" report="" no_recovery=0 parent_ref="" parent_ref_explicit=false no_parent=false
+  local provider="" lane="" model="" cwd="$PWD" isolate=0 base_ref="" base_commit="" effort="" mcp="auto" report="" no_recovery=0 parent_ref="" parent_ref_explicit=false no_parent=false
   local verify_command="" verify_name="verify" verify_timeout=1800 prepare_command="" verify_strength=""
   local op_id="" OP_ID="" OP_MODE="" provider_explicit=false model_explicit=false auto=false ack_deprecated=false accept_provider_default=false
   local -a extra=()
@@ -126,6 +126,10 @@ cmd_spawn() {
         ;;
       --cwd)      cwd="${2:-}"; shift 2 ;;
       --isolate|--worktree) isolate=1; shift ;;
+      --base)
+        [[ $# -ge 2 && -n "${2:-}" ]] || die "spawn: --base requires a non-empty value"
+        base_ref="$2"; shift 2
+        ;;
       --report)   report="${2:-}"; shift 2 ;;     # opt-in deliverable contract
       --no-recovery) no_recovery=1; shift ;;
       --verify) verify_command="${2:-}"; shift 2 ;;
@@ -145,6 +149,8 @@ cmd_spawn() {
     esac
   done
   local prompt="${REST[*]:-}"
+
+  [[ -z "$base_ref" || "$isolate" -eq 1 ]] || die "spawn: --base requires --isolate or --worktree"
 
   [[ "$auto" == false || -n "$op_id" ]] || die "spawn: --auto requires --op"
   [[ "$auto" == false || "$model_explicit" == false ]] || die "spawn: --auto conflicts with --model"
@@ -195,6 +201,14 @@ cmd_spawn() {
   [[ "$provenance_gate_rc" -eq 0 ]] || return "$provenance_gate_rc"
   cwd="$(cd "$cwd" && pwd)" || die "spawn: --cwd does not exist"
   guard_cwd "$cwd"   # never hand a worker '/' silently (known grok --cwd / crash)
+  local base_repo_root=""
+  if [[ -n "$base_ref" ]]; then
+    base_repo_root="$(worktree_repo_root "$cwd")"
+    [[ -n "$base_repo_root" ]] || die "spawn: --base requires --cwd inside a Git repo"
+    base_commit="$(git -C "$base_repo_root" rev-parse --verify --quiet "${base_ref}^{commit}" 2>/dev/null)" \
+      || die "spawn: --base ref '$base_ref' does not resolve to a commit in '$base_repo_root'"
+  fi
+  [[ "$isolate" -eq 1 ]] || warn_shared_checkout_lanes "$cwd"
   if [[ -n "$effort" && ! "$effort" =~ ^($WASPFLOW_EFFORT_TOKENS)$ ]]; then
     die "spawn: --effort must be one of ${WASPFLOW_EFFORT_TOKENS//|/, } (got: $effort)"
   fi
@@ -285,8 +299,16 @@ cmd_spawn() {
   local work_cwd="$cwd" wt_path="" repo_root=""
   if [[ "$isolate" -eq 1 ]]; then
     repo_root="$(worktree_repo_root "$cwd")"
-    wt_path="$(worktree_create "$lane" "$cwd")" || die "spawn: worktree isolation failed"
+    wt_path="$(worktree_create "$lane" "$cwd" "$base_commit")" || die "spawn: worktree isolation failed"
     work_cwd="$wt_path"
+    if [[ -n "$base_commit" ]]; then
+      local worktree_head
+      worktree_head="$(git -C "$work_cwd" rev-parse HEAD 2>/dev/null || true)"
+      if [[ "$worktree_head" != "$base_commit" ]]; then
+        worktree_remove "$lane" "$wt_path" "$repo_root" 1 >/dev/null 2>&1 || true
+        die "spawn: isolated worktree HEAD '$worktree_head' does not match --base commit '$base_commit'"
+      fi
+    fi
     log "isolated worktree: $wt_path"
   fi
 
@@ -353,7 +375,11 @@ cmd_spawn() {
   billing_path="$(billing_path_v1 "$provider" "$endpoint_profile" "$raw_provider_args")"
   auth_principal="$(billing_auth_principal "$provider")"
   lane_uuid="$(new_uuid)"
-  claude_config_dir="${CLAUDE_CONFIG_DIR:-default}"
+  if [[ "$provider" == claude ]]; then
+    claude_config_dir="$(tmux_resolve_claude_config_dir)"
+  else
+    claude_config_dir="${CLAUDE_CONFIG_DIR:-default}"
+  fi
   # Compute dispositions on every selected/explicit arm. Enforcement decides
   # whether to stop; explicit choice always continues after its warnings.
   if [[ -n "$op_id" ]]; then
@@ -382,6 +408,8 @@ cmd_spawn() {
   # that signal as unknown instead of inventing a fork point.
   local verify_fork_point=""
   [[ -n "$wt_path" ]] && verify_fork_point="$(git -C "$work_cwd" rev-parse HEAD 2>/dev/null || true)"
+  local -a base_state=()
+  [[ -n "$base_ref" ]] && base_state=(base_ref "$base_ref" base_commit "$base_commit")
   local spawned_epoch
   spawned_epoch="$(date +%s)"
   lane_create "$lane" \
@@ -459,6 +487,7 @@ cmd_spawn() {
     rollout "" \
     worktree "$wt_path" \
     repo_root "$repo_root" \
+    "${base_state[@]}" \
     verify_fork_point "$verify_fork_point" \
     transcript "$transcript" \
     report "$report_abs" \
@@ -617,11 +646,11 @@ EOF
 cmd_list_json_batch() {
   local lanes="$1" active_scopes="$2" scope_query_available="$3" lane start=0 chunk_size=128 output jq_filter
   local -a names=() files=() rows=()
-  jq_filter="$(waspflow_liveness_jq_defs)
-input_filename as \$file |
-(\$file | split("/") | .[-2]) as \$lane |
-waspflow_derived_lifecycle(\$active_scopes; \$scope_query_available) as \$lifecycle |
-{lane:\$lane,provider:(.provider // ""),lifecycle_state:\$lifecycle,
+  jq_filter="$(waspflow_liveness_jq_defs; cat <<'JQ'
+input_filename as $file |
+($file | split("/") | .[-2]) as $lane |
+waspflow_derived_lifecycle($active_scopes; $scope_query_available) as $lifecycle |
+{lane:$lane,provider:(.provider // ""),lifecycle_state:$lifecycle,
  record_status:(.status // ""),outcome:(if (.outcome // "") == "" then "open" else .outcome end),result:(.result // ""),
  cwd:(.cwd // ""),origin_cwd:(.origin_cwd // ""),repo_root:(.repo_root // ""),
  requested_model:(.model_requested // .model // ""),requested_effort:(.effort_requested // .effort // ""),
@@ -632,7 +661,9 @@ waspflow_derived_lifecycle(\$active_scopes; \$scope_query_available) as \$lifecy
  runtime_refresh_error:(.runtime_refresh_error // ""),runtime_receipt_enforced:(.runtime_receipt_enforced // "false"),spawn_epoch:(.spawn_epoch // ""),
  updated_at:(.updated_at // ""),parked_at:(.parked_at // ""),spawn_submitted:(.spawn_submitted // ""),
  mcp_requested:(.mcp_requested // ""),mcp_resolved:(.mcp_resolved // ""),mcp_warning:(.mcp_warning // ""),
- tmux_session:(.tmux_session // ""),tmux_window:(.tmux_window // ""),tmux_pane_pid:(.tmux_pane_pid // "")}"
+ tmux_session:(.tmux_session // ""),tmux_window:(.tmux_window // ""),tmux_pane_pid:(.tmux_pane_pid // "")}
+JQ
+)"
   mapfile -t names <<<"$lanes"
   while [[ "$start" -lt "${#names[@]}" ]]; do
     files=()
@@ -1547,10 +1578,25 @@ _reap_one_locked() {
     accepted_at="$(lane_get "$lane" runtime_settings_accepted_observed_at)"
     if [[ "$runtime_health" != observed ]] || \
        { [[ "$runtime_match" != true ]] && [[ "$runtime_match" != false || "$accepted_at" != "$runtime_at" ]]; }; then
-      artifacts_capture_after "$lane"
-      lane_set "$lane" result "runtime_unverified" runtime_verification_state "${runtime_health:-unknown}:${runtime_match:-unknown}"
-      err "reap: lane '$lane' has no current verified Codex runtime receipt (refresh=${runtime_health:-unknown}, match=${runtime_match:-unknown}); inspect status or accept-runtime after reviewing an observed drift"
-      return 2
+      # `accept-runtime` is the intended remedy, but it only accepts an OBSERVED
+      # drift. Once a provider's rollout log ages out of the tail window the
+      # state is `unknown`, not `false`, so no command can ever satisfy this
+      # gate again -- the evidence is gone rather than contradictory. That
+      # leaves an old, worktree-less lane permanently unreapable and forces an
+      # operator to hand-edit state.json, which defeats the guard it is meant
+      # to enforce. `--force` is already documented as "force cleanup when
+      # normal checks refuse it", so honour it here too, recording that the
+      # receipt was never verified rather than laundering it to success.
+      if [[ "$force" == 1 ]]; then
+        warn "reap: lane '$lane' finalized WITHOUT a verified Codex runtime receipt (refresh=${runtime_health:-unknown}, match=${runtime_match:-unknown}) because --force was given"
+        lane_set "$lane" runtime_verification_state "${runtime_health:-unknown}:${runtime_match:-unknown}" runtime_forced_finalize true
+      else
+        artifacts_capture_after "$lane"
+        lane_set "$lane" result "runtime_unverified" runtime_verification_state "${runtime_health:-unknown}:${runtime_match:-unknown}"
+        err "reap: lane '$lane' has no current verified Codex runtime receipt (refresh=${runtime_health:-unknown}, match=${runtime_match:-unknown}); inspect status or accept-runtime after reviewing an observed drift"
+        err "  next: waspflow reap $lane --force   # if the receipt can no longer be observed (log aged out)"
+        return 2
+      fi
     fi
   fi
   if [[ "$(lane_get "$lane" runtime_settings_match_requested)" == false ]] && \

@@ -288,6 +288,14 @@ _exec_claude() {
   local -a effort_args=()
   [[ -n "$effort" ]] && effort_args=(--effort "$effort")
 
+  local rc=0 stderr_dir stderr_file stderr_fifo tee_pid last_stdout_line
+  stderr_dir="$(mktemp -d)"
+  stderr_file="$stderr_dir/stderr.log"
+  stderr_fifo="$stderr_dir/stderr.fifo"
+  mkfifo "$stderr_fifo"
+  # Keep stderr live for callers while retaining it for the ceiling check.
+  tee "$stderr_file" <"$stderr_fifo" >&2 &
+  tee_pid=$!
   (
     cd "$cwd"
     env "${MCP_ENV[@]}" claude --print \
@@ -298,7 +306,22 @@ _exec_claude() {
       -- \
       "$prompt" \
       </dev/null
-  ) >"$output_path"
+  ) >"$output_path" 2>"$stderr_fifo" || rc=$?
+  # tee must finish draining the FIFO before the captured stderr is inspected.
+  wait "$tee_pid"
+
+  # Claude can exit 0 after terminating a print turn at its background-task
+  # wait ceiling. Keep the produced output for callers, but report interruption
+  # as failure so exec does not treat partial work as success.
+  last_stdout_line="$(awk 'NF { line = $0 } END { print line }' "$output_path")"
+  if grep -Eq 'Background tasks still running after [^[:cntrl:]]*terminating' "$stderr_file" \
+    || grep -Eq 'Background tasks still running after [^[:cntrl:]]*terminating' <<<"$last_stdout_line"; then
+    rm -rf "$stderr_dir"
+    err "exec/claude: print stopped at the background-task wait ceiling; set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely"
+    return 1
+  fi
+  rm -rf "$stderr_dir"
+  return "$rc"
 }
 
 _exec_grok() {

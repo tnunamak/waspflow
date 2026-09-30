@@ -20,9 +20,9 @@ worktree_repo_root() {
 
 # Create an isolated worktree for a lane rooted at the repo containing $cwd.
 # Echoes the worktree absolute path on success; non-zero + message on failure.
-# Args: lane cwd
+# Args: lane cwd [base_commit]
 worktree_create() {
-  local lane="$1" cwd="$2"
+  local lane="$1" cwd="$2" base_commit="${3:-}"
   local repo_root branch wt_path
   repo_root="$(worktree_repo_root "$cwd")"
   [[ -n "$repo_root" ]] || { err "worktree isolation requested but '$cwd' is not in a git repo"; return 1; }
@@ -36,10 +36,17 @@ worktree_create() {
     return 1
   fi
 
-  # Branch off the current HEAD of the repo.
+  # Preserve the historical HEAD-based command when no explicit base is given.
   if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
+    if [[ -n "$base_commit" && "$(git -C "$repo_root" rev-parse "refs/heads/$branch^{commit}" 2>/dev/null)" != "$base_commit" ]]; then
+      err "worktree branch $branch does not point to requested --base commit"
+      return 1
+    fi
     git -C "$repo_root" worktree add "$wt_path" "$branch" >/dev/null 2>&1 \
       || { err "git worktree add (existing branch $branch) failed"; return 1; }
+  elif [[ -n "$base_commit" ]]; then
+    git -C "$repo_root" worktree add -b "$branch" "$wt_path" "$base_commit" >/dev/null 2>&1 \
+      || { err "git worktree add -b $branch from requested --base failed"; return 1; }
   else
     git -C "$repo_root" worktree add -b "$branch" "$wt_path" >/dev/null 2>&1 \
       || { err "git worktree add -b $branch failed"; return 1; }

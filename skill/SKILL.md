@@ -89,7 +89,7 @@ If the report is missing at reap, one **recovery pass** resumes the session
 `--verify`). `reap` exits nonzero on failure — no false "done"; check `status
 <lane>` → `.result`. Every lane auto-saves `prompt.txt`, `git-diff.txt`, and
 `git-status-before/after.txt`, so "what changed?" is always answerable. (Optional
-spawn flags: `--verify <cmd>`, `--prepare <cmd>`, `--isolate`.)
+spawn flags: `--verify <cmd>`, `--prepare <cmd>`, `--isolate`, and `--base <ref>`.)
 
 ## Verify before destructive cleanup (`verify`)
 
@@ -139,6 +139,7 @@ for L in a b; do waspflow reap "$L"; done
 ```
 
 `--isolate` gives each worker its own git worktree (branch `waspflow/<lane>`);
+`--base <ref>` selects its starting commit and requires isolation;
 `reap` keeps a dirty worktree unless `--force`.
 
 **Billing safety before you fan out.** If `ANTHROPIC_API_KEY` is set, headless

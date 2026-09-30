@@ -207,6 +207,39 @@ grep -q 'verify_tmux kill-session -t "\$WASPFLOW_TMUX_SESSION"' <<<"$verify_clea
   && ! grep -q 'kill-server' <<<"$verify_cleanup_body" \
   || { echo "tmux EXIT cleanup: must kill only the isolated verify session" >&2; exit 1; }
 
+# Shared checkout preflight uses durable records and the existing tmux liveness
+# check. Keep this focused fixture independent of provider launches.
+shared_checkout_root="$fixture/shared-checkout"
+other_checkout_root="$fixture/other-checkout"
+shared_checkout_home="$fixture/shared-checkout-home"
+mkdir -p "$shared_checkout_root" "$other_checkout_root" "$shared_checkout_home/lanes"
+for repo in "$shared_checkout_root" "$other_checkout_root"; do
+  git -C "$repo" init -q
+  git -C "$repo" -c user.name=verify -c user.email=verify@example.invalid commit --allow-empty -qm init
+done
+shared_alias="$fixture/shared-alias"
+ln -s "$shared_checkout_root" "$shared_alias"
+WASPFLOW_HOME="$shared_checkout_home" WASPFLOW_LIB="$root/lib" bash -c '
+  source "$WASPFLOW_LIB/core.sh"
+  tmux_window_exists() { [[ "$1" == live-same || "$1" == exited-same || "$1" == live-other ]]; }
+  mkdir -p "$WASPFLOW_LANES_DIR/live-same" "$WASPFLOW_LANES_DIR/parked-same" \
+    "$WASPFLOW_LANES_DIR/reaped-same" "$WASPFLOW_LANES_DIR/exited-same" "$WASPFLOW_LANES_DIR/live-other"
+  jq -n --arg cwd "$1" "{status:\"live\",cwd:\$cwd}" >"$WASPFLOW_LANES_DIR/live-same/state.json"
+  jq -n --arg cwd "$1" "{status:\"parked\",cwd:\$cwd}" >"$WASPFLOW_LANES_DIR/parked-same/state.json"
+  jq -n --arg cwd "$1" "{status:\"reaped\",cwd:\$cwd}" >"$WASPFLOW_LANES_DIR/reaped-same/state.json"
+  jq -n --arg cwd "$1" "{status:\"exited\",cwd:\$cwd}" >"$WASPFLOW_LANES_DIR/exited-same/state.json"
+  jq -n --arg cwd "$2" "{status:\"live\",cwd:\$cwd}" >"$WASPFLOW_LANES_DIR/live-other/state.json"
+  out="$(warn_shared_checkout_lanes "$3" 2>&1)"
+  [[ "$out" == *"lane '\''live-same'\'' is also live"* && "$out" == *"lane '\''exited-same'\'' is also live"* && "$out" != *"parked-same"* && "$out" != *"reaped-same"* && "$out" != *"live-other"* ]] || {
+    printf "shared checkout warning mismatch: %s\\n" "$out" >&2; exit 1;
+  }
+  jq -n --arg cwd "$2" "{status:\"reaped\",cwd:\$cwd}" >"$WASPFLOW_LANES_DIR/live-other/state.json"
+  out="$(warn_shared_checkout_lanes "$2" 2>&1)"
+  [[ -z "$out" ]] || { printf "different checkout warned: %s\\n" "$out" >&2; exit 1; }
+' _ "$shared_checkout_root" "$other_checkout_root" "$shared_alias"
+grep -Fq '[[ "$isolate" -eq 1 ]] || warn_shared_checkout_lanes "$cwd"' "$root/bin/waspflow" \
+  || { echo "shared checkout warning: isolated spawn is not excluded" >&2; exit 1; }
+
 # The registry owns both command dispatch and help coverage, so a new command
 # cannot become reachable without appearing in this data-driven loop.
 # shellcheck disable=SC1090
@@ -240,6 +273,8 @@ grep -Fq 'waspflow list' <<<"$list_alias_help" \
 help_after_value_flag="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" spawn --provider codex --help)"
 grep -Fq 'waspflow spawn' <<<"$help_after_value_flag" \
   || { echo "help: help after a value-taking flag was not intercepted" >&2; exit 1; }
+grep -Fq -- '--base <ref>' <<<"$help_after_value_flag" \
+  || { echo "help: spawn --base flag is missing" >&2; exit 1; }
 
 set +e
 literal_help_value_output="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" accept-runtime lane --reason --help 2>&1)"
@@ -789,11 +824,26 @@ git commit -q -m init
   _claude_clear_trust_prompt() { :; }
   _claude_verify_started() { :; }
   lane_set claude-contract cwd "$fixture" report "$normalized_report" mcp_argv '[]' mcp_env '{}'
+  export ANTHROPIC_API_KEY='dummy-secret-must-not-be-in-command'
+  export CLAUDE_CONFIG_DIR=/x/caller
   claude_spawn claude-contract "$fixture" "" claude-session "$prompt_home/transcript" "$contract_prompt"
   claude_command="$(cat "$prompt_home/claude-command")"
   escaped_report="$(printf '%q' "$normalized_report")"
   [[ "$claude_command" == *"$escaped_report"* && ! -e "$sentinel" ]] \
     || { echo "claude prompt: exact contract did not cross argv safely" >&2; exit 1; }
+  [[ "$claude_command" == *"CLAUDE_CONFIG_DIR=/x/caller"* ]] \
+    || { echo "claude auth: spawn did not preserve caller profile and unset inherited API key" >&2; exit 1; }
+  [[ "$claude_command" != *"$ANTHROPIC_API_KEY"* && "${CLAUDE_AUTH_ENV[*]}" != *"$ANTHROPIC_API_KEY"* ]] \
+    || { echo "claude auth: API key leaked into generated command or auth overrides" >&2; exit 1; }
+  unset ANTHROPIC_API_KEY
+  claude_spawn claude-contract "$fixture" "" claude-session-no-key "$prompt_home/transcript" "$contract_prompt"
+  [[ "${CLAUDE_AUTH_ENV[*]}" == *"-u ANTHROPIC_API_KEY"* ]] \
+    || { echo "claude auth: absent caller key was not explicitly unset" >&2; exit 1; }
+  unset CLAUDE_CONFIG_DIR
+  claude_spawn claude-contract "$fixture" "" claude-session-unset "$prompt_home/transcript" "$contract_prompt"
+  claude_command="$(cat "$prompt_home/claude-command")"
+  [[ "${CLAUDE_AUTH_ENV[*]}" == *"-u CLAUDE_CONFIG_DIR"* && "${CLAUDE_AUTH_ENV[*]}" == *"-u ANTHROPIC_API_KEY"* ]] \
+    || { echo "claude auth: unset caller profile/key were not explicitly cleared" >&2; exit 1; }
 
   # shellcheck disable=SC1090
   source "$root/lib/providers/grok.sh"
@@ -817,7 +867,7 @@ git commit -q -m init
     local last="${!#}"
     [[ "$last" == Enter ]] || return 0
     jq -cn --arg sid "$codex_sid" --arg cwd "$fixture" \
-      '{type:"session_meta",payload:{id:$sid,cwd:$cwd}}' >"$codex_rollout"
+      '{type:"session_meta",payload:{id:$sid,cwd:$cwd,source:"cli"}}' >"$codex_rollout"
     jq -cn --arg message "$pasted_prompt" \
       '{type:"event_msg",payload:{type:"user_message",message:$message}}' >>"$codex_rollout"
   }
@@ -1530,7 +1580,7 @@ STUB
     [[ "$last" == Enter ]] || return 0
     ((++enter_count))
     jq -cn --arg sid "$spawn_sid" --arg cwd "$spawn_cwd" \
-      '{type:"session_meta",payload:{id:$sid,cwd:$cwd}}' >"$spawn_rollout"
+      '{type:"session_meta",payload:{id:$sid,cwd:$cwd,source:"cli"}}' >"$spawn_rollout"
     case "$spawn_mode" in
       marker) jq -cn --arg message "$spawn_marker" '{type:"event_msg",payload:{type:"user_message",message:$message}}' >>"$spawn_rollout" ;;
       full)   jq -cn --arg message "$pasted_prompt" '{type:"event_msg",payload:{type:"user_message",message:$message}}' >>"$spawn_rollout" ;;
@@ -1547,6 +1597,51 @@ STUB
   [[ "$enter_count" -eq 1 && "$(lane_get spawn-receipt rollout)" == "$spawn_rollout" ]] \
     || { echo "codex spawn: complete multiline prompt did not confirm on first Enter" >&2; exit 1; }
   rm -rf "$spawn_home" "$spawn_sessions"
+)
+
+# Codex paginated rollouts record the canonical submitted input as an
+# item_completed UserMessage. Confirm only that event (or the legacy event),
+# never response_item user context, and never a replayed subagent rollout.
+(
+  receipt_home="$(mktemp -d "$scratch/waspflow-codex-receipt-home-XXXXXX")"
+  receipt_sessions="$(mktemp -d "$scratch/waspflow-codex-receipt-sessions-XXXXXX")"
+  export WASPFLOW_HOME="$receipt_home" CODEX_SESSIONS_DIR="$receipt_sessions"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/codex.sh"
+  receipt_cwd="$fixture"
+  receipt_prompt=$'WASPFLOW_LANE_MARKER:receipt:test\ncomplete task text'
+  receipt_sid="55555555-5555-5555-5555-555555555555"
+  receipt_rollout="$receipt_sessions/rollout-2026-09-29T00-00-01-$receipt_sid.jsonl"
+  write_receipt_meta() {
+    jq -cn --arg sid "$receipt_sid" --arg cwd "$receipt_cwd" --argjson source "$1" \
+      '{type:"session_meta",payload:{id:$sid,cwd:$cwd,source:$source}}' >"$receipt_rollout"
+  }
+  write_item_message() {
+    jq -cn --arg prompt "$receipt_prompt" \
+      '{type:"event_msg",payload:{type:"item_completed",item:{type:"UserMessage",content:[{type:"text",text:$prompt}]}}}' >>"$receipt_rollout"
+  }
+  write_receipt_meta '"cli"'; write_item_message
+  [[ "$(_codex_find_rollout_for_submitted_prompt "$receipt_cwd" "$receipt_prompt")" == "$receipt_rollout" ]] \
+    || { echo "codex receipt: item_completed UserMessage was not confirmed" >&2; exit 1; }
+  write_receipt_meta '"cli"'
+  jq -cn --arg message "$receipt_prompt" '{type:"event_msg",payload:{type:"user_message",message:$message}}' >>"$receipt_rollout"
+  [[ "$(_codex_find_rollout_for_submitted_prompt "$receipt_cwd" "$receipt_prompt")" == "$receipt_rollout" ]] \
+    || { echo "codex receipt: legacy user_message stopped confirming" >&2; exit 1; }
+  write_receipt_meta '"cli"'
+  jq -cn --arg prompt "$receipt_prompt" \
+    '{type:"response_item",payload:{type:"message",role:"user",content:[{type:"input_text",text:$prompt}]}}' >>"$receipt_rollout"
+  [[ -z "$(_codex_find_rollout_for_submitted_prompt "$receipt_cwd" "$receipt_prompt" || true)" ]] \
+    || { echo "codex receipt: synthetic response_item user context falsely confirmed" >&2; exit 1; }
+  write_receipt_meta '{"subagent":{"thread_id":"child"}}'; write_item_message
+  [[ -z "$(_codex_find_rollout_for_submitted_prompt "$receipt_cwd" "$receipt_prompt" || true)" ]] \
+    || { echo "codex receipt: subagent replay falsely confirmed" >&2; exit 1; }
+  write_receipt_meta '"cli"'
+  jq -cn '{type:"event_msg",payload:{type:"item_completed",item:{type:"UserMessage",content:[{type:"text",text:"different task"}]}}}' >>"$receipt_rollout"
+  [[ -z "$(_codex_find_rollout_for_submitted_prompt "$receipt_cwd" "$receipt_prompt" || true)" ]] \
+    || { echo "codex receipt: rollout without full prompt was confirmed" >&2; exit 1; }
+  rm -rf "$receipt_home" "$receipt_sessions"
 )
 
 # ---------------------------------------------------------------------------
@@ -1760,6 +1855,128 @@ JSONL
   rm -rf "$cproj"
 )
 
+# Claude lifecycle operations follow the lane's recorded profile even when the
+# shell running wait/revise has selected another account.
+(
+  profile_home="$(mktemp -d "$scratch/waspflow-claude-profile-XXXXXX")"
+  export WASPFLOW_HOME="$state_home"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/claude.sh"
+  profile_a="$profile_home/account-a"
+  profile_b="$profile_home/account-b"
+  profile_sid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+  export CLAUDE_CONFIG_DIR="$profile_b"
+  unset ANTHROPIC_API_KEY CLAUDE_PROJECTS_DIR
+  lane_set claude-default-profile claude_config_dir default
+  [[ "$(_claude_projects_dir claude-default-profile)" == "$HOME/.claude/projects" ]] \
+    || { echo "claude profile: default lane did not resolve to ~/.claude" >&2; exit 1; }
+  export CLAUDE_PROJECTS_DIR="$profile_home/override-projects"
+  mkdir -p "$profile_a/projects/profile-test"
+  printf '%s\n' '{"type":"assistant","message":{"stop_reason":"end_turn"}}' \
+    >"$profile_a/projects/profile-test/$profile_sid.jsonl"
+  lane_set claude-profile-lane provider claude status live session_id "$profile_sid" \
+    cwd "$fixture" claude_config_dir "$profile_a"
+  [[ "$(_claude_projects_dir claude-profile-lane)" == "$CLAUDE_PROJECTS_DIR" ]] \
+    || { echo "claude profile: explicit projects override lost precedence" >&2; exit 1; }
+  unset CLAUDE_PROJECTS_DIR
+  claude_is_idle claude-profile-lane \
+    || { echo "claude profile: idle lookup ignored the lane's recorded profile" >&2; exit 1; }
+
+  profile_command="$profile_home/revise-command"
+  tmux_window_exists() { return 1; }
+  billing_preflight_provider() { return 0; }
+  tmux_run_owned_lane_command() { printf '%s\n' "$@" >"$profile_command"; }
+  claude_revise claude-profile-lane "continue" "$profile_home/revise-out"
+  grep -Fqx -- "CLAUDE_CONFIG_DIR=$profile_a" "$profile_command" \
+    || { echo "claude profile: headless revise did not use the lane's profile" >&2; exit 1; }
+  ! grep -Fq -- "CLAUDE_CONFIG_DIR=$profile_b" "$profile_command" \
+    || { echo "claude profile: headless revise used the current caller's profile" >&2; exit 1; }
+  rm -rf "$profile_home"
+)
+
+# A new Claude lane records and launches with caller > tmux session/global >
+# default profile precedence. This uses the verifier's private tmux socket.
+(
+  spawn_profile_home="$(mktemp -d "$scratch/waspflow-claude-spawn-profile-XXXXXX")"
+  spawn_profile_state="$spawn_profile_home/state"
+  spawn_profile_session="claude-profile-$$"
+  spawn_profile_lib="$spawn_profile_home/lib"
+  previous_wf_socket="$WASPFLOW_TMUX_SOCKET"
+  export WASPFLOW_TMUX_SOCKET="claude-profile-$$"
+  cleanup_spawn_profile_tmux() {
+    env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$TMUX_TMPDIR" "$real_tmux" -L "$WASPFLOW_TMUX_SOCKET" \
+      kill-session -t "$spawn_profile_session" 2>/dev/null || true
+  }
+  trap cleanup_spawn_profile_tmux EXIT
+  mkdir -p "$spawn_profile_lib/providers"
+  cp "$root"/lib/*.sh "$spawn_profile_lib/"
+  cp -r "$root/lib/generated" "$spawn_profile_lib/"
+  cat >"$spawn_profile_lib/providers/claude.sh" <<'CLAUDE_PROVIDER'
+claude_valid_models() { printf 'source=non_enumerable\n'; }
+claude_mcp_policy() { printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}'; }
+claude_preflight() { :; }
+claude_discover_session() { lane_get "$1" session_id; }
+claude_session_resumable() { return 0; }
+claude_is_idle() { return 1; }
+claude_turn_mark() { echo 0; }
+claude_mcp_validate_extra() { :; }
+claude_revise() { :; }
+claude_spawn() { tmux_create_owned_lane_window "$1" "$2" 'exec sleep 60' >/dev/null; }
+CLAUDE_PROVIDER
+  export WASPFLOW_LIB="$spawn_profile_lib" WASPFLOW_HOME="$spawn_profile_state" \
+    WASPFLOW_TMUX_SESSION="$spawn_profile_session"
+  # shellcheck disable=SC1090
+  source "$spawn_profile_lib/core.sh"
+  unset CLAUDE_CONFIG_DIR
+  tmux new-session -d -s "$spawn_profile_session" -n _waspflow_home
+  spawn_profile_a="$spawn_profile_home/account-a"
+  spawn_profile_odl="$spawn_profile_home/account-odl"
+
+  run_profile_spawn() {
+    local lane="$1" expected="$2"
+    "$root/bin/waspflow" spawn --provider claude --lane "$lane" --cwd "$fixture" -- "$lane prompt" >/dev/null
+    [[ "$(jq -r '.claude_config_dir' "$spawn_profile_state/lanes/$lane/state.json")" == "$expected" ]] \
+      || { echo "claude profile spawn: state for '$lane' did not record '$expected'" >&2; return 1; }
+    lane_set "$lane" mcp_argv '[]' mcp_env '{}'
+    source "$root/lib/providers/claude.sh"
+    mcp_policy_load_lane() { MCP_ARGV=(); MCP_ENV=(); }
+    tmux() { :; }
+    tmux_create_owned_lane_window() { printf '%s' "$3" >"$spawn_profile_home/$lane.command"; printf '%s:0\n' "$lane"; }
+    _claude_clear_trust_prompt() { :; }
+    _claude_verify_started() { :; }
+    claude_spawn "$lane" "$fixture" '' "test-$lane" "$spawn_profile_home/$lane.log" "$lane prompt"
+    local launch_command
+    launch_command="$(cat "$spawn_profile_home/$lane.command")"
+    if [[ "$expected" == default ]]; then
+      [[ "$launch_command" == *"-u\\ CLAUDE_CONFIG_DIR"* ]] \
+        || { echo "claude profile spawn: '$lane' did not explicitly select the default profile" >&2; return 1; }
+    else
+      [[ "$launch_command" == *"CLAUDE_CONFIG_DIR=$expected"* ]] \
+        || { echo "claude profile spawn: child command for '$lane' did not use '$expected'" >&2; return 1; }
+    fi
+    unset -f tmux tmux_create_owned_lane_window _claude_clear_trust_prompt _claude_verify_started
+    tmux kill-window -t "$spawn_profile_session:$lane" 2>/dev/null || true
+  }
+
+  tmux set-environment -g CLAUDE_CONFIG_DIR "$spawn_profile_odl"
+  run_profile_spawn claude-global-profile "$spawn_profile_odl"
+
+  export CLAUDE_CONFIG_DIR="$spawn_profile_a"
+  run_profile_spawn claude-caller-profile "$spawn_profile_a"
+
+  unset CLAUDE_CONFIG_DIR
+  tmux set-environment -g -u CLAUDE_CONFIG_DIR
+  run_profile_spawn claude-default-profile default
+
+  tmux set-environment -g -u CLAUDE_CONFIG_DIR 2>/dev/null || true
+  tmux kill-session -t "$spawn_profile_session" 2>/dev/null || true
+  trap - EXIT
+  export WASPFLOW_TMUX_SOCKET="$previous_wf_socket"
+  rm -rf "$spawn_profile_home"
+)
+
 # codex_is_idle: last rollout event payload.type == task_complete => idle.
 # Codex is a first-class provider; its idle predicate gets behavioral coverage
 # too (parity with claude/grok), so `wait` on a Codex lane is proven, not assumed.
@@ -1816,6 +2033,37 @@ JSONL
       runtime_model "" runtime_effort "" runtime_settings_source "" runtime_settings_observed_at "" \
       runtime_settings_match_requested unknown runtime_settings_warned_observed_at ""
   }
+
+  # A newer child rollout can inherit the lane marker, but it must not become
+  # the session or runtime receipt. The parent's own drift remains observable.
+  parent_sid="55555555-5555-5555-5555-555555555551"
+  child_sid="55555555-5555-5555-5555-555555555552"
+  marker="WASPFLOW_LANE_MARKER:runtime-parent:synthetic"
+  parent_roll="$runtime_sessions/2026/07/15/rollout-2026-07-15T00-00-01-$parent_sid.jsonl"
+  child_roll="$runtime_sessions/2026/07/15/rollout-2026-07-15T00-00-02-$child_sid.jsonl"
+  cat >"$parent_roll" <<JSONL
+{"type":"session_meta","payload":{"id":"$parent_sid","cwd":"$fixture","source":"cli"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"$marker"}}
+{"type":"turn_context","timestamp":"2026-07-15T04:56:00.489Z","payload":{"model":"gpt-5.6-terra","effort":"medium"}}
+JSONL
+  cat >"$child_roll" <<JSONL
+{"type":"session_meta","payload":{"id":"$child_sid","cwd":"$fixture","source":{"subagent":{"thread_spawn":{"parent_thread_id":"$parent_sid","depth":1,"agent_path":"/synthetic/child"}}}}}
+{"type":"event_msg","payload":{"type":"user_message","message":"$marker"}}
+{"type":"turn_context","timestamp":"2026-07-15T04:57:00.000Z","payload":{"model":"gpt-5.5","effort":"low"}}
+JSONL
+  lane_set runtime-parent provider codex status live cwd "$fixture" codex_marker "$marker" \
+    model_requested gpt-5.6-terra effort_requested medium model gpt-5.6-terra effort medium
+  [[ "$(codex_discover_session runtime-parent)" == "$parent_sid" ]] \
+    || { echo "runtime receipt: subagent rollout won marker discovery" >&2; exit 1; }
+  lane_set runtime-parent session_id "$parent_sid" rollout "$parent_roll"
+  codex_refresh_runtime_settings runtime-parent
+  [[ "$(lane_get runtime-parent runtime_model)" == gpt-5.6-terra && "$(lane_get runtime-parent runtime_settings_match_requested)" == true ]] \
+    || { echo "runtime receipt: subagent rollout overwrote parent receipt" >&2; exit 1; }
+  sed -i 's/"model":"gpt-5.6-terra","effort":"medium"/"model":"gpt-5.5","effort":"low"/' "$parent_roll"
+  codex_refresh_runtime_settings runtime-parent
+  [[ "$(lane_get runtime-parent runtime_model)" == gpt-5.5 && "$(lane_get runtime-parent runtime_settings_match_requested)" == false ]] \
+    || { echo "runtime receipt: true parent drift was hidden" >&2; exit 1; }
+  : >"$runtime_warn_log"
 
   # 1: matching turn_context observation.
   reset_runtime
@@ -1922,6 +2170,38 @@ JSONL
   lane_set fresh-uncorrelated provider codex status live cwd "$fixture" session_id "$other_sid" rollout "$unknown_roll" model gpt-5.6-terra effort medium runtime_receipt_enforced true runtime_receipt_version 2
   set +e; "$root/bin/waspflow" reap fresh-uncorrelated --no-archive >/dev/null 2>&1; uncorrelated_rc=$?; set -e
   [[ "$uncorrelated_rc" -eq 2 && "$(lane_get fresh-uncorrelated result)" == runtime_unverified ]] || { echo "runtime receipt: uncorrelated fresh lane did not fail closed" >&2; exit 1; }
+
+  # A stale runtime receipt remains guarded unless the operator explicitly
+  # forces finalization. The force is recorded, and never claims verification.
+  set +e; no_force_out="$("$root/bin/waspflow" reap fresh-unknown --no-archive 2>&1)"; no_force_rc=$?; set -e
+  [[ "$no_force_rc" -eq 2 && "$no_force_out" == *"--force"* ]] || { echo "runtime receipt: unknown receipt refusal omitted --force hint" >&2; exit 1; }
+  force_out="$("$root/bin/waspflow" reap fresh-unknown --no-archive --force 2>&1)"
+  [[ "$(lane_get fresh-unknown status)" == reaped && "$(lane_get fresh-unknown result)" == succeeded ]] || { echo "runtime receipt: --force did not finalize unknown receipt lane" >&2; exit 1; }
+  [[ "$(lane_get fresh-unknown runtime_forced_finalize)" == true && "$(lane_get fresh-unknown runtime_verification_state)" == unknown:unknown ]] || { echo "runtime receipt: forced finalize was not recorded accurately" >&2; exit 1; }
+  [[ "$force_out" == *"WITHOUT a verified Codex runtime receipt"* ]] || { echo "runtime receipt: forced finalize claimed verification" >&2; exit 1; }
+
+  # A gate refusal is not a terminal result. Once its observed drift is
+  # accepted, --force can pass the receipt gate and compute the real outcome.
+  reset_runtime
+  lane_set runtime runtime_receipt_enforced false
+  printf '%s\n' '{"type":"turn_context","timestamp":"2026-07-15T06:00:00Z","payload":{"model":"gpt-5.6-luna","effort":"low"}}' >>"$roll"
+  codex_refresh_runtime_settings runtime
+  set +e; "$root/bin/waspflow" reap runtime --no-archive >/dev/null 2>&1; drift_gate_rc=$?; set -e
+  [[ "$drift_gate_rc" -eq 2 && "$(lane_get runtime result)" == runtime_drift ]] || { echo "runtime receipt: drift gate did not refuse once" >&2; exit 1; }
+  "$root/bin/waspflow" accept-runtime runtime --reason "synthetic acceptance" >/dev/null
+  "$root/bin/waspflow" reap runtime --no-archive --force >/dev/null 2>&1
+  [[ "$(lane_get runtime result)" == succeeded && "$(lane_get runtime status)" == reaped ]] || { echo "runtime receipt: accepted drift became corrupt instead of a real result" >&2; exit 1; }
+
+  # Old versions may already have converted the gate marker to corrupt_result;
+  # recompute only when the saved prior_result proves that origin.
+  lane_set legacy-corrupt provider codex status live cwd "$fixture" result corrupt_result prior_result runtime_drift no_recovery true git_tracked false
+  "$root/bin/waspflow" reap legacy-corrupt --no-archive --force >/dev/null 2>&1
+  [[ "$(lane_get legacy-corrupt result)" == succeeded ]] || { echo "runtime receipt: legacy gate-marker corruption was not recomputed" >&2; exit 1; }
+
+  lane_set truly-corrupt provider codex status live cwd "$fixture" result mystery no_recovery true git_tracked false
+  set +e; "$root/bin/waspflow" reap truly-corrupt --no-archive --force >/dev/null 2>&1; corrupt_rc=$?; set -e
+  [[ "$corrupt_rc" -eq 2 && "$(lane_get truly-corrupt result)" == corrupt_result && "$(lane_get truly-corrupt prior_result)" == mystery ]] || { echo "runtime receipt: unrecognized result was not preserved as corruption" >&2; exit 1; }
+
   lane_set legacy-runtime provider codex status live cwd "$fixture" git_tracked false
   "$root/bin/waspflow" reap legacy-runtime --no-archive >/dev/null
   [[ "$(lane_get legacy-runtime result)" == succeeded ]] || { echo "runtime receipt: legacy lane behavior changed" >&2; exit 1; }
@@ -2891,6 +3171,78 @@ FAKE
   rm -rf "$argvbin"
 )
 
+# Claude print may exit zero after hitting its background-task wait ceiling.
+# Exercise the public exec command with a fake CLI, including both output
+# streams, and ensure requested output survives the failure.
+(
+  claude_ceiling_home="$(mktemp -d "$scratch/waspflow-claude-ceiling-XXXXXX")"
+  claude_ceiling_bin="$claude_ceiling_home/bin"
+  mkdir -p "$claude_ceiling_bin"
+  cat >"$claude_ceiling_bin/claude" <<'CLAUDE'
+#!/usr/bin/env bash
+printf 'partial worker output\n'
+if [[ "${CLAUDE_CEILING_MODE:-notice}" == stderr ]]; then
+  printf 'Background tasks still running after 600s; terminating. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.\n' >&2
+elif [[ "${CLAUDE_CEILING_MODE:-notice}" == notice ]]; then
+  printf 'Background tasks still running after 600s; terminating. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.\n'
+elif [[ "${CLAUDE_CEILING_MODE:-notice}" == quoted ]]; then
+  printf 'Quoted output: Background tasks still running after 600s; terminating. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.\n'
+  printf 'The quoted notice is context; the final answer is complete.\n'
+elif [[ "${CLAUDE_CEILING_MODE:-notice}" == ordinary ]]; then
+  printf 'Background tasks still running in another process; this turn completed normally.\n'
+fi
+if [[ "${CLAUDE_CEILING_MODE:-notice}" == stderr ]]; then
+  sleep 1
+  : >"${CLAUDE_CEILING_MARKER:?}"
+fi
+exit 0
+CLAUDE
+  chmod +x "$claude_ceiling_bin/claude"
+  export PATH="$claude_ceiling_bin:$PATH" WASPFLOW_HOME="$claude_ceiling_home/state" WASPFLOW_SELECTION_GATE=off
+  ceiling_out="$claude_ceiling_home/partial.out"
+  set +e
+  ceiling_err="$("$root/bin/waspflow" exec --provider claude --accept-provider-default -o "$ceiling_out" -- 'test task' 2>&1)"
+  ceiling_rc=$?
+  set -e
+  [[ "$ceiling_rc" -ne 0 && "$ceiling_err" == *'background-task wait ceiling'* \
+    && "$ceiling_err" == *'CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0'* \
+    && "$(cat "$ceiling_out")" == *'partial worker output'* ]] \
+    || { echo "claude exec: background ceiling was reported as success or output was lost" >&2; exit 1; }
+
+  ceiling_out="$claude_ceiling_home/stderr-partial.out"
+  ceiling_log="$claude_ceiling_home/stderr-live.log"
+  ceiling_marker="$claude_ceiling_home/stderr-finished"
+  set +e
+  CLAUDE_CEILING_MODE=stderr CLAUDE_CEILING_MARKER="$ceiling_marker" \
+    "$root/bin/waspflow" exec --provider claude --accept-provider-default -o "$ceiling_out" -- 'test task' >"$ceiling_log" 2>&1 &
+  ceiling_pid=$!
+  set -e
+  for _ in $(seq 1 40); do
+    grep -Fq 'Background tasks still running after 600s' "$ceiling_log" 2>/dev/null && break
+    sleep 0.05
+  done
+  [[ ! -e "$ceiling_marker" && "$(cat "$ceiling_log")" == *'Background tasks still running after 600s'* ]] \
+    || { echo "claude exec: stderr was not streamed while Claude was running" >&2; exit 1; }
+  set +e
+  wait "$ceiling_pid"
+  ceiling_rc=$?
+  set -e
+  ceiling_err="$(cat "$ceiling_log")"
+  [[ "$ceiling_rc" -ne 0 && "$ceiling_err" == *'CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0'* \
+    && "$(cat "$ceiling_out")" == *'partial worker output'* ]] \
+    || { echo "claude exec: stderr background ceiling was not detected" >&2; exit 1; }
+
+  ceiling_out="$claude_ceiling_home/quoted.out"
+  CLAUDE_CEILING_MODE=quoted "$root/bin/waspflow" exec --provider claude --accept-provider-default -o "$ceiling_out" -- 'test task'
+  grep -Fq 'The quoted notice is context; the final answer is complete.' "$ceiling_out" \
+    || { echo "claude exec: quoted notice in the body incorrectly failed" >&2; exit 1; }
+
+  ceiling_out="$claude_ceiling_home/ordinary.out"
+  CLAUDE_CEILING_MODE=ordinary "$root/bin/waspflow" exec --provider claude --accept-provider-default -o "$ceiling_out" -- 'test task'
+  grep -Fq 'this turn completed normally' "$ceiling_out" \
+    || { echo "claude exec: ordinary background-task text changed success behavior" >&2; exit 1; }
+)
+
 # Grok must not pretend it can provide a strict empty MCP boundary.
 (
   # shellcheck disable=SC1090
@@ -3070,6 +3422,48 @@ PROV
   sed -i '/^WASPFLOW_PROVIDERS=(/ s/)$/ mcpp)/' "$mcplib/core.sh"
   mcphome="$(mktemp -d "$scratch/waspflow-mcp-home-XXXXXX")"
   mcpdir="$(mktemp -d "$scratch/waspflow-mcp-cwd-XXXXXX")"; (cd "$mcpdir" && git init -q)
+  git -C "$mcpdir" config user.name 'Waspflow Test'
+  git -C "$mcpdir" config user.email 'waspflow-test@example.invalid'
+  printf 'first\n' >"$mcpdir/base-marker"
+  git -C "$mcpdir" add base-marker && git -C "$mcpdir" commit -qm 'first base commit'
+  base_commit="$(git -C "$mcpdir" rev-parse HEAD)"
+  printf 'second\n' >>"$mcpdir/base-marker"
+  git -C "$mcpdir" commit -qam 'second base commit'
+  head_commit="$(git -C "$mcpdir" rev-parse HEAD)"
+
+  set +e
+  invalid_base_out="$(WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane bad-base --cwd "$mcpdir" --isolate --base no-such-ref -- "reject bad base" 2>&1)"
+  invalid_base_rc=$?
+  set -e
+  [[ "$invalid_base_rc" -eq 1 && "$invalid_base_out" == *"--base ref 'no-such-ref' does not resolve to a commit"* \
+    && ! -e "$mcphome/lanes/bad-base" && ! -e "${mcpdir}-waspflow-bad-base" \
+    && "$(tmux list-windows -t "wf-mcp-$$" -F '#{window_name}' | grep -cxF bad-base || true)" -eq 0 ]] \
+    || { echo "spawn: invalid --base created side effects or lacked a clear error" >&2; exit 1; }
+  set +e
+  no_isolate_base_out="$(WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane base-needs-isolate --base HEAD -- "reject non-isolated base" 2>&1)"
+  no_isolate_base_rc=$?
+  set -e
+  [[ "$no_isolate_base_rc" -eq 1 && "$no_isolate_base_out" == *"--base requires --isolate or --worktree"* \
+    && ! -e "$mcphome/lanes/base-needs-isolate" ]] \
+    || { echo "spawn: --base without isolation was not rejected before side effects" >&2; exit 1; }
+
+  WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane based-worktree --cwd "$mcpdir" --isolate --base HEAD~1 -- "start from older commit" >/dev/null 2>&1
+  based_worktree="${mcpdir}-waspflow-based-worktree"
+  [[ "$(git -C "$based_worktree" rev-parse HEAD)" == "$base_commit" ]] \
+    || { echo "spawn: --base did not create the isolated branch at the requested commit" >&2; exit 1; }
+  jq -e --arg ref HEAD~1 --arg commit "$base_commit" \
+    '.base_ref == $ref and .base_commit == $commit and .verify_fork_point == $commit' \
+    "$mcphome/lanes/based-worktree/state.json" >/dev/null \
+    || { echo "spawn: --base ref/commit/fork-point receipt did not match" >&2; exit 1; }
+  WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane default-worktree --cwd "$mcpdir" --isolate -- "start from current HEAD" >/dev/null 2>&1
+  default_worktree="${mcpdir}-waspflow-default-worktree"
+  [[ "$(git -C "$default_worktree" rev-parse HEAD)" == "$head_commit" ]] \
+    || { echo "spawn: isolated default no longer starts at current HEAD" >&2; exit 1; }
+
   set +e
   WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
     "$root/bin/waspflow" spawn --provider mcpp --lane invalid-model --model denied -- "reject early" >/dev/null 2>&1
@@ -3999,6 +4393,44 @@ SYSTEMCTL
   set +e; WASPFLOW_HOME="$index_home" "$root/bin/waspflow" list --json >/dev/null 2>&1; corrupt_rc=$?; set -e
   [[ "$corrupt_rc" -eq 2 ]] || { echo "list index: unbounded corrupt record was not surfaced" >&2; exit 1; }
   rm -rf "$index_home"
+)
+
+# Healthy JSON list uses its batch parser instead of falling back per lane.
+(
+  batch_home="$(mktemp -d "$scratch/waspflow-list-batch-home-XXXXXX")"
+  batch_bin="$batch_home/bin"; mkdir -p "$batch_bin" "$batch_home/lanes"
+  batch_query_log="$batch_home/scope-queries"
+  cat >"$batch_bin/systemctl" <<'SYSTEMCTL'
+#!/usr/bin/env bash
+printf 'queried\n' >>"${WASPFLOW_SCOPE_QUERY_LOG:?}"
+exit 0
+SYSTEMCTL
+  chmod +x "$batch_bin/systemctl"
+  for i in $(seq 1 240); do
+    lane="batch-$(printf '%04d' "$i")"; mkdir -p "$batch_home/lanes/$lane"
+    jq -n --arg cwd "/fixture/$i" '{provider:"codex",status:"reaped",cwd:$cwd,runtime_model:"saved"}' >"$batch_home/lanes/$lane/state.json"
+  done
+  real_jq="$(command -v jq)"
+  cat >"$batch_bin/jq" <<'JQ'
+#!/usr/bin/env bash
+jq_bin="${REAL_JQ:-/usr/bin/jq}"
+[[ -z "${JQ_COUNTER_FILE:-}" ]] || printf 'call\n' >>"$JQ_COUNTER_FILE"
+exec "$jq_bin" "$@"
+JQ
+  chmod +x "$batch_bin/jq"
+  jq_counter="$batch_home/jq-calls"
+  before_hash="$(find "$batch_home/lanes" -name state.json -print0 | sort -z | xargs -0 sha256sum | sha256sum)"
+  batched="$(PATH="$batch_bin:$PATH" REAL_JQ="$real_jq" JQ_COUNTER_FILE="$jq_counter" \
+    WASPFLOW_HOME="$batch_home" WASPFLOW_SCOPE_QUERY_LOG="$batch_query_log" \
+    "$root/bin/waspflow" list --json)"
+  jq -e 'length == 240' <<<"$batched" >/dev/null \
+    || { echo "list batch: healthy batch omitted rows" >&2; exit 1; }
+  [[ "$(wc -l <"$jq_counter" | tr -d ' ')" == 4 ]] \
+    || { echo "list batch: healthy JSON batch fell back to per-lane jq" >&2; exit 1; }
+  after_hash="$(find "$batch_home/lanes" -name state.json -print0 | sort -z | xargs -0 sha256sum | sha256sum)"
+  [[ "$before_hash" == "$after_hash" ]] \
+    || { echo "list batch: JSON list mutated persisted state" >&2; exit 1; }
+  rm -rf "$batch_home"
 )
 
 # Batch liveness ignores pane identity entirely. A stored `live` record with no

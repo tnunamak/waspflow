@@ -15,7 +15,38 @@
 # Contract functions (called by core): claude_preflight, claude_spawn,
 # claude_is_idle, claude_revise, claude_discover_session.
 
-CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
+_claude_projects_dir() {
+  local lane="${1:-}" config_dir=""
+  if [[ -n "${CLAUDE_PROJECTS_DIR:-}" ]]; then printf '%s\n' "$CLAUDE_PROJECTS_DIR"
+  elif [[ -n "$lane" ]]; then
+    config_dir="$(lane_get "$lane" claude_config_dir 2>/dev/null || true)"
+    if [[ "$config_dir" == default ]]; then printf '%s/projects\n' "$HOME/.claude"
+    elif [[ -n "$config_dir" ]]; then printf '%s/projects\n' "$config_dir"
+    else printf '%s/projects\n' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; fi
+  else printf '%s/projects\n' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; fi
+}
+
+# Build explicit auth overrides for commands launched inside tmux. `env -u`
+# is required because panes inherit the server environment. API keys are never
+# copied into argv: when the caller has a key, this cannot replace a different
+# key inherited from tmux; when absent, clear any inherited key.
+_claude_auth_env() {
+  local lane="${1:-}" config_dir="" config_assignment=""
+  CLAUDE_AUTH_ENV=()
+  if [[ -n "$lane" ]]; then config_dir="$(lane_get "$lane" claude_config_dir 2>/dev/null || true)"; fi
+  if [[ -n "$lane" && "$config_dir" == default ]]; then
+    CLAUDE_AUTH_ENV+=(-u CLAUDE_CONFIG_DIR)
+  elif [[ -n "$lane" && -n "$config_dir" ]]; then
+    config_assignment="CLAUDE_CONFIG_DIR=$config_dir"
+  elif [[ ${CLAUDE_CONFIG_DIR+x} ]]; then
+    config_assignment="CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR"
+  else
+    CLAUDE_AUTH_ENV+=(-u CLAUDE_CONFIG_DIR)
+  fi
+  [[ ${ANTHROPIC_API_KEY+x} ]] || CLAUDE_AUTH_ENV+=(-u ANTHROPIC_API_KEY)
+  [[ -n "$config_assignment" ]] && CLAUDE_AUTH_ENV+=("$config_assignment")
+  return 0
+}
 
 # Claude's model set is small and stable (opus/sonnet/haiku aliases + dated ids)
 # and there's no auth-scoped cache to read, so we don't second-guess --model here:
@@ -73,6 +104,7 @@ claude_spawn() {
   local lane="$1" cwd="$2" model="$3" session_id="$4" transcript="$5" prompt="$6"
   shift 6
   local extra=("$@")
+  _claude_auth_env "$lane"
 
   local model_args=()
   [[ -n "$model" ]] && model_args=(--model "$model")
@@ -87,7 +119,7 @@ claude_spawn() {
   # transcript). --dangerously-skip-permissions because the lane is unattended.
   #
   # We assemble an argv array and quote it for the tmux shell.
-  local argv=(env "${MCP_ENV[@]}" claude
+  local argv=(env "${CLAUDE_AUTH_ENV[@]}" "${MCP_ENV[@]}" claude
     "${model_args[@]}"
     "${effort_args[@]}"
     --session-id "$session_id"
@@ -209,7 +241,7 @@ _claude_verify_started() {
   # 30 (~30s) gives a real spawn ample time to submit past startup modals.
   local attempts="${WASPFLOW_SUBMIT_ATTEMPTS:-30}"
   for i in $(seq 1 "$attempts"); do
-    jsonl="$(find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -type f -name "${sid}.jsonl" 2>/dev/null | head -1)"
+    jsonl="$(find "$(_claude_projects_dir "$lane")" -maxdepth 2 -type f -name "${sid}.jsonl" 2>/dev/null | head -1)"
     # Submission confirmed: a user event carries the task. Use a distinctive slice
     # of the prompt so we match the real submission, not an echo of the composer.
     if [[ -n "$jsonl" && -s "$jsonl" ]]; then
@@ -235,6 +267,7 @@ _claude_verify_started() {
 claude_resume_with_arm() {
   local lane="$1" prompt="$2" fresh="${3:-false}" transition arm model effort cwd sid target ownership nonce quoted="" a
   transition="$(lane_get "$lane" pending_transition)"
+  _claude_auth_env "$lane"
   arm="$(jq -c '.to_arm // {}' <<<"$transition" 2>/dev/null)"
   model="$(jq -r '.model // ""' <<<"$arm")"; effort="$(jq -r '.effort // ""' <<<"$arm")"
   cwd="$(lane_get "$lane" cwd)"; sid="$(jq -r '.provisional_session.session_id // empty' <<<"$transition")"
@@ -248,7 +281,7 @@ claude_resume_with_arm() {
   [[ -n "$model" ]] && model_args=(--model "$model")
   [[ -n "$effort" ]] && effort_args=(--effort "$effort")
   [[ "$fresh" == true ]] && resume_args=(--session-id "$sid") || resume_args=(--resume "$sid")
-  local argv=(env "${MCP_ENV[@]}" claude "${resume_args[@]}" "${model_args[@]}" "${effort_args[@]}" --name "$lane" --dangerously-skip-permissions "${MCP_ARGV[@]}" -- "$prompt")
+  local argv=(env "${CLAUDE_AUTH_ENV[@]}" "${MCP_ENV[@]}" claude "${resume_args[@]}" "${model_args[@]}" "${effort_args[@]}" --name "$lane" --dangerously-skip-permissions "${MCP_ARGV[@]}" -- "$prompt")
   for a in "${argv[@]}"; do quoted+=" $(printf '%q' "$a")"; done
   tmux_send_owned_window_shell_command "$ownership" "bash -lc $(printf '%q' "${quoted# }")" || return 1
   tmux pipe-pane -t "$target" -o "$(transcript_capture_command "$(lane_transcript "$lane")")" 2>/dev/null || true
@@ -279,7 +312,7 @@ claude_session_resumable() {
   local lane="$1" session_id jsonl
   session_id="$(claude_discover_session "$lane")"
   [[ -n "$session_id" ]] || return 1
-  jsonl="$(find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
+  jsonl="$(find "$(_claude_projects_dir "$lane")" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
   [[ -n "$jsonl" && -s "$jsonl" ]]
 }
 
@@ -313,11 +346,11 @@ CLAUDE_SUBAGENT_ACTIVE_SECS="${CLAUDE_SUBAGENT_ACTIVE_SECS:-45}"
 # (sub-second race right after spawn) — the parent's end_turn gate below plus
 # wait's polling covers that in practice. Returns 0 if any child looks active.
 _claude_children_active() {
-  local session_id="$1" subdir sub last_mtime now age
+  local lane="$1" session_id="$2" subdir sub last_mtime now age
   # Parent transcript dir: <projects>/<slug>/<session-id>/subagents/
   # Locate it via the parent jsonl's dir so we don't guess the slug.
   local parent_jsonl parent_dir
-  parent_jsonl="$(find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
+  parent_jsonl="$(find "$(_claude_projects_dir "$lane")" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
   [[ -n "$parent_jsonl" ]] || return 1
   parent_dir="$(dirname "$parent_jsonl")"
   subdir="$parent_dir/${session_id}/subagents"
@@ -347,13 +380,13 @@ claude_is_idle() {
   local lane="$1" session_id jsonl last_reason
   session_id="$(claude_discover_session "$lane")"
   [[ -n "$session_id" ]] || return 1
-  jsonl="$(find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -type f -name "${session_id}.jsonl" \
+  jsonl="$(find "$(_claude_projects_dir "$lane")" -maxdepth 2 -type f -name "${session_id}.jsonl" \
             -printf '%T@\t%p\n' 2>/dev/null | sort -rn | head -1 | cut -f2-)"
   [[ -n "$jsonl" && -f "$jsonl" ]] || return 1
   last_reason="$(jq -rc 'select(.type=="assistant") | .message.stop_reason // empty' "$jsonl" 2>/dev/null | tail -1)"
   [[ "$last_reason" == "end_turn" ]] || return 1
   # Parent turn ended — but hold IDLE while any spawned subagent is still writing.
-  if _claude_children_active "$session_id"; then
+  if _claude_children_active "$lane" "$session_id"; then
     return 2   # distinct nonzero: "parent done, children still active" (not idle)
   fi
   return 0
@@ -371,7 +404,7 @@ claude_turn_mark() {
   local lane="$1" session_id jsonl
   session_id="$(claude_discover_session "$lane")"
   [[ -n "$session_id" ]] || { echo 0; return 0; }
-  jsonl="$(find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
+  jsonl="$(find "$(_claude_projects_dir "$lane")" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
   [[ -n "$jsonl" && -f "$jsonl" ]] || { echo 0; return 0; }
   jq -rc 'select(.type=="assistant" and .message.stop_reason=="end_turn") | 1' "$jsonl" 2>/dev/null | wc -l
 }
@@ -382,10 +415,10 @@ claude_arm_switch_supported() { :; }
 # The session log's mtime is the last provider activity; compaction writes a
 # {"type":"system","subtype":"compact_boundary"} row into the SAME session file.
 claude_session_log() {
-  local session_id
+  local lane="$1" session_id
   session_id="$(claude_discover_session "$1")"
   [[ -n "$session_id" ]] || return 1
-  find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1 | grep .
+  find "$(_claude_projects_dir "$lane")" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1 | grep .
 }
 # Args: lane epoch. Counts compactions stamped at or after epoch.
 claude_compactions_since() {
@@ -424,6 +457,7 @@ claude_turn_settled() {
 claude_revise() {
   local lane="$1" message="$2" out_file="${3:-}"
   local session_id model cwd
+  _claude_auth_env "$lane"
   session_id="$(claude_discover_session "$lane")"
   [[ -n "$session_id" ]] || { err "no session_id recorded for lane '$lane'"; return 1; }
   model="$(lane_get "$lane" model)"
@@ -441,7 +475,7 @@ claude_revise() {
     # long prompts or special characters.
     local target jsonl before after attempt j
     target="$(tmux_window_target "$lane")"
-    jsonl="$(find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
+    jsonl="$(find "$(_claude_projects_dir "$lane")" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
     before="$(wc -l <"$jsonl" 2>/dev/null || echo 0)"
     tmux send-keys -t "$target" C-u
     sleep 0.3
@@ -450,7 +484,7 @@ claude_revise() {
     for attempt in 1 2 3 4 5; do
       tmux send-keys -t "$target" Enter
       for j in $(seq 1 6); do
-        [[ -z "$jsonl" ]] && jsonl="$(find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
+        [[ -z "$jsonl" ]] && jsonl="$(find "$(_claude_projects_dir "$lane")" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
         after="$(wc -l <"$jsonl" 2>/dev/null || echo 0)"
         [[ "$after" -gt "$before" ]] && return 0
         sleep 1
@@ -478,7 +512,7 @@ claude_revise() {
     rc=0
     # Resume from the lane's cwd: claude --resume is scoped to the project dir.
     tmux_run_owned_lane_command "$lane" "${cwd:-$PWD}" headless-revise -- \
-      env "${MCP_ENV[@]}" claude --resume "$session_id" --print "${model_args[@]}" \
+      env "${CLAUDE_AUTH_ENV[@]}" "${MCP_ENV[@]}" claude --resume "$session_id" --print "${model_args[@]}" \
       --dangerously-skip-permissions "${MCP_ARGV[@]}" -- "$message" </dev/null >"$tmp" 2>&1 || rc=$?
     if grep -q "No conversation found" "$tmp" 2>/dev/null; then
       sleep $(( attempt * 2 ))
@@ -515,7 +549,7 @@ claude_refresh_runtime_settings() {
   }
   sid="$expected_session"
   [[ -n "$sid" ]] || { _claude_runtime_refresh_health unknown no-session; return 0; }
-  file="$(find "${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}" -maxdepth 2 -name "${sid}.jsonl" 2>/dev/null | head -1)"
+  file="$(find "$(_claude_projects_dir "$lane")" -maxdepth 2 -name "${sid}.jsonl" 2>/dev/null | head -1)"
   [[ -n "$file" && -f "$file" && ! -p "$file" && -r "$file" ]] || { _claude_runtime_refresh_health unknown no-session-log; return 0; }
   # Typed extraction, not raw grep: task/tool content can embed forged
   # "model":"claude-…" strings, and attestation feeding flywheel eligibility
