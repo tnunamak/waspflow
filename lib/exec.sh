@@ -288,7 +288,7 @@ _exec_claude() {
   local -a effort_args=()
   [[ -n "$effort" ]] && effort_args=(--effort "$effort")
 
-  local rc=0 stderr_dir stderr_file stderr_fifo tee_pid claude_pid last_stdout_line
+  local rc=0 stderr_dir stderr_file stderr_fifo tee_pid last_stdout_line
   stderr_dir="$(mktemp -d)"
   stderr_file="$stderr_dir/stderr.log"
   stderr_fifo="$stderr_dir/stderr.fifo"
@@ -306,9 +306,7 @@ _exec_claude() {
       -- \
       "$prompt" \
       </dev/null
-  ) >"$output_path" 2>"$stderr_fifo" &
-  claude_pid=$!
-  wait "$claude_pid" || rc=$?
+  ) >"$output_path" 2>"$stderr_fifo" || rc=$?
   # tee must finish draining the FIFO before the captured stderr is inspected.
   wait "$tee_pid"
 

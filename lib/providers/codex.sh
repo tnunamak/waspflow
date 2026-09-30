@@ -765,7 +765,7 @@ _codex_find_rollout_for_submitted_prompt() {
     [[ "$fcwd" == "$cwd" ]] || continue
     # A subagent may replay the parent's history in a same-cwd rollout. It is
     # not evidence that this CLI launch accepted the prompt.
-    head -1 "$f" 2>/dev/null | jq -e 'select(.type=="session_meta") | (.payload.source | type == "string")' >/dev/null 2>&1 || continue
+    head -1 "$f" 2>/dev/null | jq -e 'select(.type=="session_meta") | ((.payload.source | type) == "object" and (.payload.source | has("subagent"))) | not' >/dev/null 2>&1 || continue
     jq -e --arg full_prompt "$full_prompt" \
       'select(
         ((.payload.type // .type) == "user_message" and (.payload.message // "") == $full_prompt)

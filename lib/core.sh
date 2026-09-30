@@ -504,9 +504,11 @@ warn_shared_checkout_lanes() {
     other_real="$(realpath "$other_root" 2>/dev/null)" || continue
     [[ "$other_real" == "$current_real" ]] || continue
     warn "spawn: warning: lane '$lane' is also live in checkout $current_real without isolation; concurrent writers can change each other's branch and index. Use --isolate for write tasks."
+  # Small batches: jq stops at the first malformed file in an invocation, so
+  # one corrupt record must hide only its own batch, not the whole scan.
   done < <(
     find "$WASPFLOW_LANES_DIR" -mindepth 2 -maxdepth 2 -name state.json -type f -print0 2>/dev/null \
-      | xargs -0 -r -n 10000 jq -r --arg root "$current_root" --arg real "$current_real" '
+      | xargs -0 -r -n 64 jq -r --arg root "$current_root" --arg real "$current_real" '
           select(type == "object"
             and (.status | type == "string" and length > 0 and . != "parked" and . != "reaped")
             and (.cwd | type == "string")
