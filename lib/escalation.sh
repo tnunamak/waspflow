@@ -288,19 +288,28 @@ escalate_provisional_session_id() {
 }
 
 escalate_provision_locked() {
-  local lane="$1" transition="$2" cwd id target ownership session scopes i
+  local lane="$1" transition="$2" cwd id target ownership session scopes fallback state_file i
   cwd="$(lane_get "$lane" cwd)"; id="$(jq -r .id <<<"$transition")"
   session="$(escalate_provisional_session_id "$lane" "$transition")"
   target="$(tmux_create_owned_lane_window "$lane" "$cwd" 'exec bash --noprofile --norc' provisional "escalation:$id")" || return 1
   ownership="$(tmux_window_ownership_json "$target")" || { tmux kill-window -t "$target" 2>/dev/null || true; return 1; }
   scopes='[]'
   if tmux_cgroup_scope_available; then
-    for i in $(seq 1 20); do
+    # `new-window` returns before its pane command journals ownership. Allow
+    # systemd startup time, and accept the core's explicit tmux-only fallback.
+    state_file="$(lane_state_file "$lane")"
+    fallback=""
+    for i in $(seq 1 150); do
       scopes="$(tmux_lane_scope_receipts_for_execution "$lane" "escalation:$id")"
-      [[ "$(jq 'length' <<<"$scopes" 2>/dev/null)" -gt 0 ]] && break
+      if [[ "$(jq 'length' <<<"$scopes" 2>/dev/null)" -gt 0 ]]; then break; fi
+      fallback="$(jq -r --arg execution "escalation:$id" '
+        ((.cgroup_fallbacks // []) | if type == "array" then . else [] end)
+        | any(.[]; .execution == $execution)
+      ' "$state_file" 2>/dev/null || true)"
+      [[ "$fallback" == true ]] && break
       sleep 0.1
     done
-    if [[ "$(jq 'length' <<<"$scopes" 2>/dev/null)" -eq 0 ]]; then
+    if [[ "$(jq 'length' <<<"$scopes" 2>/dev/null)" -eq 0 && "$fallback" != true ]]; then
       tmux_kill_window_if_owned "$ownership" >/dev/null 2>&1 || true
       return 1
     fi

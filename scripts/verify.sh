@@ -4743,6 +4743,35 @@ PROV
   jq -e 'keys == ["exit_class","from_arm","ok","reason","segment_index","suggested_argv","to_arm"] and .ok and .exit_class == "success" and .segment_index == 1' <<<"$success_json" >/dev/null
   jq -e '.status == "live" and .provider == "codex" and .model == "target" and .effort == "high" and .op_mode == "standard" and .arm_generation == "4" and .segment_index == "1" and .session_id == "esc-success-new-session" and .fake_launch_count == "1"' "$eschome/lanes/esc-success/state.json" >/dev/null \
     || { echo "escalate success: journaled provisional session was launched more than once" >&2; exit 1; }
+  if tmux_cgroup_scope_available; then
+    jq -e 'any(.cgroup_scope_receipts[]?; .execution | startswith("escalation:"))' "$eschome/lanes/esc-success/state.json" >/dev/null \
+      || { echo "escalate scope: available scope was not journaled" >&2; exit 1; }
+
+    # A busy user manager can take more than two seconds to start a scope.
+    # Delay the real launcher past that old deadline; provisioning must wait
+    # for its receipt instead of killing an owned pane before it starts.
+    real_systemd_run="$(command -v systemd-run)"
+    escalation_delaybin="$(mktemp -d "$scratch/waspflow-escalation-delaybin-XXXXXX")"
+    cat >"$escalation_delaybin/systemd-run" <<EOF
+#!/usr/bin/env bash
+sleep 3
+exec "$real_systemd_run" "\$@"
+EOF
+    chmod +x "$escalation_delaybin/systemd-run"
+    make_escalation_lane esc-scope-delayed
+    old_path="$PATH"; export PATH="$escalation_delaybin:$PATH"
+    set +e; delayed_json="$(run_escalate esc-scope-delayed --to codex/target/high --json 2>"$eschome/scope-delayed.err")"; rc=$?; set -e
+    export PATH="$old_path"
+    [[ "$rc" -eq 0 ]] \
+      || { cat "$eschome/scope-delayed.err" >&2; echo "escalate scope delay: expected success, got $rc" >&2; exit 1; }
+    jq -e '.ok and .exit_class == "success"' <<<"$delayed_json" >/dev/null
+    jq -e '.model == "target" and any(.cgroup_scope_receipts[]?; .execution | startswith("escalation:"))' \
+      "$eschome/lanes/esc-scope-delayed/state.json" >/dev/null \
+      || { echo "escalate scope delay: delayed receipt was not adopted" >&2; exit 1; }
+    set +e; "$root/bin/waspflow" reap esc-scope-delayed --no-archive >/dev/null 2>"$eschome/scope-delayed-reap.err"; rc=$?; set -e
+    [[ "$rc" -eq 2 ]] || { cat "$eschome/scope-delayed-reap.err" >&2; echo "escalate scope delay: reap expected rc2, got $rc" >&2; exit 1; }
+    rm -rf "$escalation_delaybin"
+  fi
   jq -e 'select(.receipt_kind == "lane_segment" and .lane_uuid == "esc-success-uuid") | .segment.index == 0 and .segment.closed_by == "escalation" and .segment.boundary == "none" and .verify.failure_class == "task"' "$eschome/receipts.jsonl" >/dev/null
   grep -qF 'UNTRUSTED VERIFY OUTPUT' "$eschome/lanes/esc-success/state.json"
   grep -qF 'Do not weaken, skip, or edit tests to make verification pass.' "$eschome/lanes/esc-success/state.json"
@@ -4753,6 +4782,31 @@ PROV
   jq -s 'map(select(.lane_uuid == "esc-success-uuid" and .receipt_kind == "lane")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
   last_segment_index="$(jq -r '.segment_index | tonumber' "$eschome/lanes/esc-success/state.json")"
   jq -e --argjson last_segment_index "$last_segment_index" '.receipt_kind == "lane" and .segment == {index:$last_segment_index,closed_by:"reap"} and (.escalation_path | length == 1) and .escalation_path[0].to_arm.model == "target"' "$eschome/lanes/esc-success/receipt.json" >/dev/null
+
+  # A positive systemd preflight is not proof that launching this pane's scope
+  # will succeed. The fallback is still owned by the exact tmux window and must
+  # be journaled as degraded instead of rejecting the escalation.
+  if tmux_cgroup_scope_available; then
+    escalation_failbin="$(mktemp -d "$scratch/waspflow-escalation-failbin-XXXXXX")"
+    cat >"$escalation_failbin/systemd-run" <<'FAIL'
+#!/usr/bin/env bash
+exit 73
+FAIL
+    chmod +x "$escalation_failbin/systemd-run"
+    old_path="$PATH"; export PATH="$escalation_failbin:$PATH"
+    make_escalation_lane esc-scope-fallback
+    set +e; fallback_json="$(run_escalate esc-scope-fallback --to codex/target/high --json 2>"$eschome/scope-fallback.err")"; rc=$?; set -e
+    export PATH="$old_path"
+    [[ "$rc" -eq 0 ]] \
+      || { cat "$eschome/scope-fallback.err" >&2; echo "escalate scope fallback: expected success, got $rc" >&2; exit 1; }
+    jq -e '.ok and .exit_class == "success"' <<<"$fallback_json" >/dev/null
+    jq -e '.model == "target" and .status == "live" and any(.cgroup_fallbacks[]?; .execution | startswith("escalation:"))' \
+      "$eschome/lanes/esc-scope-fallback/state.json" >/dev/null \
+      || { echo "escalate scope fallback: degraded ownership was not recorded" >&2; exit 1; }
+    set +e; "$root/bin/waspflow" reap esc-scope-fallback --no-archive >/dev/null 2>"$eschome/scope-fallback-reap.err"; rc=$?; set -e
+    [[ "$rc" -eq 2 ]] || { cat "$eschome/scope-fallback-reap.err" >&2; echo "escalate scope fallback: reap expected rc2, got $rc" >&2; exit 1; }
+    rm -rf "$escalation_failbin"
+  fi
 
   # A provider failure is an attempt failure: it has a durable receipt phase but
   # does not mutate the arm. A different retry is refused; the exact resume
