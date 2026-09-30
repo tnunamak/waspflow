@@ -488,6 +488,36 @@ list_lanes() {
   find "$WASPFLOW_LANES_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort
 }
 
+# Warn when a non-isolated spawn would share a checkout with an owned live lane.
+# The durable lane directory is the index; inspect only each record's lifecycle
+# and cwd, and ask the existing tmux helper only for prefix-matched candidates.
+warn_shared_checkout_lanes() {
+  local cwd="$1" current_root current_real lane sf other_cwd other_root other_real
+  current_root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || return 0
+  current_real="$(realpath "$current_root" 2>/dev/null)" || return 0
+  [[ -n "$current_real" && -d "$WASPFLOW_LANES_DIR" ]] || return 0
+  while IFS=$'\t' read -r sf other_cwd; do
+    [[ -n "$sf" && -n "$other_cwd" ]] || continue
+    lane="$(basename "$(dirname "$sf")")"
+    tmux_window_exists "$lane" || continue
+    other_root="$(git -C "$other_cwd" rev-parse --show-toplevel 2>/dev/null)" || continue
+    other_real="$(realpath "$other_root" 2>/dev/null)" || continue
+    [[ "$other_real" == "$current_real" ]] || continue
+    warn "spawn: warning: lane '$lane' is also live in checkout $current_real without isolation; concurrent writers can change each other's branch and index. Use --isolate for write tasks."
+  done < <(
+    find "$WASPFLOW_LANES_DIR" -mindepth 2 -maxdepth 2 -name state.json -type f -print0 2>/dev/null \
+      | xargs -0 -r -n 10000 jq -r --arg root "$current_root" --arg real "$current_real" '
+          select(type == "object"
+            and (.status | type == "string" and length > 0 and . != "parked" and . != "reaped")
+            and (.cwd | type == "string")
+            and (.cwd == $root or (.cwd | startswith($root + "/"))
+              or .cwd == $real or (.cwd | startswith($real + "/"))))
+          | [input_filename, .cwd] | @tsv
+        ' 2>/dev/null
+  )
+  return 0
+}
+
 # The lane directory is the durable, global lane index.  Paths in a record are
 # intentionally compared as paths rather than by a transient shell cwd, so a
 # caller can scope a fleet query to a project after restarting its harness.

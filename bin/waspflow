@@ -208,6 +208,7 @@ cmd_spawn() {
     base_commit="$(git -C "$base_repo_root" rev-parse --verify --quiet "${base_ref}^{commit}" 2>/dev/null)" \
       || die "spawn: --base ref '$base_ref' does not resolve to a commit in '$base_repo_root'"
   fi
+  [[ "$isolate" -eq 1 ]] || warn_shared_checkout_lanes "$cwd"
   if [[ -n "$effort" && ! "$effort" =~ ^($WASPFLOW_EFFORT_TOKENS)$ ]]; then
     die "spawn: --effort must be one of ${WASPFLOW_EFFORT_TOKENS//|/, } (got: $effort)"
   fi

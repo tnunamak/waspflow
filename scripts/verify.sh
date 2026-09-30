@@ -207,6 +207,39 @@ grep -q 'verify_tmux kill-session -t "\$WASPFLOW_TMUX_SESSION"' <<<"$verify_clea
   && ! grep -q 'kill-server' <<<"$verify_cleanup_body" \
   || { echo "tmux EXIT cleanup: must kill only the isolated verify session" >&2; exit 1; }
 
+# Shared checkout preflight uses durable records and the existing tmux liveness
+# check. Keep this focused fixture independent of provider launches.
+shared_checkout_root="$fixture/shared-checkout"
+other_checkout_root="$fixture/other-checkout"
+shared_checkout_home="$fixture/shared-checkout-home"
+mkdir -p "$shared_checkout_root" "$other_checkout_root" "$shared_checkout_home/lanes"
+for repo in "$shared_checkout_root" "$other_checkout_root"; do
+  git -C "$repo" init -q
+  git -C "$repo" -c user.name=verify -c user.email=verify@example.invalid commit --allow-empty -qm init
+done
+shared_alias="$fixture/shared-alias"
+ln -s "$shared_checkout_root" "$shared_alias"
+WASPFLOW_HOME="$shared_checkout_home" WASPFLOW_LIB="$root/lib" bash -c '
+  source "$WASPFLOW_LIB/core.sh"
+  tmux_window_exists() { [[ "$1" == live-same || "$1" == exited-same || "$1" == live-other ]]; }
+  mkdir -p "$WASPFLOW_LANES_DIR/live-same" "$WASPFLOW_LANES_DIR/parked-same" \
+    "$WASPFLOW_LANES_DIR/reaped-same" "$WASPFLOW_LANES_DIR/exited-same" "$WASPFLOW_LANES_DIR/live-other"
+  jq -n --arg cwd "$1" "{status:\"live\",cwd:\$cwd}" >"$WASPFLOW_LANES_DIR/live-same/state.json"
+  jq -n --arg cwd "$1" "{status:\"parked\",cwd:\$cwd}" >"$WASPFLOW_LANES_DIR/parked-same/state.json"
+  jq -n --arg cwd "$1" "{status:\"reaped\",cwd:\$cwd}" >"$WASPFLOW_LANES_DIR/reaped-same/state.json"
+  jq -n --arg cwd "$1" "{status:\"exited\",cwd:\$cwd}" >"$WASPFLOW_LANES_DIR/exited-same/state.json"
+  jq -n --arg cwd "$2" "{status:\"live\",cwd:\$cwd}" >"$WASPFLOW_LANES_DIR/live-other/state.json"
+  out="$(warn_shared_checkout_lanes "$3" 2>&1)"
+  [[ "$out" == *"lane '\''live-same'\'' is also live"* && "$out" == *"lane '\''exited-same'\'' is also live"* && "$out" != *"parked-same"* && "$out" != *"reaped-same"* && "$out" != *"live-other"* ]] || {
+    printf "shared checkout warning mismatch: %s\\n" "$out" >&2; exit 1;
+  }
+  jq -n --arg cwd "$2" "{status:\"reaped\",cwd:\$cwd}" >"$WASPFLOW_LANES_DIR/live-other/state.json"
+  out="$(warn_shared_checkout_lanes "$2" 2>&1)"
+  [[ -z "$out" ]] || { printf "different checkout warned: %s\\n" "$out" >&2; exit 1; }
+' _ "$shared_checkout_root" "$other_checkout_root" "$shared_alias"
+grep -Fq '[[ "$isolate" -eq 1 ]] || warn_shared_checkout_lanes "$cwd"' "$root/bin/waspflow" \
+  || { echo "shared checkout warning: isolated spawn is not excluded" >&2; exit 1; }
+
 # The registry owns both command dispatch and help coverage, so a new command
 # cannot become reachable without appearing in this data-driven loop.
 # shellcheck disable=SC1090
