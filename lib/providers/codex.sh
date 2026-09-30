@@ -731,8 +731,13 @@ _codex_find_rollout_for_marker() {
   local listing; listing="$(_codex_rollout_candidates_for_text "$marker" "$since_epoch")"
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
-    fcwd="$(head -1 "$f" 2>/dev/null | jq -rc 'select(.type=="session_meta") | .payload.cwd // empty' 2>/dev/null)"
+    local meta
+    meta="$(head -1 "$f" 2>/dev/null | jq -rc 'select(.type=="session_meta") | .payload // {}' 2>/dev/null)"
+    fcwd="$(jq -r '.cwd // empty' <<<"$meta" 2>/dev/null)"
     [[ "$fcwd" == "$cwd" ]] || continue
+    # A lane marker can appear in a child thread's inherited prompt. Only the
+    # parent CLI thread can establish the lane's runtime receipt.
+    [[ "$(jq -r 'if (.source | type) == "object" and (.source | has("subagent")) then "subagent" else "main" end' <<<"$meta" 2>/dev/null)" == main ]] || continue
     grep -Fq "$marker" "$f" 2>/dev/null || continue
     echo "$f"
     return 0
@@ -844,10 +849,13 @@ codex_refresh_runtime_settings() {
   done <"$snapshot"
   local meta
   meta="$(jq -Rrc --arg sid "$sid" 'fromjson? | select(.type == "session_meta" and (.payload.id // "") == $sid) | 1' "$snapshot" 2>/dev/null | tail -1)"
+  local subagent
+  subagent="$(jq -Rrc --arg sid "$sid" 'fromjson? | select(.type == "session_meta" and (.payload.id // "") == $sid) | if ((.payload.source // {}) | type) == "object" and ((.payload.source // {}) | has("subagent")) then 1 else 0 end' "$snapshot" 2>/dev/null | tail -1)"
   rm -f "$snapshot"
   if [[ -n "$malformed" ]]; then _codex_runtime_refresh_health error "malformed-rollout:$malformed"; return 0; fi
   if [[ "$in_flight" -eq 1 ]]; then _codex_runtime_refresh_health in_flight incomplete-final-record; return 0; fi
   if [[ "$meta" != 1 ]]; then _codex_runtime_refresh_health unknown uncorrelated-rollout; return 0; fi
+  if [[ "$subagent" == 1 ]]; then _codex_runtime_refresh_health unknown subagent-rollout; return 0; fi
   if [[ -z "$source" || -z "$runtime_model" || -z "$runtime_effort" ]]; then
     _codex_runtime_refresh_health unknown no-settings-event
     return 0

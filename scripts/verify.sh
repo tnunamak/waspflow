@@ -1817,6 +1817,37 @@ JSONL
       runtime_settings_match_requested unknown runtime_settings_warned_observed_at ""
   }
 
+  # A newer child rollout can inherit the lane marker, but it must not become
+  # the session or runtime receipt. The parent's own drift remains observable.
+  parent_sid="55555555-5555-5555-5555-555555555551"
+  child_sid="55555555-5555-5555-5555-555555555552"
+  marker="WASPFLOW_LANE_MARKER:runtime-parent:synthetic"
+  parent_roll="$runtime_sessions/2026/07/15/rollout-2026-07-15T00-00-01-$parent_sid.jsonl"
+  child_roll="$runtime_sessions/2026/07/15/rollout-2026-07-15T00-00-02-$child_sid.jsonl"
+  cat >"$parent_roll" <<JSONL
+{"type":"session_meta","payload":{"id":"$parent_sid","cwd":"$fixture","source":"cli"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"$marker"}}
+{"type":"turn_context","timestamp":"2026-07-15T04:56:00.489Z","payload":{"model":"gpt-5.6-terra","effort":"medium"}}
+JSONL
+  cat >"$child_roll" <<JSONL
+{"type":"session_meta","payload":{"id":"$child_sid","cwd":"$fixture","source":{"subagent":{"thread_spawn":{"parent_thread_id":"$parent_sid","depth":1,"agent_path":"/synthetic/child"}}}}}
+{"type":"event_msg","payload":{"type":"user_message","message":"$marker"}}
+{"type":"turn_context","timestamp":"2026-07-15T04:57:00.000Z","payload":{"model":"gpt-5.5","effort":"low"}}
+JSONL
+  lane_set runtime-parent provider codex status live cwd "$fixture" codex_marker "$marker" \
+    model_requested gpt-5.6-terra effort_requested medium model gpt-5.6-terra effort medium
+  [[ "$(codex_discover_session runtime-parent)" == "$parent_sid" ]] \
+    || { echo "runtime receipt: subagent rollout won marker discovery" >&2; exit 1; }
+  lane_set runtime-parent session_id "$parent_sid" rollout "$parent_roll"
+  codex_refresh_runtime_settings runtime-parent
+  [[ "$(lane_get runtime-parent runtime_model)" == gpt-5.6-terra && "$(lane_get runtime-parent runtime_settings_match_requested)" == true ]] \
+    || { echo "runtime receipt: subagent rollout overwrote parent receipt" >&2; exit 1; }
+  sed -i 's/"model":"gpt-5.6-terra","effort":"medium"/"model":"gpt-5.5","effort":"low"/' "$parent_roll"
+  codex_refresh_runtime_settings runtime-parent
+  [[ "$(lane_get runtime-parent runtime_model)" == gpt-5.5 && "$(lane_get runtime-parent runtime_settings_match_requested)" == false ]] \
+    || { echo "runtime receipt: true parent drift was hidden" >&2; exit 1; }
+  : >"$runtime_warn_log"
+
   # 1: matching turn_context observation.
   reset_runtime
   printf '%s\n' '{"type":"turn_context","timestamp":"2026-07-15T04:56:00.489Z","payload":{"model":"gpt-5.6-terra","effort":"medium"}}' >>"$roll"
