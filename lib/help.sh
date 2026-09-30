@@ -195,6 +195,7 @@ Flags:
   --mcp <auto|none|inherit>   Set the MCP policy; defaults to auto.
   --cwd <dir>                 Set the worker directory; defaults to the current directory.
   --isolate, --worktree       Create an isolated Git worktree for the lane.
+  --base <ref>                Start an isolated worktree from this commit-ish.
   --report <path>             Require this report when the lane is reaped.
   --no-recovery               Do not make the one report-recovery attempt at reap.
   --verify <command>          Configure the lane verification command.

@@ -240,6 +240,8 @@ grep -Fq 'waspflow list' <<<"$list_alias_help" \
 help_after_value_flag="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" spawn --provider codex --help)"
 grep -Fq 'waspflow spawn' <<<"$help_after_value_flag" \
   || { echo "help: help after a value-taking flag was not intercepted" >&2; exit 1; }
+grep -Fq -- '--base <ref>' <<<"$help_after_value_flag" \
+  || { echo "help: spawn --base flag is missing" >&2; exit 1; }
 
 set +e
 literal_help_value_output="$(WASPFLOW_HOME="$state_home" "$root/bin/waspflow" accept-runtime lane --reason --help 2>&1)"
@@ -3178,6 +3180,48 @@ PROV
   sed -i '/^WASPFLOW_PROVIDERS=(/ s/)$/ mcpp)/' "$mcplib/core.sh"
   mcphome="$(mktemp -d "$scratch/waspflow-mcp-home-XXXXXX")"
   mcpdir="$(mktemp -d "$scratch/waspflow-mcp-cwd-XXXXXX")"; (cd "$mcpdir" && git init -q)
+  git -C "$mcpdir" config user.name 'Waspflow Test'
+  git -C "$mcpdir" config user.email 'waspflow-test@example.invalid'
+  printf 'first\n' >"$mcpdir/base-marker"
+  git -C "$mcpdir" add base-marker && git -C "$mcpdir" commit -qm 'first base commit'
+  base_commit="$(git -C "$mcpdir" rev-parse HEAD)"
+  printf 'second\n' >>"$mcpdir/base-marker"
+  git -C "$mcpdir" commit -qam 'second base commit'
+  head_commit="$(git -C "$mcpdir" rev-parse HEAD)"
+
+  set +e
+  invalid_base_out="$(WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane bad-base --cwd "$mcpdir" --isolate --base no-such-ref -- "reject bad base" 2>&1)"
+  invalid_base_rc=$?
+  set -e
+  [[ "$invalid_base_rc" -eq 1 && "$invalid_base_out" == *"--base ref 'no-such-ref' does not resolve to a commit"* \
+    && ! -e "$mcphome/lanes/bad-base" && ! -e "${mcpdir}-waspflow-bad-base" \
+    && "$(tmux list-windows -t "wf-mcp-$$" -F '#{window_name}' | grep -cxF bad-base || true)" -eq 0 ]] \
+    || { echo "spawn: invalid --base created side effects or lacked a clear error" >&2; exit 1; }
+  set +e
+  no_isolate_base_out="$(WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane base-needs-isolate --base HEAD -- "reject non-isolated base" 2>&1)"
+  no_isolate_base_rc=$?
+  set -e
+  [[ "$no_isolate_base_rc" -eq 1 && "$no_isolate_base_out" == *"--base requires --isolate or --worktree"* \
+    && ! -e "$mcphome/lanes/base-needs-isolate" ]] \
+    || { echo "spawn: --base without isolation was not rejected before side effects" >&2; exit 1; }
+
+  WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane based-worktree --cwd "$mcpdir" --isolate --base HEAD~1 -- "start from older commit" >/dev/null 2>&1
+  based_worktree="${mcpdir}-waspflow-based-worktree"
+  [[ "$(git -C "$based_worktree" rev-parse HEAD)" == "$base_commit" ]] \
+    || { echo "spawn: --base did not create the isolated branch at the requested commit" >&2; exit 1; }
+  jq -e --arg ref HEAD~1 --arg commit "$base_commit" \
+    '.base_ref == $ref and .base_commit == $commit and .verify_fork_point == $commit' \
+    "$mcphome/lanes/based-worktree/state.json" >/dev/null \
+    || { echo "spawn: --base ref/commit/fork-point receipt did not match" >&2; exit 1; }
+  WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
+    "$root/bin/waspflow" spawn --provider mcpp --lane default-worktree --cwd "$mcpdir" --isolate -- "start from current HEAD" >/dev/null 2>&1
+  default_worktree="${mcpdir}-waspflow-default-worktree"
+  [[ "$(git -C "$default_worktree" rev-parse HEAD)" == "$head_commit" ]] \
+    || { echo "spawn: isolated default no longer starts at current HEAD" >&2; exit 1; }
+
   set +e
   WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
     "$root/bin/waspflow" spawn --provider mcpp --lane invalid-model --model denied -- "reject early" >/dev/null 2>&1

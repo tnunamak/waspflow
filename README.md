@@ -114,6 +114,11 @@ Use `--isolate` when several workers may edit the same repo:
 ```bash
 waspflow spawn --provider claude --accept-provider-default --lane api --isolate -- "Refactor the API client"
 waspflow spawn --provider codex  --accept-provider-default --lane ui  --isolate -- "Tighten the settings page"
+
+Add `--base <ref>` to start an isolated lane from a specific commit instead of
+the current `HEAD`:
+
+waspflow spawn --provider codex --accept-provider-default --lane follow-up --isolate --base feature/previous -- "Build on the previous branch"
 ```
 
 Each lane gets a git worktree on branch `waspflow/<lane>`. `reap` removes that
@@ -248,6 +253,7 @@ config shape.
 Useful `spawn` options:
 
 - `--isolate` creates a git worktree for the lane.
+- `--base <ref>` selects the starting commit for an isolated worktree.
 - `--report <path>` requires a written deliverable before `reap` succeeds.
 - `--verify <cmd>` configures an oracle; use `verify <lane>` before destructive reap.
 - `--prepare <cmd>` runs setup before that oracle; `--verify-timeout <seconds>` bounds both commands.

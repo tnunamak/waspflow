@@ -104,7 +104,7 @@ split_after_ddash() {
 # ============================================================================
 
 cmd_spawn() {
-  local provider="" lane="" model="" cwd="$PWD" isolate=0 effort="" mcp="auto" report="" no_recovery=0 parent_ref="" parent_ref_explicit=false no_parent=false
+  local provider="" lane="" model="" cwd="$PWD" isolate=0 base_ref="" base_commit="" effort="" mcp="auto" report="" no_recovery=0 parent_ref="" parent_ref_explicit=false no_parent=false
   local verify_command="" verify_name="verify" verify_timeout=1800 prepare_command="" verify_strength=""
   local op_id="" OP_ID="" OP_MODE="" provider_explicit=false model_explicit=false auto=false ack_deprecated=false accept_provider_default=false
   local -a extra=()
@@ -126,6 +126,10 @@ cmd_spawn() {
         ;;
       --cwd)      cwd="${2:-}"; shift 2 ;;
       --isolate|--worktree) isolate=1; shift ;;
+      --base)
+        [[ $# -ge 2 && -n "${2:-}" ]] || die "spawn: --base requires a non-empty value"
+        base_ref="$2"; shift 2
+        ;;
       --report)   report="${2:-}"; shift 2 ;;     # opt-in deliverable contract
       --no-recovery) no_recovery=1; shift ;;
       --verify) verify_command="${2:-}"; shift 2 ;;
@@ -145,6 +149,8 @@ cmd_spawn() {
     esac
   done
   local prompt="${REST[*]:-}"
+
+  [[ -z "$base_ref" || "$isolate" -eq 1 ]] || die "spawn: --base requires --isolate or --worktree"
 
   [[ "$auto" == false || -n "$op_id" ]] || die "spawn: --auto requires --op"
   [[ "$auto" == false || "$model_explicit" == false ]] || die "spawn: --auto conflicts with --model"
@@ -195,6 +201,13 @@ cmd_spawn() {
   [[ "$provenance_gate_rc" -eq 0 ]] || return "$provenance_gate_rc"
   cwd="$(cd "$cwd" && pwd)" || die "spawn: --cwd does not exist"
   guard_cwd "$cwd"   # never hand a worker '/' silently (known grok --cwd / crash)
+  local base_repo_root=""
+  if [[ -n "$base_ref" ]]; then
+    base_repo_root="$(worktree_repo_root "$cwd")"
+    [[ -n "$base_repo_root" ]] || die "spawn: --base requires --cwd inside a Git repo"
+    base_commit="$(git -C "$base_repo_root" rev-parse --verify --quiet "${base_ref}^{commit}" 2>/dev/null)" \
+      || die "spawn: --base ref '$base_ref' does not resolve to a commit in '$base_repo_root'"
+  fi
   if [[ -n "$effort" && ! "$effort" =~ ^($WASPFLOW_EFFORT_TOKENS)$ ]]; then
     die "spawn: --effort must be one of ${WASPFLOW_EFFORT_TOKENS//|/, } (got: $effort)"
   fi
@@ -285,8 +298,16 @@ cmd_spawn() {
   local work_cwd="$cwd" wt_path="" repo_root=""
   if [[ "$isolate" -eq 1 ]]; then
     repo_root="$(worktree_repo_root "$cwd")"
-    wt_path="$(worktree_create "$lane" "$cwd")" || die "spawn: worktree isolation failed"
+    wt_path="$(worktree_create "$lane" "$cwd" "$base_commit")" || die "spawn: worktree isolation failed"
     work_cwd="$wt_path"
+    if [[ -n "$base_commit" ]]; then
+      local worktree_head
+      worktree_head="$(git -C "$work_cwd" rev-parse HEAD 2>/dev/null || true)"
+      if [[ "$worktree_head" != "$base_commit" ]]; then
+        worktree_remove "$lane" "$wt_path" "$repo_root" 1 >/dev/null 2>&1 || true
+        die "spawn: isolated worktree HEAD '$worktree_head' does not match --base commit '$base_commit'"
+      fi
+    fi
     log "isolated worktree: $wt_path"
   fi
 
@@ -382,6 +403,8 @@ cmd_spawn() {
   # that signal as unknown instead of inventing a fork point.
   local verify_fork_point=""
   [[ -n "$wt_path" ]] && verify_fork_point="$(git -C "$work_cwd" rev-parse HEAD 2>/dev/null || true)"
+  local -a base_state=()
+  [[ -n "$base_ref" ]] && base_state=(base_ref "$base_ref" base_commit "$base_commit")
   local spawned_epoch
   spawned_epoch="$(date +%s)"
   lane_create "$lane" \
@@ -459,6 +482,7 @@ cmd_spawn() {
     rollout "" \
     worktree "$wt_path" \
     repo_root "$repo_root" \
+    "${base_state[@]}" \
     verify_fork_point "$verify_fork_point" \
     transcript "$transcript" \
     report "$report_abs" \
