@@ -817,7 +817,7 @@ git commit -q -m init
     local last="${!#}"
     [[ "$last" == Enter ]] || return 0
     jq -cn --arg sid "$codex_sid" --arg cwd "$fixture" \
-      '{type:"session_meta",payload:{id:$sid,cwd:$cwd}}' >"$codex_rollout"
+      '{type:"session_meta",payload:{id:$sid,cwd:$cwd,source:"cli"}}' >"$codex_rollout"
     jq -cn --arg message "$pasted_prompt" \
       '{type:"event_msg",payload:{type:"user_message",message:$message}}' >>"$codex_rollout"
   }
@@ -1530,7 +1530,7 @@ STUB
     [[ "$last" == Enter ]] || return 0
     ((++enter_count))
     jq -cn --arg sid "$spawn_sid" --arg cwd "$spawn_cwd" \
-      '{type:"session_meta",payload:{id:$sid,cwd:$cwd}}' >"$spawn_rollout"
+      '{type:"session_meta",payload:{id:$sid,cwd:$cwd,source:"cli"}}' >"$spawn_rollout"
     case "$spawn_mode" in
       marker) jq -cn --arg message "$spawn_marker" '{type:"event_msg",payload:{type:"user_message",message:$message}}' >>"$spawn_rollout" ;;
       full)   jq -cn --arg message "$pasted_prompt" '{type:"event_msg",payload:{type:"user_message",message:$message}}' >>"$spawn_rollout" ;;
@@ -1547,6 +1547,51 @@ STUB
   [[ "$enter_count" -eq 1 && "$(lane_get spawn-receipt rollout)" == "$spawn_rollout" ]] \
     || { echo "codex spawn: complete multiline prompt did not confirm on first Enter" >&2; exit 1; }
   rm -rf "$spawn_home" "$spawn_sessions"
+)
+
+# Codex paginated rollouts record the canonical submitted input as an
+# item_completed UserMessage. Confirm only that event (or the legacy event),
+# never response_item user context, and never a replayed subagent rollout.
+(
+  receipt_home="$(mktemp -d "$scratch/waspflow-codex-receipt-home-XXXXXX")"
+  receipt_sessions="$(mktemp -d "$scratch/waspflow-codex-receipt-sessions-XXXXXX")"
+  export WASPFLOW_HOME="$receipt_home" CODEX_SESSIONS_DIR="$receipt_sessions"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"
+  # shellcheck disable=SC1090
+  source "$root/lib/providers/codex.sh"
+  receipt_cwd="$fixture"
+  receipt_prompt=$'WASPFLOW_LANE_MARKER:receipt:test\ncomplete task text'
+  receipt_sid="55555555-5555-5555-5555-555555555555"
+  receipt_rollout="$receipt_sessions/rollout-2026-09-29T00-00-01-$receipt_sid.jsonl"
+  write_receipt_meta() {
+    jq -cn --arg sid "$receipt_sid" --arg cwd "$receipt_cwd" --argjson source "$1" \
+      '{type:"session_meta",payload:{id:$sid,cwd:$cwd,source:$source}}' >"$receipt_rollout"
+  }
+  write_item_message() {
+    jq -cn --arg prompt "$receipt_prompt" \
+      '{type:"event_msg",payload:{type:"item_completed",item:{type:"UserMessage",content:[{type:"text",text:$prompt}]}}}' >>"$receipt_rollout"
+  }
+  write_receipt_meta '"cli"'; write_item_message
+  [[ "$(_codex_find_rollout_for_submitted_prompt "$receipt_cwd" "$receipt_prompt")" == "$receipt_rollout" ]] \
+    || { echo "codex receipt: item_completed UserMessage was not confirmed" >&2; exit 1; }
+  write_receipt_meta '"cli"'
+  jq -cn --arg message "$receipt_prompt" '{type:"event_msg",payload:{type:"user_message",message:$message}}' >>"$receipt_rollout"
+  [[ "$(_codex_find_rollout_for_submitted_prompt "$receipt_cwd" "$receipt_prompt")" == "$receipt_rollout" ]] \
+    || { echo "codex receipt: legacy user_message stopped confirming" >&2; exit 1; }
+  write_receipt_meta '"cli"'
+  jq -cn --arg prompt "$receipt_prompt" \
+    '{type:"response_item",payload:{type:"message",role:"user",content:[{type:"input_text",text:$prompt}]}}' >>"$receipt_rollout"
+  [[ -z "$(_codex_find_rollout_for_submitted_prompt "$receipt_cwd" "$receipt_prompt" || true)" ]] \
+    || { echo "codex receipt: synthetic response_item user context falsely confirmed" >&2; exit 1; }
+  write_receipt_meta '{"subagent":{"thread_id":"child"}}'; write_item_message
+  [[ -z "$(_codex_find_rollout_for_submitted_prompt "$receipt_cwd" "$receipt_prompt" || true)" ]] \
+    || { echo "codex receipt: subagent replay falsely confirmed" >&2; exit 1; }
+  write_receipt_meta '"cli"'
+  jq -cn '{type:"event_msg",payload:{type:"item_completed",item:{type:"UserMessage",content:[{type:"text",text:"different task"}]}}}' >>"$receipt_rollout"
+  [[ -z "$(_codex_find_rollout_for_submitted_prompt "$receipt_cwd" "$receipt_prompt" || true)" ]] \
+    || { echo "codex receipt: rollout without full prompt was confirmed" >&2; exit 1; }
+  rm -rf "$receipt_home" "$receipt_sessions"
 )
 
 # ---------------------------------------------------------------------------
