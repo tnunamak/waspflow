@@ -3046,6 +3046,7 @@ PROV
 # Public parsing + lane receipts: default auto reaches the adapter and records
 # both the requested policy and the provider-resolved result.
 (
+set -x
   mcplib="$(mktemp -d "$scratch/waspflow-mcp-lib-XXXXXX")"; mkdir -p "$mcplib/providers"
   cp "$root"/lib/*.sh "$mcplib/"; cp -r "$root/lib/generated" "$mcplib/" 2>/dev/null || true
   cat >"$mcplib/providers/mcpp.sh" <<'PROV'
