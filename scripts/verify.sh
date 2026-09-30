@@ -3060,7 +3060,7 @@ mcpp_mcp_policy() { case "$1" in auto) printf '%s\n' '{"resolved":"none","warnin
 mcpp_spawn() {
   local lane="$1" cwd="$2"
   if [[ "$lane" == mcp-child-parent ]]; then
-    tmux_create_owned_lane_window "$lane" "$cwd" "printf '%s\\n' \"\$WASPFLOW_PARENT_REF\" > $(printf '%q' "${MCPP_PARENT_REF_FILE:?}")" >/dev/null
+    tmux_create_owned_lane_window "$lane" "$cwd" "printf '%s\\n' \"\$WASPFLOW_PARENT_REF\" > $(printf '%q' "${MCPP_PARENT_REF_FILE:?}"); exec sleep 60" >/dev/null
   else
     tmux_create_owned_lane_window "$lane" "$cwd" "exec sleep 60" >/dev/null
   fi
@@ -5154,7 +5154,8 @@ JSON
   compact_rollout dfs-attached
   attached_window="$(lane_get dfs-attached tmux_window)"
   tmux select-window -t "$attached_window"
-  script -qfc "tmux attach-session -t $WASPFLOW_TMUX_SESSION" /dev/null >/dev/null 2>&1 &
+  # CI's TERM=dumb is not a usable tmux terminal, even inside script's pty.
+  TERM=xterm-256color script -qfc "tmux attach-session -t $WASPFLOW_TMUX_SESSION" /dev/null >/dev/null 2>&1 &
   attach_pid=$!
   for i in $(seq 1 50); do [[ "$(tmux display-message -p -t "$attached_window" '#{window_active_clients}')" -gt 0 ]] && break; sleep 0.1; done
   [[ "$(tmux display-message -p -t "$attached_window" '#{window_active_clients}')" -gt 0 ]] || { echo "deferred attached: could not attach a test client" >&2; exit 1; }
