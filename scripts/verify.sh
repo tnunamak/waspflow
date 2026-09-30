@@ -3060,7 +3060,7 @@ mcpp_mcp_policy() { case "$1" in auto) printf '%s\n' '{"resolved":"none","warnin
 mcpp_spawn() {
   local lane="$1" cwd="$2"
   if [[ "$lane" == mcp-child-parent ]]; then
-    tmux_create_owned_lane_window "$lane" "$cwd" "printf '%s\\n' \"\$WASPFLOW_PARENT_REF\" > $(printf '%q' "${MCPP_PARENT_REF_FILE:?}")" >/dev/null
+    tmux_create_owned_lane_window "$lane" "$cwd" "printf '%s\\n' \"\$WASPFLOW_PARENT_REF\" > $(printf '%q' "${MCPP_PARENT_REF_FILE:?}"); exec sleep 60" >/dev/null
   else
     tmux_create_owned_lane_window "$lane" "$cwd" "exec sleep 60" >/dev/null
   fi
