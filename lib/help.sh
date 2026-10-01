@@ -453,9 +453,10 @@ Flags:
                               ancestor of a remote-tracking branch, patch-equivalent to the default
                               branch, or a merged PR with the same head), blocked (dirty, locked, in use,
                               live lane...), or unknown. Never fetches or deletes; --apply is rejected.
-  --repos-root <dir>          With --worktrees: scan every repo directly under <dir> (repeatable;
-                              default ~/code).
-  --repo <path>               With --worktrees: scan this repo (repeatable).
+  --repos-root <dir>          With --worktrees: scan every repo directly under <dir> (repeatable).
+  --repo <path>               With --worktrees: scan this repo (repeatable). Without --repo or
+                              --repos-root, scan the repos waspflow's lanes have used plus the
+                              current directory's repo.
   --json                      With --worktrees: machine-readable output.
 
 Examples:
