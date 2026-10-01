@@ -1375,17 +1375,28 @@ cmd_park() {
 }
 
 cmd_gc() {
-  local lane_age project="" apply=0 adopt_legacy=0; lane_age="$(numeric_knob WASPFLOW_GC_LANE_AGE_SECONDS 86400)"
+  local lane_age project="" apply=0 adopt_legacy=0 worktrees=0 json=0; lane_age="$(numeric_knob WASPFLOW_GC_LANE_AGE_SECONDS 86400)"
+  local -a wt_args=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --lane-age) [[ $# -ge 2 ]] || die "gc: --lane-age requires seconds"; lane_age="$2"; shift 2 ;;
       --project) [[ $# -ge 2 ]] || die "gc: --project requires a directory"; project="$2"; shift 2 ;;
       --apply) apply=1; shift ;;
       --adopt-legacy) adopt_legacy=1; shift ;;
+      --worktrees) worktrees=1; shift ;;
+      --json) json=1; shift ;;
+      --repos-root|--repo)
+        [[ $# -ge 2 ]] || die "gc: $1 requires a directory"; wt_args+=("$1" "$2"); shift 2 ;;
       -*) die "gc: unknown option '$1'" ;;
       *) die "gc: unexpected arg '$1'" ;;
     esac
   done
+  if [[ "$worktrees" -eq 1 ]]; then
+    [[ "$apply" -eq 0 ]] || die "gc: --worktrees --apply is not implemented yet (dry run only)"
+    [[ "$json" -eq 0 ]] || wt_args+=(--json)
+    exec python3 "$WASPFLOW_ROOT/scripts/gc-worktrees.py" --lanes-dir "$WASPFLOW_LANES_DIR" "${wt_args[@]}"
+  fi
+  [[ "$json" -eq 0 && ${#wt_args[@]} -eq 0 ]] || die "gc: --json, --repos-root and --repo require --worktrees"
   [[ "$lane_age" =~ ^[0-9]+$ && "$lane_age" -gt 0 ]] \
     || die "gc: --lane-age must be a positive integer seconds value (got: $lane_age)"
   if [[ -n "$project" ]]; then
