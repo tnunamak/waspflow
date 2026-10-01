@@ -82,6 +82,58 @@ def discover_repos(roots, repos):
     return list(found.values())
 
 
+def repo_of(path):
+    """Main worktree path of the repo containing path, found without running git."""
+    d = os.path.realpath(path)
+    while True:
+        dot = os.path.join(d, ".git")
+        if os.path.isdir(dot):
+            return d
+        if os.path.isfile(dot):
+            try:
+                with open(dot) as f:
+                    line = f.read().strip()
+            except OSError:
+                return None
+            if not line.startswith("gitdir:"):
+                return None
+            gitdir = os.path.realpath(os.path.join(d, line[7:].strip()))
+            # <common>/worktrees/<id> -> main worktree is the parent of <common>
+            if os.path.basename(os.path.dirname(gitdir)) == "worktrees":
+                return os.path.dirname(os.path.dirname(os.path.dirname(gitdir)))
+            return None
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
+def known_repos(lanes_dir, cwd):
+    """Repos referenced by any lane record (any status), plus the cwd's repo."""
+    paths = {cwd}
+    if lanes_dir and os.path.isdir(lanes_dir):
+        for lane in os.listdir(lanes_dir):
+            try:
+                with open(os.path.join(lanes_dir, lane, "state.json")) as f:
+                    st = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(st, dict):
+                continue
+            for key in ("repo_root", "origin_cwd", "cwd", "worktree"):
+                val = st.get(key)
+                if isinstance(val, str) and val.startswith("/"):
+                    paths.add(val)
+    found = {}
+    for path in sorted(paths):
+        if not os.path.isdir(path):
+            continue
+        main = repo_of(path)
+        if main and os.path.isdir(os.path.join(main, ".git")):
+            found.setdefault(os.path.realpath(main), main)
+    return sorted(found.values())
+
+
 def scan_processes():
     """(pid, path) for the cwd and open files of this user's processes."""
     uid, me, hits = os.getuid(), os.getpid(), []
@@ -338,8 +390,12 @@ def main():
     ap.add_argument("--lanes-dir", default="")
     ap.add_argument("--json", action="store_true")
     ns = ap.parse_args()
-    roots = ns.repos_root or ([] if ns.repo else [os.path.expanduser("~/code")])
-    repos = discover_repos(roots, ns.repo)
+    if ns.repos_root or ns.repo:
+        repos = discover_repos(ns.repos_root, ns.repo)
+    else:
+        # No machine-specific default: scan the repos waspflow has worked in,
+        # plus the repo of the current directory.
+        repos = known_repos(ns.lanes_dir, os.getcwd())
 
     procs, panes = scan_processes(), tmux_panes()
     lanes = live_lane_paths(ns.lanes_dir)

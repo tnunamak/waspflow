@@ -4166,6 +4166,21 @@ GH
   "$root/bin/waspflow" gc --worktrees --apply >/dev/null 2>"$gw/apply.err" && gwfail "--apply was accepted"
   grep -q 'not implemented' "$gw/apply.err" || gwfail "--apply error was unclear"
   [[ -d "$gw/wt-squash" && -d "$gw/wt-dirty" ]] || gwfail "dry run deleted a worktree"
+  # Without --repo/--repos-root the scan has no machine-specific default: it
+  # covers repos named by lane records plus the cwd's repo, and nothing else.
+  other="$gw/code/other"; mkdir -p "$other"
+  gwgit -C "$other" init -q; gwgit -C "$other" commit -q --allow-empty -m init
+  gwgit -C "$other" worktree add -q "$gw/wt-unreferenced" -b unreferenced
+  mkdir -p "$gw/home/lanes/known-lane"
+  jq -n --arg r "$proj" '{status:"reaped", repo_root:$r, cwd:$r}' >"$gw/home/lanes/known-lane/state.json"
+  known="$(cd "$gw" && WASPFLOW_HOME="$gw/home" PATH="$gw/bin:$PATH" "$root/bin/waspflow" gc --worktrees --json)"
+  jq -e --arg p "$gw/wt-squash" 'any(.worktrees[]; .path == $p)' <<<"$known" >/dev/null \
+    || gwfail "default scan missed a repo named by a lane record"
+  jq -e --arg p "$gw/wt-unreferenced" 'all(.worktrees[]; .path != $p)' <<<"$known" >/dev/null \
+    || gwfail "default scan included a repo no lane or cwd references"
+  known_cwd="$(cd "$other" && WASPFLOW_HOME="$gw/home" PATH="$gw/bin:$PATH" "$root/bin/waspflow" gc --worktrees --json)"
+  jq -e --arg p "$gw/wt-unreferenced" 'any(.worktrees[]; .path == $p)' <<<"$known_cwd" >/dev/null \
+    || gwfail "default scan missed the current directory's repo"
   rm -rf "$gw"
 )
 
