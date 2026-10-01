@@ -442,12 +442,21 @@ Select old safely parkable lanes, and optionally park them.
 
 Usage:
   waspflow gc [--lane-age <seconds>] [--project <dir>] [--adopt-legacy] [--apply]
+  waspflow gc --worktrees [--repos-root <dir>]... [--repo <path>]... [--json]
 
 Flags:
   --lane-age <seconds>        Select lanes at least this old; defaults from WASPFLOW_GC_LANE_AGE_SECONDS or 86400.
   --project <dir>             Limit selection to this project directory.
   --adopt-legacy              Allow verified legacy ownership adoption before parking.
   --apply                     Park selected lanes; without it, gc is a dry run.
+  --worktrees                 Read-only report of linked git worktrees: removable (positive evidence:
+                              ancestor of a remote-tracking branch, patch-equivalent to the default
+                              branch, or a merged PR with the same head), blocked (dirty, locked, in use,
+                              live lane...), or unknown. Never fetches or deletes; --apply is rejected.
+  --repos-root <dir>          With --worktrees: scan every repo directly under <dir> (repeatable;
+                              default ~/code).
+  --repo <path>               With --worktrees: scan this repo (repeatable).
+  --json                      With --worktrees: machine-readable output.
 
 Examples:
   waspflow gc --lane-age 86400

@@ -4087,6 +4087,88 @@ PROV
   rm -rf "$lifelib" "$lifehome" "$lifeother"
 )
 
+# gc --worktrees: read-only disposition scan. Temp repos, a stub `gh`, and no
+# real user state; the tmux on PATH is the verifier's isolated-socket wrapper.
+(
+  gw="$(mktemp -d "$scratch/waspflow-gcwt-XXXXXX")"
+  mkdir -p "$gw/bin" "$gw/code" "$gw/home"
+  gw="$(cd "$gw" && pwd -P)"
+  cat >"$gw/bin/gh" <<'GH'
+#!/usr/bin/env bash
+[[ "${GH_STUB_FAIL:-0}" != 1 ]] || exit 1
+[[ "$1 $2" == "pr list" ]] || exit 64
+cat "${GH_STUB_JSON:?}"
+GH
+  chmod +x "$gw/bin/gh"
+  printf '[]\n' >"$gw/gh.json"
+  export GH_STUB_JSON="$gw/gh.json"
+  gwgit() { git -c user.name=t -c user.email=t@example.invalid "$@"; }
+  gwgit init -q -b main "$gw/origin.git" --bare
+  gwgit clone -q "$gw/origin.git" "$gw/code/proj" 2>/dev/null
+  proj="$gw/code/proj"
+  printf 'base\n' >"$proj/f"; printf 'ignored.log\n.env\nnode_modules/\n' >"$proj/.gitignore"
+  gwgit -C "$proj" add -A; gwgit -C "$proj" commit -q -m base; gwgit -C "$proj" push -q origin main
+  gwgit -C "$proj" fetch -q origin
+  gwwt() { gwgit -C "$proj" worktree add -q -b "$1" "$gw/wt-$1" "${2:-main}"; }
+  # ancestor-merged: branch tip already contained in origin/main
+  gwwt merged
+  # clean worktree with an unmerged commit and no remote branch
+  gwwt nobranch; printf 'x\n' >"$gw/wt-nobranch/n"; gwgit -C "$gw/wt-nobranch" add n; gwgit -C "$gw/wt-nobranch" commit -q -m n
+  # squash-merged: unpushed commit; stub gh reports a merged PR with this head
+  gwwt squash; printf 's\n' >"$gw/wt-squash/s"; gwgit -C "$gw/wt-squash" add s; gwgit -C "$gw/wt-squash" commit -q -m s
+  gwwt other; printf 'o\n' >"$gw/wt-other/o"; gwgit -C "$gw/wt-other" add o; gwgit -C "$gw/wt-other" commit -q -m o
+  squash_head="$(gwgit -C "$gw/wt-squash" rev-parse HEAD)"
+  printf '[{"headRefOid":"%s"},{"headRefOid":"0000000000000000000000000000000000000000"}]\n' "$squash_head" >"$gw/gh.json"
+  gwwt dirty; printf 'changed\n' >"$gw/wt-dirty/f"
+  gwwt untracked; printf 'u\n' >"$gw/wt-untracked/new"
+  gwwt envfile; printf 'SECRET=1\n' >"$gw/wt-envfile/.env"
+  gwwt nodemods; mkdir -p "$gw/wt-nodemods/node_modules/x"; printf 'x\n' >"$gw/wt-nodemods/node_modules/x/i.js"
+  gwwt locked; gwgit -C "$proj" worktree lock --reason test "$gw/wt-locked"
+  gwwt busy; (cd "$gw/wt-busy" && exec sleep 300) >/dev/null 2>&1 & busy_pid=$!
+  trap 'kill "$busy_pid" 2>/dev/null || true' EXIT
+  sleep 0.3
+  before_refs="$(gwgit -C "$proj" for-each-ref | md5sum)"
+  scan="$(WASPFLOW_HOME="$gw/home" PATH="$gw/bin:$PATH" "$root/bin/waspflow" gc --worktrees --repos-root "$gw/code" --json)"
+  kill "$busy_pid" 2>/dev/null || true; wait "$busy_pid" 2>/dev/null || true
+  disp() { jq -r --arg p "$gw/wt-$1" '.worktrees[] | select(.path == $p) | .disposition' <<<"$scan"; }
+  gwfail() { echo "gc --worktrees: $1" >&2; exit 1; }
+  [[ "$(disp merged)" == removable ]] || gwfail "ancestor-merged worktree was not removable"
+  jq -e --arg p "$gw/wt-merged" '.worktrees[] | select(.path == $p and .evidence == "ancestor-of-remote")' <<<"$scan" >/dev/null \
+    || gwfail "ancestor evidence class missing"
+  [[ "$(disp squash)" == removable ]] || gwfail "squash-merged (matching PR head) was not removable"
+  jq -e --arg p "$gw/wt-squash" '.worktrees[] | select(.path == $p and .evidence == "merged-pr")' <<<"$scan" >/dev/null \
+    || gwfail "merged-pr evidence class missing"
+  [[ "$(disp other)" == unknown ]] || gwfail "squash-merged with a different head was not unknown"
+  [[ "$(disp nobranch)" == unknown ]] || gwfail "missing remote branch was not unknown"
+  [[ "$(disp dirty)" == blocked ]] && jq -e --arg p "$gw/wt-dirty" '.worktrees[] | select(.path == $p) | .reasons | any(test("tracked"))' <<<"$scan" >/dev/null \
+    || gwfail "dirty worktree not blocked for tracked changes"
+  [[ "$(disp untracked)" == blocked ]] && jq -e --arg p "$gw/wt-untracked" '.worktrees[] | select(.path == $p) | .reasons | any(test("untracked"))' <<<"$scan" >/dev/null \
+    || gwfail "untracked worktree not blocked for untracked files"
+  [[ "$(disp envfile)" == blocked ]] && jq -e --arg p "$gw/wt-envfile" '.worktrees[] | select(.path == $p) | .reasons | any(test("secret"))' <<<"$scan" >/dev/null \
+    || gwfail "ignored .env did not block"
+  [[ "$(disp locked)" == blocked ]] && jq -e --arg p "$gw/wt-locked" '.worktrees[] | select(.path == $p) | .reasons | any(test("locked"))' <<<"$scan" >/dev/null \
+    || gwfail "locked worktree not blocked"
+  [[ "$(disp nodemods)" == removable ]] || gwfail "ignored node_modules alone blocked the worktree"
+  [[ "$(disp busy)" == blocked ]] && jq -e --arg p "$gw/wt-busy" '.worktrees[] | select(.path == $p) | .reasons | any(test("process"))' <<<"$scan" >/dev/null \
+    || gwfail "process with cwd inside did not block"
+  # a worktree deleted behind the scan's back is gone, not a crash
+  rm -rf "$gw/wt-merged"
+  gone="$(WASPFLOW_HOME="$gw/home" PATH="$gw/bin:$PATH" "$root/bin/waspflow" gc --worktrees --repo "$proj" --json)"
+  [[ "$(jq -r --arg p "$gw/wt-merged" '.worktrees[] | select(.path == $p) | .disposition' <<<"$gone")" == gone ]] \
+    || gwfail "vanished worktree was not reported as gone"
+  # gh failure is unknown, never done
+  GH_STUB_FAIL=1 WASPFLOW_HOME="$gw/home" PATH="$gw/bin:$PATH" "$root/bin/waspflow" gc --worktrees --repo "$proj" --json \
+    | jq -e --arg p "$gw/wt-squash" '.worktrees[] | select(.path == $p and .disposition == "unknown")' >/dev/null \
+    || gwfail "gh failure did not leave the squash worktree unknown"
+  WASPFLOW_HOME="$gw/home" PATH="$gw/bin:$PATH" "$root/bin/waspflow" gc --worktrees --repos-root "$gw/code" | grep -q 'wt-squash' \
+    || gwfail "table output missing worktree"
+  [[ "$(gwgit -C "$proj" for-each-ref | md5sum)" == "$before_refs" ]] || gwfail "dry run changed refs"
+  "$root/bin/waspflow" gc --worktrees --apply >/dev/null 2>"$gw/apply.err" && gwfail "--apply was accepted"
+  grep -q 'not implemented' "$gw/apply.err" || gwfail "--apply error was unclear"
+  [[ -d "$gw/wt-squash" && -d "$gw/wt-dirty" ]] || gwfail "dry run deleted a worktree"
+  rm -rf "$gw"
+)
+
 # Descendant ownership is deliberately exercised with the same adapter seam the
 # real providers use. The test socket is private (configured at the top of this
 # verifier), and every user scope has a unique waspflow-test unit name; neither
