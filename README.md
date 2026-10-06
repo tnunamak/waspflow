@@ -61,9 +61,10 @@ exit 6 (`parent_required`) before it creates a lane. Use `--no-parent` only for
 an intentional top-level spawn; it records `declared_orphan` rather than
 `absent`.
 
-You need `tmux`, `jq`, `git`, `curl`, `uuidgen`, and at least one agent CLI:
-`codex`, `claude`, `grok`, or `agy`. If something is missing, `waspflow doctor` tells
-you what to install. See [docs/prerequisites.md](docs/prerequisites.md) for links.
+You need `tmux`, `jq`, `awk`, `python3`, `git`, `flock`, and provider CLIs for
+the lanes you run. `codex` and `claude` are recommended; `grok`, `agy`, `qwen`,
+and `dsh` are optional. If something is missing, `waspflow doctor` tells you
+what to install. See [docs/prerequisites.md](docs/prerequisites.md) for links.
 
 ## The Loop
 
