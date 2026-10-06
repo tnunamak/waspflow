@@ -1,0 +1,9 @@
+{
+  "checks": {
+    "default": {
+      "argv": ["/usr/bin/env", "WASPFLOW_TEST_TMPDIR=/tmp", "bash", "scripts/verify.sh"],
+      "timeout_ms": 900000,
+      "output_bytes": 262144
+    }
+  }
+}
