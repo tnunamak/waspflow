@@ -6751,4 +6751,223 @@ PROV
   rm -rf "$pg_home"
 ) || exit 1
 
+# Reap cleanup stays bounded at the provider boundary and truthfully records
+# partial failures. These fixtures never invoke a provider or production tmux.
+(
+  rr="$(mktemp -d "$scratch/waspflow-reap-regression-XXXXXX")"
+  trap 'rm -rf "$rr"' EXIT
+  export WASPFLOW_HOME="$rr/home" WASPFLOW_LIB="$root/lib"
+  source "$root/lib/core.sh"
+  source "$root/lib/artifacts.sh"
+  source "$root/lib/fanin.sh"
+  for fn in _reap_remaining_resources _reap_cleanup_record _reap_cleanup_finish _reap_cleanup _reap_one _reap_one_locked; do
+    eval "$(sed -n "/^$fn()/,/^}/p" "$root/bin/waspflow")"
+  done
+  provenance_reconcile_lane() { return 0; }
+  escalate_transition_requires_resolution() { return 1; }
+  load_provider() { :; }
+  provider_refresh_runtime_settings() { echo refresh >>"$rr/provider-called"; return 1; }
+  artifacts_verify() { echo verify >>"$rr/provider-called"; return 1; }
+  _artifacts_recover() { echo recover >>"$rr/provider-called"; return 1; }
+  artifacts_emit_receipt_v1() { [[ ! -f "$rr/fail-receipt" ]]; }
+  tmux_window_exists() { [[ -f "$rr/window" ]]; }
+  tmux_window_target() { echo @42; }
+  tmux_kill_owned_lane_window() {
+    [[ ! -f "$rr/stale-window" ]] || return 1
+    rm -f "$rr/window"
+  }
+  tmux_lane_scope_receipts() { :; }
+  fanin_bundle_lane() { [[ ! -f "$rr/fail-archive" ]]; }
+  worktree_remove() {
+    [[ ! -f "$rr/fail-worktree" ]] || return 1
+    rm -rf "$2"
+    if [[ -f "$rr/interrupt" ]]; then kill -TERM "$BASHPID"; fi
+  }
+  make_reap_lane() {
+    lane_set "$1" provider codex status live outcome "$2" cwd "$rr" \
+      git_tracked false runtime_receipt_enforced true runtime_refresh_state unknown \
+      runtime_settings_match_requested unknown codex_lane_marker marker
+  }
+
+  make_reap_lane never-ran abandoned
+  lane_set never-ran report "$rr/missing-report"
+  _reap_one_locked never-ran 1 0 1
+  [[ "$(lane_get never-ran status)" == reaped ]]
+  [[ "$(lane_get never-ran result)" == abandoned ]]
+  [[ "$(lane_get never-ran runtime_verification_state)" == not_applicable_closed ]]
+  [[ "$(lane_get never-ran runtime_refresh_state)" == unknown ]]
+  [[ ! -f "$rr/provider-called" ]]
+
+  make_reap_lane expired harvested
+  printf '%0256d\n' 0 >"$rr/report"
+  lane_set expired result runtime_unverified report "$rr/report"
+  _reap_one_locked expired 1 0 1
+  [[ "$(lane_get expired result)" == succeeded && ! -f "$rr/provider-called" ]]
+  make_reap_lane missing-harvest harvested
+  lane_set missing-harvest report "$rr/no-report"
+  rc=0; _reap_one_locked missing-harvest 1 0 1 || rc=$?
+  [[ "$rc" == 2 && "$(lane_get missing-harvest result)" == report_missing ]]
+  [[ "$(lane_get missing-harvest status)" == reaped && ! -f "$rr/provider-called" ]]
+
+  make_reap_lane partial abandoned
+  mkdir "$rr/worktree"
+  lane_set partial worktree "$rr/worktree"
+  touch "$rr/fail-worktree"
+  rc=0; _reap_one_locked partial 1 0 1 || rc=$?
+  [[ "$rc" == 2 && "$(lane_get partial status)" != reaped && -d "$rr/worktree" ]]
+  jq -e --arg wt "worktree:$rr/worktree" '.state=="partial" and .remaining_resources==[$wt] and .errors==["worktree-remove"]' \
+    "$rr/home/lanes/partial/reap-cleanup.json" >/dev/null
+  rm "$rr/fail-worktree"
+  _reap_one_locked partial 1 0 1
+  [[ "$(lane_get partial status)" == reaped && ! -e "$rr/worktree" ]]
+  _reap_one_locked partial 1 0 1
+
+  make_reap_lane archive abandoned
+  mkdir "$rr/worktree"; lane_set archive worktree "$rr/worktree"
+  touch "$rr/fail-archive"
+  rc=0; _reap_one_locked archive 1 0 0 || rc=$?
+  [[ "$rc" == 2 && -d "$rr/worktree" && "$(lane_get archive status)" != reaped ]]
+  rm "$rr/fail-archive"
+  _reap_one_locked archive 1 0 0
+
+  make_reap_lane ownership abandoned
+  touch "$rr/window" "$rr/stale-window"
+  rc=0; _reap_one_locked ownership 1 0 1 || rc=$?
+  [[ "$rc" == 2 && -f "$rr/window" && "$(lane_get ownership status)" != reaped ]]
+  rm "$rr/stale-window"
+  _reap_one_locked ownership 1 0 1
+  [[ ! -f "$rr/window" ]]
+
+  make_reap_lane receipt abandoned
+  touch "$rr/fail-receipt"
+  rc=0; _reap_one_locked receipt 1 0 1 || rc=$?
+  [[ "$rc" == 2 && "$(lane_get receipt status)" != reaped ]]
+  rm "$rr/fail-receipt"
+  _reap_one_locked receipt 1 0 1
+
+  make_reap_lane interrupt abandoned
+  mkdir "$rr/worktree"; lane_set interrupt worktree "$rr/worktree"
+  touch "$rr/interrupt"
+  rc=0; _reap_one_locked interrupt 1 0 1 || rc=$?
+  [[ "$rc" == 143 && "$(lane_get interrupt reap_cleanup_state)" == partial ]]
+  [[ ! -e "$rr/worktree" && "$(lane_get interrupt status)" != reaped ]]
+  rm "$rr/interrupt"
+  _reap_one_locked interrupt 1 0 1
+
+  make_reap_lane preserve harvested
+  mkdir "$rr/worktree"
+  printf '%0256d\n' 0 >"$rr/worktree/report"
+  lane_set preserve worktree "$rr/worktree" report "$rr/worktree/report"
+  _reap_one_locked preserve 1 0 1
+  [[ ! -d "$rr/worktree" && -s "$(lane_get preserve report)" ]]
+  [[ "$(lane_get preserve report_original)" == "$rr/worktree/report" ]]
+
+  # Scope failure retains the workspace; a reused invocation is not killed.
+  tmux_lane_scope_receipts() { printf 'waspflow-fi.scope\x1eabc\n'; }
+  timeout() {
+    case "$4" in
+      show)
+        [[ ! -f "$rr/scope-unknown" ]] || return 1
+        if [[ "$7" == InvocationID ]]; then
+          [[ -f "$rr/scope-reused" ]] && echo def || echo abc
+        else
+          [[ -f "$rr/scope-active" ]] && echo active || echo inactive
+        fi ;;
+      kill|stop)
+        touch "$rr/scope-signalled"
+        [[ ! -f "$rr/scope-fail" ]] || return 1
+        rm -f "$rr/scope-active" ;;
+      *) return 1 ;;
+    esac
+  }
+  make_reap_lane scope abandoned
+  mkdir "$rr/worktree"; lane_set scope worktree "$rr/worktree"
+  touch "$rr/scope-active" "$rr/scope-fail"
+  rc=0; _reap_one_locked scope 1 0 1 || rc=$?
+  [[ "$rc" == 2 && -d "$rr/worktree" && "$(lane_get scope status)" != reaped ]]
+  rm "$rr/scope-fail"
+  _reap_one_locked scope 1 0 1
+  [[ ! -d "$rr/worktree" ]]
+  rm "$rr/scope-signalled"
+  make_reap_lane reused abandoned
+  touch "$rr/scope-reused" "$rr/scope-active"
+  _reap_one_locked reused 1 0 1
+  [[ ! -f "$rr/scope-signalled" ]]
+  rm "$rr/scope-reused"
+  touch "$rr/scope-unknown"
+  make_reap_lane unknown-scope abandoned
+  rc=0; _reap_one_locked unknown-scope 1 0 1 || rc=$?
+  [[ "$rc" == 2 && "$(lane_get unknown-scope status)" != reaped ]]
+  tmux_lane_scope_receipts() { :; }
+  unset -f timeout
+
+  make_reap_lane retained abandoned
+  mkdir "$rr/worktree"; lane_set retained worktree "$rr/worktree"
+  _reap_one_locked retained 1 1 1
+  [[ "$(lane_get retained status)" == reaped && -d "$rr/worktree" ]]
+  [[ "$(lane_get retained reap_remaining_resources)" == "[\"worktree:$rr/worktree\"]" ]]
+
+  # The journal is independent evidence if the final lifecycle write fails.
+  eval "$(declare -f lane_set | sed '1s/lane_set/real_lane_set/')"
+  lane_set() {
+    [[ "$2" != status || "$3" != reaped ]] || return 1
+    real_lane_set "$@"
+  }
+  make_reap_lane state-fail abandoned
+  rc=0; _reap_one_locked state-fail 1 0 1 || rc=$?
+  [[ "$rc" != 0 && "$(lane_get state-fail status)" != reaped ]]
+  jq -e '.state=="partial" and .errors==["state-write:status=reaped"]' \
+    "$rr/home/lanes/state-fail/reap-cleanup.json" >/dev/null
+  lane_set() {
+    [[ "$2" != reap_cleanup_state ]] || return 1
+    real_lane_set "$@"
+  }
+  make_reap_lane journal-fail abandoned
+  rc=0; _reap_one_locked journal-fail 1 0 1 || rc=$?
+  [[ "$rc" != 0 ]]
+  jq -e '.state=="partial" and .errors==["state-write:cleanup-state"]' \
+    "$rr/home/lanes/journal-fail/reap-cleanup.json" >/dev/null
+
+  # A second reap cannot leave an indefinitely waiting lock wrapper.
+  mkdir -p "$WASPFLOW_LOCKS_DIR"
+  flock "$WASPFLOW_LOCKS_DIR/busy.lock" bash -c 'touch "$1"; sleep 7' bash "$rr/locked" &
+  holder=$!
+  while [[ ! -f "$rr/locked" ]]; do sleep 0.05; done
+  _reap_one_locked() { touch "$rr/lock-entered"; }
+  rc=0; _reap_one busy 1 0 1 || rc=$?
+  [[ "$rc" == 1 && ! -f "$rr/lock-entered" ]]
+  wait "$holder"
+)
+
+# GC is already a read-only scanner. Lock in the acceptance boundary using
+# real local Git worktrees, with deterministic process/lane observations.
+python3 - "$root" "$scratch" <<'PY_REAP_GC'
+import importlib.util, json, os, pathlib, subprocess, sys, tempfile
+root, scratch = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("wf_gc", root + "/scripts/gc-worktrees.py")
+gc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gc)
+with tempfile.TemporaryDirectory(prefix="waspflow-gc-regression-", dir=scratch) as temp:
+    repo, wt, lanes = [os.path.join(temp, n) for n in ("repo", "orphan", "lanes")]
+    os.mkdir(repo)
+    def git(*args):
+        return subprocess.check_output(["git", "-C", repo, *args], stderr=subprocess.DEVNULL, text=True)
+    git("init", "-q", "-b", "main")
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-qm", "base")
+    git("update-ref", "refs/remotes/origin/main", "HEAD")
+    git("worktree", "add", "-q", "-b", "orphan", wt)
+    entries = gc.list_worktrees(repo)
+    assert len(entries) == 1
+    before = git("worktree", "list", "--porcelain")
+    row = gc.analyze(repo, entries[0], [], [], [], "origin/main")
+    assert row["disposition"] == "removable", row
+    os.makedirs(os.path.join(lanes, "live"))
+    pathlib.Path(lanes, "live", "state.json").write_text(json.dumps({"status":"live", "cwd":wt + "/nested"}))
+    row = gc.analyze(repo, entries[0], [], [], gc.live_lane_paths(lanes), "origin/main")
+    assert row["disposition"] == "blocked" and "live lane record: live" in row["reasons"], row
+    row = gc.analyze(repo, entries[0], [(1234, wt + "/nested")], [], [], "origin/main")
+    assert row["disposition"] == "blocked" and any("process cwd/open files" in r for r in row["reasons"]), row
+    assert os.path.isdir(wt) and before == git("worktree", "list", "--porcelain")
+PY_REAP_GC
+
 echo "waspflow verify: ok"

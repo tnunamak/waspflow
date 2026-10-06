@@ -162,7 +162,7 @@ artifacts_report_present() {
 # Idempotent: if already finalized to a terminal result, returns it unchanged.
 # Args: lane provider
 artifacts_finalize() {
-  local lane="$1" provider="$2" existing report
+  local lane="$1" provider="$2" cleanup_only="${3:-0}" existing report
   existing="$(lane_get "$lane" result)"
   # `runtime_unverified` and `runtime_drift` are not outcomes: _reap_one_locked
   # writes them when a runtime-receipt gate REFUSES the reap. A later reap only
@@ -222,7 +222,7 @@ artifacts_finalize() {
   fi
 
   # Report missing → one recovery pass (unless recovery disabled).
-  if [[ "$(lane_get "$lane" no_recovery)" == "true" ]]; then
+  if [[ "$cleanup_only" == 1 || "$(lane_get "$lane" no_recovery)" == "true" ]]; then
     local report_failure_state; report_failure_state="$(lane_get "$lane" report_state)"
     lane_set "$lane" result "report_missing" report_state "${report_failure_state:-absent}"
     warn "lane '$lane': required report missing and recovery disabled ($report)"

@@ -1700,9 +1700,119 @@ _verify_one() {
 
 # Reap a single lane. Args: lane force keep_wt no_archive. Returns 2 on an unmet
 # deliverable/verification contract so callers/CI can key on it.
+# Cleanup is separate from the worker result. Unregistered lane-made trees
+# remain discoverable through the read-only gc --worktrees scan.
+_reap_remaining_resources() {
+  local lane="$1" wt unit invocation actual state
+  local -a remaining=()
+  if tmux_window_exists "$lane"; then
+    remaining+=("tmux:$(tmux_window_target "$lane")")
+  fi
+  while IFS=$'\x1e' read -r unit invocation; do
+    [[ "$unit" =~ ^waspflow-[A-Za-z0-9._-]+\.scope$ && "$invocation" =~ ^[A-Fa-f0-9-]+$ ]] || continue
+    actual="$(timeout 5 systemctl --user show "$unit" -p InvocationID --value 2>/dev/null)" || {
+      remaining+=("scope:$unit:unknown"); continue;
+    }
+    [[ "$actual" == "$invocation" ]] || continue
+    state="$(timeout 5 systemctl --user show "$unit" -p ActiveState --value 2>/dev/null)" || state=unknown
+    case "$state" in inactive|failed) ;; *) remaining+=("scope:$unit:$state") ;; esac
+  done < <(tmux_lane_scope_receipts "$lane")
+  wt="$(lane_get "$lane" worktree)"
+  if [[ -n "$wt" && -e "$wt" ]]; then remaining+=("worktree:$wt"); fi
+  jq -cn --args '$ARGS.positional' "${remaining[@]}"
+}
+
+_reap_cleanup_record() {
+  local lane="$1" state="$2" errors="$3" remaining="$4" tmp dir
+  dir="$(lane_dir "$lane")"
+  tmp="$(mktemp "$dir/.reap-cleanup.XXXXXX")" || return 1
+  if ! jq -cn --arg state "$state" --argjson errors "$errors" --argjson remaining "$remaining" \
+      '{state:$state,errors:$errors,remaining_resources:$remaining,inventory:"recorded-only",at:now}' >"$tmp" \
+      || ! mv "$tmp" "$dir/reap-cleanup.json"; then
+    rm -f "$tmp"; err "reap: cleanup receipt-write failed for '$lane'"; return 1
+  fi
+  if ! lane_set "$lane" reap_cleanup_state "$state" reap_remaining_resources "$remaining" reap_cleanup_errors "$errors"; then
+    # Keep independent failure evidence even when state.json is unwritable.
+    jq '.state="partial" | .errors += ["state-write:cleanup-state"]' "$dir/reap-cleanup.json" >"$tmp" \
+      && mv "$tmp" "$dir/reap-cleanup.json" || rm -f "$tmp"
+    err "reap: state-write failed for '$lane'; cleanup evidence retained in $dir/reap-cleanup.json"
+    return 1
+  fi
+}
+
+_reap_cleanup_finish() {
+  local lane="$1" keep_wt="$2" errors="$3" remaining blocking state=complete
+  remaining="$(_reap_remaining_resources "$lane")" || return 1
+  blocking="$remaining"
+  if [[ "$keep_wt" == 1 ]]; then
+    blocking="$(jq -c 'map(select(startswith("worktree:") | not))' <<<"$remaining")"
+  fi
+  [[ "$blocking" == '[]' && "$errors" == '[]' ]] || state=partial
+  _reap_cleanup_record "$lane" "$state" "$errors" "$remaining" || return 1
+  if [[ "$state" == partial ]]; then
+    err "reap: lane '$lane' cleanup incomplete; remaining=$remaining errors=$errors"
+    return 2
+  fi
+  lane_set "$lane" status reaped || {
+    _reap_cleanup_record "$lane" partial '["state-write:status=reaped"]' "$remaining" || true
+    err "reap: could not persist reaped for '$lane'"; return 1;
+  }
+  log "reap: lane '$lane' cleanup complete; remaining=$remaining (explicitly retained)"
+}
+
+_reap_cleanup() {
+  local lane="$1" force="$2" keep_wt="$3" no_archive="$4" result="$5"
+  local errors='[]' wt repo_root unit invocation actual report preserved archive_ok=1
+  _reap_cleanup_record "$lane" running '[]' "$(_reap_remaining_resources "$lane")" || return 1
+  # Called in a subshell: handled interruption leaves a terminal receipt.
+  # SIGKILL still leaves the durable running journal for an idempotent retry.
+  trap '_reap_cleanup_finish "$lane" "$keep_wt" '"'"'["interrupted"]'"'"' || true; exit 143' TERM
+  trap '_reap_cleanup_finish "$lane" "$keep_wt" '"'"'["interrupted"]'"'"' || true; exit 130' INT
+  artifacts_emit_receipt_v1 "$lane" "$result" || errors="$(jq -c '. + ["receipt-write"]' <<<"$errors")"
+  if tmux_window_exists "$lane"; then
+    tmux_kill_owned_lane_window "$lane" \
+      || errors="$(jq -c '. + ["tmux:ownership-mismatch-or-stop-failed"]' <<<"$errors")"
+  fi
+  while IFS=$'\x1e' read -r unit invocation; do
+    [[ "$unit" =~ ^waspflow-[A-Za-z0-9._-]+\.scope$ && "$invocation" =~ ^[A-Fa-f0-9-]+$ ]] || continue
+    actual="$(timeout 5 systemctl --user show "$unit" -p InvocationID --value 2>/dev/null)" || continue
+    [[ "$actual" == "$invocation" ]] || continue
+    timeout 5 systemctl --user kill --kill-whom=all --signal=SIGKILL "$unit" >/dev/null 2>&1 || true
+    timeout 5 systemctl --user stop "$unit" >/dev/null 2>&1 || true
+  done < <(tmux_lane_scope_receipts "$lane")
+  if [[ "$no_archive" != 1 ]] && ! fanin_bundle_lane "$lane"; then
+    errors="$(jq -c '. + ["branch-archive"]' <<<"$errors")"; archive_ok=0
+  fi
+  wt="$(lane_get "$lane" worktree)"
+  repo_root="$(lane_get "$lane" repo_root)"
+  report="$(lane_get "$lane" report)"
+  # Preserve an in-worktree report before deletion, including its durable path.
+  if [[ -n "$wt" && "$keep_wt" != 1 && "$report" == "$wt/"* && -f "$report" ]]; then
+    preserved="$(lane_dir "$lane")/reaped-report"
+    if ! cp -- "$report" "$preserved" \
+        || ! lane_set "$lane" report_original "$report" report "$preserved"; then
+      errors="$(jq -c '. + ["report-preservation"]' <<<"$errors")"
+      archive_ok=0
+    fi
+  fi
+  # Never remove a workspace while an owned process might still use it, or
+  # after an archive failure. --force does not override these safety checks.
+  if [[ -n "$wt" && "$keep_wt" != 1 && "$archive_ok" == 1 ]]; then
+    if [[ "$(_reap_remaining_resources "$lane" | jq -c 'map(select(startswith("worktree:") | not))')" == '[]' ]]; then
+      worktree_remove "$lane" "$wt" "$repo_root" "$force" \
+        || errors="$(jq -c '. + ["worktree-remove"]' <<<"$errors")"
+    fi
+  fi
+  _reap_cleanup_finish "$lane" "$keep_wt" "$errors"
+}
+
 _reap_one() {
   local lane="$1"
-  lane_operation_run "$lane" _reap_one_locked "$@"
+  require_cmd flock timeout
+  mkdir -p "$WASPFLOW_LOCKS_DIR"
+  ( flock -w 5 -x 9 || { err "reap: lane '$lane' operation lock is busy; retry after the active operation"; exit 1; }
+    ( _reap_one_locked "$@" ) 9>&-
+  ) 9>"$WASPFLOW_LOCKS_DIR/$lane.lock"
 }
 
 _reap_one_locked() {
@@ -1718,8 +1828,17 @@ _reap_one_locked() {
   local provider; provider="$(lane_get "$lane" provider)"
   load_provider "$provider"
 
-  provider_refresh_runtime_settings "$lane"
-  if [[ "$provider" == codex && "$(lane_get "$lane" runtime_receipt_enforced)" == true ]]; then
+  local closed=0
+  case "$(lane_outcome "$lane")" in
+    harvested|abandoned|superseded) closed=1 ;;
+  esac
+  if [[ "$closed" == 1 ]]; then
+    # Closeout authorizes cleanup, not a fresh provider turn or attestation.
+    lane_set "$lane" runtime_verification_state not_applicable_closed || return 1
+  else
+    provider_refresh_runtime_settings "$lane"
+  fi
+  if [[ "$closed" == 0 && "$provider" == codex && "$(lane_get "$lane" runtime_receipt_enforced)" == true ]]; then
     local runtime_health runtime_match runtime_at accepted_at
     runtime_health="$(lane_get "$lane" runtime_refresh_state)"
     runtime_match="$(lane_get "$lane" runtime_settings_match_requested)"
@@ -1748,7 +1867,7 @@ _reap_one_locked() {
       fi
     fi
   fi
-  if [[ "$(lane_get "$lane" runtime_settings_match_requested)" == false ]] && \
+  if [[ "$closed" == 0 && "$(lane_get "$lane" runtime_settings_match_requested)" == false ]] && \
      [[ "$(lane_get "$lane" runtime_settings_accepted_observed_at)" != "$(lane_get "$lane" runtime_settings_observed_at)" ]]; then
     artifacts_capture_after "$lane"
     lane_set "$lane" result "runtime_drift" runtime_verification_state mismatch
@@ -1760,31 +1879,11 @@ _reap_one_locked() {
   # the diff, enforce any --report contract, and — if the report is missing —
   # run one recovery pass. Recovery may resume the live pane OR the exited
   # session, and needs the worktree intact to read the diff + write the report.
-  local result; result="$(artifacts_finalize "$lane" "$provider")"
-  result="$(artifacts_verify "$lane" "$result")"
-  artifacts_emit_receipt_v1 "$lane" "$result" || warn "reap: could not emit receipt for lane '$lane'"
-
-  if tmux_window_exists "$lane"; then
-    tmux kill-window -t "$(tmux_window_target "$lane")" 2>/dev/null || true
+  local result; result="$(artifacts_finalize "$lane" "$provider" "$closed")" || return 1
+  if [[ "$closed" == 0 ]]; then
+    result="$(artifacts_verify "$lane" "$result")" || return 1
   fi
-  # Scope receipts are intentionally reaped only after finalization: report
-  # recovery may have started a new headless scope after the pane exited.
-  tmux_kill_owned_lane_scopes "$lane"
-
-  # Bundle-before-reap: archive the branch tip to a verified git bundle BEFORE
-  # removing the worktree/branch, so "reaping is cleanup, not data loss" holds
-  # even for unpushed branches. --no-archive opts out for the truly disposable.
-  [[ "$no_archive" -eq 1 ]] || fanin_bundle_lane "$lane" || true
-
-  local wt; wt="$(lane_get "$lane" worktree)"
-  if [[ -n "$wt" && "$keep_wt" -ne 1 ]]; then
-    local repo_root; repo_root="$(lane_get "$lane" repo_root)"
-    if worktree_remove "$lane" "$wt" "$repo_root" "$force"; then
-      log "reap: removed worktree $wt"
-    fi
-  fi
-
-  lane_set "$lane" status "reaped"
+  ( _reap_cleanup "$lane" "$force" "$keep_wt" "$no_archive" "$result" ) || return $?
   case "$result" in
     succeeded)       log "reap: lane '$lane' reaped — result=succeeded" ;;
     verified)        log "reap: lane '$lane' reaped — result=verified" ;;
