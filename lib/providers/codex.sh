@@ -461,7 +461,7 @@ codex_spawn() {
   # step instead of fixed sleeps, then VERIFY submission by waiting for a rollout
   # file to appear for THIS cwd — re-sending Enter if it didn't take.
   _codex_clear_trust_prompt "$target"
-  _codex_wait_composer_ready "$target"
+  _codex_wait_composer_ready "$target" || true
   _codex_submit_prompt "$lane" "$cwd" "$target" "$prompt" "$marker"
 }
 
@@ -471,10 +471,19 @@ _codex_pane() { tmux capture-pane -p -t "$1" -S -60 2>/dev/null | strip_ansi; }
 # Clear the "Do you trust this directory?" prompt if/when it appears. We poll up
 # to ~20s; the prompt may appear a beat after launch. Selecting "1" + Enter =
 # "Yes, continue". If it never appears (already-trusted dir), this is a no-op.
+# `codex resume` of a session whose goal was paused asks "Resume paused goal?".
+# Goal state is lifecycle state: answering "Resume goal" restarts autonomous
+# work, and Codex exposes no non-interactive switch to leave it paused. The
+# prompt is therefore the safety boundary: never answer it, surface needs-owner.
+_codex_paused_goal_prompt_visible() {
+  grep -qi "Resume paused goal" <<<"$1"
+}
+
 _codex_clear_trust_prompt() {
   local target="$1" i pane
   for i in $(seq 1 20); do
     pane="$(_codex_pane "$target")"
+    _codex_paused_goal_prompt_visible "$pane" && return 0
     if grep -qi "Do you trust" <<<"$pane"; then
       tmux send-keys -t "$target" "1"
       sleep 1
@@ -500,6 +509,7 @@ _codex_wait_composer_ready() {
   local target="$1" i pane
   for i in $(seq 1 30); do
     pane="$(_codex_pane "$target")"
+    _codex_paused_goal_prompt_visible "$pane" && return 2
     if ! grep -qi "Do you trust" <<<"$pane" \
        && grep -qiE "model: *gpt-|gpt-[0-9].* (medium|low|high|default) " <<<"$pane"; then
       return 0
@@ -602,7 +612,11 @@ codex_resume_with_arm() {
   tmux_send_owned_window_shell_command "$ownership" "bash -lc $(printf '%q' "${quoted# }")" || return 1
   tmux pipe-pane -t "$target" -o "$(transcript_capture_command "$(lane_transcript "$lane")")" 2>/dev/null || true
   _codex_clear_trust_prompt "$target"
-  _codex_wait_composer_ready "$target"
+  if ! _codex_wait_composer_ready "$target"; then
+    lane_set "$lane" recovery_state needs-owner recovery_reason paused-goal
+    err "codex resume: session $sid has a paused goal; left paused and no prompt submitted (needs-owner: answer it in the pane via 'waspflow attach $lane')"
+    return 1
+  fi
   if ! _codex_submit_prompt "$lane" "$cwd" "$target" "$prompt" "$marker" true; then
     return 1
   fi
@@ -1144,12 +1158,12 @@ codex_revise() {
         ;;
     esac
   fi
-  local tmp; tmp="${out_file:-$(mktemp)}"
+  local tmp resume_rc=0; tmp="${out_file:-$(mktemp)}"
   tmux_run_owned_lane_command "$lane" "${cwd:-$PWD}" headless-revise -- \
     codex exec "${recovery_dir_args[@]}" resume "$sid" "$message" "${model_args[@]}" "${effort_args[@]}" \
     -c sandbox_mode=workspace-write -c approval_policy=never "${MCP_ARGV[@]}" -o "$tmp" \
-    >/dev/null 2>&1
+    >/dev/null 2>&1 || resume_rc=$?
   codex_refresh_runtime_settings "$lane"
   if [[ -z "$out_file" ]]; then cat "$tmp"; rm -f "$tmp"; fi
-  return 0
+  return "$resume_rc"
 }

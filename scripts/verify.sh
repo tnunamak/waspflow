@@ -6602,4 +6602,153 @@ STUB
   [[ -s "$er/argv.log" && "$(cat "$er/argv.log")" == *'model_reasoning_effort=ultra'* ]] \
     || { echo "ultra: real exec_run did not invoke Codex with ultra" >&2; exit 1; }
 )
+# Steer / resume / recovery (pilot slice 3). Real bin/waspflow + real tmux on the
+# isolated socket; only the provider process boundary is faked.
+(
+  sl="$(mktemp -d "$scratch/waspflow-steerlib-XXXXXX")"; mkdir -p "$sl/providers"
+  cp "$root"/lib/*.sh "$sl/"; cp -r "$root/lib/generated" "$sl/" 2>/dev/null || true
+  sh_home="$(mktemp -d "$scratch/waspflow-steerhome-XXXXXX")"
+  sh_work="$(mktemp -d "$scratch/waspflow-steerwork-XXXXXX")"
+  cat >"$sl/providers/steerp.sh" <<'PROV'
+steerp_preflight() { :; }
+steerp_discover_session() { echo sid; }
+steerp_session_resumable() { return 0; }
+steerp_is_idle() { [[ -f "$STEER_CTL/idle" ]]; }
+steerp_turn_mark() { cat "$STEER_CTL/mark" 2>/dev/null || echo 0; }
+steerp_valid_models() { return 1; }
+steerp_mcp_policy() { printf '%s\n' '{"resolved":"inherit","warning":"","argv":[],"env":{}}'; }
+steerp_spawn() { return 0; }
+steerp_revise() {
+  local mode=headless
+  tmux_window_exists "$1" && mode=live
+  printf '%s:%s\n' "$mode" "$2" >>"$STEER_CTL/revise.log"
+  # What an observer sees mid-turn: capture status while the revise is running.
+  [[ "$mode" == headless ]] && WASPFLOW_HOME="$WASPFLOW_HOME" "$STEER_BIN" status "$1" >"$STEER_CTL/status-during.json" 2>/dev/null
+  [[ "$2" == *timeout* ]] && return 124
+  return 0
+}
+PROV
+  sed -i '/^WASPFLOW_PROVIDERS=(/ s/)$/ steerp)/' "$sl/core.sh"
+  export STEER_CTL="$sh_work/ctl" STEER_BIN="$root/bin/waspflow"; mkdir -p "$STEER_CTL"
+  sess="wf-steer-$$"
+  tmux new-session -d -s "$sess" -n _h
+  swf() { WASPFLOW_LIB="$sl" WASPFLOW_HOME="$sh_home" WASPFLOW_TMUX_SESSION="$sess" "$root/bin/waspflow" "$@"; }
+  mkstate() { # lane status [extra-json]
+    mkdir -p "$sh_home/lanes/$1"; : >"$sh_home/lanes/$1/transcript.log"
+    jq -n --arg cwd "$sh_work" --arg st "$2" --argjson x "${3:-{\}}" '{provider:"steerp",status:$st,cwd:$cwd,session_id:"sid"} + $x' >"$sh_home/lanes/$1/state.json"
+  }
+  st() { jq -r ".$2 // empty" "$sh_home/lanes/$1/state.json"; }
+  stmod() { jq "$2" "$sh_home/lanes/$1/state.json" >"$sh_work/s.json" && mv "$sh_work/s.json" "$sh_home/lanes/$1/state.json"; }
+  # Fresh shells (bash -c) so no function stubbed earlier in this suite leaks in.
+  own() { WASPFLOW_HOME="$sh_home" WASPFLOW_TMUX_SESSION="$sess" bash -c 'source "$1/core.sh"; tmux_capture_lane_ownership "$2" "$3:$2"' _ "$sl" "$1" "$sess"; }
+
+  # 1. Reboot-restored window: recorded id stale, one same-named window in the
+  #    lane's cwd -> revise steers it live (no parallel headless resume) and the
+  #    durable ownership is repaired. Ambiguity / foreign cwd fail closed.
+  tmux new-window -d -t "$sess" -n drift -c "$sh_work" 'exec sleep 120'
+  mkstate drift live "{\"tmux_session\":\"$sess\",\"tmux_window\":\"@9999\",\"tmux_pane_pid\":\"1\"}"
+  : >"$STEER_CTL/revise.log"
+  swf revise drift -- "next" >/dev/null 2>&1 || { echo "steer: drifted-window revise failed" >&2; exit 1; }
+  [[ "$(<"$STEER_CTL/revise.log")" == "live:next" ]] || { echo "steer: stale window id led to a headless resume instead of live steer" >&2; exit 1; }
+  real_id="$(tmux list-windows -t "$sess" -F '#{window_id} #{window_name}' | awk '$2=="drift"{print $1}')"
+  [[ "$(st drift tmux_window)" == "$real_id" ]] || { echo "steer: restored window id was not re-recorded" >&2; exit 1; }
+  tmux new-window -d -t "$sess" -n drift -c "$sh_work" 'exec sleep 120'
+  stmod drift '.tmux_window="@9999" | .tmux_pane_pid="1"'
+  : >"$STEER_CTL/revise.log"
+  set +e; out="$(swf revise drift -- "again" 2>&1)"; rc=$?; set -e
+  [[ "$rc" -ne 0 && ! -s "$STEER_CTL/revise.log" && "$out" == *"identity cannot be proven"* && "$(st drift tmux_window)" == "@9999" ]] \
+    || { echo "steer: duplicate same-named windows must fail closed without state change" >&2; exit 1; }
+  mkstate foreign live "{\"tmux_session\":\"$sess\",\"tmux_window\":\"@9999\",\"tmux_pane_pid\":\"1\",\"cwd\":\"/\"}"
+  tmux new-window -d -t "$sess" -n foreign -c "$sh_work" 'exec sleep 120'
+  set +e; swf revise foreign -- "x" >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -ne 0 && "$(st foreign tmux_window)" == "@9999" ]] || { echo "steer: cwd-mismatched window must not be adopted" >&2; exit 1; }
+
+  # 2. Reaped lane whose worktree is gone: fail before advertising a resume.
+  mkstate gone reaped '{"cwd":"/nonexistent/waspflow-gone-worktree"}'
+  : >"$STEER_CTL/revise.log"
+  set +e; out="$(swf revise gone -- "more" 2>&1)"; rc=$?; set -e
+  [[ "$rc" -ne 0 && ! -s "$STEER_CTL/revise.log" && "$out" == *"no longer exists"* && "$out" != *"resuming session headlessly"* \
+     && "$(st gone headless_revise_state)" == failed-before-submission ]] \
+    || { echo "steer: missing-worktree resume did not fail early and durably" >&2; exit 1; }
+
+  # 3. Headless revise of reaped and parked lanes is visible work, then terminal.
+  for kind in reaped parked; do
+    mkstate "h-$kind" "$kind" '{"result":"succeeded"}'
+    swf revise "h-$kind" -- "go" >/dev/null 2>&1 || { echo "steer: $kind headless revise failed" >&2; exit 1; }
+    jq -e '.headless_revise_active == true and .headless_revise_state == "running" and .record_status == "'"$kind"'"' "$STEER_CTL/status-during.json" >/dev/null \
+      || { echo "steer: $kind headless revise was invisible to status while running" >&2; exit 1; }
+    [[ "$(st "h-$kind" headless_revise_state)" == completed && "$(st "h-$kind" result)" == succeeded && -n "$(st "h-$kind" headless_revise_ended_epoch)" ]] \
+      || { echo "steer: $kind headless revise did not reach a terminal state" >&2; exit 1; }
+  done
+  set +e; swf revise h-parked -- "timeout please" >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 124 && "$(st h-parked headless_revise_state)" == timeout ]] || { echo "steer: provider timeout was not recorded/propagated" >&2; exit 1; }
+  # A dead pid with state=running must not read as active work.
+  stmod h-parked '.headless_revise_state="running" | .headless_revise_pid="999999"'
+  [[ "$(swf status h-parked | jq -r '.headless_revise_state + ":" + ((.headless_revise_active // false) | tostring)')" == interrupted:false ]] \
+    || { echo "steer: dead headless revise still reported active" >&2; exit 1; }
+
+  # 4. The headless command itself is bounded (a hung resume reaches rc 124).
+  mkstate bounded live
+  set +e; t0="$(date +%s)"
+  WASPFLOW_HOME="$sh_home" WASPFLOW_REVISE_HEADLESS_TIMEOUT_SECONDS=1 \
+    bash -c 'source "$1/core.sh"; tmux_run_owned_lane_command bounded "$2" headless-revise -- sleep 30' _ "$sl" "$sh_work" >/dev/null 2>&1; rc=$?
+  t1="$(date +%s)"; set -e
+  [[ "$rc" -eq 124 && $((t1 - t0)) -lt 20 ]] || { echo "steer: hung headless resume was not bounded (rc=$rc, $((t1 - t0))s)" >&2; exit 1; }
+
+  # 5. Unconfirmed revise on a terminal-idle lane must not deadlock park.
+  for name in idle1 busy1; do
+    tmux new-window -d -t "$sess" -n "$name" -c "$sh_work" 'exec sleep 120'
+    mkstate "$name" live
+    own "$name"
+  done
+  stmod idle1 '.revise_barrier_mark="5" | .revise_submitted="false" | .revise_submission_state="unconfirmed-no-task-started"'
+  stmod busy1 '.revise_barrier_mark="5" | .revise_submitted="true" | .revise_submission_state="confirmed-task-started"'
+  echo 5 >"$STEER_CTL/mark"; : >"$STEER_CTL/idle"
+  set +e; out="$(swf park busy1 2>&1)"; rc=$?; set -e
+  [[ "$rc" -ne 0 && "$out" == *"revise turn is still pending"* && "$(st busy1 status)" == live ]] \
+    || { echo "steer: park must still refuse a confirmed pending revise turn" >&2; exit 1; }
+  swf park idle1 >/dev/null 2>&1 || { echo "steer: unconfirmed revise left the lane unparkable" >&2; exit 1; }
+  [[ "$(st idle1 status)" == parked && -z "$(st idle1 revise_barrier_mark)" && "$(st idle1 revise_submission_state)" == unconfirmed-no-task-started \
+     && "$(st idle1 revise_failed_submission_state)" == unconfirmed-no-task-started ]] \
+    || { echo "steer: park did not clear the barrier while keeping the failed-submission receipt" >&2; exit 1; }
+  rm -f "$STEER_CTL/idle"
+
+  # 6. A bare choice answers a provider-blocking prompt in place (no new turn).
+  tmux new-window -d -t "$sess" -n choice -c "$sh_work" \
+    "bash -c 'printf \"approaching your usage limit\n❯ 1. Switch to a lesser model\n  2. Keep current\n\"; read -r x; echo GOT:\$x; exec sleep 60'"
+  mkstate choice live
+  own choice
+  sleep 1; : >"$STEER_CTL/revise.log"
+  swf revise choice -- "2" >/dev/null 2>&1 || { echo "steer: prompt answer failed" >&2; exit 1; }
+  sleep 1
+  [[ ! -s "$STEER_CTL/revise.log" && "$(tmux capture-pane -p -t "$sess:choice")" == *GOT:2* && "$(st choice revise_submission_state)" == answered-prompt ]] \
+    || { echo "steer: choice reply was not delivered to the blocking prompt in place" >&2; exit 1; }
+
+  tmux kill-session -t "$sess" 2>/dev/null || true
+  rm -rf "$sl" "$sh_home" "$sh_work"
+) || exit 1
+
+# Codex resume must preserve a paused goal: the "Resume paused goal?" prompt is
+# the safety boundary. No key is sent, no prompt is submitted, state is needs-owner.
+(
+  pg_home="$(mktemp -d "$scratch/waspflow-pausedgoal-XXXXXX")"
+  export WASPFLOW_HOME="$pg_home"
+  # shellcheck disable=SC1090
+  source "$root/lib/core.sh"; load_provider codex
+  keys="$pg_home/keys"; submitted="$pg_home/submitted"; : >"$keys"
+  tmux_window_if_owned() { printf '@42\n'; }
+  tmux_send_owned_window_shell_command() { :; }
+  _codex_pane() { printf 'Resume paused goal?\nGoal: finish the migration\n\n1. Resume goal\n2. Leave paused\n'; }
+  tmux() { case "$1" in send-keys) echo "$*" >>"$keys" ;; esac; return 0; }
+  _codex_submit_prompt() { echo called >"$submitted"; }
+  pown='{"tmux_session":"s","tmux_window":"@42","tmux_pane_pid":4242}'
+  lane_set pgoal provider codex status escalating cwd "$pg_home" session_id 019ff145-437b-7360-8693-8adb853b5410 \
+    pending_transition "$(jq -cn --argjson o "$pown" '{to_arm:{model:"gpt-5.6-terra",effort:"high"},submission_marker:"WASPFLOW_LANE_MARKER:pg",provisional_session:{session_id:"019ff145-437b-7360-8693-8adb853b5410",ownership:$o}}')"
+  set +e; codex_resume_with_arm pgoal 'go again' 2>"$pg_home/err"; rc=$?; set -e
+  [[ "$rc" -ne 0 && ! -e "$submitted" && ! -s "$keys" && "$(lane_get pgoal recovery_state)" == needs-owner && "$(lane_get pgoal recovery_reason)" == paused-goal ]] \
+    || { echo "paused goal: resume must stop at needs-owner without keys or submission" >&2; exit 1; }
+  grep -q 'paused goal' "$pg_home/err" || { echo "paused goal: no owner-facing message" >&2; exit 1; }
+  rm -rf "$pg_home"
+) || exit 1
+
 echo "waspflow verify: ok"

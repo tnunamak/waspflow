@@ -843,6 +843,13 @@ tmux_run_owned_lane_command() {
     pane|escalation:*) child_environment=("WASPFLOW_PARENT_REF=$parent_ref") ;;
   esac
 
+  # A headless resume of a large session can otherwise run unbounded behind a
+  # blocked `revise`; the bound makes it reach a terminal state (rc 124).
+  if [[ "$execution" == headless-revise ]] && command -v timeout >/dev/null 2>&1; then
+    local revise_timeout; revise_timeout="$(numeric_knob WASPFLOW_REVISE_HEADLESS_TIMEOUT_SECONDS 3600)"
+    [[ "$revise_timeout" -eq 0 ]] || set -- timeout --kill-after=30 "$revise_timeout" "$@"
+  fi
+
   if ! tmux_cgroup_scope_available; then
     tmux_record_lane_cgroup_fallback "$lane" "$execution" "scope-unavailable" || return 1
     ( cd "$cwd" && env "${child_environment[@]}" "PAGER=$WASPFLOW_LANE_PAGER" "GIT_PAGER=$WASPFLOW_LANE_PAGER" "$@" )
@@ -1207,6 +1214,30 @@ tmux_snapshot_has_lane() {
   else
     awk -F '|' -v n="$lane" '$2 == n { found=1 } END { exit !found }' <<<"$snapshot"
   fi
+}
+
+# Repair a recorded tmux window id that tmux restoration (reboot, resurrect)
+# changed under a still-valid lane. Recorded ownership (session + window id +
+# pane pid) is the safety boundary, so a mismatch is only repaired when exactly
+# one window in the lane's tmux session carries the lane's name AND its pane
+# runs in the lane's cwd. Returns 0 when nothing needed repair, the window is
+# gone for real, or ownership was atomically re-recorded; returns 3 when a
+# same-named window exists but cannot be proven the lane's (fail closed: the
+# caller must not report the lane exited and start a parallel headless resume).
+tmux_reconcile_lane_window() {
+  local lane="$1" session cwd matches window path
+  [[ -n "$(lane_get "$lane" tmux_window)" ]] || return 0
+  tmux_owned_lane_window_exists "$lane" && return 0
+  session="$(lane_get "$lane" tmux_session)"; [[ -n "$session" ]] || session="$WASPFLOW_TMUX_SESSION"
+  matches="$(tmux list-windows -t "$session" -F '#{window_id}|#{window_name}|#{pane_current_path}' 2>/dev/null \
+    | awk -F '|' -v n="$lane" '$2 == n')"
+  [[ -n "$matches" ]] || return 0
+  [[ "$(wc -l <<<"$matches")" -eq 1 ]] || return 3
+  IFS='|' read -r window _ path <<<"$matches"
+  cwd="$(lane_get "$lane" cwd)"
+  [[ -n "$cwd" && ( "$path" == "$cwd" || "$path" == "$cwd"/* ) ]] || return 3
+  tmux_capture_lane_ownership "$lane" "$window" || return 3
+  log "lane '$lane': recorded tmux window was stale; re-recorded restored window $window"
 }
 
 tmux_window_exists() {

@@ -364,11 +364,14 @@ escalate_resume_launch_locked() {
   fi
   transition="$(jq -c '.provisional_session.launch_attempted=true' <<<"$transition")"
   lane_set "$lane" status escalating pending_transition "$transition" escalation_error ""
+  lane_set "$lane" recovery_state "" recovery_reason ""
   resume_fn="${provider}_resume_with_arm"
   WASPFLOW_PROVISIONAL_SESSION_ID=""; WASPFLOW_PROVISIONAL_ROLLOUT=""
   if ! "$resume_fn" "$lane" "$prompt" "$fresh"; then
-    lane_set "$lane" status escalate_failed escalation_error "provider launch/submission confirmation failed"
-    escalate_emit "$json" 2 "provider launch/submission confirmation failed; old arm unchanged" "$(jq -c .from_arm <<<"$transition")" "$(jq -c .to_arm <<<"$transition")" "$(jq -r .segment_index <<<"$transition")" "waspflow escalate $lane --resume-transition" "waspflow escalate $lane --abort-transition"
+    local launch_error="provider launch/submission confirmation failed"
+    [[ "$(lane_get "$lane" recovery_state)" != needs-owner ]] || launch_error="needs-owner: $(lane_get "$lane" recovery_reason) (provider prompt left unanswered)"
+    lane_set "$lane" status escalate_failed escalation_error "$launch_error"
+    escalate_emit "$json" 2 "$launch_error; old arm unchanged" "$(jq -c .from_arm <<<"$transition")" "$(jq -c .to_arm <<<"$transition")" "$(jq -r .segment_index <<<"$transition")" "waspflow escalate $lane --resume-transition" "waspflow escalate $lane --abort-transition"
     return
   fi
   escalate_mark_confirmed_locked "$lane" "$json" "$transition"

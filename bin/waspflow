@@ -1090,10 +1090,17 @@ cmd_status() {
   # A pending deferred switch also reports whether a cold-cache boundary holds now.
   local deferred=null
   [[ -z "$(jq -r '.deferred_switch // ""' <<<"$record")" ]] || deferred="$(deferred_status_json "$lane")"
-  jq --arg lifecycle "$lifecycle" --argjson deferred "$deferred" '
+  # A headless revise records its pid; "running" with a dead pid was interrupted.
+  local headless_alive=false headless_pid
+  headless_pid="$(jq -r 'select(.headless_revise_state == "running") | .headless_revise_pid // empty' <<<"$record")"
+  [[ ! "$headless_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$headless_pid" 2>/dev/null || headless_alive=true
+  jq --arg lifecycle "$lifecycle" --argjson deferred "$deferred" --argjson headless_alive "$headless_alive" '
     (.status // "") as $record_status
     | .status = $lifecycle
     | .record_status = $record_status
+    | if (.headless_revise_state // "") == "running" then
+        (if $headless_alive then .headless_revise_active = true else .headless_revise_state = "interrupted" end)
+      else . end
     | if $deferred == null then . else .deferred_switch_status = $deferred end
   ' <<<"$record"
 }
@@ -1298,6 +1305,7 @@ lane_is_parkable() {
   local lane="$1" adopt_legacy="${2:-0}" provider barrier mark need_adopt=0
   PARK_REFUSAL=""
   PARK_NEEDS_ADOPT=0
+  PARK_CLEARS_BARRIER=0
   if ! jq empty "$(lane_state_file "$lane")" 2>/dev/null; then
     PARK_REFUSAL="corrupt state.json"; return 1
   fi
@@ -1325,7 +1333,14 @@ lane_is_parkable() {
   if [[ -n "$barrier" ]]; then
     mark="$("${provider}_turn_mark" "$lane" 2>/dev/null || echo '')"
     if [[ ! "$barrier" =~ ^[0-9]+$ || ! "$mark" =~ ^[0-9]+$ || "$mark" -le "$barrier" ]]; then
-      PARK_REFUSAL="a revise turn is still pending"; return 1
+      # A revise whose submission the provider never confirmed (receipt says so)
+      # started no turn; the idle oracle below still guards a real active turn.
+      # Parking kills the window, so the unsent paste cannot be submitted later.
+      if [[ "$(lane_get "$lane" revise_submitted)" == false && "$(lane_get "$lane" revise_submission_state)" == unconfirmed-* ]]; then
+        PARK_CLEARS_BARRIER=1
+      else
+        PARK_REFUSAL="a revise turn is still pending"; return 1
+      fi
     fi
   fi
   if ! "${provider}_is_idle" "$lane"; then
@@ -1344,6 +1359,7 @@ _park_one_locked() {
   local lane="$1" reason="$2" adopt_legacy="${3:-0}"
   provenance_reconcile_lane "$lane" \
     || warn "park: lane '$lane' provenance reconciliation failed; the lane remains retryable"
+  tmux_reconcile_lane_window "$lane" || true   # restored window ids; park still verifies ownership below
   lane_is_parkable "$lane" "$adopt_legacy" || { err "park: lane '$lane' refused: $PARK_REFUSAL"; return 1; }
   if [[ "$PARK_NEEDS_ADOPT" -eq 1 ]]; then
     tmux_capture_lane_ownership "$lane" \
@@ -1354,6 +1370,12 @@ _park_one_locked() {
   tmux_kill_owned_lane_window "$lane" \
     || { err "park: lane '$lane' ownership changed before its window could be stopped"; return 1; }
   lane_set "$lane" status "parked" parked_at "$(date +%s)" park_reason "$reason"
+  if [[ "$PARK_CLEARS_BARRIER" -eq 1 ]]; then
+    # Keep the failed-submission receipt (revise_submission_*) as evidence; only
+    # the wait barrier, which can no longer be satisfied, is cleared.
+    lane_set "$lane" revise_barrier_mark "" revise_failed_submission_state "$(lane_get "$lane" revise_submission_state)" revise_failed_submission_cleared_epoch "$(date +%s)"
+    log "park: cleared the stale barrier of an unconfirmed revise (receipt kept: $(lane_get "$lane" revise_submission_state))"
+  fi
   log "park: lane '$lane' parked — transcript, state, session, worktree, and artifacts preserved"
 }
 
@@ -1487,6 +1509,31 @@ _revise_one() {
     return 1
   fi
   local provider; provider="$(lane_get "$lane" provider)"
+  # tmux restoration can change window ids under a live lane. Re-prove identity
+  # by name+cwd (or fail closed) BEFORE deciding the window "exited", so revise
+  # never starts a parallel headless resume against a restored live pane.
+  tmux_reconcile_lane_window "$lane" || {
+    err "revise: lane '$lane' has a tmux window by that name whose identity cannot be proven (several matches, or its cwd differs from the lane's); refusing a parallel headless resume"
+    err "  next: inspect 'tmux list-windows -t $(lane_get "$lane" tmux_session)', close the stray window or 'waspflow attach $lane', then retry"
+    return 1
+  }
+  # A bare choice sent to a pane that is blocked on a provider prompt answers
+  # that prompt in place. Wrapped as a normal message it would start a NEW turn
+  # (and the provider may start it under different model/effort defaults).
+  if [[ "$message" =~ ^[[:space:]]*([0-9]{1,2}|[yYnN]|yes|no)[[:space:]]*$ ]]; then
+    local choice="${BASH_REMATCH[1]}" blocked_hint=""
+    tmux_window_exists "$lane" || choice=""
+    [[ -z "$choice" ]] || \
+    blocked_hint="$(wf_pane_looks_blocked "$(tmux capture-pane -p -t "$(tmux_window_target "$lane")" -S -15 2>/dev/null | strip_ansi)" || true)"
+    if [[ -n "$choice" && -n "$blocked_hint" ]]; then
+      log "revise: lane '$lane' is blocked on a provider prompt ($blocked_hint); answering it in place with '$choice'"
+      tmux send-keys -t "$(tmux_window_target "$lane")" -l -- "$choice"
+      sleep 0.3
+      tmux send-keys -t "$(tmux_window_target "$lane")" Enter
+      lane_set "$lane" revise_submission_state answered-prompt revise_submission_error "" revise_prompt_answered "$choice"
+      return 0
+    fi
+  fi
   report="$(lane_get "$lane" report)"
   message="$(artifacts_report_prompt "$message" "$report")"
   # A deferred switch applies here when a cold-cache boundary holds; the message
@@ -1497,6 +1544,7 @@ _revise_one() {
     [[ "$DEFERRED_ATTEMPTED" != true ]] || return "$deferred_rc"
   fi
   load_provider "$provider"
+  local headless=0 revise_rc=0
   if tmux_window_exists "$lane"; then
     log "revise: steering live pane for lane '$lane'"
     # Live steer starts a NEW turn asynchronously; record the provider completed-
@@ -1507,10 +1555,36 @@ _revise_one() {
     mark="$("${provider}_turn_mark" "$lane" 2>/dev/null || echo 0)"
     lane_set "$lane" revise_barrier_mark "$mark"
   else
+    # `claude --resume`/`codex exec resume` run from the lane's cwd. A reaped
+    # isolated lane has had its worktree removed; fail now, before advertising a
+    # resume that cannot start, and leave durable evidence of why.
+    local resume_cwd; resume_cwd="$(lane_get "$lane" cwd)"
+    if [[ -n "$resume_cwd" && ! -d "$resume_cwd" ]]; then
+      lane_set "$lane" headless_revise_state failed-before-submission headless_revise_error missing-cwd headless_revise_ended_epoch "$(date +%s)"
+      err "revise: lane '$lane' cannot resume headlessly: its working directory no longer exists ($resume_cwd; a reaped isolated lane's worktree is removed)"
+      err "  next: spawn a fresh lane for the follow-up (the lane's branch and receipts are preserved), or restore that directory and retry"
+      return 1
+    fi
     log "revise: lane '$lane' window exited; resuming session headlessly"
-    lane_set "$lane" surface_changed "true"
+    # Headless resume is current work even when the record says parked/reaped:
+    # status shows it (pid liveness distinguishes a running turn from a dead one).
+    headless=1
+    lane_set "$lane" surface_changed "true" headless_revise_state running headless_revise_pid "$$" \
+      headless_revise_started_epoch "$(date +%s)" headless_revise_ended_epoch "" headless_revise_error "" headless_revise_rc ""
   fi
-  "${provider}_revise" "$lane" "$message" "$out" || return $?
+  "${provider}_revise" "$lane" "$message" "$out" || revise_rc=$?
+  if [[ "$headless" -eq 1 ]]; then
+    local headless_state=completed headless_error=""
+    case "$revise_rc" in
+      0) ;;
+      124|137) headless_state=timeout; headless_error="exceeded WASPFLOW_REVISE_HEADLESS_TIMEOUT_SECONDS"
+        err "revise: headless resume of lane '$lane' timed out (rc $revise_rc); the session may hold a partial reply. Check 'waspflow peek $lane', retry with a larger WASPFLOW_REVISE_HEADLESS_TIMEOUT_SECONDS, or park/revise a smaller-context lane" ;;
+      *) headless_state=failed; headless_error="provider exit $revise_rc" ;;
+    esac
+    lane_set "$lane" headless_revise_state "$headless_state" headless_revise_error "$headless_error" \
+      headless_revise_rc "$revise_rc" headless_revise_ended_epoch "$(date +%s)"
+  fi
+  [[ "$revise_rc" -eq 0 ]] || return "$revise_rc"
   # A delivered instruction supersedes one a failed deferred switch left behind;
   # if it was a different instruction, show what is being discarded.
   local undelivered; undelivered="$(lane_get "$lane" undelivered_message)"
