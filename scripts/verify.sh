@@ -2596,6 +2596,28 @@ PROV
   wait "$completion_pid"
   lane_set barlane revise_submission_state ""
 
+  # The chosen headless revise writes headless_revise_state, not the dot
+  # patch's synthetic revise_submission_state used by the fixture above.
+  lane_set barlane headless_revise_state running headless_revise_pid "$$"
+  set +e; run_wait 1 >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 1 ]] || { echo "wait: chosen running headless receipt reused old idle" >&2; exit 1; }
+  lane_set barlane headless_revise_state timeout
+  set +e; run_wait 5 >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 3 ]] || { echo "wait: chosen timed-out headless receipt was ignored" >&2; exit 1; }
+  lane_set barlane headless_revise_state running headless_revise_pid 999999
+  set +e; run_wait 5 >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 3 ]] || { echo "wait: dead headless pid did not interrupt wait" >&2; exit 1; }
+  lane_set barlane headless_revise_state running headless_revise_pid "$$"
+  (
+    sleep 1
+    printf 'headless deliverable\n' >"$ctl/headless-deliverable"
+    lane_set barlane headless_revise_state completed
+  ) & completion_pid=$!
+  run_wait 5 >/dev/null 2>&1
+  [[ -s "$ctl/headless-deliverable" ]] || { echo "wait: chosen headless receipt returned before completion" >&2; exit 1; }
+  wait "$completion_pid"
+  lane_set barlane headless_revise_state "" headless_revise_pid ""
+
   # Deterministic pane fixtures, no provider or external tmux client.
   cat >>"$fakelib/providers/faker.sh" <<PROV
 tmux_window_exists() { [[ -f "$ctl/window" ]]; }
@@ -6972,6 +6994,17 @@ PROV
   rm "$rr/scope-fail"
   _reap_one_locked scope 1 0 1
   [[ ! -d "$rr/worktree" ]]
+  # A running headless revise blocks reap; after it completes, its recorded
+  # scope is stopped before cleanup can be reported complete.
+  make_reap_lane headless abandoned
+  lane_set headless headless_revise_state running headless_revise_pid "$$"
+  rc=0; _reap_one_locked headless 1 0 1 || rc=$?
+  [[ "$rc" == 1 && "$(lane_get headless status)" != reaped ]]
+  lane_set headless headless_revise_state completed headless_revise_pid ""
+  touch "$rr/scope-active"
+  rm -f "$rr/scope-signalled"
+  _reap_one_locked headless 1 0 1
+  [[ -f "$rr/scope-signalled" && "$(lane_get headless status)" == reaped ]]
   rm "$rr/scope-signalled"
   make_reap_lane reused abandoned
   touch "$rr/scope-reused" "$rr/scope-active"

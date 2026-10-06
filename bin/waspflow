@@ -1233,7 +1233,7 @@ cmd_wait() {
     provenance_reconcile_lane "$lane" \
       || warn "wait: lane '$lane' provenance reconciliation failed; continuing to observe the worker"
     # Re-read the receipt and barrier: revise may start after wait's first poll.
-    local submission
+    local submission headless_state="" headless_running=0 headless_completed=0 headless_pid=""
     submission="$(lane_get "$lane" revise_submission_state)"
     if [[ "$submission" == failed ]]; then
       lane_set "$lane" wait_state failed
@@ -1261,6 +1261,29 @@ cmd_wait() {
         warn "wait: lane '$lane' BLOCKED ($hint); inspect with waspflow peek"
         return 4
       fi
+    else
+      # The chosen steer path records synchronous headless turns separately
+      # from the interactive submission receipt used above. Its completed
+      # process is the terminal oracle when the pane has gone away.
+      headless_state="$(lane_get "$lane" headless_revise_state)"
+      case "$headless_state" in
+        running)
+          headless_pid="$(lane_get "$lane" headless_revise_pid)"
+          if [[ "$headless_pid" =~ ^[0-9]+$ ]] && kill -0 "$headless_pid" 2>/dev/null; then
+            headless_running=1
+          else
+            lane_set "$lane" wait_state interrupted
+            warn "wait: lane '$lane' headless revise was interrupted"
+            return 3
+          fi
+          ;;
+        failed|timeout|interrupted|failed-before-submission)
+          lane_set "$lane" wait_state failed
+          warn "wait: lane '$lane' headless revise ended in $headless_state"
+          return 3
+          ;;
+        completed) headless_completed=1 ;;
+      esac
     fi
     if [[ "$barrier_cleared" -eq 0 ]]; then
       local cur_mark
@@ -1272,7 +1295,8 @@ cmd_wait() {
         lane_set "$lane" revise_barrier_mark ""
       fi
     fi
-    if [[ "$submission" != running && "$barrier_cleared" -eq 1 ]] && "${provider}_is_idle" "$lane"; then
+    if [[ "$submission" != running && "$headless_running" -eq 0 && "$barrier_cleared" -eq 1 ]] \
+      && { [[ "$headless_completed" -eq 1 ]] || "${provider}_is_idle" "$lane"; }; then
       # Capture the change so far (cheap, idempotent). Deliverable enforcement +
       # the honest result happen at reap (the explicit end-of-run), so an
       # intermediate idle between revise turns doesn't trigger premature recovery.
@@ -1298,7 +1322,8 @@ cmd_wait() {
     # Recorded pane loss plus no active owned scope is a resumable interruption,
     # not an indefinitely busy provider. Legacy metadata without ownership is
     # deliberately left unknown. Running headless revisions use their receipt.
-    if [[ "$submission" != running && -n "$(lane_get "$lane" tmux_window)" ]] && ! tmux_window_exists "$lane"; then
+    if [[ "$submission" != running && "$headless_running" -eq 0 && -z "$headless_state" \
+      && -n "$(lane_get "$lane" tmux_window)" ]] && ! tmux_window_exists "$lane"; then
       local active_scopes record lifecycle
       if active_scopes="$(waspflow_active_scope_snapshot)"; then
         record="$(cat "$(lane_state_file "$lane")")"
@@ -1320,7 +1345,9 @@ cmd_wait() {
     # matching is only an optional HINT in the message, never the trigger.
     local now cur_size; now="$(date +%s)"
     cur_size="$(wc -c <"$transcript" 2>/dev/null || echo 0)"
-    if [[ "$cur_size" != "$last_size" ]]; then
+    if [[ "$headless_running" -eq 1 ]]; then
+      last_change="$now"
+    elif [[ "$cur_size" != "$last_size" ]]; then
       last_size="$cur_size"; last_change="$now"      # activity → reset the stall clock
     elif [[ $(( now - last_change )) -ge "$stall_secs" ]]; then
       local pane hint=""
@@ -1513,7 +1540,7 @@ _wait_reap_after_idle() {
 }
 
 _wait_reap_after_idle_locked() {
-  local lane="$1" provider barrier mark
+  local lane="$1" provider barrier mark headless_state
   provider="$(lane_get "$lane" provider)"
   load_provider "$provider"
   barrier="$(lane_get "$lane" revise_barrier_mark)"
@@ -1523,7 +1550,12 @@ _wait_reap_after_idle_locked() {
       || return 5
     lane_set "$lane" revise_barrier_mark ""
   fi
-  "${provider}_is_idle" "$lane" || return 5
+  headless_state="$(lane_get "$lane" headless_revise_state)"
+  if ! tmux_window_exists "$lane" && [[ -n "$headless_state" ]]; then
+    [[ "$headless_state" == completed ]] || return 5
+  else
+    "${provider}_is_idle" "$lane" || return 5
+  fi
   _reap_one_locked "$lane" 0 0 0
 }
 
@@ -1863,6 +1895,14 @@ _reap_one() {
 
 _reap_one_locked() {
   local lane="$1" force="$2" keep_wt="$3" no_archive="$4"
+  local headless_pid
+  if [[ "$(lane_get "$lane" headless_revise_state)" == running ]]; then
+    headless_pid="$(lane_get "$lane" headless_revise_pid)"
+    if [[ "$headless_pid" =~ ^[0-9]+$ ]] && kill -0 "$headless_pid" 2>/dev/null; then
+      err "reap: lane '$lane' has an active headless revise; wait for it before cleanup"
+      return 1
+    fi
+  fi
   provenance_reconcile_lane "$lane" \
     || warn "reap: lane '$lane' provenance reconciliation failed; finalization continues with the failure recorded"
   if [[ "$(lane_get "$lane" status)" == escalating ]] || escalate_transition_requires_resolution "$lane"; then
