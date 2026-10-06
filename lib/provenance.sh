@@ -213,7 +213,7 @@ provenance_emit_lane_started() {
        producer:{name:"waspflow",instance_id:$instance},
        lane:{id:$lane_uuid,label:$lane,provider:$provider},
        parent:{ref:(if $parent_ref == "" then null else $parent_ref end),evidence_class:$parent_evidence_class},
-       evidence:{class:"observed",method:"waspflow_confirmed_submission",task_fingerprint:(if $task_hash == "" then null else "sha256:" + $task_hash end)}}')" || return 1
+       evidence:{class:"observed",method:"waspflow_lane_created",task_fingerprint:(if $task_hash == "" then null else "sha256:" + $task_hash end)}}')" || return 1
   _provenance_append "$event_id" "$payload" || return 1
   lane_set "$lane" provenance_lane_started_emitted "true"
 }

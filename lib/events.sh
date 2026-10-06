@@ -153,7 +153,6 @@ lane_inspection_json() {
   else reasons+=("insufficient-source-facts")
   fi
   if [[ "$clients" =~ ^[0-9]+$ && "$clients" -gt 0 ]]; then
-    classification="blocked-needs-human"
     eligibility="vetoed-attached-client"
     reasons+=("attached-client-veto")
   fi

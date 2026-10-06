@@ -594,10 +594,26 @@ tmux_resolve_claude_config_dir() {
 }
 
 tmux_window_target() {
-  local recorded
+  local recorded matches window name home uuid expected_home expected_uuid
   recorded="$(lane_get "$1" tmux_window)"
-  [[ -n "$recorded" ]] && printf '%s\n' "$recorded" \
-    || printf '%s:%s\n' "$WASPFLOW_TMUX_SESSION" "$1"
+  if [[ -n "$recorded" ]]; then
+    tmux_owned_lane_window_target "$1" && return 0
+  else
+    matches="$(tmux list-windows -t "$WASPFLOW_TMUX_SESSION" -F '#{window_id}|#{window_name}|#{@waspflow_home}|#{@waspflow_lane_uuid}' 2>/dev/null | awk -F '|' -v n="$1" '$2 == n')"
+    if [[ -n "$matches" && "$(wc -l <<<"$matches")" -eq 1 ]]; then
+      IFS='|' read -r window name home uuid <<<"$matches"
+      expected_home="$(cd "$WASPFLOW_HOME" && pwd -P)"
+      expected_uuid="$(lane_get "$1" lane_uuid)"
+      if [[ ( -z "$home" || "$home" == "$expected_home" ) && ( -z "$uuid" || "$uuid" == "$expected_uuid" ) ]]; then
+        printf '%s\n' "$window"
+        return 0
+      fi
+      err "tmux: lane '$1' belongs to foreign home '$home'; refusing adoption"
+    fi
+  fi
+  # Callers that do not check status must never fall back to the current pane.
+  printf '!waspflow-unresolved!\n'
+  return 1
 }
 
 # Record the exact tmux objects created for a successful spawn. Window ids are
@@ -1155,6 +1171,9 @@ tmux_create_owned_lane_window() {
   # use". Serialize only this allocation syscall; the panes run concurrently.
   window_lock="$WASPFLOW_HOME/.tmux-window-create.lock"
   mkdir -p "$WASPFLOW_HOME"
+  local home instance
+  home="$(cd "$WASPFLOW_HOME" && pwd -P)"
+  instance="$(cat "$WASPFLOW_HOME/provenance-instance-id" 2>/dev/null || true)"
   _tmux_allocate_lane_window() {
     local indexes next=0 index
     indexes="$(tmux list-windows -t "$WASPFLOW_TMUX_SESSION" -F '#{window_index}' 2>/dev/null | sort -n)"
@@ -1167,7 +1186,10 @@ tmux_create_owned_lane_window() {
       fi
     done <<<"$indexes"
     tmux new-window -d -P -F '#{window_id}' -t "$WASPFLOW_TMUX_SESSION:$next" \
-      -n "$lane" -c "$cwd" "bash -c $(printf '%q' "$launcher")"
+      -n "$lane" -c "$cwd" "bash -c $(printf '%q' "$launcher")" \
+      \; set-option -w -t "$WASPFLOW_TMUX_SESSION:$next" @waspflow_home "$home" \
+      \; set-option -w -t "$WASPFLOW_TMUX_SESSION:$next" @waspflow_lane_uuid "$lane_uuid" \
+      \; set-option -w -t "$WASPFLOW_TMUX_SESSION:$next" @waspflow_instance "$instance"
   }
   if command -v flock >/dev/null 2>&1; then
     window="$(
@@ -1290,15 +1312,20 @@ tmux_snapshot_has_lane() {
 # same-named window exists but cannot be proven the lane's (fail closed: the
 # caller must not report the lane exited and start a parallel headless resume).
 tmux_reconcile_lane_window() {
-  local lane="$1" session cwd matches window path
+  local lane="$1" session cwd matches window path home uuid
   [[ -n "$(lane_get "$lane" tmux_window)" ]] || return 0
   tmux_owned_lane_window_exists "$lane" && return 0
   session="$(lane_get "$lane" tmux_session)"; [[ -n "$session" ]] || session="$WASPFLOW_TMUX_SESSION"
-  matches="$(tmux list-windows -t "$session" -F '#{window_id}|#{window_name}|#{pane_current_path}' 2>/dev/null \
+  matches="$(tmux list-windows -t "$session" -F '#{window_id}|#{window_name}|#{pane_current_path}|#{@waspflow_home}|#{@waspflow_lane_uuid}' 2>/dev/null \
     | awk -F '|' -v n="$lane" '$2 == n')"
   [[ -n "$matches" ]] || return 0
   [[ "$(wc -l <<<"$matches")" -eq 1 ]] || return 3
-  IFS='|' read -r window _ path <<<"$matches"
+  IFS='|' read -r window _ path home uuid <<<"$matches"
+  if [[ ( -n "$home" && "$home" != "$(cd "$WASPFLOW_HOME" && pwd -P)" ) \
+    || ( -n "$uuid" && "$uuid" != "$(lane_get "$lane" lane_uuid)" ) ]]; then
+    err "tmux: lane '$lane' belongs to foreign home '$home'; refusing restoration"
+    return 3
+  fi
   cwd="$(lane_get "$lane" cwd)"
   [[ -n "$cwd" && ( "$path" == "$cwd" || "$path" == "$cwd"/* ) ]] || return 3
   tmux_capture_lane_ownership "$lane" "$window" || return 3
@@ -1306,14 +1333,14 @@ tmux_reconcile_lane_window() {
 }
 
 tmux_window_exists() {
-  # New lanes use recorded ownership. Keep the name fallback for pre-ownership
+  # New lanes use recorded ownership. Keep only unambiguous name fallback for pre-ownership
   # records so existing callers retain their historical behavior; safety-critical
   # park deliberately uses tmux_owned_lane_window_exists instead.
   if [[ -n "$(lane_get "$1" tmux_window)" ]]; then
     tmux_owned_lane_window_exists "$1" && return 0
     return 1
   fi
-  tmux_named_lane_window_exists "$1"
+  tmux_window_target "$1" >/dev/null
 }
 
 # Paste literal text into a tmux pane without key-name parsing or newline

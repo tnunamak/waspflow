@@ -45,6 +45,85 @@ done
   grep -q 'FAIL lock age must be an integer' "$doctor_fixture/invalid.out"
 )
 
+# Wave 2 B: receipt correlation is independent of unrelated log growth.
+(
+  fixture="$(mktemp -d "$scratch/waspflow-wave2-b-XXXXXX")"
+  trap 'rm -rf "$fixture"' EXIT
+  export WASPFLOW_HOME="$fixture/home" CLAUDE_PROJECTS_DIR="$fixture/projects"
+  source "$root/lib/core.sh"; source "$root/lib/providers/claude.sh"
+  mkdir -p "$CLAUDE_PROJECTS_DIR/p"
+  log_file="$CLAUDE_PROJECTS_DIR/p/session.jsonl"
+  lane_set receipt provider claude session_id session cwd "$fixture" model opus
+  _claude_auth_env() { CLAUDE_AUTH_ENV=(); }
+  billing_preflight_provider() { return 0; }
+  claude_discover_session() { echo session; }
+  tmux_window_exists() { return 0; }
+  tmux_window_target() { echo @fixture; }
+  tmux_paste_text() { return 0; }
+  sleep() { :; }
+  tmux() {
+    [[ "$*" == *Enter ]] || return 0
+    printf 'enter\n' >>"$fixture/enters"
+    case "$mode" in
+      absent) ;;
+      unrelated) printf '%s\n' '{"type":"assistant","message":{"content":"requested update"}}' >>"$log_file" ;;
+      queued) printf '%s\n' '{"type":"queue-operation","content":"requested update"}' >>"$log_file" ;;
+      meta) printf '%s\n' '{"type":"user","isMeta":true,"message":{"content":"requested update"}}' >>"$log_file" ;;
+      delayed)
+        [[ "$(wc -l <"$fixture/enters")" -ge 2 ]] &&
+          printf '%s\n' '{"type":"user","message":{"content":[{"type":"text","text":"requested update"}]}}' >>"$log_file"
+        ;;
+    esac
+    return 0
+  }
+  for mode in absent unrelated queued meta; do
+    rm -f "$log_file"; : >"$fixture/enters"
+    # Even an identical old event is not proof of this submission.
+    [[ "$mode" == absent ]] || printf '%s\n' '{"type":"user","message":{"content":"requested update"}}' >"$log_file"
+    if claude_revise receipt "requested update" 2>"$fixture/errors"; then
+      echo "Claude receipt: $mode falsely confirmed" >&2; exit 1
+    fi
+    [[ "$(lane_get receipt claude_submission_state)" == unconfirmed && "$(wc -l <"$fixture/enters")" == 5 ]]
+    ! grep -q 'No such file\|ambiguous redirect' "$fixture/errors"
+  done
+  rm -f "$log_file"; : >"$fixture/enters"; mode=delayed
+  claude_revise receipt "requested update" 2>"$fixture/errors"
+  [[ "$(lane_get receipt claude_submission_state)" == submitted && "$(wc -l <"$fixture/enters")" == 2 ]]
+
+  # Permanent versus delayed launch evidence produces precise diagnostics.
+  _claude_pane() { echo ""; }
+  WASPFLOW_SUBMIT_ATTEMPTS=1
+  rm -f "$log_file"
+  ! _claude_verify_started receipt @fixture "prompt" session nonce
+  [[ "$WASPFLOW_PROVIDER_LAUNCH_ERROR" == session-log-unavailable ]]
+  printf '%s\n' '{"type":"assistant","message":{"content":"nonce"}}' >"$log_file"
+  ! _claude_verify_started receipt @fixture "prompt" session nonce
+  [[ "$WASPFLOW_PROVIDER_LAUNCH_ERROR" == receipt-timeout ]]
+  printf '%s\n' '{"type":"user","message":{"content":"nonce"}}' >>"$log_file"
+  _claude_verify_started receipt @fixture "prompt" session nonce
+  [[ -z "$WASPFLOW_PROVIDER_LAUNCH_ERROR" ]]
+)
+
+# Cross-home names never authorize a foreign or ambiguous target.
+(
+  fixture="$(mktemp -d "$scratch/waspflow-wave2-target-XXXXXX")"
+  trap 'rm -rf "$fixture"' EXIT
+  export WASPFLOW_HOME="$fixture/home"
+  source "$root/lib/core.sh"
+  mkdir -p "$WASPFLOW_HOME"
+  lane_set shared lane_uuid uuid-a
+  tmux() { [[ "$1" == list-windows ]] && cat "$fixture/windows"; }
+  printf '@1|shared|%s|uuid-a\n' "$WASPFLOW_HOME" >"$fixture/windows"
+  [[ "$(tmux_window_target shared)" == @1 ]]
+  printf '@2|shared|%s|uuid-b\n' "$fixture/other" >>"$fixture/windows"
+  ! tmux_window_target shared >/dev/null 2>&1
+  ! tmux_window_exists shared
+  tail -1 "$fixture/windows" >"$fixture/foreign"; mv "$fixture/foreign" "$fixture/windows"
+  ! tmux_window_target shared >"$fixture/result" 2>"$fixture/error"
+  grep -q 'foreign home' "$fixture/error"
+  [[ "$(cat "$fixture/result")" == '!waspflow-unresolved!' ]]
+)
+
 # Codex billing truth: `OPENAI_API_KEY` is not an auth-mode signal. Stub the
 # read-only status probe so these assertions never depend on this host's login.
 (
@@ -960,6 +1039,45 @@ EOF
   grep -qx 'finished' "$pager_result" \
     || { echo "pager hygiene: explicit safe override did not finish" >&2; exit 1; }
   rm -rf "$pager_bin" "$pager_result" "$pager_env" "$pager_override_marker"
+)
+
+
+# A running-but-unconfirmed provider must already have its creation ledger row.
+(
+  launch_fixture="$(mktemp -d "$scratch/waspflow-unconfirmed-XXXXXX")"
+  export WASPFLOW_HOME="$launch_fixture/home" WASPFLOW_LIB="$launch_fixture/lib"
+  export WASPFLOW_TMUX_SESSION="wf-unconfirmed-$"
+  trap 'tmux kill-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || true; rm -rf "$launch_fixture"' EXIT
+  mkdir -p "$WASPFLOW_LIB/providers"
+  cp "$root"/lib/*.sh "$WASPFLOW_LIB/"
+  cp -r "$root/lib/generated" "$WASPFLOW_LIB/"
+  printf '\nWASPFLOW_PROVIDERS+=(unconfirmed)\n' >>"$WASPFLOW_LIB/core.sh"
+  cat >"$WASPFLOW_LIB/providers/unconfirmed.sh" <<'PROV'
+unconfirmed_preflight() { :; }
+unconfirmed_spawn() { tmux_create_owned_lane_window "$1" "$2" 'exec sleep 120' >/dev/null || return 1; return 3; }
+unconfirmed_is_idle() { return 1; }
+unconfirmed_revise() { return 1; }
+unconfirmed_discover_session() { :; }
+unconfirmed_session_resumable() { return 1; }
+unconfirmed_turn_mark() { echo 0; }
+unconfirmed_valid_models() { echo source=non_enumerable; }
+unconfirmed_mcp_policy() { echo '{"resolved":"none","warning":"","argv":[],"env":{}}'; }
+PROV
+  set +e
+  "$root/bin/waspflow" spawn --provider unconfirmed --lane not-confirmed --cwd "$fixture" --parent-ref fixture-parent -- "fixture task" >"$launch_fixture/out" 2>"$launch_fixture/err"
+  rc=$?
+  set -e
+  [[ "$rc" == 3 ]] || { cat "$launch_fixture/err" >&2; echo "unconfirmed spawn: rc=$rc" >&2; exit 1; }
+  source "$WASPFLOW_LIB/core.sh"; source "$WASPFLOW_LIB/provenance.sh"
+  tmux_owned_lane_window_exists not-confirmed
+  [[ "$(lane_get not-confirmed spawn_submitted)" == false ]]
+  jq -se 'length == 1 and .[0].event_type == "lane_started" and .[0].parent.ref == "fixture-parent" and .[0].evidence.method == "waspflow_lane_created"' "$WASPFLOW_HOME/provenance.jsonl" >/dev/null
+  target="$(tmux_window_target not-confirmed)"
+  [[ "$(tmux show-options -w -v -t "$target" @waspflow_home)" == "$(cd "$WASPFLOW_HOME" && pwd -P)" ]]
+  [[ "$(tmux show-options -w -v -t "$target" @waspflow_lane_uuid)" == "$(lane_get not-confirmed lane_uuid)" ]]
+  [[ "$(tmux show-options -w -v -t "$target" @waspflow_instance)" == "$(cat "$WASPFLOW_HOME/provenance-instance-id")" ]]
+  provenance_reconcile_lane not-confirmed
+  [[ "$(wc -l <"$WASPFLOW_HOME/provenance.jsonl")" == 1 ]]
 )
 
 WASPFLOW_HOME="$state_home" "$root/bin/waspflow" init \
@@ -2752,7 +2870,7 @@ PROV
   done
   : >"$ctl/pane"; echo 1 >"$ctl/clients"
   set +e; run_wait 1 >/dev/null 2>&1; rc=$?; set -e
-  [[ "$rc" -eq 4 ]] || { echo "wait: attached client did not veto idle" >&2; exit 1; }
+  [[ "$rc" -eq 0 ]] || { echo "wait: attachment obscured observed idle" >&2; exit 1; }
   echo 0 >"$ctl/clients"
   run_wait 5 >/dev/null 2>&1
   [[ "$(lane_get barlane wait_state)" == idle && -z "$(lane_get barlane blocked_hint)" ]] \
@@ -4976,10 +5094,11 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   jq -e '.classification == "orphaned-control-plane" and (.reasons | index("live-record-missing-owned-window"))' <<<"$inspected" >/dev/null
   lane_set obs-blocked provider codex status live rollout "$codex_log" wait_state stalled
   jq -e '.classification == "blocked-needs-human"' <<<"$(lane_inspection_json obs-blocked)" >/dev/null
-  # An attached client is a surfaced veto even when terminal evidence exists.
+  # Attachment preserves observed completion and independently vetoes cleanup.
+  tmux_window_exists() { return 0; }
   tmux() { if [[ "$1" == list-clients ]]; then printf '/dev/pts/9\n'; return 0; fi; return 1; }
   lane_set obs-close provider codex status live outcome harvested rollout "$codex_log"
-  jq -e '.classification == "blocked-needs-human" and .eligibility == "vetoed-attached-client" and (.reasons | index("attached-client-veto"))' <<<"$(lane_inspection_json obs-close)" >/dev/null \
+  jq -e '.classification == "closeout-ready" and .eligibility == "vetoed-attached-client" and (.reasons | index("attached-client-veto"))' <<<"$(lane_inspection_json obs-close)" >/dev/null \
     || { echo "inspection: attached client did not veto closeout" >&2; exit 1; }
   ! find "$event_tmp" -mindepth 1 -print -quit | grep -q . \
     || { echo "event tail left external temporary files behind" >&2; exit 1; }
@@ -5673,6 +5792,7 @@ FAIL
   set +e; failed_json="$(run_escalate esc-failure --to codex/target/high --json 2>"$eschome/failure.err")"; rc=$?; set -e
   [[ "$rc" -eq 2 ]] || { cat "$eschome/failure.err" >&2; echo "escalate failure: expected rc2, got $rc" >&2; exit 1; }
   jq -e '.ok == false and .exit_class == "attempt_failed"' <<<"$failed_json" >/dev/null
+  jq -e '.pending_transition | fromjson | .launch_failure.provider == "codex" and .launch_failure.stage == "launch_provisioned" and (.launch_failure.reason | contains("launch-or-confirmation-failed"))' "$eschome/lanes/esc-failure/state.json" >/dev/null
   jq -e '.status == "escalate_failed" and .model == "old" and .arm_generation == "3" and ((.pending_transition | fromjson).phase == "launch_provisioned")' "$eschome/lanes/esc-failure/state.json" >/dev/null
   set +e; different_json="$(run_escalate esc-failure --to codex/other/high --json 2>/dev/null)"; rc=$?; set -e
   [[ "$rc" -eq 1 ]] || { echo "escalate immutable target: expected rc1, got $rc" >&2; exit 1; }
@@ -5727,7 +5847,7 @@ FAIL
   make_escalation_lane esc-qwen-unsupported
   set +e; qwen_unsupported_json="$(run_escalate esc-qwen-unsupported --to qwen/target --json 2>/dev/null)"; rc=$?; set -e
   [[ "$rc" -eq 2 ]] || { echo "qwen escalation hook: expected rc2, got $rc" >&2; exit 1; }
-  jq -e '.exit_class == "attempt_failed" and (.reason | contains("provider launch/submission confirmation failed"))' <<<"$qwen_unsupported_json" >/dev/null
+  jq -e '.exit_class == "attempt_failed" and (.reason | contains("qwen: launch-or-confirmation-failed (launch_provisioned)"))' <<<"$qwen_unsupported_json" >/dev/null
   jq -e '.provider == "codex" and .model == "old" and .status == "escalate_failed" and ((.pending_transition | fromjson).phase == "launch_provisioned")' "$eschome/lanes/esc-qwen-unsupported/state.json" >/dev/null
 
   make_escalation_lane esc-crash-launch

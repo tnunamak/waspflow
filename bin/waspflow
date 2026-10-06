@@ -544,6 +544,8 @@ cmd_spawn() {
 
   # The lane directory is now visible with a complete state.json.  Artifacts
   # may follow; failures from the old setup window occurred before publication.
+  provenance_emit_lane_started "$lane" \
+    || warn "spawn: lane '$lane' creation provenance could not be written (lifecycle commands will retry)"
   : >"$transcript"
 
   # Durable artifacts: prompt + git-status-before, automatically (no flag).
@@ -565,9 +567,8 @@ cmd_spawn() {
   local window_owned=0
   tmux_owned_lane_window_exists "$lane" && window_owned=1
   if tmux_named_lane_window_exists "$lane" && [[ "$window_owned" -ne 1 ]]; then
-    tmux kill-window -t "$WASPFLOW_TMUX_SESSION:$lane" 2>/dev/null || true
     lane_set "$lane" status "spawn_failed" spawn_submitted "false"
-    die "spawn: provider created a window without an ownership receipt; stopped the unowned window"
+    die "spawn: same-named window has no matching ownership receipt; refusing to adopt or stop it"
   fi
 
   if [[ "$spawn_rc" -ne 0 ]]; then
@@ -1273,15 +1274,14 @@ cmd_wait() {
     [[ -n "$barrier_mark" ]] || barrier_cleared=1
 
     # Inspect only the current pane tail, never old scrollback containing quoted
-    # prompt text. An attached client can submit between observations: surface
-    # that veto rather than claiming a stable completion boundary.
+    # prompt text. Attachment vetoes cleanup, not observation of completion.
     local pane="" hint="" target="" clients=0
     if tmux_window_exists "$lane"; then
       target="$(tmux_window_target "$lane")"
       clients="$(tmux display-message -p -t "$target" '#{window_active_clients}' 2>/dev/null || true)"
       pane="$(tmux capture-pane -p -t "$target" 2>/dev/null | strip_ansi | grep -a -v '^$' | tail -5 || true)"
       hint="$(wf_pane_looks_blocked "$pane" || true)"
-      if [[ "$clients" =~ ^[0-9]+$ && "$clients" -gt 0 ]]; then
+      if [[ "$reap_after_idle" -eq 1 && "$clients" =~ ^[0-9]+$ && "$clients" -gt 0 ]]; then
         hint="attached tmux client"
       fi
       if [[ -n "$hint" ]]; then

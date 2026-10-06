@@ -236,7 +236,7 @@ _claude_clear_trust_prompt() {
 _claude_verify_started() {
   local lane="$1" target="$2" expected_prompt="${3:-$(lane_get "$1" prompt)}" sid="${4:-}" nonce="${5:-}" jsonl i pane
   [[ -n "$sid" ]] || sid="$(claude_discover_session "$lane")"
-  [[ -n "$sid" ]] || return 1
+  [[ -n "$sid" ]] || { WASPFLOW_PROVIDER_LAUNCH_ERROR=missing-session; return 1; }
   # Attempts are env-tunable so tests can exercise the failure path fast; default
   # 30 (~30s) gives a real spawn ample time to submit past startup modals.
   local attempts="${WASPFLOW_SUBMIT_ATTEMPTS:-30}"
@@ -247,6 +247,7 @@ _claude_verify_started() {
     if [[ -n "$jsonl" && -s "$jsonl" ]]; then
       if jq -rc 'select(.type=="user") | (.message.content // .message // "" | tostring)' "$jsonl" 2>/dev/null \
            | grep -qF "${nonce:-${expected_prompt:0:40}}"; then
+        WASPFLOW_PROVIDER_LAUNCH_ERROR=""
         return 0
       fi
     fi
@@ -257,6 +258,8 @@ _claude_verify_started() {
     fi
     sleep 1
   done
+  WASPFLOW_PROVIDER_LAUNCH_ERROR=receipt-timeout
+  [[ -f "$jsonl" && -r "$jsonl" ]] || WASPFLOW_PROVIDER_LAUNCH_ERROR=session-log-unavailable
   return 1
 }
 
@@ -273,9 +276,9 @@ claude_resume_with_arm() {
   cwd="$(lane_get "$lane" cwd)"; sid="$(jq -r '.provisional_session.session_id // empty' <<<"$transition")"
   [[ -n "$sid" ]] || sid="$(lane_get "$lane" session_id)"
   ownership="$(jq -c '.provisional_session.ownership // null' <<<"$transition")"
-  target="$(tmux_window_if_owned "$ownership")" || { err "claude escalation: provisional window is not owned"; return 1; }
+  target="$(tmux_window_if_owned "$ownership")" || { WASPFLOW_PROVIDER_LAUNCH_ERROR=ownership-mismatch; err "claude escalation: provisional window is not owned"; return 1; }
   nonce="$(jq -r '.submission_nonce // empty' <<<"$transition")"
-  [[ -n "$sid" ]] || { err "claude escalation: no resumable session"; return 1; }
+  [[ -n "$sid" ]] || { WASPFLOW_PROVIDER_LAUNCH_ERROR=missing-session; err "claude escalation: no resumable session"; return 1; }
   mcp_policy_load_lane "$lane"
   local model_args=() effort_args=() resume_args=()
   [[ -n "$model" ]] && model_args=(--model "$model")
@@ -283,7 +286,7 @@ claude_resume_with_arm() {
   [[ "$fresh" == true ]] && resume_args=(--session-id "$sid") || resume_args=(--resume "$sid")
   local argv=(env "${CLAUDE_AUTH_ENV[@]}" "${MCP_ENV[@]}" claude "${resume_args[@]}" "${model_args[@]}" "${effort_args[@]}" --name "$lane" --dangerously-skip-permissions "${MCP_ARGV[@]}" -- "$prompt")
   for a in "${argv[@]}"; do quoted+=" $(printf '%q' "$a")"; done
-  tmux_send_owned_window_shell_command "$ownership" "bash -lc $(printf '%q' "${quoted# }")" || return 1
+  tmux_send_owned_window_shell_command "$ownership" "bash -lc $(printf '%q' "${quoted# }")" || { WASPFLOW_PROVIDER_LAUNCH_ERROR=command-submission-failed; return 1; }
   tmux pipe-pane -t "$target" -o "$(transcript_capture_command "$(lane_transcript "$lane")")" 2>/dev/null || true
   _claude_clear_trust_prompt "$target"
   if ! _claude_verify_started "$lane" "$target" "$prompt" "$sid" "$nonce"; then
@@ -472,13 +475,14 @@ claude_revise() {
 
   if tmux_window_exists "$lane"; then
     # Live in-pane steer. The Enter can race the composer (esp. through hook
-    # output), so VERIFY the turn started by watching the JSONL grow, re-sending
+    # output), so VERIFY the turn started by matching the newly recorded user message, re-sending
     # Enter if it didn't take. Text is pasted literally; send-keys can mangle
     # long prompts or special characters.
-    local target jsonl before after attempt j
+    local target jsonl before=0 attempt j
     target="$(tmux_window_target "$lane")"
     jsonl="$(find "$(_claude_projects_dir "$lane")" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
-    before="$(wc -l <"$jsonl" 2>/dev/null || echo 0)"
+    [[ -f "$jsonl" && -r "$jsonl" ]] && before="$(wc -l <"$jsonl")"
+    lane_set "$lane" claude_submission_state pending claude_submission_reason ""
     tmux send-keys -t "$target" C-u
     sleep 0.3
     tmux_paste_text "$target" "$message"
@@ -487,14 +491,22 @@ claude_revise() {
       tmux send-keys -t "$target" Enter
       for j in $(seq 1 6); do
         [[ -z "$jsonl" ]] && jsonl="$(find "$(_claude_projects_dir "$lane")" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
-        after="$(wc -l <"$jsonl" 2>/dev/null || echo 0)"
-        [[ "$after" -gt "$before" ]] && return 0
+        if [[ -f "$jsonl" && -r "$jsonl" ]] && tail -n +"$((before + 1))" "$jsonl" \
+          | jq -e --arg message "$message" 'select(.type == "user" and .isMeta != true and .isCompactSummary != true)
+            | (.message.content // "" | if type == "array" then map(select(.type == "text") | .text) | join("") else . end)
+            | select(. == $message)' >/dev/null 2>&1; then
+          lane_set "$lane" claude_submission_state submitted claude_submission_reason "correlated-user-event"
+          return 0
+        fi
         sleep 1
       done
       warn "claude revise: steer attempt $attempt didn't start a turn for lane '$lane'; retrying Enter"
     done
-    warn "claude revise: message may not have submitted for lane '$lane' (transcript did not grow)"
-    return 0
+    local reason=correlated-receipt-missing
+    [[ -f "$jsonl" && -r "$jsonl" ]] || reason=session-log-unavailable
+    lane_set "$lane" claude_submission_state unconfirmed claude_submission_reason "$reason"
+    warn "claude revise: submission unconfirmed for lane '$lane' ($reason)"
+    return 1
   fi
 
   # Headless resume after the pane exited. Redirect stdin from /dev/null:
