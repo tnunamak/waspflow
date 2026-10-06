@@ -460,8 +460,8 @@ codex_spawn() {
   # output, "model: loading"), so we synchronize on observable pane state at each
   # step instead of fixed sleeps, then VERIFY submission by waiting for a rollout
   # file to appear for THIS cwd — re-sending Enter if it didn't take.
-  _codex_clear_trust_prompt "$target"
-  _codex_wait_composer_ready "$target" || true
+  _codex_clear_trust_prompt "$target" || return 1
+  _codex_wait_composer_ready "$target" || return 1
   _codex_submit_prompt "$lane" "$cwd" "$target" "$prompt" "$marker"
 }
 
@@ -482,8 +482,10 @@ _codex_paused_goal_prompt_visible() {
 _codex_clear_trust_prompt() {
   local target="$1" i pane
   for i in $(seq 1 20); do
+    tmux display-message -p -t "$target" >/dev/null 2>&1 || return 1
     pane="$(_codex_pane "$target")"
     _codex_paused_goal_prompt_visible "$pane" && return 0
+    wf_pane_startup_menu "$pane" >/dev/null && return 0
     if grep -qi "Do you trust" <<<"$pane"; then
       tmux send-keys -t "$target" "1"
       sleep 1
@@ -508,8 +510,10 @@ _codex_clear_trust_prompt() {
 _codex_wait_composer_ready() {
   local target="$1" i pane
   for i in $(seq 1 30); do
+    tmux display-message -p -t "$target" >/dev/null 2>&1 || return 1
     pane="$(_codex_pane "$target")"
     _codex_paused_goal_prompt_visible "$pane" && return 2
+    wf_pane_startup_menu "$pane" >/dev/null && return 0
     if ! grep -qi "Do you trust" <<<"$pane" \
        && grep -qiE "model: *gpt-|gpt-[0-9].* (medium|low|high|default) " <<<"$pane"; then
       return 0
@@ -546,6 +550,7 @@ $prompt"
   local startup_pane startup_reason
   startup_pane="$(tmux capture-pane -p -t "$target" 2>/dev/null || true)"
   if [[ -n "$startup_pane" ]] && startup_reason="$(wf_pane_startup_menu "$startup_pane")"; then
+    [[ "$provisional" == true ]] || lane_set "$lane" startup_blocker "$startup_reason" startup_pane "$startup_pane"
     err "codex spawn: lane '$lane' is showing a $startup_reason, so the prompt was not submitted (an injected Enter would answer the menu). Resolve it, then retry: waspflow attach $lane"
     return 1
   fi
@@ -554,6 +559,13 @@ $prompt"
   tmux_paste_text "$target" "$full_prompt"
   sleep 1
   for attempt in 1 2 3 4 5; do
+    tmux display-message -p -t "$target" >/dev/null 2>&1 || return 1
+    startup_pane="$(tmux capture-pane -p -t "$target" 2>/dev/null || true)"
+    if startup_reason="$(wf_pane_startup_menu "$startup_pane")"; then
+      [[ "$provisional" == true ]] || lane_set "$lane" startup_blocker "$startup_reason" startup_pane "$startup_pane"
+      err "codex spawn: $startup_reason appeared before submission; refusing to answer it"
+      return 1
+    fi
     tmux send-keys -t "$target" Enter
     # Give the turn a moment to start + write its session_meta line.
     local j
@@ -563,6 +575,7 @@ $prompt"
       if [[ -n "$rollout" ]]; then
         local sid
         sid="$(_codex_rollout_session_id "$rollout")"
+        [[ -n "$sid" ]] || continue
         if [[ -n "$sid" ]]; then
           if [[ "$provisional" == true ]]; then
             WASPFLOW_PROVISIONAL_SESSION_ID="$sid"
@@ -780,13 +793,21 @@ _codex_find_rollout_for_submitted_prompt() {
     # A subagent may replay the parent's history in a same-cwd rollout. It is
     # not evidence that this CLI launch accepted the prompt.
     head -1 "$f" 2>/dev/null | jq -e 'select(.type=="session_meta") | ((.payload.source | type) == "object" and (.payload.source | has("subagent"))) | not' >/dev/null 2>&1 || continue
-    jq -e --arg full_prompt "$full_prompt" \
-      'select(
-        ((.payload.type // .type) == "user_message" and (.payload.message // "") == $full_prompt)
-        or
-        (.type == "event_msg" and .payload.type == "item_completed" and .payload.item.type == "UserMessage"
-          and ([.payload.item.content[]? | select(.type == "text") | .text] | join("")) == $full_prompt)
-      )' \
+    # Exact text and task_started must belong to the same turn.
+    jq -ne --arg full_prompt "$full_prompt" '
+      reduce inputs as $e ({started:false,matched:false,confirmed:false};
+        ($e.payload.type // $e.type) as $type |
+        if $type == "task_started" then
+          .matched = (if .started then false else .matched end) | .started = true
+        elif $type == "task_complete" or $type == "turn_aborted" then
+          .started = false | .matched = false
+        elif $type == "user_message" then
+          .matched = (($e.payload.message // "") == $full_prompt)
+        elif $e.type == "event_msg" and $type == "item_completed" and $e.payload.item.type == "UserMessage" then
+          .matched = (([$e.payload.item.content[]? | select(.type == "text") | .text] | join("")) == $full_prompt)
+        else . end |
+        .confirmed = (.confirmed or (.started and .matched))
+      ) | .confirmed' \
       "$f" >/dev/null 2>&1 || continue
     echo "$f"
     return 0

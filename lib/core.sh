@@ -949,8 +949,56 @@ tmux_run_owned_lane_command() {
 # A pane command is arbitrary shell syntax assembled by a provider adapter.
 # Keep parsing at this boundary, then use the argv-based launcher above for the
 # actual scope and fallback lifecycle.
+# Record what the hydrated lane actually resolves, rather than presenting the
+# spawner's PATH as evidence about another shell. Version probing is bounded.
+tmux_lane_provider_identity() {
+  local lane="$1" resolved="$2" kind="$3" spawner="$4" version=unknown
+  if [[ "$kind" == file && -n "$resolved" ]] && command -v timeout >/dev/null 2>&1; then
+    version="$(timeout --kill-after=1 2 "$resolved" --version 2>&1)" || version=unknown
+  fi
+  lane_set "$lane" provider_binary_path "$resolved" provider_binary_kind "$kind" provider_binary_version "$version" spawner_binary_path "$spawner"
+  [[ "$resolved" == "$spawner" ]] || warn "lane '$lane': provider resolves to '$resolved' in its login shell (spawner: '$spawner')"
+}
+
+# Bound only login-shell startup, never the provider's task. The watchdog
+# watches readiness AFTER profile hydration and cleans only owned processes.
+tmux_lane_login_shell() {
+  local lane="$1" command_text="$2" ready watchdog rc=0 seconds ticks provider identity spawner
+  provider="$(lane_get "$lane" provider)"
+  case "$provider" in antigravity) provider=agy ;; deepseek) provider=dsh ;; esac
+  spawner="$(command -v "$provider" || true)"
+  identity="source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_lane_provider_identity \"\$@\""
+  seconds="$(numeric_knob WASPFLOW_SHELL_STARTUP_TIMEOUT_SECONDS 20)"
+  [[ "$seconds" -gt 0 ]] || { err "shell startup timeout must be positive"; return 1; }
+  ready="$(mktemp "$(lane_dir "$lane")/.shell-ready.XXXXXX")" || return 1
+  ticks=$((seconds * 10))
+  (
+    local i
+    for ((i=0; i<ticks; i++)); do
+      [[ -s "$ready" ]] && exit 0
+      sleep 0.1
+    done
+    [[ -s "$ready" ]] && exit 0
+    lane_set "$lane" status spawn_failed spawn_submitted false startup_blocker shell-hydration-timeout
+    err "lane '$lane': login-shell hydration timed out after ${seconds}s; stopping only its owned processes"
+    tmux_kill_owned_lane_scopes "$lane"
+    tmux_kill_owned_lane_window "$lane" || true
+  ) &
+  watchdog=$!
+  command bash -lc "printf ready >$(printf '%q' "$ready"); bash -c $(printf '%q' "$identity") -- $(printf '%q' "$lane") \"\$(command -v $(printf '%q' "$provider") || true)\" \"\$(type -t $(printf '%q' "$provider") || true)\" $(printf '%q' "$spawner"); $command_text" || rc=$?
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+  rm -f "$ready"
+  return "$rc"
+}
+
 tmux_run_owned_lane_shell_command() {
   local lane="$1" cwd="$2" execution="$3" shell_command="$4"
+  # Provider adapters already quote their single bash -lc argument. Preserve
+  # that exact argument and the login environment; wrap only fresh pane starts.
+  if [[ "$execution" == pane && "$shell_command" == "bash -lc "* ]]; then
+    shell_command="source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_lane_login_shell $(printf '%q' "$lane") ${shell_command#bash -lc }"
+  fi
   tmux_run_owned_lane_command "$lane" "$cwd" "$execution" -- bash -c "$shell_command"
 }
 
@@ -1011,7 +1059,8 @@ def waspflow_scope_unavailable:
   | any(.[]?; .reason? == "scope-unavailable");
 def waspflow_derived_lifecycle($active_scopes; $scope_query_available):
   waspflow_scope_units as $units
-  | if ($units | any(.[]; . as $unit | ($active_scopes | index($unit)) != null)) then "live"
+  | if (.status // "") == "spawn_failed" then "spawn_failed"
+    elif ($units | any(.[]; . as $unit | ($active_scopes | index($unit)) != null)) then "live"
     elif ($scope_query_available | not) then "unknown"
     elif waspflow_scope_unavailable then "unknown"
     elif (.status // "") == "live" then "interrupted"
@@ -1083,7 +1132,7 @@ tmux_create_owned_lane_window() {
   if [[ "$lane_uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
     lane_parent_ref="waspflow:$lane_uuid"
   fi
-  launcher="export WASPFLOW_HOME=$(printf '%q' "$WASPFLOW_HOME") WASPFLOW_LIB=$(printf '%q' "$WASPFLOW_LIB") WASPFLOW_TMUX_SESSION=$(printf '%q' "$WASPFLOW_TMUX_SESSION") WASPFLOW_LANE_PAGER=$(printf '%q' "$WASPFLOW_LANE_PAGER") WASPFLOW_PARENT_REF=$(printf '%q' "$lane_parent_ref") PATH=$(printf '%q' "$PATH"); source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_run_owned_lane_shell_command $(printf '%q' "$lane") $(printf '%q' "$cwd") $(printf '%q' "$execution") $(printf '%q' "$shell_command")"
+  launcher="export WASPFLOW_HOME=$(printf '%q' "$WASPFLOW_HOME") WASPFLOW_LIB=$(printf '%q' "$WASPFLOW_LIB") WASPFLOW_TMUX_SESSION=$(printf '%q' "$WASPFLOW_TMUX_SESSION") WASPFLOW_LANE_PAGER=$(printf '%q' "$WASPFLOW_LANE_PAGER") WASPFLOW_SHELL_STARTUP_TIMEOUT_SECONDS=$(printf '%q' "${WASPFLOW_SHELL_STARTUP_TIMEOUT_SECONDS:-20}") WASPFLOW_PARENT_REF=$(printf '%q' "$lane_parent_ref") PATH=$(printf '%q' "$PATH"); source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_run_owned_lane_shell_command $(printf '%q' "$lane") $(printf '%q' "$cwd") $(printf '%q' "$execution") $(printf '%q' "$shell_command")"
   tmux_ensure_session
   # tmux chooses the next numeric window index inside the server. Concurrent
   # callers can observe the same free index and one then fails with "index in
@@ -1319,8 +1368,13 @@ wf_pane_startup_menu() {
   if grep -qiE 'update available|new version available|a new version of .* is available|would you like to (update|upgrade)|update now' <<<"$pane"; then
     echo "startup update prompt"; return 0
   fi
-  # First-run trust/onboarding gates that precede the composer.
-  if grep -qiE 'do you trust the (files|authors)|trust this (folder|directory|workspace)|welcome to .*!.*(get started|continue)' <<<"$pane"; then
+  # Capacity is a passive wait, never permission to switch models. At startup
+  # it still owns the keyboard, so do not inject task text or Enter into it.
+  if grep -qiE 'our systems are thinking a bit more|retry with a faster model' <<<"$pane"; then
+    echo "provider capacity wait"; return 0
+  fi
+  # Hook review is deliberately not auto-approved.
+  if grep -qiE 'hook.*trust|trust.*hook|review.*hooks|do you trust the (files|authors|contents)|trust this (folder|directory|workspace)|welcome to .*!.*(get started|continue)' <<<"$pane"; then
     echo "startup trust prompt"; return 0
   fi
   return 1

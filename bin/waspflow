@@ -551,11 +551,11 @@ cmd_spawn() {
   fi
 
   if [[ "$spawn_rc" -ne 0 ]]; then
-    lane_set "$lane" spawn_submitted "false"
+    lane_set "$lane" status "spawn_failed" spawn_submitted "false"
     err "spawn: lane '$lane' launched but the task was NOT confirmed submitted"
     err "  the worker may be stuck at a startup prompt (trust gate / MCP auth / other modal)."
     err "  inspect:  waspflow peek $lane        (see what is blocking)"
-    err "  recover:  waspflow revise $lane -- \"<the task>\"   (re-inject once unblocked)"
+    err "  recover:  inspect the saved prompt, then waspflow reap $lane --force and spawn again (no session_id required)"
     err "  the lane is recorded, so nothing is lost — but do NOT assume it is working."
     return 3
   fi

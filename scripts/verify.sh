@@ -14,7 +14,9 @@ export WASPFLOW_SELECTION_GATE=off
 scratch="${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}"
 mkdir -p "$scratch"
 
-bash -n "$root/bin/waspflow" "$root"/lib/*.sh "$root"/lib/providers/*.sh
+for syntax_file in "$root/scripts/verify.sh" "$root/bin/waspflow" "$root"/lib/*.sh "$root"/lib/providers/*.sh; do
+  bash -n "$syntax_file"
+done
 
 # Codex billing truth: `OPENAI_API_KEY` is not an auth-mode signal. Stub the
 # read-only status probe so these assertions never depend on this host's login.
@@ -870,6 +872,7 @@ git commit -q -m init
       '{type:"session_meta",payload:{id:$sid,cwd:$cwd,source:"cli"}}' >"$codex_rollout"
     jq -cn --arg message "$pasted_prompt" \
       '{type:"event_msg",payload:{type:"user_message",message:$message}}' >>"$codex_rollout"
+    jq -cn '{type:"event_msg",payload:{type:"task_started"}}' >>"$codex_rollout"
   }
   lane_set codex-contract cwd "$fixture" report "$normalized_report" session_id "" rollout ""
   _codex_submit_prompt codex-contract "$fixture" fake:0 "$contract_prompt" 'WASPFLOW_LANE_MARKER:prompt-contract:marker'
@@ -1583,7 +1586,9 @@ STUB
       '{type:"session_meta",payload:{id:$sid,cwd:$cwd,source:"cli"}}' >"$spawn_rollout"
     case "$spawn_mode" in
       marker) jq -cn --arg message "$spawn_marker" '{type:"event_msg",payload:{type:"user_message",message:$message}}' >>"$spawn_rollout" ;;
-      full)   jq -cn --arg message "$pasted_prompt" '{type:"event_msg",payload:{type:"user_message",message:$message}}' >>"$spawn_rollout" ;;
+      full|queued) jq -cn --arg message "$pasted_prompt" '{type:"event_msg",payload:{type:"user_message",message:$message}}' >>"$spawn_rollout" ;;
+    esac
+    case "$spawn_mode" in full) jq -cn '{type:"event_msg",payload:{type:"task_started"}}' >>"$spawn_rollout" ;;
     esac
   }
   lane_set spawn-receipt cwd "$spawn_cwd"
@@ -1592,6 +1597,10 @@ STUB
   [[ "$rc" -ne 0 && -z "$(lane_get spawn-receipt session_id)" ]] \
     || { echo "codex spawn: marker-only rollout was accepted as task receipt" >&2; exit 1; }
   lane_set spawn-receipt session_id "" rollout ""
+  spawn_mode=queued; enter_count=0
+  set +e; _codex_submit_prompt spawn-receipt "$spawn_cwd" fake:0 $'three\nline\ntask' "$spawn_marker"; rc=$?; set -e
+  [[ "$rc" -ne 0 && -z "$(lane_get spawn-receipt session_id)" ]] \
+    || { echo "codex spawn: exact queued input without task_started was accepted" >&2; exit 1; }
   spawn_mode=full; enter_count=0
   _codex_submit_prompt spawn-receipt "$spawn_cwd" fake:0 $'three\nline\ntask' "$spawn_marker"
   [[ "$enter_count" -eq 1 && "$(lane_get spawn-receipt rollout)" == "$spawn_rollout" ]] \
@@ -1623,9 +1632,11 @@ STUB
       '{type:"event_msg",payload:{type:"item_completed",item:{type:"UserMessage",content:[{type:"text",text:$prompt}]}}}' >>"$receipt_rollout"
   }
   write_receipt_meta '"cli"'; write_item_message
+  jq -cn '{type:"event_msg",payload:{type:"task_started"}}' >>"$receipt_rollout"
   [[ "$(_codex_find_rollout_for_submitted_prompt "$receipt_cwd" "$receipt_prompt")" == "$receipt_rollout" ]] \
     || { echo "codex receipt: item_completed UserMessage was not confirmed" >&2; exit 1; }
   write_receipt_meta '"cli"'
+  jq -cn '{type:"event_msg",payload:{type:"task_started"}}' >>"$receipt_rollout"
   jq -cn --arg message "$receipt_prompt" '{type:"event_msg",payload:{type:"user_message",message:$message}}' >>"$receipt_rollout"
   [[ "$(_codex_find_rollout_for_submitted_prompt "$receipt_cwd" "$receipt_prompt")" == "$receipt_rollout" ]] \
     || { echo "codex receipt: legacy user_message stopped confirming" >&2; exit 1; }
@@ -1641,6 +1652,15 @@ STUB
   jq -cn '{type:"event_msg",payload:{type:"item_completed",item:{type:"UserMessage",content:[{type:"text",text:"different task"}]}}}' >>"$receipt_rollout"
   [[ -z "$(_codex_find_rollout_for_submitted_prompt "$receipt_cwd" "$receipt_prompt" || true)" ]] \
     || { echo "codex receipt: rollout without full prompt was confirmed" >&2; exit 1; }
+  write_receipt_meta '"cli"'
+  jq -cn '{type:"event_msg",payload:{type:"task_started"}}' >>"$receipt_rollout"
+  jq -cn '{type:"event_msg",payload:{type:"task_complete"}}' >>"$receipt_rollout"
+  write_item_message
+  [[ -z "$(_codex_find_rollout_for_submitted_prompt "$receipt_cwd" "$receipt_prompt" || true)" ]] \
+    || { echo "codex receipt: completed prior turn supplied a false start receipt" >&2; exit 1; }
+  jq -cn '{type:"event_msg",payload:{type:"task_started"}}' >>"$receipt_rollout"
+  [[ "$(_codex_find_rollout_for_submitted_prompt "$receipt_cwd" "$receipt_prompt")" == "$receipt_rollout" ]] \
+    || { echo "codex receipt: exact queued task failed to confirm when its turn started" >&2; exit 1; }
   rm -rf "$receipt_home" "$receipt_sessions"
 )
 
@@ -3039,7 +3059,7 @@ PROV
   grep -q "NOT confirmed submitted" <<<"$out" || { echo "dead-on-arrival: missing loud warning" >&2; exit 1; }
   [[ "$(jq -r '.spawn_submitted // empty' "$dead_home/lanes/dead/state.json" 2>/dev/null)" == "false" ]] \
     || { echo "dead-on-arrival: spawn_submitted should be false" >&2; exit 1; }
-  jq -e '(.tmux_window | startswith("@")) and (.tmux_pane_pid | tonumber > 0)' \
+  jq -e '.status == "spawn_failed" and (.tmux_window | startswith("@")) and (.tmux_pane_pid | tonumber > 0)' \
     "$dead_home/lanes/dead/state.json" >/dev/null \
     || { echo "dead-on-arrival: retained worker lacks ownership receipt" >&2; exit 1; }
   tmux kill-session -t "wf-dead-$$" 2>/dev/null || true
@@ -7033,5 +7053,102 @@ with tempfile.TemporaryDirectory(prefix="waspflow-gc-regression-", dir=scratch) 
     assert row["disposition"] == "blocked" and any("process cwd/open files" in r for r in row["reasons"]), row
     assert os.path.isdir(wt) and before == git("worktree", "list", "--porcelain")
 PY_REAP_GC
+
+
+# Start/exec maintenance: menus never consume the task, and only an exact
+# first-turn receipt confirms a launch. All provider calls here are fixtures.
+(
+  menu_home="$(mktemp -d "$scratch/waspflow-start-menu-XXXXXX")"
+  export WASPFLOW_HOME="$menu_home"
+  source "$root/lib/core.sh"
+  source "$root/lib/providers/codex.sh"
+  sleep() { :; }
+  menu_text=""; sends=0
+  tmux() {
+    case "$1" in
+      capture-pane) printf '%s\n' "$menu_text" ;;
+      send-keys) ((++sends)) ;;
+    esac
+    return 0
+  }
+  tmux_paste_text() { ((++sends)); }
+  for menu_text in \
+    $'Update available! 0.159.3 -> 0.160.0\n1. Update now\n2. Skip\n3. Skip until next version' \
+    $'Do you trust these hooks?\n1. Trust and continue\n2. Exit' \
+    $'Our systems are thinking a bit more about this request\n1. Retry with a faster model\n2. Dismiss and keep waiting'; do
+    lane_set menu provider codex cwd "$fixture" status live session_id ""
+    sends=0
+    _codex_clear_trust_prompt fake:0
+    _codex_wait_composer_ready fake:0
+    if _codex_submit_prompt menu "$fixture" fake:0 "complete task" WASPFLOW_LANE_MARKER:menu:test; then
+      echo "start menus: menu was falsely confirmed" >&2; exit 1
+    fi
+    [[ "$sends" == 0 && -n "$(lane_get menu startup_blocker)" && -z "$(lane_get menu session_id)" ]] \
+      || { echo "start menus: task or answer was injected into a modal" >&2; exit 1; }
+  done
+  # A failed spawn is not working merely because its blocked scope is alive.
+  lifecycle="$(waspflow_derived_lane_lifecycle '{"status":"spawn_failed","cgroup_scope_receipts":[{"unit":"waspflow-test.scope","invocation_id":"aa"}]}' '["waspflow-test.scope"]' true)"
+  [[ "$lifecycle" == spawn_failed ]] || { echo "failed spawn still appears live" >&2; exit 1; }
+  rm -rf "$menu_home"
+)
+
+# Login hydration must stop boundedly without imposing a deadline on a running
+# provider. A fake bash stalls only its -lc entry; no real profile or model runs.
+(
+  h="$(mktemp -d "$scratch/waspflow-hydration-XXXXXX")"
+  h_session="wf-hydration-$$"
+  trap 'tmux kill-session -t "$h_session" 2>/dev/null || true; rm -rf "$h"' EXIT
+  mkdir -p "$h/bin" "$h/lib" "$h/cwd"
+  real_bash="$(command -v bash)"
+  cp "$root"/lib/*.sh "$h/lib/"
+  printf '\ntmux_cgroup_scope_available() { return 1; }\n' >>"$h/lib/core.sh"
+  cat >"$h/bin/bash" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == -lc ]]; then
+  if [[ "\$(cat "$h/mode")" == stall ]]; then
+    printf '%s\n' "\$\$" >"$h/login-pid"
+    exec sleep 30
+  fi
+  shift
+  exec "$real_bash" -c "\$@"
+fi
+exec "$real_bash" "\$@"
+EOF
+  # Avoid a recursive env bash shebang once this wrapper is first on PATH.
+  sed -i "1c#!$real_bash" "$h/bin/bash"
+  printf '#!%s\nprintf "fixture-codex 1.0\\n"\n' "$real_bash" >"$h/bin/codex"
+  chmod +x "$h/bin/bash" "$h/bin/codex"
+  export PATH="$h/bin:$PATH" WASPFLOW_HOME="$h/state" WASPFLOW_LIB="$h/lib" \
+    WASPFLOW_TMUX_SESSION="$h_session" WASPFLOW_SHELL_STARTUP_TIMEOUT_SECONDS=1
+  source "$h/lib/core.sh"
+  printf stall >"$h/mode"
+  lane_set hydration provider codex status live cwd "$h/cwd"
+  tmux_create_owned_lane_window hydration "$h/cwd" "bash -lc 'printf should-not-run'" >/dev/null
+  for ((i=0; i<60; i++)); do
+    [[ "$(lane_get hydration startup_blocker)" == shell-hydration-timeout ]] && break
+    sleep 0.1
+  done
+  [[ "$(lane_get hydration startup_blocker)" == shell-hydration-timeout ]] \
+    || { echo "hydration: no bounded visible failure" >&2; exit 1; }
+  for ((i=0; i<30; i++)); do
+    tmux_owned_lane_window_exists hydration || break
+    sleep 0.1
+  done
+  ! tmux_owned_lane_window_exists hydration \
+    || { echo "hydration: failed startup window survived" >&2; exit 1; }
+  pid="$(cat "$h/login-pid")"
+  [[ ! -r "/proc/$pid/stat" || "$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null)" == Z ]] \
+    || { echo "hydration: login child survived cleanup" >&2; exit 1; }
+
+  printf ready >"$h/mode"
+  lane_set hydrated provider codex status live cwd "$h/cwd"
+  body="sleep 2; printf done >$(printf '%q' "$h/done")"
+  tmux_create_owned_lane_window hydrated "$h/cwd" "bash -lc $(printf '%q' "$body")" >/dev/null
+  for ((i=0; i<70; i++)); do [[ -s "$h/done" ]] && break; sleep 0.1; done
+  [[ -s "$h/done" && -z "$(lane_get hydrated startup_blocker)" ]] \
+    || { echo "hydration: timeout killed a provider after startup" >&2; exit 1; }
+  [[ "$(lane_get hydrated provider_binary_path)" == "$h/bin/codex" && "$(lane_get hydrated provider_binary_version)" == "fixture-codex 1.0" ]] \
+    || { echo "hydration: effective provider identity not recorded" >&2; exit 1; }
+)
 
 echo "waspflow verify: ok"
