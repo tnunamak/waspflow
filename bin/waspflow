@@ -107,6 +107,7 @@ cmd_spawn() {
   local provider="" lane="" model="" cwd="$PWD" isolate=0 base_ref="" base_commit="" effort="" mcp="auto" report="" no_recovery=0 parent_ref="" parent_ref_explicit=false no_parent=false
   local verify_command="" verify_name="verify" verify_timeout=1800 prepare_command="" verify_strength=""
   local op_id="" OP_ID="" OP_MODE="" provider_explicit=false model_explicit=false auto=false ack_deprecated=false accept_provider_default=false
+  local preview_worktree=0
   local -a extra=()
   split_after_ddash "$@"
   set -- "${FLAGS[@]:-}"
@@ -126,6 +127,7 @@ cmd_spawn() {
         ;;
       --cwd)      cwd="${2:-}"; shift 2 ;;
       --isolate|--worktree) isolate=1; shift ;;
+      --preview-worktree) preview_worktree=1; isolate=1; shift ;;
       --base)
         [[ $# -ge 2 && -n "${2:-}" ]] || die "spawn: --base requires a non-empty value"
         base_ref="$2"; shift 2
@@ -149,6 +151,18 @@ cmd_spawn() {
     esac
   done
   local prompt="${REST[*]:-}"
+  if [[ "$preview_worktree" -eq 1 ]]; then
+    [[ -n "$lane" ]] || die "spawn: --preview-worktree requires --lane"
+    validate_lane_name "$lane"
+    cwd="$(cd "$cwd" && pwd -P)" || die "spawn: --cwd does not exist"
+    local preview_repo preview_path
+    preview_repo="$(worktree_repo_root "$cwd")"
+    [[ -n "$preview_repo" ]] || die "spawn: worktree preview requires a Git repo"
+    preview_path="$(worktree_resolve_path "$preview_repo" "$(basename "$preview_repo")-waspflow-$lane")" || return 1
+    [[ ! -e "$preview_path" ]] || die "spawn: worktree path already exists: $preview_path"
+    printf '%s\n' "$preview_path"
+    return 0
+  fi
 
   [[ -z "$base_ref" || "$isolate" -eq 1 ]] || die "spawn: --base requires --isolate or --worktree"
 
@@ -265,7 +279,7 @@ cmd_spawn() {
   mkdir -p "$WASPFLOW_LOCKS_DIR"
   local spawn_lock_fd
   exec {spawn_lock_fd}>"$WASPFLOW_LOCKS_DIR/$lane.lock"
-  flock -x "$spawn_lock_fd"
+  lane_lock_acquire "$lane" "$spawn_lock_fd" spawn || { exec {spawn_lock_fd}>&-; return 1; }
   # A lane record is durable evidence. Reusing a name is allowed only after the
   # old record was explicitly reaped; parked, exited, malformed, and otherwise
   # unreaped records must never be silently overwritten by a new spawn.
@@ -297,6 +311,11 @@ cmd_spawn() {
 
   # Worktree isolation (opt-in, only inside a git repo).
   local work_cwd="$cwd" wt_path="" repo_root=""
+  local worktree_policy_root="" policy_repo
+  policy_repo="$(worktree_repo_root "$cwd")"
+  if [[ -n "$policy_repo" && ( "$isolate" -eq 1 || -n "$verify_command" ) ]]; then
+    worktree_policy_root="$(worktree_resolve_root "$policy_repo")" || die "spawn: worktree root policy failed"
+  fi
   if [[ "$isolate" -eq 1 ]]; then
     repo_root="$(worktree_repo_root "$cwd")"
     wt_path="$(worktree_create "$lane" "$cwd" "$base_commit")" || die "spawn: worktree isolation failed"
@@ -428,6 +447,7 @@ cmd_spawn() {
     receipt_id "" \
     cwd "$work_cwd" \
     origin_cwd "$cwd" \
+    worktree_root "$worktree_policy_root" \
     model "$model" \
     model_requested "$model" \
     model_passed "$model" \
@@ -1094,10 +1114,18 @@ cmd_status() {
   local headless_alive=false headless_pid
   headless_pid="$(jq -r 'select(.headless_revise_state == "running") | .headless_revise_pid // empty' <<<"$record")"
   [[ ! "$headless_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$headless_pid" 2>/dev/null || headless_alive=true
-  jq --arg lifecycle "$lifecycle" --argjson deferred "$deferred" --argjson headless_alive "$headless_alive" '
+  local report_observation; report_observation="$(artifacts_report_observation "$lane")"
+  case "$lifecycle" in
+    idle|exited|parked)
+      case "$(jq -r '.report_current_state' <<<"$report_observation")" in
+        absent|insubstantial|unchanged) warn "status: lane '$lane' has no current substantial report; no recovery was invoked" ;;
+      esac ;;
+  esac
+  jq --argjson report_observation "$report_observation" --arg lifecycle "$lifecycle" --argjson deferred "$deferred" --argjson headless_alive "$headless_alive" '
     (.status // "") as $record_status
     | .status = $lifecycle
     | .record_status = $record_status
+    | . += $report_observation
     | if (.headless_revise_state // "") == "running" then
         (if $headless_alive then .headless_revise_active = true else .headless_revise_state = "interrupted" end)
       else . end
@@ -1684,8 +1712,10 @@ cmd_attach() {
 
 cmd_reap() {
   local lane="" force=0 keep_wt=0 no_archive=0 status_filter=""
+  local WASPFLOW_RECOVERY_POLICY="${WASPFLOW_RECOVERY_POLICY:-original}"
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --no-recovery) WASPFLOW_RECOVERY_POLICY=disabled; shift ;;
       --force) force=1; shift ;;
       --keep-worktree) keep_wt=1; shift ;;
       --no-archive) no_archive=1; shift ;;
@@ -1695,6 +1725,8 @@ cmd_reap() {
       *) [[ -z "$lane" ]] && { lane="$1"; shift; } || die "reap: unexpected arg '$1'" ;;
     esac
   done
+
+  case "$WASPFLOW_RECOVERY_POLICY" in original|disabled) ;; *) die "reap: WASPFLOW_RECOVERY_POLICY must be original or disabled" ;; esac
 
   # Batch mode: reap every lane whose fan-in outcome matches the filter. This is
   # the one-command fan-in cleanup — `reap --status harvested,superseded,abandoned`.
@@ -1888,7 +1920,8 @@ _reap_one() {
   local lane="$1"
   require_cmd flock timeout
   mkdir -p "$WASPFLOW_LOCKS_DIR"
-  ( flock -w 5 -x 9 || { err "reap: lane '$lane' operation lock is busy; retry after the active operation"; exit 1; }
+  ( lane_lock_acquire "$lane" 9 reap || exit 1
+    trap 'rm -f "$WASPFLOW_LOCKS_DIR/$lane.lock.owner"' EXIT
     ( _reap_one_locked "$@" ) 9>&-
   ) 9>"$WASPFLOW_LOCKS_DIR/$lane.lock"
 }

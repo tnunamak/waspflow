@@ -1858,6 +1858,89 @@ JSONL
   rm -rf "$d"
 )
 
+# Exec access preflight is host-only and happens before provider invocation.
+(
+  source "$root/lib/core.sh"
+  source "$root/lib/exec.sh"
+  d="$(mktemp -d "$scratch/waspflow-preflight-XXXXXX")"
+  trap 'rm -rf "$d"' EXIT
+  split_after_ddash() {
+    FLAGS=(); REST=(); local seen=0 a
+    for a in "$@"; do
+      if [[ "$seen" -eq 0 && "$a" == -- ]]; then seen=1; continue; fi
+      if [[ "$seen" -eq 0 ]]; then FLAGS+=("$a"); else REST+=("$a"); fi
+    done
+  }
+  selection_gate_mode() { echo off; }
+  is_known_provider() { return 0; }
+  load_provider() { :; }
+  validate_model() { :; }
+  resolve_mcp_policy() { MCP_ARGV_JSON='[]'; MCP_ENV_JSON='{}'; MCP_WARNING=''; }
+  codex_preflight() { :; }
+  mcp_policy_load_json() { :; }
+  billing_path_v1() { echo '{}'; }
+  artifacts_emit_exec_receipt_v1() { printf '%s\n' "${12}" >"$d/receipt"; }
+  _exec_codex() { touch "$d/invoked"; printf 'ok\n' >"$5"; }
+  if (exec_run --provider codex --cwd "$d" --needs-path missing -o "$d/out" -- test) 2>/dev/null; then
+    echo "exec preflight: missing prerequisite accepted" >&2; exit 1
+  fi
+  [[ ! -e "$d/invoked" ]]
+  mkdir "$d/directory"
+  if (exec_run --provider codex --cwd "$d" -o "$d/directory" -- test) 2>/dev/null; then exit 1; fi
+  [[ ! -e "$d/invoked" ]]
+  # Inject the OS create failure so this remains deterministic under root.
+  if (mktemp() { return 1; }; exec_run --provider codex --cwd "$d" -o "$d/out" -- test) 2>/dev/null; then exit 1; fi
+  [[ ! -e "$d/invoked" ]]
+  printf 'input\n' >"$d/input"
+  exec_run --provider codex --cwd "$d" --needs-path input -o "$d/out" -- test
+  [[ -e "$d/invoked" ]]
+  jq -e '.state == "present" and .bytes == 3 and .preflight.sandbox_effective == "unknown" and .preflight.required_paths[0].provider_access == "unknown"' "$d/receipt" >/dev/null
+  ln -s "$d/input" "$d/link"
+  if (_exec_abs_output_path "$d/link") 2>/dev/null; then exit 1; fi
+  [[ "$(cat "$d/input")" == input ]]
+  _exec_codex() { printf 'Execution error\n' >"$5"; }
+  if exec_run --provider codex --cwd "$d" -o "$d/out" -- test; then exit 1; fi
+  jq -e '.state == "invalid" and .bytes > 0' "$d/receipt" >/dev/null
+  _exec_codex() { printf 'Execution error: explained and fixed\n' >"$5"; }
+  exec_run --provider codex --cwd "$d" -o "$d/out" -- test
+)
+
+# Isolation, preview and baseline worktrees share the same recorded root.
+(
+  d="$(mktemp -d "$scratch/waspflow-root-policy-XXXXXX")"
+  export WASPFLOW_HOME="$d/state"
+  trap 'rm -rf "$d"' EXIT
+  source "$root/lib/core.sh"
+  source "$root/lib/worktree.sh"
+  source "$root/lib/artifacts.sh"
+  mkdir "$d/repo" "$d/allowed" "$d/other"
+  git -C "$d/repo" init -q
+  git -C "$d/repo" -c user.name=Test -c user.email=test@example.invalid commit --allow-empty -qm initial
+  export WASPFLOW_WORKTREE_ROOT="$d/allowed"
+  path="$(worktree_resolve_path "$d/repo" repo-waspflow-test)"
+  [[ "$path" == "$d/allowed/repo-waspflow-test" && ! -e "$path" ]]
+  if worktree_resolve_path "$d/repo" ../escape 2>/dev/null; then exit 1; fi
+  ln -s "$d/other" "$d/allowed/escape"
+  if worktree_resolve_path "$d/repo" escape 2>/dev/null; then exit 1; fi
+  if (WASPFLOW_WORKTREE_ROOT="$d/missing" worktree_resolve_root "$d/repo") 2>/dev/null; then exit 1; fi
+  git -C "$d/repo" config waspflow.worktreeRoot "$d/allowed"
+  if (WASPFLOW_WORKTREE_ROOT="$d/other" worktree_create conflict "$d/repo") 2>/dev/null; then exit 1; fi
+  [[ ! -e "$d/other/repo-waspflow-conflict" ]]
+  preview="$("$root/bin/waspflow" spawn --cwd "$d/repo" --lane preview --preview-worktree)"
+  [[ "$preview" == "$d/allowed/repo-waspflow-preview" && ! -e "$preview" ]]
+  wt="$(worktree_create policy "$d/repo")"
+  [[ "$wt" == "$d/allowed/repo-waspflow-policy" ]]
+  worktree_remove policy "$wt" "$d/repo" 0
+  fork="$(git -C "$d/repo" rev-parse HEAD)"
+  lane_set root-policy verify_failure_class task verify_fork_point "$fork" repo_root "$d/repo" cwd "$d/repo" worktree_root "$d/allowed" verify_timeout 5 verify_command "pwd > $(printf '%q' "$d/baseline-path"); false"
+  git -C "$d/repo" config --unset waspflow.worktreeRoot
+  unset WASPFLOW_WORKTREE_ROOT
+  artifacts_classify_pre_existing root-policy
+  baseline="$(cat "$d/baseline-path")"
+  [[ "$baseline" == "$d/allowed"/.waspflow-baseline-* && ! -e "$baseline" ]]
+  [[ "$(git -C "$d/repo" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
+)
+
 # BUG 1 — claude_is_idle gates on active subagents. Fixture matches the real
 # on-disk schema: parent <sid>.jsonl + <sid>/subagents/agent-*.jsonl.
 (
@@ -7209,6 +7292,76 @@ EOF
     || { echo "hydration: timeout killed a provider after startup" >&2; exit 1; }
   [[ "$(lane_get hydrated provider_binary_path)" == "$h/bin/codex" && "$(lane_get hydrated provider_binary_version)" == "fixture-codex 1.0" ]] \
     || { echo "hydration: effective provider identity not recorded" >&2; exit 1; }
+)
+
+# Wave 2 A: bounded parsing, diagnostic locks, and evidence-only observations.
+(
+  w2="$(mktemp -d "$scratch/waspflow-wave2-a-XXXXXX")"
+  trap 'rm -rf "$w2"' EXIT
+  export WASPFLOW_HOME="$w2/home" WASPFLOW_LIB="$root/lib"
+  source "$root/lib/core.sh"
+  source "$root/lib/artifacts.sh"
+  source "$root/lib/fanin.sh"
+  source "$root/lib/providers/codex.sh"
+  mkdir "$w2/repo"; git -C "$w2/repo" init -q
+  git -C "$w2/repo" config user.name Fixture
+  git -C "$w2/repo" config user.email fixture@example.invalid
+  printf base >"$w2/repo/file"; git -C "$w2/repo" add file
+  git -C "$w2/repo" commit -qm base
+  lane_set evidence cwd "$w2/repo"
+  artifacts_capture_before evidence "$w2/repo" prompt
+  printf committed >"$w2/repo/file"; git -C "$w2/repo" commit -qam committed
+  printf staged >"$w2/repo/file"; git -C "$w2/repo" add file
+  printf unstaged >"$w2/repo/file"
+  artifacts_capture_after evidence
+  grep -q '+committed' "$(lane_dir evidence)/git-diff-committed.patch"
+  grep -q '+staged' "$(lane_dir evidence)/git-diff-staged.patch"
+  grep -q '+unstaged' "$(lane_dir evidence)/git-diff-unstaged.patch"
+
+  lane_set evidence report "$w2/report" report_contract_version 2 report_before_signature missing
+  before="$(cat "$(lane_state_file evidence)")"
+  artifacts_report_observation evidence | jq -e '.report_exists==false and .report_bytes==0 and .report_current_state=="absent"' >/dev/null
+  [[ "$before" == "$(cat "$(lane_state_file evidence)")" ]]
+  _artifacts_recover() { touch "$w2/provider-called"; }
+  WASPFLOW_RECOVERY_POLICY=disabled artifacts_finalize evidence codex >/dev/null
+  [[ ! -e "$w2/provider-called" && "$(lane_get evidence result)" == report_missing ]]
+
+  _codex_discover_session_cached() { echo fixture-session; }
+  lane_set parser cwd "$w2" session_id fixture-session rollout "$w2/rollout" model model effort high
+  real_jq="$(command -v jq)"
+  jq() { echo called >>"$w2/jq-count"; "$real_jq" "$@"; }
+  for count in 1000 10000; do
+    "$real_jq" -cn --argjson count "$count" '
+      {type:"session_meta",payload:{id:"fixture-session",cwd:"fixture"}},
+      (range($count) | {type:"event_msg",payload:{type:"irrelevant"}}),
+      {type:"turn_context",timestamp:"first",payload:{model:"wrong",effort:"low"}},
+      {type:"event_msg",timestamp:"authoritative",payload:{type:"thread_settings_applied",thread_settings:{model:"model",reasoning_effort:"high"}}},
+      {type:"turn_context",timestamp:"last",payload:{model:"wrong",effort:"low"}}' >"$w2/rollout"
+    : >"$w2/jq-count"
+    codex_refresh_runtime_settings parser
+    calls="$(wc -l <"$w2/jq-count")"
+    [[ "$calls" -lt 80 ]]
+    if [[ "$count" == 1000 ]]; then first_calls="$calls"; else [[ "$calls" == "$first_calls" ]]; fi
+    [[ "$(lane_get parser runtime_model)" == model && "$(lane_get parser runtime_settings_source)" == thread_settings_applied ]]
+  done
+  printf '{' >>"$w2/rollout"
+  codex_refresh_runtime_settings parser
+  [[ "$(lane_get parser runtime_refresh_state)" == in_flight ]]
+  printf '\n' >>"$w2/rollout"
+  codex_refresh_runtime_settings parser
+  [[ "$(lane_get parser runtime_refresh_state)" == error ]]
+  unset -f jq
+
+  WASPFLOW_LOCK_WAIT_SECONDS=1
+  hold_lock() { touch "$w2/held"; sleep 2; }
+  lane_operation_run busy hold_lock &
+  holder=$!
+  while [[ ! -e "$w2/held" ]]; do sleep 0.05; done
+  if lane_operation_run busy true 2>"$w2/lock-error"; then exit 1; fi
+  grep -q 'operation=hold_lock started_epoch=' "$w2/lock-error"
+  wait "$holder"
+  lane_operation_run busy true
+  [[ ! -e "$WASPFLOW_LOCKS_DIR/busy.lock.owner" ]]
 )
 
 echo "waspflow verify: ok"

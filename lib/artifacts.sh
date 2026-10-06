@@ -113,7 +113,7 @@ artifacts_capture_before() {
   fi
   if git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
     git -C "$cwd" status --short >"$dir/git-status-before.txt" 2>&1 || true
-    lane_set "$lane" git_tracked "true"
+    lane_set "$lane" git_tracked "true" git_spawn_head "$(git -C "$cwd" rev-parse HEAD 2>/dev/null || true)"
   else
     : >"$dir/git-status-before.txt"
     lane_set "$lane" git_tracked "false"
@@ -133,6 +133,33 @@ artifacts_capture_after() {
     echo
     git -C "$cwd" --no-pager diff 2>/dev/null
   } >"$dir/git-diff.txt" 2>&1 || true
+  git -C "$cwd" --no-pager diff --binary --cached >"$dir/git-diff-staged.patch" 2>/dev/null || true
+  git -C "$cwd" --no-pager diff --binary >"$dir/git-diff-unstaged.patch" 2>/dev/null || true
+  local spawn_head; spawn_head="$(lane_get "$lane" git_spawn_head)"
+  if [[ -n "$spawn_head" ]]; then
+    git -C "$cwd" --no-pager diff --binary "$spawn_head" HEAD >"$dir/git-diff-committed.patch" 2>/dev/null || true
+  fi
+}
+
+# Observation only: never changes the report contract or invokes recovery.
+artifacts_report_observation() {
+  local lane="$1" report state=not_required exists=false bytes=0 before
+  report="$(lane_get "$lane" report)"
+  if [[ -n "$report" ]]; then
+    state=absent
+    if [[ -f "$report" ]]; then
+      exists=true
+      bytes="$(wc -c <"$report" 2>/dev/null)" || bytes=0
+      state=present
+      [[ "$bytes" -ge "$WASPFLOW_REPORT_MIN_BYTES" ]] || state=insubstantial
+      if [[ "$state" == present && "$(lane_get "$lane" report_contract_version)" == 2 ]]; then
+        before="$(lane_get "$lane" report_before_signature)"
+        [[ -n "$before" && "$before" != "$(artifacts_report_signature "$report")" ]] || state=unchanged
+      fi
+    fi
+  fi
+  jq -cn --arg state "$state" --argjson exists "$exists" --argjson bytes "$bytes" \
+    '{report_exists:$exists,report_bytes:$bytes,report_current_state:$state}'
 }
 
 # Is the lane's required report present and substantial?
@@ -163,6 +190,10 @@ artifacts_report_present() {
 # Args: lane provider
 artifacts_finalize() {
   local lane="$1" provider="$2" cleanup_only="${3:-0}" existing report
+  case "${WASPFLOW_RECOVERY_POLICY:-original}" in
+    original|disabled) ;;
+    *) err "recovery policy must be original or disabled"; return 1 ;;
+  esac
   existing="$(lane_get "$lane" result)"
   # `runtime_unverified` and `runtime_drift` are not outcomes: _reap_one_locked
   # writes them when a runtime-receipt gate REFUSES the reap. A later reap only
@@ -222,7 +253,7 @@ artifacts_finalize() {
   fi
 
   # Report missing → one recovery pass (unless recovery disabled).
-  if [[ "$cleanup_only" == 1 || "$(lane_get "$lane" no_recovery)" == "true" ]]; then
+  if [[ "$cleanup_only" == 1 || "${WASPFLOW_RECOVERY_POLICY:-original}" == disabled || "$(lane_get "$lane" no_recovery)" == "true" ]]; then
     local report_failure_state; report_failure_state="$(lane_get "$lane" report_state)"
     lane_set "$lane" result "report_missing" report_state "${report_failure_state:-absent}"
     warn "lane '$lane': required report missing and recovery disabled ($report)"
@@ -439,6 +470,8 @@ artifacts_run_verify_checkpoint() {
 # receipts; every cleanup path removes the detached worktree.
 artifacts_classify_pre_existing() {
   local lane="$1" fork repo_root tmp verify_command prepare_command timeout rc state="inconclusive"
+  local recorded_root baseline_template WASPFLOW_WORKTREE_ROOT="${WASPFLOW_WORKTREE_ROOT:-}"
+  recorded_root="$(lane_get "$lane" worktree_root)"; [[ -z "$recorded_root" ]] || WASPFLOW_WORKTREE_ROOT="$recorded_root"
   [[ "$(lane_get "$lane" verify_failure_class)" == task ]] || return 0
   fork="$(lane_get "$lane" verify_fork_point)"
   if [[ -z "$fork" ]]; then
@@ -450,7 +483,8 @@ artifacts_classify_pre_existing() {
     lane_set "$lane" baseline_oracle_ran "false" baseline_oracle_state "skipped" baseline_oracle_reason "no_fork_point"
     return 0
   fi
-  tmp="$(mktemp -d "$(dirname "$repo_root")/.waspflow-baseline-XXXXXX")" || { lane_set "$lane" baseline_oracle_ran "true" baseline_oracle_state "inconclusive" baseline_oracle_reason "worktree_create_failed"; return 0; }
+  baseline_template="$(worktree_resolve_path "$repo_root" .waspflow-baseline-XXXXXX)" || { lane_set "$lane" baseline_oracle_ran "false" baseline_oracle_state "inconclusive" baseline_oracle_reason "worktree_root_policy"; return 0; }
+  tmp="$(mktemp -d "$baseline_template")" || { lane_set "$lane" baseline_oracle_ran "true" baseline_oracle_state "inconclusive" baseline_oracle_reason "worktree_create_failed"; return 0; }
   rmdir "$tmp" || { rm -rf "$tmp"; lane_set "$lane" baseline_oracle_ran "true" baseline_oracle_state "inconclusive" baseline_oracle_reason "worktree_create_failed"; return 0; }
   if ! git -C "$repo_root" worktree add --detach "$tmp" "$fork" >/dev/null 2>&1; then
     rm -rf "$tmp"; lane_set "$lane" baseline_oracle_ran "true" baseline_oracle_state "inconclusive" baseline_oracle_reason "worktree_create_failed"; return 0
@@ -614,8 +648,9 @@ _receipts_append_segment_once() {
 
 artifacts_emit_exec_receipt_v1() {
   local exec_id="$1" provider="$2" model="$3" effort="$4" mode="$5" billing="$6" availability="$7" invoked="$8" completed="$9" result="${10}" exit_code="${11}"
-  local receipt
-  receipt="$(jq -cn --arg exec_id "$exec_id" --arg provider "$provider" --arg model "$model" --arg effort "$effort" --arg mode "$mode" \
+  local receipt output="${12:-}"
+  [[ -n "$output" ]] || output='{}'
+  receipt="$(jq -cn --argjson output "$output" --arg exec_id "$exec_id" --arg provider "$provider" --arg model "$model" --arg effort "$effort" --arg mode "$mode" \
     --argjson billing "$billing" --argjson availability "$availability" --arg invoked "$invoked" --arg completed "$completed" --arg result "$result" --argjson exit_code "$exit_code" '
       ($invoked|tonumber) as $start | ($completed|tonumber) as $end |
       {schema_version:1,receipt_kind:"exec",exec_id:$exec_id,
@@ -624,7 +659,7 @@ artifacts_emit_exec_receipt_v1() {
        stats_eligible:false,ineligibility_reasons:["surface_exec"],availability:$availability,
        quota_observation:{schema_version:1,state:"absent",reason:"not_sampled_for_exec",stale:false,source:"",observation:null},
        verify:{state:"skipped"},timestamps:{invoked_epoch:$start,completed_epoch:$end,wall_seconds:($end-$start)},
-       result:$result,exit_code:$exit_code}')"
+       result:$result,exit_code:$exit_code,output:$output}')"
   _receipts_append "$receipt"
 }
 

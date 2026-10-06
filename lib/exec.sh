@@ -11,6 +11,7 @@ set -euo pipefail
 exec_run() {
   local provider="" model="" effort="" mcp="auto" cwd="$PWD" out_file="" op_id="" OP_ID="" OP_MODE=""
   local provider_explicit=false model_explicit=false auto=false ack_deprecated=false accept_provider_default=false
+  local -a needs_paths=()
   split_after_ddash "$@"
   set -- "${FLAGS[@]:-}"
   while [[ $# -gt 0 ]]; do
@@ -41,6 +42,10 @@ exec_run() {
       --cwd)
         [[ $# -ge 2 && -n "${2:-}" ]] || die "exec: --cwd requires a value"
         cwd="$2"; shift 2
+        ;;
+      --needs-path)
+        [[ $# -ge 2 && -n "${2:-}" ]] || die "exec: --needs-path requires a readable path"
+        needs_paths+=("$2"); shift 2
         ;;
       -o)
         [[ $# -ge 2 && -n "${2:-}" ]] || die "exec: -o requires a file"
@@ -119,12 +124,16 @@ exec_run() {
 
   local output_path should_cat=0
   if [[ -n "$out_file" ]]; then
-    output_path="$(_exec_abs_output_path "$out_file")"
+    output_path="$(_exec_abs_output_path "$out_file")" || return 1
   else
-    output_path="$(mktemp)"
+    output_path="$(mktemp)" || return 1
     should_cat=1
   fi
 
+  if ! _exec_access_preflight "$provider" "$cwd" "$output_path" "${needs_paths[@]}"; then
+    [[ "$should_cat" -eq 0 ]] || rm -f "$output_path"
+    return 1
+  fi
   local invoked_epoch exec_id rc=0 result=succeeded
   invoked_epoch="$(date +%s)"; exec_id="$(new_uuid)"
   case "$provider" in
@@ -150,7 +159,14 @@ exec_run() {
   local availability billing completed_epoch
   availability="$(jq -cn --arg p "$provider" --arg m "$model" --arg state "${MODEL_VALIDATION_STATE:-not_applicable}" --arg source "${MODEL_VALIDATION_SOURCE:-none}" --arg scope "${MODEL_VALIDATION_SCOPE:-not_applicable}" --arg at "${MODEL_VALIDATION_AT:-}" '{schema_version:1,provider:$p,model:$m,state:$state,evidence_source:$source,query_scope:$scope,observed_at:(if $at == "" then null else $at end),detail:""}')"
   billing="$(billing_path_v1 "$provider" default false)"; completed_epoch="$(date +%s)"
-  artifacts_emit_exec_receipt_v1 "$exec_id" "$provider" "$model" "$effort" "${OP_MODE:-standard}" "$billing" "$availability" "$invoked_epoch" "$completed_epoch" "$result" "$rc" \
+  local output_state=missing output_bytes=0 output_metadata
+  if [[ -f "$output_path" ]]; then
+    output_bytes="$(wc -c <"$output_path")"
+    output_state=invalid
+    _exec_output_is_useful "$output_path" && output_state=present
+  fi
+  output_metadata="$(jq -cn --arg state "$output_state" --argjson bytes "$output_bytes" --argjson preflight "$EXEC_PREFLIGHT_JSON" '{state:$state,bytes:$bytes,preflight:$preflight}')"
+  artifacts_emit_exec_receipt_v1 "$exec_id" "$provider" "$model" "$effort" "${OP_MODE:-standard}" "$billing" "$availability" "$invoked_epoch" "$completed_epoch" "$result" "$rc" "$output_metadata" \
     || warn "exec: could not emit receipt"
   if [[ "$rc" -ne 0 ]]; then
     [[ "$should_cat" -eq 1 ]] && rm -f "$output_path"
@@ -236,8 +252,30 @@ _exec_abs_output_path() {
   dir="$(dirname "$path")"
   base="$(basename "$path")"
   [[ -d "$dir" ]] || die "exec: output directory does not exist: $dir"
-  dir="$(cd "$dir" && pwd)"
-  printf '%s/%s\n' "$dir" "$base"
+  dir="$(cd "$dir" && pwd -P)" || return 1
+  path="$dir/$base"
+  [[ ! -L "$path" ]] || die "exec: output must not be a symlink: $path"
+  [[ ! -e "$path" || ( -f "$path" && -w "$path" ) ]] || die "exec: output is not a writable regular file: $path"
+  [[ -w "$dir" && -x "$dir" ]] || die "exec: output directory is not writable/searchable: $dir"
+  local probe
+  probe="$(mktemp "$dir/.waspflow-output-preflight.XXXXXX")" || die "exec: cannot create output in: $dir"
+  rm -f "$probe" || return 1
+  printf '%s\n' "$path"
+}
+
+# Host access is a prerequisite, never proof of provider sandbox access.
+_exec_access_preflight() {
+  local provider="$1" cwd="$2" output_path="$3" path sandbox=unknown required='[]'
+  shift 3
+  [[ "$provider" != codex ]] || sandbox=workspace-write
+  for path in "$@"; do
+    [[ "$path" == /* ]] || path="$cwd/$path"
+    [[ -e "$path" && -r "$path" && ( ! -d "$path" || -x "$path" ) ]] \
+      || { err "exec: required path is not readable/searchable: $path"; return 1; }
+    required="$(jq -c --arg path "$path" '. + [{path:$path,host_access:"readable",provider_access:"unknown"}]' <<<"$required")"
+  done
+  EXEC_PREFLIGHT_JSON="$(jq -cn --arg provider "$provider" --arg cwd "$cwd" --arg sandbox "$sandbox" --arg output "$output_path" --argjson required "$required" '{provider:$provider,cwd:$cwd,sandbox_requested:$sandbox,sandbox_effective:"unknown",output_path:$output,required_paths:$required}')"
+  printf 'exec preflight: %s\n' "$EXEC_PREFLIGHT_JSON" >&2
 }
 
 _exec_codex() {

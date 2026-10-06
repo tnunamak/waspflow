@@ -18,6 +18,37 @@ worktree_repo_root() {
   git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || echo ""
 }
 
+# Resolve operator/project policy without creating directories.
+worktree_resolve_root() {
+  local repo_root="$1" configured requested root
+  configured="$(git -C "$repo_root" config --get waspflow.worktreeRoot 2>/dev/null || true)"
+  requested="${WASPFLOW_WORKTREE_ROOT:-}"
+  for root in "$configured" "$requested"; do
+    [[ -z "$root" ]] && continue
+    [[ "$root" == /* && -d "$root" ]] || { err "worktree root must be an existing absolute directory: $root"; return 1; }
+  done
+  [[ -z "$configured" ]] || configured="$(cd "$configured" && pwd -P)" || return 1
+  [[ -z "$requested" ]] || requested="$(cd "$requested" && pwd -P)" || return 1
+  if [[ -n "$configured" && -n "$requested" && "$configured" != "$requested" ]]; then
+    err "worktree root conflicts with project policy: $requested (required: $configured)"; return 1
+  fi
+  root="${configured:-${requested:-$(dirname "$repo_root")}}"
+  root="$(cd "$root" && pwd -P)" || return 1
+  [[ -w "$root" && -x "$root" ]] || { err "worktree root is not writable/searchable: $root"; return 1; }
+  printf '%s\n' "$root"
+}
+
+worktree_resolve_path() {
+  local repo_root="$1" leaf="$2" root path
+  [[ -n "$leaf" && "$leaf" != . && "$leaf" != .. && "$leaf" != */* && "$leaf" != *$'\n'* && "$leaf" != *$'\r'* ]] \
+    || { err "worktree name must be one path component"; return 1; }
+  root="$(worktree_resolve_root "$repo_root")" || return 1
+  path="${root%/}/$leaf"
+  [[ ! -L "$path" ]] || { err "worktree path is a symlink: $path"; return 1; }
+  printf '%s\n' "$path"
+}
+
+
 # Create an isolated worktree for a lane rooted at the repo containing $cwd.
 # Echoes the worktree absolute path on success; non-zero + message on failure.
 # Args: lane cwd [base_commit]
@@ -28,8 +59,7 @@ worktree_create() {
   [[ -n "$repo_root" ]] || { err "worktree isolation requested but '$cwd' is not in a git repo"; return 1; }
 
   branch="waspflow/$lane"
-  # Place worktrees as siblings of the repo to avoid nesting inside it.
-  wt_path="$(dirname "$repo_root")/$(basename "$repo_root")-waspflow-$lane"
+  wt_path="$(worktree_resolve_path "$repo_root" "$(basename "$repo_root")-waspflow-$lane")" || return 1
 
   if [[ -e "$wt_path" ]]; then
     err "worktree path already exists: $wt_path (reap the lane or pick a new name)"

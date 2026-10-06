@@ -455,7 +455,23 @@ lane_operation_run() {
   # The outer subshell holds the lock; the operation runs with fd 9 closed, so
   # nothing it starts (a verify oracle's daemons, a new tmux server, a provider's
   # background shells) can inherit the lock and keep it after this CLI exits.
-  ( flock -x 9; ( "$@" ) 9>&- ) 9>"$lockf"
+  ( lane_lock_acquire "$lane" 9 "${1:-operation}" || exit 1
+    trap 'rm -f "$lockf.owner"' EXIT
+    ( "$@" ) 9>&-
+  ) 9>"$lockf"
+}
+
+# Diagnostics are advisory; flock remains the authority. A stale owner file
+# never authorizes breaking a lock. Readers/status need not acquire this lock.
+lane_lock_acquire() {
+  local lane="$1" fd="$2" operation="$3" seconds owner
+  seconds="$(numeric_knob WASPFLOW_LOCK_WAIT_SECONDS 5)"
+  owner="$WASPFLOW_LOCKS_DIR/$lane.lock.owner"
+  if ! flock -w "$seconds" -x "$fd"; then
+    err "lane '$lane': operation lock busy after ${seconds}s; last owner: $(cat "$owner" 2>/dev/null || echo unknown)"
+    return 1
+  fi
+  printf 'pid=%s operation=%s started_epoch=%s\n' "$BASHPID" "$operation" "$(date +%s)" >"$owner"
 }
 
 # The critical section: read → merge → atomic write. MUST run under the lane lock

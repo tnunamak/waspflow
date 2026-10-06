@@ -893,39 +893,44 @@ codex_refresh_runtime_settings() {
   head -c "$snapshot_size" "$rollout" >"$snapshot" 2>/dev/null || { rm -f "$snapshot"; _codex_runtime_refresh_health error snapshot-read-failed; return 0; }
   [[ "$(wc -c <"$snapshot" 2>/dev/null || echo -1)" == "$snapshot_size" ]] || { rm -f "$snapshot"; _codex_runtime_refresh_health in_flight snapshot-short-read; return 0; }
   last_byte="$(tail -c 1 "$snapshot" 2>/dev/null | od -An -tx1 | tr -d '[:space:]')"
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line_number=$((line_number + 1)); last_line=$line_number
-  done <"$snapshot"
-  source=""; observed_at=""; runtime_model=""; runtime_effort=""
-  line_number=0
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line_number=$((line_number + 1))
-    if ! parsed="$(jq -c . <<<"$line" 2>/dev/null)"; then
-      if [[ "$line_number" == "$last_line" && "$last_byte" != 0a ]]; then in_flight=1; break; fi
-      malformed="line-$line_number"; break
-    fi
-    if [[ "$(jq -r --arg sid "$sid" 'select(.type == "session_meta" and (.payload.id // "") == $sid) | 1' <<<"$parsed")" == 1 ]]; then
-      : # exact session correlation established below from the same snapshot
-    fi
-    local event_source event_at event_model event_effort
-    event_source="$(jq -r 'if .type == "turn_context" then "turn_context" elif .type == "event_msg" and .payload.type == "thread_settings_applied" then "thread_settings_applied" else empty end' <<<"$parsed")"
-    [[ -n "$event_source" ]] || continue
-    event_at="$(jq -r '.timestamp // ""' <<<"$parsed")"
-    if [[ "$event_source" == turn_context ]]; then
-      event_model="$(jq -r '.payload.model // ""' <<<"$parsed")"
-      event_effort="$(jq -r '.payload.effort // .payload.reasoning_effort // ""' <<<"$parsed")"
-    else
-      event_model="$(jq -r '.payload.thread_settings.model // ""' <<<"$parsed")"
-      event_effort="$(jq -r '.payload.thread_settings.reasoning_effort // .payload.thread_settings.effort // ""' <<<"$parsed")"
-    fi
-    if [[ "$event_source" == thread_settings_applied || "$source" != thread_settings_applied ]]; then
-      source="$event_source"; observed_at="$event_at"; runtime_model="$event_model"; runtime_effort="$event_effort"
-    fi
-  done <"$snapshot"
-  local meta
-  meta="$(jq -Rrc --arg sid "$sid" 'fromjson? | select(.type == "session_meta" and (.payload.id // "") == $sid) | 1' "$snapshot" 2>/dev/null | tail -1)"
-  local subagent
-  subagent="$(jq -Rrc --arg sid "$sid" 'fromjson? | select(.type == "session_meta" and (.payload.id // "") == $sid) | if ((.payload.source // {}) | type) == "object" and ((.payload.source // {}) | has("subagent")) then 1 else 0 end' "$snapshot" 2>/dev/null | tail -1)"
+  # One streaming reducer, not several jq processes per record. Invalid trailing
+  # fragments remain distinct from malformed complete records.
+  local summary meta subagent
+  summary="$(jq -Rnc --arg sid "$sid" '
+    reduce inputs as $line
+      ({line:0,bad:0,meta:"",subagent:0,source:"",at:"",model:"",effort:""};
+       .line += 1 |
+       (try (if ($line | test("^\\s*$")) then {} else ($line | fromjson) end) catch {"__invalid":true}) as $e |
+       if ($e | type) != "object" or $e.__invalid == true then
+         if .bad == 0 then .bad=.line else . end
+       else
+         (if $e.type == "session_meta" and ($e.payload.id // "") == $sid then
+            .meta="1" | .subagent=(if ($e.payload.source | type) == "object" and ($e.payload.source | has("subagent")) then 1 else 0 end)
+          else . end) |
+         if $e.type == "event_msg" and $e.payload.type == "thread_settings_applied" then
+           .source="thread_settings_applied" | .at=($e.timestamp // "") |
+           .model=($e.payload.thread_settings.model // "") |
+           .effort=($e.payload.thread_settings.reasoning_effort // $e.payload.thread_settings.effort // "")
+         elif $e.type == "turn_context" and .source != "thread_settings_applied" then
+           .source="turn_context" | .at=($e.timestamp // "") |
+           .model=($e.payload.model // "") | .effort=($e.payload.effort // $e.payload.reasoning_effort // "")
+         else . end
+       end)
+  ' "$snapshot" 2>/dev/null)" || {
+    rm -f "$snapshot"; _codex_runtime_refresh_health error snapshot-parse-failed; return 0;
+  }
+  line_number="$(jq -r '.bad' <<<"$summary")"
+  last_line="$(jq -r '.line' <<<"$summary")"
+  if [[ "$line_number" != 0 ]]; then
+    if [[ "$line_number" == "$last_line" && "$last_byte" != 0a ]]; then in_flight=1
+    else malformed="line-$line_number"; fi
+  fi
+  source="$(jq -r '.source' <<<"$summary")"
+  observed_at="$(jq -r '.at' <<<"$summary")"
+  runtime_model="$(jq -r '.model' <<<"$summary")"
+  runtime_effort="$(jq -r '.effort' <<<"$summary")"
+  meta="$(jq -r '.meta' <<<"$summary")"
+  subagent="$(jq -r '.subagent' <<<"$summary")"
   rm -f "$snapshot"
   if [[ -n "$malformed" ]]; then _codex_runtime_refresh_health error "malformed-rollout:$malformed"; return 0; fi
   if [[ "$in_flight" -eq 1 ]]; then _codex_runtime_refresh_health in_flight incomplete-final-record; return 0; fi
