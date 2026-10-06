@@ -385,6 +385,8 @@ claude_is_idle() {
   [[ -n "$jsonl" && -f "$jsonl" ]] || return 1
   last_reason="$(jq -rc 'select(.type=="assistant") | .message.stop_reason // empty' "$jsonl" 2>/dev/null | tail -1)"
   [[ "$last_reason" == "end_turn" ]] || return 1
+  # A later attached user message must not reuse the previous end_turn.
+  claude_turn_settled "$lane" || return 1
   # Parent turn ended — but hold IDLE while any spawned subagent is still writing.
   if _claude_children_active "$lane" "$session_id"; then
     return 2   # distinct nonzero: "parent done, children still active" (not idle)

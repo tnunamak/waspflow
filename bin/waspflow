@@ -1232,6 +1232,36 @@ cmd_wait() {
     load_provider "$provider"
     provenance_reconcile_lane "$lane" \
       || warn "wait: lane '$lane' provenance reconciliation failed; continuing to observe the worker"
+    # Re-read the receipt and barrier: revise may start after wait's first poll.
+    local submission
+    submission="$(lane_get "$lane" revise_submission_state)"
+    if [[ "$submission" == failed ]]; then
+      lane_set "$lane" wait_state failed
+      warn "wait: lane '$lane' resumed turn FAILED"
+      return 3
+    fi
+    barrier_mark="$(lane_get "$lane" revise_barrier_mark)"
+    barrier_cleared=0
+    [[ -n "$barrier_mark" ]] || barrier_cleared=1
+
+    # Inspect only the current pane tail, never old scrollback containing quoted
+    # prompt text. An attached client can submit between observations: surface
+    # that veto rather than claiming a stable completion boundary.
+    local pane="" hint="" target="" clients=0
+    if tmux_window_exists "$lane"; then
+      target="$(tmux_window_target "$lane")"
+      clients="$(tmux display-message -p -t "$target" '#{window_active_clients}' 2>/dev/null || true)"
+      pane="$(tmux capture-pane -p -t "$target" 2>/dev/null | strip_ansi | grep -a -v '^$' | tail -5 || true)"
+      hint="$(wf_pane_looks_blocked "$pane" || true)"
+      if [[ "$clients" =~ ^[0-9]+$ && "$clients" -gt 0 ]]; then
+        hint="attached tmux client"
+      fi
+      if [[ -n "$hint" ]]; then
+        lane_set "$lane" wait_state blocked blocked_hint "$hint"
+        warn "wait: lane '$lane' BLOCKED ($hint); inspect with waspflow peek"
+        return 4
+      fi
+    fi
     if [[ "$barrier_cleared" -eq 0 ]]; then
       local cur_mark
       cur_mark="$("${provider}_turn_mark" "$lane" 2>/dev/null)" || true
@@ -1242,11 +1272,12 @@ cmd_wait() {
         lane_set "$lane" revise_barrier_mark ""
       fi
     fi
-    if [[ "$barrier_cleared" -eq 1 ]] && "${provider}_is_idle" "$lane"; then
+    if [[ "$submission" != running && "$barrier_cleared" -eq 1 ]] && "${provider}_is_idle" "$lane"; then
       # Capture the change so far (cheap, idempotent). Deliverable enforcement +
       # the honest result happen at reap (the explicit end-of-run), so an
       # intermediate idle between revise turns doesn't trigger premature recovery.
       artifacts_capture_after "$lane"
+      lane_set "$lane" wait_state idle blocked_hint ""
       log "wait: lane '$lane' is IDLE"
       [[ "$reap_after_idle" -eq 1 ]] || deferred_report "$lane" wait
       # Preserve wait's timeout/stall semantics: cleanup is reached only through
@@ -1263,6 +1294,21 @@ cmd_wait() {
         return "$reap_rc"
       fi
       return 0
+    fi
+    # Recorded pane loss plus no active owned scope is a resumable interruption,
+    # not an indefinitely busy provider. Legacy metadata without ownership is
+    # deliberately left unknown. Running headless revisions use their receipt.
+    if [[ "$submission" != running && -n "$(lane_get "$lane" tmux_window)" ]] && ! tmux_window_exists "$lane"; then
+      local active_scopes record lifecycle
+      if active_scopes="$(waspflow_active_scope_snapshot)"; then
+        record="$(cat "$(lane_state_file "$lane")")"
+        lifecycle="$(waspflow_derived_lane_lifecycle "$record" "$active_scopes" true)"
+        if [[ "$lifecycle" == interrupted ]]; then
+          lane_set "$lane" wait_state interrupted
+          warn "wait: lane '$lane' INTERRUPTED (owned window and scope exited)"
+          return 3
+        fi
+      fi
     fi
     # --- stall check ---
     # The ROBUST signal is STALL itself, not prompt wording: the worker produced no

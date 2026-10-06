@@ -1284,6 +1284,9 @@ strip_ansi() { perl "$WASPFLOW_ROOT/scripts/strip-ansi.pl"; }
 # Echoes a short reason if blocked; empty (rc 1) if not. Args: pane_text
 wf_pane_looks_blocked() {
   local pane="$1"
+  if grep -qiE 'enter to select|type something|chat about this|ctrl\+x ctrl\+s to send now|waiting for task|interrupt.*what should claude do' <<<"$pane"; then
+    echo "provider waiting for input or task recovery"; return 0
+  fi
   # A numbered choice menu with a selection cursor (trust gate, downgrade offers).
   if grep -qiE '(^|\n)[[:space:]]*(❯|>|\*)?[[:space:]]*[12]\.[[:space:]]*(yes|no|continue|proceed|keep|switch|use)' <<<"$pane"; then
     echo "numbered choice prompt"; return 0

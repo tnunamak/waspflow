@@ -2003,6 +2003,17 @@ JSONL
   # Turn completes -> idle.
   printf '%s\n' '{"type":"event_msg","payload":{"type":"task_complete"}}' >>"$roll"
   codex_is_idle cx-idle || { echo "codex_is_idle: expected idle after task_complete" >&2; exit 1; }
+  # Delayed prior-turn completion cannot complete the current turn.
+  printf '%s\n' '{"type":"event_msg","payload":{"type":"task_started","turn_id":"new"}}' \
+    '{"type":"event_msg","payload":{"type":"task_complete","turn_id":"old"}}' >>"$roll"
+  ! codex_is_idle cx-idle || { echo "codex idle: stale turn ID accepted" >&2; exit 1; }
+  printf '%s\n' '{"type":"event_msg","payload":{"type":"exec_command_begin","call_id":"bg"}}' \
+    '{"type":"event_msg","payload":{"type":"task_complete","turn_id":"new"}}' >>"$roll"
+  ! codex_is_idle cx-idle || { echo "codex idle: live background tool accepted" >&2; exit 1; }
+  printf '%s\n' '{"type":"event_msg","payload":{"type":"exec_command_end","call_id":"bg"}}' >>"$roll"
+  codex_is_idle cx-idle || { echo "codex idle: completed background tool stayed busy" >&2; exit 1; }
+  printf '%s' '{"type":"event_msg"' >>"$roll"
+  ! codex_is_idle cx-idle || { echo "codex idle: partial append accepted" >&2; exit 1; }
   rm -rf "$cxdir"
 )
 
@@ -2546,6 +2557,59 @@ PROV
   : > "$ctl/idle"
   set +e; run_wait 5 >/dev/null 2>&1; rc=$?; set -e
   [[ "$rc" -eq 0 ]] || { echo "barrier: plain wait should honor idle (rc0), got $rc" >&2; exit 1; }
+
+  # Headless receipts veto the old idle even when its barrier already advanced.
+  lane_set barlane revise_submission_state running revise_barrier_mark ""
+  set +e; run_wait 1 >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 1 ]] || { echo "wait: running headless receipt false-completed" >&2; exit 1; }
+  lane_set barlane revise_submission_state failed
+  set +e; run_wait 5 >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 3 ]] || { echo "wait: failed headless receipt not surfaced" >&2; exit 1; }
+  lane_set barlane revise_submission_state running
+  (
+    sleep 1
+    printf 'new deliverable\n' >"$ctl/deliverable"
+    lane_set barlane revise_submission_state completed
+  ) & completion_pid=$!
+  run_wait 5 >/dev/null 2>&1
+  [[ -s "$ctl/deliverable" ]] || { echo "wait: returned before resumed output" >&2; exit 1; }
+  wait "$completion_pid"
+  lane_set barlane revise_submission_state ""
+
+  # Deterministic pane fixtures, no provider or external tmux client.
+  cat >>"$fakelib/providers/faker.sh" <<PROV
+tmux_window_exists() { [[ -f "$ctl/window" ]]; }
+tmux_window_target() { echo '@fixture'; }
+tmux() {
+  case "\$1" in
+    capture-pane) cat "$ctl/pane" ;;
+    display-message) cat "$ctl/clients" ;;
+    *) return 1 ;;
+  esac
+}
+waspflow_active_scope_snapshot() { echo '[]'; }
+PROV
+  : >"$ctl/window"; : >"$ctl/pane"; echo 0 >"$ctl/clients"
+  for prompt in 'Enter to select · ↑/↓ to navigate · Esc to cancel' \
+    'Type something' 'ctrl+x ctrl+s to send now' 'Waiting for task' \
+    'Interrupt · What should Claude do'; do
+    printf '%s\n' "$prompt" >"$ctl/pane"
+    set +e; run_wait 1 >/dev/null 2>&1; rc=$?; set -e
+    [[ "$rc" -eq 4 && "$(lane_get barlane wait_state)" == blocked ]] \
+      || { echo "wait: short poll missed blocker: $prompt" >&2; exit 1; }
+  done
+  : >"$ctl/pane"; echo 1 >"$ctl/clients"
+  set +e; run_wait 1 >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 4 ]] || { echo "wait: attached client did not veto idle" >&2; exit 1; }
+  echo 0 >"$ctl/clients"
+  run_wait 5 >/dev/null 2>&1
+  [[ "$(lane_get barlane wait_state)" == idle && -z "$(lane_get barlane blocked_hint)" ]] \
+    || { echo "wait: recovered lane retained a stale blocker" >&2; exit 1; }
+  rm -f "$ctl/window" "$ctl/idle"
+  lane_set barlane tmux_window '@lost' status live
+  set +e; run_wait 5 >/dev/null 2>&1; rc=$?; set -e
+  [[ "$rc" -eq 3 && "$(lane_get barlane wait_state)" == interrupted ]] \
+    || { echo "wait: rebooted window was not interrupted" >&2; exit 1; }
 
   rm -rf "$fakelib" "$ctl"
 )
@@ -5190,7 +5254,7 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   deferred_lane_quiescent sig-attach || { echo "deferred signal: a settled Claude turn was not quiescent" >&2; exit 1; }
   printf '%s\n' '{"type":"user","message":{"content":"typed through attach"}}' >>"$attach_log"
   load_provider claude
-  claude_is_idle sig-attach || { echo "deferred signal: fixture no longer reproduces the stale end_turn idle" >&2; exit 1; }
+  ! claude_is_idle sig-attach || { echo "idle oracle: a later attached user turn reused stale end_turn" >&2; exit 1; }
   ! deferred_lane_quiescent sig-attach || { echo "deferred signal: an attached Claude turn in flight was treated as quiescent" >&2; exit 1; }
   printf '%s\n' '{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"attached done"}]}}' >>"$attach_log"
   deferred_lane_quiescent sig-attach || { echo "deferred signal: the attached turn completed but was not quiescent" >&2; exit 1; }

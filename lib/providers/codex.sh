@@ -945,7 +945,7 @@ codex_refresh_runtime_settings() {
   return 0
 }
 
-# IDLE predicate: last rollout event is task_complete.
+# IDLE predicate: the current turn completed and no turn-owned exec is pending.
 # Args: lane
 codex_is_idle() {
   local lane="$1" sid rollout last
@@ -956,9 +956,25 @@ codex_is_idle() {
     rollout="$(_codex_rollout_for_session "$sid" || true)"
   fi
   [[ -n "$rollout" && -f "$rollout" ]] || return 1
-  last="$(tail -1 "$rollout" 2>/dev/null \
-          | jq -rc '(.payload.type // .type) // empty' 2>/dev/null)"
-  [[ "$last" == "task_complete" ]]
+  # Ordered current-turn evidence, with matching IDs when present.
+  jq -ne '
+    reduce inputs as $row
+      ({turn:"", complete:false, tools:{}};
+       if $row.type == "turn_context" then .complete=false
+       elif $row.type == "event_msg" then
+         $row.payload as $p |
+         if $p.type == "task_started" then .turn=($p.turn_id // "") | .complete=false | .tools={}
+         elif $p.type == "user_message" then .complete=false
+         elif $p.type == "exec_command_begin" then
+           .tools[($p.call_id // "unknown")]=true | .complete=false
+         elif $p.type == "exec_command_end" then del(.tools[($p.call_id // "unknown")])
+         elif $p.type == "task_complete" then
+           .complete=(.turn == "" or ($p.turn_id // "") == .turn)
+         elif $p.type == "turn_aborted" then .complete=false
+         else . end
+       else . end)
+    | .complete and (.tools | length == 0)
+  ' "$rollout" >/dev/null 2>&1
 }
 
 # turn_mark: count of COMPLETED turns (task_complete events) in the rollout. Like
