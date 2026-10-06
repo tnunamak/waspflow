@@ -2063,30 +2063,7 @@ cmd_doctor() {
     if [[ "$code" == "200" ]]; then echo "  [ok]   codex model proxy $url"; else
       echo "  [warn] codex model proxy $url -> $code (start your Codex proxy, or unset WASPFLOW_CODEX_BACKEND_HEALTH_URL)"; fi
   fi
-  billing_report_auth
-  if command -v clawmeter >/dev/null 2>&1; then
-    local quota_check
-    quota_check="$(quota_observation_v1 codex)"
-    if [[ "$(jq -r '.state' <<<"$quota_check")" == absent ]]; then
-      echo "  [warn] clawmeter codex envelope: $(jq -r '.reason' <<<"$quota_check")"
-    else
-      echo "  [ok]   clawmeter codex envelope shape"
-    fi
-    quota_check="$(quota_observation_v1 antigravity)"
-    quota_state="$(jq -r '.state' <<<"$quota_check")"
-    if [[ "$quota_state" == ok || "$quota_state" == stale ]]; then
-      echo "  [ok]   clawmeter antigravity quota mapping: $quota_state"
-    else
-      echo "  [warn] clawmeter antigravity quota mapping: $quota_state ($(jq -r '.reason // "unavailable"' <<<"$quota_check"))"
-    fi
-    quota_check="$(quota_observation_v1 qwen)"
-    quota_state="$(jq -r '.state' <<<"$quota_check")"
-    if [[ "$quota_state" == ok || "$quota_state" == stale ]]; then
-      echo "  [ok]   clawmeter qwen quota mapping (alibaba): $quota_state"
-    else
-      echo "  [warn] clawmeter qwen quota mapping (alibaba): $quota_state ($(jq -r '.reason // "unavailable"' <<<"$quota_check"))"
-    fi
-  fi
+  WASPFLOW_DOCTOR_READ_ONLY=1 billing_report_auth
   # Policy edges rot by design (they are dated judgments); surface staleness
   # here rather than letting an old edge decay into a silent deny-list entry.
   if ops_load 2>/dev/null; then

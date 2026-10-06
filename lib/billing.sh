@@ -92,7 +92,7 @@ codex_auth_observation() {
     fi
   fi
 
-  if mkdir -p "$cache_dir" 2>/dev/null; then
+  if [[ "${WASPFLOW_DOCTOR_READ_ONLY:-0}" != 1 ]] && mkdir -p "$cache_dir" 2>/dev/null; then
     tmp="$(mktemp "$cache_dir/.auth-mode.XXXXXX" 2>/dev/null || true)"
     if [[ -n "$tmp" ]]; then
       if ! printf '%s\t%s\t%s\n' "$now" "$mode" "$principal" >"$tmp" || ! mv -f "$tmp" "$cache_file"; then

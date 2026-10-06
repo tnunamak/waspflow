@@ -37,6 +37,7 @@ done
   grep -q 'WARN stale locks: 1 older than 30 minutes' <<<"$doctor_output"
   grep -q 'WARN release version: .* (latest v999.0.0)' <<<"$doctor_output"
   [[ -f "$doctor_fixture/locks/old.lock" ]]
+  [[ ! -e "$doctor_fixture/codex-auth-cache" ]]
   export WASPFLOW_DOCTOR_LOCK_AGE_MINUTES=not-a-number
   if PATH="$doctor_bin:$PATH" "$root/bin/waspflow" doctor >"$doctor_fixture/invalid.out"; then
     echo 'doctor: invalid lock age succeeded' >&2; exit 1
