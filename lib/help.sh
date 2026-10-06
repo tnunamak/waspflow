@@ -673,13 +673,14 @@ EOF
 
 help_usage_doctor() {
   cat <<'EOF'
-Check local prerequisites and supported agent CLIs.
+Check local tools, provider CLIs, state, tmux, locks, and release version.
 
 Usage:
   waspflow doctor
 
 Flags:
-  No command-specific flags.
+  No command-specific flags. Set WASPFLOW_DOCTOR_LOCK_AGE_MINUTES to change
+  the stale-lock warning threshold (default: 30 minutes).
 
 Examples:
   waspflow doctor

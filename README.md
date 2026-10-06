@@ -1,5 +1,12 @@
 # waspflow
 
+## Status: maintenance mode
+
+The supported workflow is `spawn`, `exec`, `wait`, steer (`revise`), `reap`,
+`gc`, and `doctor`. New features are not planned. T3 Code is the primary
+orchestrator; waspflow remains available for these local workflows. Report bugs
+in `inbox/`.
+
 <p align="center">
   <img src="assets/waspflow-hero.webp" alt="waspflow agent workflow control room" width="100%">
 </p>

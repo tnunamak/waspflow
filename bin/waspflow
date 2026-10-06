@@ -1992,29 +1992,69 @@ cmd_doctor() {
   echo "  WASPFLOW_HOME = $WASPFLOW_HOME"
   echo "  tmux session  = $WASPFLOW_TMUX_SESSION"
   local ok=1
-  local agent_ok=0
-  for c in tmux jq git flock; do
-    if command -v "$c" >/dev/null 2>&1; then echo "  [ok]   $c"; else echo "  [MISS] $c (required)"; ok=0; fi
+  local c
+  for c in tmux jq awk python3 git flock; do
+    if command -v "$c" >/dev/null 2>&1; then echo "PASS tool $c"; else echo "FAIL tool $c (required)"; ok=0; fi
   done
-  command -v curl >/dev/null 2>&1 || ok=0
-  command -v uuidgen >/dev/null 2>&1 || [[ -r /proc/sys/kernel/random/uuid ]] || ok=0
   # Binaries whose name differs from the waspflow provider name get the
   # provider annotated, so `doctor` output stays greppable by provider.
   local label
-  for c in claude codex grok agy qwen dsh curl uuidgen; do
+  for c in claude codex grok agy qwen dsh uuidgen; do
     label="$c"
     case "$c" in agy) label="agy (antigravity)" ;; dsh) label="dsh (deepseek)" ;; esac
     if command -v "$c" >/dev/null 2>&1; then
-      echo "  [ok]   $label"
-      [[ "$c" == "claude" || "$c" == "codex" || "$c" == "grok" || "$c" == "agy" || "$c" == "qwen" || "$c" == "dsh" ]] && agent_ok=1
-    elif [[ "$c" == "curl" || "$c" == "uuidgen" ]]; then
-      echo "  [MISS] $c (required on systems without an equivalent)"
+      case "$c" in
+        claude|codex|grok|agy|qwen|dsh) echo "PASS provider $label" ;;
+        uuidgen) echo "PASS tool $label" ;;
+      esac
+    elif [[ "$c" == "uuidgen" ]]; then
+      echo "WARN tool $c (required without /proc/sys/kernel/random/uuid)"
+    elif [[ "$c" == "claude" || "$c" == "codex" ]]; then
+      echo "WARN provider $label (recommended)"
     else
-      echo "  [warn] $label (install at least one agent CLI)"
+      echo "WARN provider $label (optional)"
     fi
   done
   if ! command -v uuidgen >/dev/null 2>&1 && [[ -r /proc/sys/kernel/random/uuid ]]; then
-    echo "  [ok]   /proc/sys/kernel/random/uuid"
+    echo "PASS UUID source /proc/sys/kernel/random/uuid"
+  elif ! command -v uuidgen >/dev/null 2>&1; then
+    echo "FAIL UUID source unavailable"; ok=0
+  fi
+  if [[ -d "$WASPFLOW_HOME" ]]; then
+    if [[ -w "$WASPFLOW_HOME" ]]; then echo "PASS state home writable"; else echo "FAIL state home not writable"; ok=0; fi
+  else
+    local parent="$WASPFLOW_HOME"
+    while [[ ! -e "$parent" && "$parent" != / ]]; do parent="$(dirname "$parent")"; done
+    if [[ -d "$parent" && -w "$parent" ]]; then echo "PASS state home creatable"; else echo "FAIL state home not creatable"; ok=0; fi
+  fi
+  local lock_age="${WASPFLOW_DOCTOR_LOCK_AGE_MINUTES:-30}" lock stale=0
+  if [[ ! "$lock_age" =~ ^[0-9]+$ ]]; then
+    echo "FAIL lock age must be an integer number of minutes"; ok=0
+  elif [[ -d "$WASPFLOW_LOCKS_DIR" ]] && command -v flock >/dev/null 2>&1; then
+    while IFS= read -r -d '' lock; do
+      if flock -n "$lock" true 2>/dev/null; then ((++stale)); fi
+    done < <(find "$WASPFLOW_LOCKS_DIR" -type f -name '*.lock' -mmin "+$lock_age" -print0 2>/dev/null)
+    if (( stale > 0 )); then echo "WARN stale locks: $stale older than $lock_age minutes"; else echo "PASS stale locks: none older than $lock_age minutes"; fi
+  else
+    echo "PASS stale locks: none older than $lock_age minutes"
+  fi
+  if command -v tmux >/dev/null 2>&1; then
+    if tmux list-sessions >/dev/null 2>&1; then echo "PASS tmux server reachable"; else echo "WARN tmux server unavailable (starts on first lane)"; fi
+  fi
+  if command -v git >/dev/null 2>&1 && git -C "$WASPFLOW_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    local installed latest distance
+    installed="$(git -C "$WASPFLOW_ROOT" describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+    distance="$(git -C "$WASPFLOW_ROOT" rev-list --count "${installed}..HEAD" 2>/dev/null || true)"
+    if [[ -n "$installed" && "$distance" =~ ^[1-9][0-9]*$ ]]; then installed="$installed+$distance commits"; fi
+    latest="${WASPFLOW_DOCTOR_LATEST_TAG:-}"
+    if [[ -z "$latest" ]] && command -v timeout >/dev/null 2>&1; then
+      latest="$(timeout 5 git -C "$WASPFLOW_ROOT" ls-remote --tags --refs origin 'v[0-9]*' 2>/dev/null | awk -F/ '{print $NF}' | sort -V | tail -1)"
+    fi
+    if [[ -z "$latest" ]]; then echo "WARN release version: latest tag unavailable"
+    elif [[ "$installed" == "$latest" ]]; then echo "PASS release version: $installed (latest $latest)"
+    else echo "WARN release version: ${installed:-unknown} (latest $latest)"; fi
+  else
+    echo "WARN release version: checkout unavailable"
   fi
   # Codex backend
   local url="$WASPFLOW_CODEX_BACKEND_HEALTH_URL"
@@ -2058,7 +2098,6 @@ cmd_doctor() {
       echo "  [ok]   policy preferred_over edges current vs catalog"
     fi
   fi
-  [[ "$agent_ok" -eq 1 ]] || ok=0
   [[ "$ok" -eq 1 ]] || {
     echo "  -> missing prerequisites"
     echo "     see: $WASPFLOW_ROOT/docs/prerequisites.md"

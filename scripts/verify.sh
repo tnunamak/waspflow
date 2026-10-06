@@ -18,6 +18,32 @@ for syntax_file in "$root/scripts/verify.sh" "$root/bin/waspflow" "$root"/lib/*.
   bash -n "$syntax_file"
 done
 
+# Doctor is read-only: the fixture home and lock timestamps must survive both
+# a healthy scan and a stale-lock warning. Pin the remote tag probe locally.
+(
+  doctor_fixture="$(mktemp -d "$scratch/waspflow-doctor-XXXXXX")"
+  doctor_bin="$doctor_fixture/bin"
+  trap 'rm -rf "$doctor_fixture"' EXIT
+  mkdir -p "$doctor_fixture/locks" "$doctor_bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$doctor_bin/codex"
+  chmod +x "$doctor_bin/codex"
+  touch -d '45 minutes ago' "$doctor_fixture/locks/old.lock"
+  export WASPFLOW_HOME="$doctor_fixture" WASPFLOW_DOCTOR_LATEST_TAG=v999.0.0
+  export WASPFLOW_DOCTOR_LOCK_AGE_MINUTES=30
+  doctor_output="$(PATH="$doctor_bin:$PATH" "$root/bin/waspflow" doctor)"
+  grep -q 'PASS tool python3' <<<"$doctor_output"
+  grep -q 'PASS provider codex' <<<"$doctor_output"
+  grep -q 'PASS state home writable' <<<"$doctor_output"
+  grep -q 'WARN stale locks: 1 older than 30 minutes' <<<"$doctor_output"
+  grep -q 'WARN release version: .* (latest v999.0.0)' <<<"$doctor_output"
+  [[ -f "$doctor_fixture/locks/old.lock" ]]
+  export WASPFLOW_DOCTOR_LOCK_AGE_MINUTES=not-a-number
+  if PATH="$doctor_bin:$PATH" "$root/bin/waspflow" doctor >"$doctor_fixture/invalid.out"; then
+    echo 'doctor: invalid lock age succeeded' >&2; exit 1
+  fi
+  grep -q 'FAIL lock age must be an integer' "$doctor_fixture/invalid.out"
+)
+
 # Codex billing truth: `OPENAI_API_KEY` is not an auth-mode signal. Stub the
 # read-only status probe so these assertions never depend on this host's login.
 (
@@ -127,7 +153,7 @@ grep -Fq 'minimal|low|medium|high|xhigh|max|ultra)' "$root/lib/exec.sh"
 grep -Eq "unsupported effort" "$root/lib/providers/grok.sh"
 # Generated capabilities-derived effort unions present
 test -f "$root/lib/generated/effort-whitelists.sh"
-grep -q 'tmux jq git flock' "$root/bin/waspflow"
+grep -q 'for c in tmux jq awk python3 git flock' "$root/bin/waspflow"
 grep -q '`flock`' "$root/docs/prerequisites.md"
 # Lane provenance: --op spawn records policy_version + catalog_ref
 grep -Eq 'policy_version' "$root/bin/waspflow"
