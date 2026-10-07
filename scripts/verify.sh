@@ -7558,3 +7558,4 @@ source "$root/scripts/fixtures/verify-s5-cleanup.sh" # S5 cleanup ownership and 
 source "$root/scripts/fixtures/verify-s7-fleet.sh"
 
 echo "waspflow verify: ok"
+source "$root/scripts/fixtures/verify-r2-b.sh"
