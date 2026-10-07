@@ -204,6 +204,11 @@ artifacts_provider_terminal_outcome() {
       outcome="$(tail -n 1 "$receipt" 2>/dev/null | jq -r 'select(.phase == "completion") | .outcome // empty' 2>/dev/null || true)"
       case "$outcome" in succeeded|failed) printf '%s\n' "$outcome" ;; *) printf 'unknown\n' ;; esac
       ;;
+    deepseek)
+      receipt="$(_deepseek_receipt_file "$lane")"
+      outcome="$(tail -n 1 "$receipt" 2>/dev/null | jq -r 'select(.phase == "completion") | .outcome // empty' 2>/dev/null || true)"
+      case "$outcome" in succeeded) printf 'succeeded\n' ;; failed|no_session) printf 'failed\n' ;; *) printf 'unknown\n' ;; esac
+      ;;
     *) printf 'unknown\n' ;;
   esac
 }
@@ -274,6 +279,18 @@ artifacts_finalize() {
   fi
 
   report="$(lane_get "$lane" report)"
+  # A lane whose task was never confirmed has no clean provider turn to
+  # finalize. With no report contract, the old ordering labeled that absence a
+  # success; keep report-contract failures as report_missing below, but never
+  # fabricate a no-report success for an unsubmitted task.
+  if [[ "$(lane_get "$lane" spawn_submitted)" == false || "$(lane_get "$lane" status)" == spawn_failed ]]; then
+    if [[ -z "$report" ]]; then
+      turn_state_finish_generation "$lane" failed
+      lane_set "$lane" provider_terminal_outcome failed
+      err "lane '$lane': task was never confirmed submitted — result=failed"
+      echo "failed"; return 0
+    fi
+  fi
   if [[ -z "$report" ]]; then
     # No deliverable contract — finishing the turn cleanly IS success.
     turn_state_finish_generation "$lane" succeeded

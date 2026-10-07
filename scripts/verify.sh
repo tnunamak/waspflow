@@ -7560,3 +7560,4 @@ source "$root/scripts/fixtures/verify-s7-fleet.sh"
 source "$root/scripts/fixtures/verify-r2-c.sh"
 
 echo "waspflow verify: ok"
+source "$root/scripts/fixtures/verify-r2-b.sh"

@@ -163,8 +163,13 @@ exec_run() {
   # Providers write to a unique sibling file. Only validated output is renamed
   # over the destination, so an exit-0/no-write cannot relabel old output as new.
   if [[ "$rc" -eq 0 && -n "$staged_output" ]]; then
-    mv -f "$staged_output" "$output_path" || { rc=1; result=failed; }
-    staged_output=""
+    if _exec_move_file_exact "$staged_output" "$output_path"; then
+      staged_output=""
+    else
+      staged_output="$EXEC_MOVE_REMAINDER"
+      provider_output_path="$staged_output"
+      rc=1; result=failed
+    fi
   fi
 
   local availability billing completed_epoch
@@ -186,8 +191,17 @@ exec_run() {
     if [[ -n "$staged_output" ]]; then
       # Keep whatever the failed run wrote for diagnosis, beside (never at) the
       # destination so a failure cannot pass as the new result.
-      if [[ -s "$staged_output" ]] && mv -f "$staged_output" "$output_path.partial"; then
-        warn "exec: failed run's partial output kept at $output_path.partial"
+      if [[ -s "$staged_output" ]]; then
+        if _exec_move_file_exact "$staged_output" "$output_path.partial"; then
+          warn "exec: failed run's partial output kept at $output_path.partial"
+        else
+          staged_output="$EXEC_MOVE_REMAINDER"
+          if [[ -s "$staged_output" ]]; then
+            warn "exec: failed run's partial output retained at $staged_output"
+          else
+            rm -f "$staged_output"
+          fi
+        fi
       else
         rm -f "$staged_output"
       fi
@@ -241,33 +255,49 @@ _exec_deepseek() {
   return "$rc"
 }
 
-# Reject an output file that is too small to be real, blank once stripped, or is
-# only a known error placeholder. Conservative on purpose: the 2-byte floor and
-# whitespace check reject nothing legitimate (even a one-line "a\n" file list is
-# >2 bytes), and the denylist matches ONLY when the ENTIRE stripped body equals a
-# pure-error string — not merely contains it — so a real report that mentions
-# "Execution error" in passing still passes. Returns 0 if useful, 1 if not.
+# Reject blank output and unmistakable provider-error shapes. Output semantics
+# belong to the caller: `null`, a classification word, and a one-byte answer can
+# all be valid results. Returns 0 if useful, 1 if not.
 _exec_output_is_useful() {
   local path="$1" bytes stripped
   [[ -f "$path" ]] || return 1
-  # Byte floor: < 2 bytes cannot be a meaningful answer.
+  # An empty file cannot be an answer; a one-byte file can.
   bytes="$(wc -c <"$path" 2>/dev/null || echo 0)"
-  [[ "$bytes" -ge 2 ]] || return 1
+  [[ "$bytes" -ge 1 ]] || return 1
   # Strip leading/trailing whitespace (incl. blank lines); empty after strip = useless.
   stripped="$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$path" | sed '/^$/d')"
   [[ -n "$stripped" ]] || return 1
-  # Pure-error placeholders: reject only when the ENTIRE stripped body EXACTLY
-  # equals one of these (no globs — a real report that merely opens with "Error:"
-  # and continues must pass). Case-insensitive on the common single-word ones.
+  # Reject only error syntax that is unambiguously provider diagnostics. Exact
+  # words such as `null` or `denied` can be valid machine-readable results.
   local low; low="$(printf '%s' "$stripped" | tr '[:upper:]' '[:lower:]')"
-  case "$low" in
-    "execution error" | "error" | "null" | "undefined" \
-    | "no response" | "no output" | "(no output)" | "n/a" \
-    | "denied" | "permission denied" | "access denied" | "request denied" | "operation denied" )
-      return 1
-      ;;
-  esac
+  if [[ "$stripped" != *$'\n'* ]]; then
+    case "$low" in
+      "execution error" | "provider error" | "no response" | "no output" | "(no output)" | "n/a" \
+      | "permission denied" | "access denied" | "request denied" | "operation denied" | error:\ *)
+        return 1
+        ;;
+    esac
+  fi
   return 0
+}
+
+# Move a staged regular file to one exact regular-file destination. `mv` treats
+# a directory target as a container, so re-check the target after moving and
+# retain the stage's actual path if a concurrent directory creation absorbed it.
+# On failure, EXEC_MOVE_REMAINDER names the provider output that remains.
+_exec_move_file_exact() {
+  local source="$1" target="$2" relocated
+  EXEC_MOVE_REMAINDER="$source"
+  [[ -f "$source" && ! -L "$source" && ! -d "$target" ]] || return 1
+  if mv -f "$source" "$target" && [[ -f "$target" && ! -L "$target" ]]; then
+    EXEC_MOVE_REMAINDER=""
+    return 0
+  fi
+  relocated="$target/$(basename "$source")"
+  if [[ -f "$relocated" && ! -L "$relocated" ]]; then
+    EXEC_MOVE_REMAINDER="$relocated"
+  fi
+  return 1
 }
 
 _exec_abs_output_path() {
