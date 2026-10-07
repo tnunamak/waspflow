@@ -7484,4 +7484,7 @@ EOF
   [[ ! -e "$WASPFLOW_LOCKS_DIR/busy.lock.owner" ]]
 )
 
+# S6: tmux/process ownership and startup-watchdog boundaries.
+source "$root/scripts/fixtures/verify-s6-runtime.sh"
+
 echo "waspflow verify: ok"
