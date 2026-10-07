@@ -7291,7 +7291,8 @@ PROV
   # A running headless revise blocks reap; after it completes, its recorded
   # scope is stopped before cleanup can be reported complete.
   make_reap_lane headless abandoned
-  lane_set headless headless_revise_state running headless_revise_pid "$$"
+  lane_set headless headless_revise_state running headless_revise_pid "$$" \
+    headless_revise_pid_start_ticks "$(process_start_ticks "$$")"
   rc=0; _reap_one_locked headless 1 0 1 || rc=$?
   [[ "$rc" == 1 && "$(lane_get headless status)" != reaped ]]
   lane_set headless headless_revise_state completed headless_revise_pid ""
