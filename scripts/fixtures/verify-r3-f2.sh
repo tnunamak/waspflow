@@ -86,7 +86,9 @@
   fi
   [[ "$(cat "$r3f2/blank.out")" == OLD ]]
   EXEC_FIXTURE_OUTPUT=OK
-  exec_run --provider codex --cwd "$r3f2" -- prompt >"$r3f2/stdout"
+  exec_run --provider codex --cwd "$r3f2" -o "$r3f2/codex.out" -- prompt
   printf 'OK\n' >"$r3f2/expected-stdout"
+  cmp -s "$r3f2/expected-stdout" "$r3f2/codex.out"
+  exec_run --provider codex --cwd "$r3f2" -- prompt >"$r3f2/stdout"
   cmp -s "$r3f2/expected-stdout" "$r3f2/stdout"
 )

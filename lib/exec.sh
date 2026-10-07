@@ -160,6 +160,13 @@ exec_run() {
     rc=1; result=failed
   fi
 
+  # Codex's successful headless output can omit its final line feed. Normalize
+  # the staged output before publication so both `-o FILE` and stdout mode have
+  # normal terminal/file text semantics without touching failed output.
+  if [[ "$rc" -eq 0 && "$provider" == codex && "$(tail -c1 "$provider_output_path" 2>/dev/null)" != "" ]]; then
+    printf '\n' >>"$provider_output_path"
+  fi
+
   # Providers write to a unique sibling file. Only validated output is renamed
   # over the destination, so an exit-0/no-write cannot relabel old output as new.
   if [[ "$rc" -eq 0 && -n "$staged_output" ]]; then
@@ -212,7 +219,6 @@ exec_run() {
 
   if [[ "$should_cat" -eq 1 ]]; then
     cat "$output_path"
-    [[ "$(tail -c1 "$output_path" 2>/dev/null)" == "" ]] || printf '\n'
     rm -f "$output_path"
   fi
 }
