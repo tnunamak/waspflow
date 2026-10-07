@@ -32,4 +32,19 @@
     '{"type":"event_msg","payload":{"type":"user_message","turn_id":"same-id","message":"ordered"}}' >"$rollout"
   [[ "$(_codex_revise_submission_state "$rollout" ordered 0)" == confirmed ]] \
     || { echo 'r3-f3 B8: same-ID start-before-user receipt was not confirmed' >&2; exit 1; }
+
+  # B6: another user's turn_started cannot confirm this prompt merely because
+  # the requested prompt appeared earlier in the event suffix.
+  source "$root/lib/providers/grok.sh"
+  grok_events="$fixture/grok-events.jsonl"
+  printf '%s\n' \
+    '{"type":"user","content":"requested"}' \
+    '{"type":"user","content":"other"}' \
+    '{"type":"turn_started","prompt":"other"}' >"$grok_events"
+  if _grok_submission_receipt_present "$grok_events" requested 0; then
+    echo 'r3-f3 B6: Grok accepted another user turn as the requested prompt' >&2; exit 1
+  fi
+  printf '%s\n' '{"type":"turn_started","prompt":"requested"}' >>"$grok_events"
+  _grok_submission_receipt_present "$grok_events" requested 0 \
+    || { echo 'r3-f3 B6: Grok rejected prompt evidence on its turn start' >&2; exit 1; }
 )

@@ -125,8 +125,9 @@ grok_spawn() {
 
 _grok_pane() { tmux capture-pane -p -t "$1" -S -60 2>/dev/null | strip_ansi; }
 
-# A submission is proven only by a new turn_started receipt and the exact prompt
-# in a new event. Session files can contain prior turns and unrelated MCP noise.
+# A submission is proven only when the new turn_started receipt itself contains
+# the exact prompt. Separate user/prompt events cannot be correlated safely:
+# another user entry may intervene before that turn begins.
 _grok_submission_receipt_present() {
   local events="$1" prompt="$2" before="$3" first
   [[ -n "$events" && -f "$events" && "$before" =~ ^[0-9]+$ ]] || return 1
@@ -134,10 +135,7 @@ _grok_submission_receipt_present() {
   tail -n +"$first" "$events" 2>/dev/null | jq -s -e --arg prompt "$prompt" '
     def exact_prompt: [.. | strings? | select(. == $prompt)] | length > 0;
     . as $events |
-    (any($events[]; .type == "turn_started" and exact_prompt))
-    or any(range(0; ($events | length)); . as $i |
-      ($events[$i].type | test("^(user|prompt|input)(_.*)?$")) and ($events[$i] | exact_prompt)
-      and any(range($i + 1; ($events | length)); . as $j | $events[$j].type == "turn_started"))
+    any($events[]; .type == "turn_started" and exact_prompt)
   ' >/dev/null 2>&1
 }
 
