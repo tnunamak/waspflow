@@ -5486,7 +5486,7 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
     local n
     n=$(( $(cat "$grok_calls") + 1 ))
     printf '%s\n' "$n" >"$grok_calls"
-    [[ "$n" -eq 2 ]] && printf '{"type":"turn_started"}\n' >>"$grok_events"
+    [[ "$n" -eq 2 ]] && printf '{"type":"turn_started","prompt":"prompt"}\n' >>"$grok_events"
     printf '%s\n' "$grok_events"
   }
   lane_set resume-grok cwd "$fixture" session_id grok-session pending_transition '{"to_arm":{"provider":"grok","model":"grok-new","effort":"high"},"provisional_session":{"session_id":"grok-session","ownership":{"tmux_session":"test","tmux_window":"@resume","tmux_pane_pid":"1"}}}'
@@ -6386,6 +6386,7 @@ done
 if [[ -n "$log_file" && -z "$conversation" && "${AGY_FAIL:-0}" != 1 ]]; then
   printf 'Created conversation 123e4567-e89b-12d3-a456-426614174000\n' >"$log_file"
 fi
+[[ -z "$log_file" || "${AGY_FAIL:-0}" == 1 ]] || printf '%s\n' '{"type":"result","text":"agy test output"}' >>"$log_file"
 [[ "${AGY_FAIL:-0}" != 1 ]] || exit 9
 case " $all_args " in *" --print "*) printf 'agy test output\n' ;; *) exit 2 ;; esac
 AGY
@@ -7569,6 +7570,8 @@ source "$root/scripts/fixtures/verify-s7-fleet.sh"
 source "$root/scripts/fixtures/verify-r2-c.sh"
 # R2-A core cleanup and escalation regressions.
 source "$root/scripts/fixtures/verify-r2-a.sh"
+# r2-d provider hardening: fail closed on stale, malformed, and diagnostic evidence.
+source "$root/scripts/fixtures/verify-r2-d.sh"
 
 echo "waspflow verify: ok"
 source "$root/scripts/fixtures/verify-r2-b.sh"
