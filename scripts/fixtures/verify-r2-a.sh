@@ -45,7 +45,7 @@
   set -e
   [[ "$provisional_rc" -ne 0 && "$(lane_get provisional status)" == escalating ]]
   [[ ! -e "$r2a/unexpected-scope-kill" && ! -e "$r2a/unexpected-window-kill" ]]
-  unset -f tmux_kill_owned_lane_scopes tmux_kill_owned_lane_window
+  source "$root/lib/core.sh"
 
   # #3: transitions retain the old window's full ownership receipt so commit
   # can retire it under the strict ownership contract.
@@ -69,7 +69,8 @@
   chmod +x "$r2a/bin/codex"
   lane_set detached provider codex status live
   export R2A_HEARTBEAT="$r2a/heartbeat"
-  HOME="$r2a/slow-home" WASPFLOW_SHELL_STARTUP_TIMEOUT_SECONDS=3 tmux_lane_login_shell detached pane "$r2a/bin/codex" &
+  mkdir "$r2a/fast-home"; printf ':\n' >"$r2a/fast-home/.bash_profile"
+  HOME="$r2a/fast-home" WASPFLOW_SHELL_STARTUP_TIMEOUT_SECONDS=3 tmux_lane_login_shell detached pane "$r2a/bin/codex" &
   wrapper=$!
   for _ in {1..60}; do [[ -s "$R2A_HEARTBEAT" ]] && break; sleep 0.05; done
   [[ -s "$R2A_HEARTBEAT" ]]
