@@ -294,16 +294,21 @@ grok_resume_with_arm() {
   [[ "$fresh" == true ]] && resume_args=(--session-id "$sid") || resume_args=(--resume "$sid")
   local argv=(grok "${model_args[@]}" "${effort_args[@]}" "${resume_args[@]}" --always-approve --cwd "$cwd" "$prompt")
   for a in "${argv[@]}"; do quoted+=" $(printf '%q' "$a")"; done
+  local before=0 events i
+  events="$(_grok_events_file "$sid" || true)"; before="$(_grok_event_line_count "$events")"
+  transition="$(jq -c --argjson before "$before" '.provisional_session.submission_event_before=$before' <<<"$transition")" \
+    || { err "grok escalation: could not record submission evidence baseline"; return 1; }
+  lane_set "$lane" pending_transition "$transition" || return 1
   tmux_send_owned_window_shell_command "$ownership" "bash -lc $(printf '%q' "${quoted# }")" || return 1
   tmux pipe-pane -t "$target" -o "$(transcript_capture_command "$(lane_transcript "$lane")")" 2>/dev/null || true
   local before=0 events i
-  events="$(_grok_events_file "$sid" || true)"; before="$(wc -l <"$events" 2>/dev/null || echo 0)"
   for i in $(seq 1 "${WASPFLOW_SUBMIT_ATTEMPTS:-20}"); do
     events="$(_grok_events_file "$sid" || true)"
-    [[ "$(wc -l <"$events" 2>/dev/null || echo 0)" -gt "$before" ]] && break
+    _grok_submission_receipt_present "$events" "$prompt" "$before" && break
     sleep 1
   done
-  if [[ "$(wc -l <"$events" 2>/dev/null || echo 0)" -le "$before" ]]; then
+  if ! _grok_submission_receipt_present "$events" "$prompt" "$before"; then
+    WASPFLOW_PROVIDER_LAUNCH_ERROR=receipt-timeout
     return 1
   fi
   WASPFLOW_PROVISIONAL_SESSION_ID="$sid"
@@ -311,13 +316,15 @@ grok_resume_with_arm() {
 }
 
 grok_confirm_escalation_submission() {
-  local lane="$1" _prompt="$2" _fresh="${3:-false}" transition sid events
+  local lane="$1" prompt="$2" _fresh="${3:-false}" transition sid events before
   transition="$(lane_get "$lane" pending_transition)"
   sid="$(jq -r '.provisional_session.session_id // empty' <<<"$transition")"
   [[ -n "$sid" ]] || return 1
+  before="$(jq -r '.provisional_session.submission_event_before // empty' <<<"$transition")"
+  [[ "$before" =~ ^[0-9]+$ ]] || return 1
   events="$(_grok_events_file "$sid" || true)"
   [[ -n "$events" && -s "$events" ]] || return 1
-  grep -q '"type":"turn_started"\|"type":"turn_ended"\|turn_started\|phase_changed' "$events" 2>/dev/null || return 1
+  _grok_submission_receipt_present "$events" "$prompt" "$before" || return 1
   WASPFLOW_PROVISIONAL_SESSION_ID="$sid"
   WASPFLOW_PROVISIONAL_ROLLOUT=""
 }

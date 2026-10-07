@@ -42,4 +42,15 @@
     echo 'r2-d: Grok accepted a malformed transcript tail' >&2; exit 1
   fi
 
+  # Historical events cannot confirm an escalation: only the exact prompt
+  # appended after the pre-launch snapshot is valid evidence.
+  printf '%s\n' '{"type":"turn_started","prompt":"old escalation"}' '{"type":"turn_ended"}' >"$grok_events"
+  lane_set grok-escalation pending_transition '{"provisional_session":{"session_id":"grok-r2d","submission_event_before":2}}'
+  if grok_confirm_escalation_submission grok-escalation 'current escalation'; then
+    echo 'r2-d: Grok escalation accepted historical events' >&2; exit 1
+  fi
+  printf '%s\n' '{"type":"user","content":"current escalation"}' '{"type":"turn_started","prompt":"current escalation"}' >>"$grok_events"
+  grok_confirm_escalation_submission grok-escalation 'current escalation' \
+    || { echo 'r2-d: Grok rejected current escalation receipt' >&2; exit 1; }
+
 )
