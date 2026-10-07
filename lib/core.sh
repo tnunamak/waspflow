@@ -58,6 +58,14 @@ WASPFLOW_CODEX_BACKEND_HEALTH_URL="${WASPFLOW_CODEX_BACKEND_HEALTH_URL:-}"
 # default session.
 WASPFLOW_TMUX_SESSION="${WASPFLOW_TMUX_SESSION:-waspflow}"
 
+# Select a private tmux server without changing the user's ambient tmux setup.
+# Set WASPFLOW_TMUX_SOCKET to the name passed to `tmux -L` (for example,
+# `wf-test-$$`). Every waspflow tmux operation then uses that server.
+WASPFLOW_TMUX_SOCKET="${WASPFLOW_TMUX_SOCKET:-}"
+if [[ -n "$WASPFLOW_TMUX_SOCKET" ]]; then
+  tmux() { command tmux -L "$WASPFLOW_TMUX_SOCKET" "$@"; }
+fi
+
 # Limit retained history for future waspflow windows without changing the tmux
 # server or any other session. Unset, empty, and 0 all remove this session's
 # override so tmux's inherited setting applies (effectively "unlimited" — tmux
@@ -702,9 +710,18 @@ tmux_capture_lane_ownership() {
 # Receipts are append-only because an older scope can still hold a daemon when a
 # later headless resume starts. The InvocationID makes a reused unit name safe:
 # cleanup may signal a unit only when it is still the invocation we created.
+tmux_cgroup_scope_unavailable_reason() {
+  command -v systemd-run >/dev/null 2>&1 || { printf 'systemd-run-missing\n'; return 0; }
+  command -v systemctl >/dev/null 2>&1 || { printf 'systemctl-missing\n'; return 0; }
+  [[ -n "${XDG_RUNTIME_DIR:-}" ]] || { printf 'xdg-runtime-dir-missing\n'; return 0; }
+  systemctl --user show-environment >/dev/null 2>&1 && return 1
+  [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]] || { printf 'dbus-session-bus-address-missing\n'; return 0; }
+  printf 'user-scope-bus-unavailable\n'
+  return 0
+}
+
 tmux_cgroup_scope_available() {
-  command -v systemd-run >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1 \
-    && systemctl --user show-environment >/dev/null 2>&1
+  ! tmux_cgroup_scope_unavailable_reason >/dev/null
 }
 
 _lane_cgroup_receipt_append_locked() {
@@ -946,8 +963,10 @@ tmux_run_owned_lane_command() {
     [[ "$revise_timeout" -eq 0 ]] || set -- timeout --kill-after=30 "$revise_timeout" "$@"
   fi
 
-  if ! tmux_cgroup_scope_available; then
-    tmux_record_lane_cgroup_fallback "$lane" "$execution" "scope-unavailable" || return 1
+  local scope_unavailable_reason=""
+  if scope_unavailable_reason="$(tmux_cgroup_scope_unavailable_reason)"; then
+    warn "systemd user scopes unavailable ($scope_unavailable_reason); continuing with tmux-only supervision"
+    tmux_record_lane_cgroup_fallback "$lane" "$execution" "scope-unavailable:$scope_unavailable_reason" || return 1
     ( cd "$cwd" && env "${child_environment[@]}" "PAGER=$WASPFLOW_LANE_PAGER" "GIT_PAGER=$WASPFLOW_LANE_PAGER" "$@" )
     return $?
   fi
@@ -1140,7 +1159,7 @@ waspflow_active_scope_snapshot() {
   local units
   command -v systemctl >/dev/null 2>&1 || return 1
   units="$(systemctl --user list-units --all --type=scope --state=active \
-    --no-legend --plain --full 'waspflow-*.scope')" || return 1
+    --no-legend --plain --full 'waspflow-*.scope' 2>/dev/null)" || return 1
   printf '%s\n' "$units" \
     | awk 'NF && $1 ~ /^waspflow-[A-Za-z0-9._-]+\.scope$/ { print $1 }' \
     | jq -Rsc 'split("\n") | map(select(length > 0)) | unique'
@@ -1161,7 +1180,7 @@ def waspflow_scope_units:
   | unique;
 def waspflow_scope_unavailable:
   ((.cgroup_fallbacks // []) | if type == "array" then . else [] end)
-  | any(.[]?; .reason? == "scope-unavailable");
+  | any(.[]?; (.reason? | type == "string" and startswith("scope-unavailable")));
 def waspflow_derived_lifecycle($active_scopes; $scope_query_available):
   waspflow_scope_units as $units
   | if (.status // "") == "spawn_failed" then "spawn_failed"

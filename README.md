@@ -555,6 +555,7 @@ resolved provider argv/env; use `status <lane>` for one full record.
 |---|---|---|
 | `WASPFLOW_HOME` | `~/.local/state/waspflow` | Lane state and transcripts |
 | `WASPFLOW_TMUX_SESSION` | `waspflow` | tmux session that holds worker windows |
+| `WASPFLOW_TMUX_SOCKET` | _(unset — default server)_ | tmux socket name passed to `tmux -L`; set this to isolate every waspflow tmux operation from your normal server |
 | `WASPFLOW_TMUX_HISTORY_LIMIT` | _(unset — inherit)_ | Scrollback lines for future waspflow windows. Unset, empty, or `0` inherits tmux's own setting (no cap). Set a number (e.g. `100000`) to bound retained scrollback during large fan-outs |
 | `WASPFLOW_LANE_PAGER` | `cat` | Pager command for provider children in new lanes; overrides inherited `PAGER` and `GIT_PAGER` for those children only |
 | `WASPFLOW_TRANSCRIPT_RAW` | empty | Set to `1` to keep new transcripts verbatim. By default waspflow strips terminal control sequences while writing readable transcripts; this does not alter existing transcripts. |

@@ -19,6 +19,19 @@ export WASPFLOW_HOME="$fixture/home" WASPFLOW_TMUX_SESSION=waspflow
 source "$root/lib/core.sh"
 tmux() { command tmux -L "$socket" "$@"; }
 
+# A public socket override routes core's tmux wrapper through `tmux -L`.
+mkdir "$fixture/socket-bin"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >"%s"\n' "$fixture/socket-args" >"$fixture/socket-bin/tmux"
+chmod +x "$fixture/socket-bin/tmux"
+PATH="$fixture/socket-bin:$PATH" WASPFLOW_TMUX_SOCKET=fixture-socket WASPFLOW_LIB="$root/lib" \
+  bash -c 'source "$WASPFLOW_LIB/core.sh"; tmux list-sessions'
+[[ "$(<"$fixture/socket-args")" == '-L fixture-socket list-sessions' ]]
+
+# Missing user-runtime state is an explicit tmux-only fallback, not raw
+# systemctl/jq noise.
+unset XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
+[[ "$(tmux_cgroup_scope_unavailable_reason)" == xdg-runtime-dir-missing ]]
+
 mkdir -p "$WASPFLOW_HOME" "$fixture/cwd"
 lane_set lane lane_uuid 11111111-1111-1111-1111-111111111111 cwd "$fixture/cwd" provider codex session_id fixture-session
 tmux new-session -d -s waspflow -n _waspflow_home
