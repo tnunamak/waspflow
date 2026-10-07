@@ -42,6 +42,9 @@ Codex may show an update or trust prompt before its composer is ready. Resolve i
 
 ## Verify
 
+The test suite requires Bash 4 or later and ripgrep (`rg`). `rg` is a test dependency;
+it is not required to run Waspflow itself.
+
 ```bash
 waspflow doctor
 waspflow demo --provider codex
