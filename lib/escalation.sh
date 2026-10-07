@@ -270,6 +270,12 @@ escalate_commit_locked() {
   # A resumed deferred apply delivered the revise message it carried.
   if jq -e 'has("submission_message")' >/dev/null <<<"$transition"; then lane_set "$lane" undelivered_message ""; fi
   tmux_kill_window_if_owned "$(jq -cn --arg tmux_session "$(jq -r '.from_tmux_session // ""' <<<"$transition")" --arg tmux_window "$(jq -r '.from_tmux_window // ""' <<<"$transition")" --arg tmux_pane_pid "$(jq -r '.from_tmux_pane_pid // ""' <<<"$transition")" --arg waspflow_home "$(jq -r '.from_waspflow_home // ""' <<<"$transition")" --arg waspflow_lane_uuid "$(jq -r '.from_waspflow_lane_uuid // ""' <<<"$transition")" '{tmux_session:$tmux_session,tmux_window:$tmux_window,tmux_pane_pid:$tmux_pane_pid,waspflow_home:$waspflow_home,waspflow_lane_uuid:$waspflow_lane_uuid}')" >/dev/null 2>&1 || true
+  if ! tmux_kill_owned_lane_detached_sessions_except_execution "$lane" "escalation:$(jq -r .id <<<"$transition")"; then
+    lane_set "$lane" old_arm_retirement_state uncertain escalation_error "old detached execution group could not be retired"
+    escalate_emit "$json" 2 "arm switched, but old detached execution retirement is uncertain; inspect before further lifecycle changes" "$from" "$to" "$((index+1))"
+    return
+  fi
+  lane_set "$lane" old_arm_retirement_state retired
   escalate_emit "$json" 0 "arm switched to $(escalate_arm_label "$to")" "$from" "$to" "$((index+1))"
 }
 

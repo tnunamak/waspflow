@@ -51,4 +51,28 @@ EOF
   flock -u 8
   wait "$receipt_writer"
   [[ "$(lane_get locked durable_field)" == kept && -n "$(tmux_lane_detached_session_receipts locked)" ]]
+
+  # B2: retirement can exclude the freshly-provisioned escalation group while
+  # still stopping every earlier execution group.
+  lane_set retirement provider fake cwd "$r3f1"
+  tmux_record_lane_detached_session retirement pane 1 1 1 1
+  tmux_record_lane_detached_session retirement escalation:new 2 2 2 2
+  tmux_kill_detached_session_receipt_if_owned() { jq -r .execution <<<"$1" >>"$r3f1/retired"; }
+  tmux_kill_owned_lane_detached_sessions_except_execution retirement escalation:new
+  [[ "$(cat "$r3f1/retired")" == pane ]]
+  unset -f tmux_kill_detached_session_receipt_if_owned
+
+  # Recovery never starts another provider against a checkout while retirement
+  # of the previous detached execution is uncertain.
+  source "$root/lib/fanin.sh"
+  source "$root/lib/turn-state.sh"
+  source "$root/lib/artifacts.sh"
+  lane_set recovery provider fake cwd "$r3f1" spawn_submitted true report "$r3f1/missing-report"
+  tmux_window_exists() { return 0; }
+  tmux_window_target() { printf '@recovery\n'; }
+  tmux() { :; }
+  tmux_kill_owned_lane_detached_sessions() { return 1; }
+  _artifacts_recover() { touch "$r3f1/unexpected-recovery"; }
+  [[ "$(artifacts_finalize recovery fake)" == report_missing && ! -e "$r3f1/unexpected-recovery" ]]
+  [[ "$(lane_get recovery recovery_reason)" == detached-process-retirement-uncertain ]]
 )

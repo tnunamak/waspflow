@@ -1491,6 +1491,11 @@ _park_one_locked() {
   fi
   tmux_kill_owned_lane_window "$lane" \
     || { err "park: lane '$lane' ownership changed before its window could be stopped"; return 1; }
+  if ! tmux_kill_owned_lane_detached_sessions "$lane"; then
+    lane_set "$lane" park_retirement_state uncertain
+    err "park: lane '$lane' has a detached execution group that could not be retired; preserving its checkout"
+    return 1
+  fi
   lane_set "$lane" status "parked" parked_at "$(date +%s)" park_reason "$reason"
   if [[ "$PARK_CLEARS_BARRIER" -eq 1 ]]; then
     # Keep the failed-submission receipt (revise_submission_*) as evidence; only

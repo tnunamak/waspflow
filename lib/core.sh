@@ -931,6 +931,19 @@ tmux_kill_owned_lane_detached_sessions() {
   return "$rc"
 }
 
+# Escalation launches the new arm before retiring the old one.  Preserve the
+# freshly-provisioned execution while retiring every older detached group.
+tmux_kill_owned_lane_detached_sessions_except_execution() {
+  local lane="$1" keep_execution="$2" receipt execution rc=0
+  while IFS= read -r receipt; do
+    [[ -n "$receipt" ]] || continue
+    execution="$(jq -r '.execution // empty' <<<"$receipt")"
+    [[ "$execution" == "$keep_execution" ]] && continue
+    tmux_kill_detached_session_receipt_if_owned "$receipt" || rc=1
+  done < <(tmux_lane_detached_session_receipts "$lane")
+  return "$rc"
+}
+
 tmux_lane_scope_start_marker() {
   local lane="$1" unit="$2"
   printf '%s/.scope-started-%s\n' "$(lane_dir "$lane")" "$unit"
