@@ -256,13 +256,13 @@ grep -q '`flock`' "$root/docs/prerequisites.md"
 # Lane provenance: --op spawn records policy_version + catalog_ref
 grep -Eq 'policy_version' "$root/bin/waspflow"
 grep -Eq 'catalog_ref' "$root/bin/waspflow"
-# The disallowed three-value group is a literal source fragment, not an ERE.
-if grep -Fq 'high|xhigh|max' "$root/lib/providers/codex.sh"; then
-  echo 'verify: unexpected success at scripts/verify.sh:242' >&2
+# Reject only a standalone three-value group; the valid list also contains ultra.
+if grep -Eq '(^|[^|[:alnum:]_])high\|xhigh\|max([^|[:alnum:]_]|$)' "$root/lib/providers/codex.sh"; then
+  echo 'verify: unexpected success at scripts/verify.sh:260' >&2
   exit 1
 fi
-if grep -Fq 'high|xhigh|max' "$root/lib/exec.sh"; then
-  echo 'verify: unexpected success at scripts/verify.sh:243' >&2
+if grep -Eq '(^|[^|[:alnum:]_])high\|xhigh\|max([^|[:alnum:]_]|$)' "$root/lib/exec.sh"; then
+  echo 'verify: unexpected success at scripts/verify.sh:264' >&2
   exit 1
 fi
 
