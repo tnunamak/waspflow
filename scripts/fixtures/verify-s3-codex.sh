@@ -15,6 +15,18 @@
   tmux_window_target() { printf 'fixture:0\n'; }
   tmux_paste_text() { :; }
 
+  # An update notice stays visible after "skip until next version", but it no
+  # longer owns the keyboard once Codex shows its normal composer. A real menu
+  # and a trust prompt still block with an actionable, non-contradictory path.
+  update_with_composer=$'Update available! 0.159.3 -> 0.160.1\nRun bun install -g...\n› Ask Codex to do anything'
+  ! _codex_startup_blocker "$update_with_composer"
+  update_menu=$'Update available! 0.159.3 -> 0.160.1\n1. Update now\n2. Skip'
+  [[ "$(_codex_startup_blocker "$update_menu")" == "startup update prompt" ]]
+  trust_menu=$'Do you trust the contents of this directory?\n1. Yes, continue\n2. No, quit'
+  [[ "$(_codex_startup_blocker "$trust_menu")" == "startup trust prompt" ]]
+  trust_error="$(_codex_startup_blocked_message trust "$(_codex_startup_blocker "$trust_menu")" 2>&1 || true)"
+  [[ "$trust_error" == *"no keys were sent"* && "$trust_error" == *"waspflow reap trust --force"* ]]
+
   sid='12345678-1234-1234-1234-123456789abc'
   rollout="$CODEX_SESSIONS_DIR/rollout-2026-10-07-$sid.jsonl"
   reset_rollout() {

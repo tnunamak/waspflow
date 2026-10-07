@@ -484,13 +484,44 @@ _codex_paused_goal_prompt_visible() {
   grep -qi "Resume paused goal" <<<"$1"
 }
 
+# Codex leaves its update notice visible after an operator skips it. That banner
+# is informational once the ordinary composer is present; treating it as a
+# modal forever strands every new lane. Keep the shared conservative detector
+# for actual menus, but require a missing composer before its update result can
+# block a Codex submission.
+_codex_startup_blocker() {
+  local pane="$1" reason
+  reason="$(wf_pane_startup_menu "$pane")" || return 1
+  if [[ "$reason" == "startup update prompt" ]] \
+     && grep -qiE '(^|[[:space:]])(›|❯|>)[[:space:]]*Ask Codex|Ask Codex to do anything' <<<"$pane"; then
+    return 1
+  fi
+  printf '%s\n' "$reason"
+}
+
+_codex_startup_blocked_message() {
+  local lane="$1" reason="$2"
+  case "$reason" in
+    "startup trust prompt")
+      err "codex spawn: lane '$lane' is waiting for Codex's directory-trust choice; no keys were sent"
+      err "  inspect: waspflow peek $lane"
+      err "  next: attach only if you intend to make that trust decision yourself; otherwise run 'waspflow reap $lane --force' and spawn again after trusting the directory in Codex"
+      ;;
+    *)
+      err "codex spawn: lane '$lane' is showing a $reason, so the prompt was not submitted (an injected Enter would answer the menu)"
+      err "  inspect: waspflow peek $lane"
+      err "  recover: waspflow reap $lane --force and spawn again after resolving the provider prompt"
+      ;;
+  esac
+}
+
 _codex_clear_trust_prompt() {
   local target="$1" i pane
   for i in $(seq 1 20); do
     tmux display-message -p -t "$target" >/dev/null 2>&1 || return 1
     pane="$(_codex_pane "$target")"
     _codex_paused_goal_prompt_visible "$pane" && return 0
-    wf_pane_startup_menu "$pane" >/dev/null && return 0
+    _codex_startup_blocker "$pane" >/dev/null && return 0
     if grep -qi "Do you trust" <<<"$pane"; then
       tmux send-keys -t "$target" "1"
       sleep 1
@@ -518,7 +549,7 @@ _codex_wait_composer_ready() {
     tmux display-message -p -t "$target" >/dev/null 2>&1 || return 1
     pane="$(_codex_pane "$target")"
     _codex_paused_goal_prompt_visible "$pane" && return 2
-    wf_pane_startup_menu "$pane" >/dev/null && return 0
+    _codex_startup_blocker "$pane" >/dev/null && return 0
     if ! grep -qi "Do you trust" <<<"$pane" \
        && grep -qiE "model: *gpt-|gpt-[0-9].* (medium|low|high|default) " <<<"$pane"; then
       return 0
@@ -554,9 +585,9 @@ $prompt"
   # is selected — answering blind is how a spawn becomes an unrequested upgrade.
   local startup_pane startup_reason
   startup_pane="$(tmux capture-pane -p -t "$target" 2>/dev/null || true)"
-  if [[ -n "$startup_pane" ]] && startup_reason="$(wf_pane_startup_menu "$startup_pane")"; then
+  if [[ -n "$startup_pane" ]] && startup_reason="$(_codex_startup_blocker "$startup_pane")"; then
     [[ "$provisional" == true ]] || lane_set "$lane" startup_blocker "$startup_reason" startup_pane "$startup_pane"
-    err "codex spawn: lane '$lane' is showing a $startup_reason, so the prompt was not submitted (an injected Enter would answer the menu). Resolve it, then retry: waspflow attach $lane"
+    _codex_startup_blocked_message "$lane" "$startup_reason"
     return 1
   fi
   tmux send-keys -t "$target" C-u
@@ -566,12 +597,18 @@ $prompt"
   for attempt in 1 2 3 4 5; do
     tmux display-message -p -t "$target" >/dev/null 2>&1 || return 1
     startup_pane="$(tmux capture-pane -p -t "$target" 2>/dev/null || true)"
-    if startup_reason="$(wf_pane_startup_menu "$startup_pane")"; then
+    if startup_reason="$(_codex_startup_blocker "$startup_pane")"; then
       [[ "$provisional" == true ]] || lane_set "$lane" startup_blocker "$startup_reason" startup_pane "$startup_pane"
-      err "codex spawn: $startup_reason appeared before submission; refusing to answer it"
+      _codex_startup_blocked_message "$lane" "$startup_reason"
       return 1
     fi
-    tmux send-keys -t "$target" Enter
+    # A dead pane cannot accept this retry. Stop immediately with an honest
+    # failed launch rather than spending every retry/poll interval claiming we
+    # are still trying to submit a prompt that no UI can receive.
+    tmux send-keys -t "$target" Enter || {
+      err "codex spawn: launch pane disappeared before submit attempt $attempt"
+      return 1
+    }
     # Give the turn a moment to start + write its session_meta line.
     local j
     for j in $(seq 1 6); do
