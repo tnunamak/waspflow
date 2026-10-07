@@ -52,6 +52,29 @@ EOF
   wait "$receipt_writer"
   [[ "$(lane_get locked durable_field)" == kept && -n "$(tmux_lane_detached_session_receipts locked)" ]]
 
+  # MEDIUM-3: only the exact untracked report is moved before the normal dirty
+  # check.  It enables report-only cleanup but still refuses unrelated work.
+  source "$root/lib/worktree.sh"
+  report_repo="$r3f1/report-repo"
+  git init -q "$report_repo"
+  git -C "$report_repo" config user.name Fixture
+  git -C "$report_repo" config user.email fixture@example.invalid
+  touch "$report_repo/base"; git -C "$report_repo" add base; git -C "$report_repo" commit -qm base
+  report_wt="$r3f1/report-worktree"
+  git -C "$report_repo" worktree add -q -b report-clean "$report_wt"
+  printf 'report\n' >"$report_wt/report.txt"
+  [[ "$(worktree_preserve_report_for_cleanup "$report_wt" "$report_wt/report.txt" "$r3f1/reaped-report")" == moved ]]
+  [[ ! -e "$report_wt/report.txt" && -s "$r3f1/reaped-report" ]]
+  worktree_remove report-clean "$report_wt" "$report_repo" 0
+  [[ ! -e "$report_wt" ]]
+  dirty_wt="$r3f1/dirty-worktree"
+  git -C "$report_repo" worktree add -q -b report-dirty "$dirty_wt"
+  printf 'report\n' >"$dirty_wt/report.txt"
+  worktree_preserve_report_for_cleanup "$dirty_wt" "$dirty_wt/report.txt" "$r3f1/reaped-report-dirty" >/dev/null
+  printf 'real user change\n' >"$dirty_wt/other.txt"
+  ! worktree_remove report-dirty "$dirty_wt" "$report_repo" 0
+  [[ -d "$dirty_wt" ]]
+
   # B2: retirement can exclude the freshly-provisioned escalation group while
   # still stopping every earlier execution group.
   lane_set retirement provider fake cwd "$r3f1"

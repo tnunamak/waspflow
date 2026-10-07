@@ -1922,7 +1922,7 @@ _reap_cleanup_finish() {
 
 _reap_cleanup() {
   local lane="$1" force="$2" keep_wt="$3" no_archive="$4" result="$5"
-  local errors='[]' wt repo_root unit invocation actual report preserved archive_ok=1 loss_inventory
+  local errors='[]' wt repo_root unit invocation actual report preserved report_preservation archive_ok=1 loss_inventory
   _reap_cleanup_record "$lane" running '[]' "$(_reap_remaining_resources "$lane")" || return 1
   # Called in a subshell: handled interruption leaves a terminal receipt.
   # SIGKILL still leaves the durable running journal for an idempotent retry.
@@ -1952,12 +1952,13 @@ _reap_cleanup() {
   # Preserve an in-worktree report before deletion, including its durable path.
   if [[ -n "$wt" && "$keep_wt" != 1 && "$report" == "$wt/"* && -f "$report" ]]; then
     preserved="$(lane_dir "$lane")/reaped-report"
-    if ! cp -- "$report" "$preserved" \
+    if ! report_preservation="$(worktree_preserve_report_for_cleanup "$wt" "$report" "$preserved")" \
         || ! lane_set "$lane" report_original "$report" report "$preserved"; then
       errors="$(jq -c '. + ["report-preservation"]' <<<"$errors")"
       archive_ok=0
     else
       resource_ledger_register "$lane" report "$preserved" retained || errors="$(jq -c '. + ["report-ledger"]' <<<"$errors")"
+      [[ "$report_preservation" == moved ]] || log "reap: report '$report' is tracked and remains in the worktree for the dirty-tree guard"
     fi
   fi
   # Never remove a workspace while an owned process might still use it, or
