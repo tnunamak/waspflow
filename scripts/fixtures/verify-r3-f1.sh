@@ -123,6 +123,16 @@ EOF
   status_output="$("$root/bin/waspflow" status reused-headless)"
   jq -e '(.headless_revise_active // false) == false and .headless_revise_state == "interrupted"' <<<"$status_output" >/dev/null
 
+  # LOW-2: terminal provider evidence cannot make a completed cleanup look
+  # unreaped or recommend another reap operation.
+  source "$root/lib/providers/codex.sh"
+  source "$root/lib/events.sh"
+  printf '%s\n' '{"type":"event_msg","payload":{"type":"task_complete","turn_id":"done"}}' >"$r3f1/reaped-rollout.jsonl"
+  lane_set already-reaped provider codex cwd "$r3f1" status reaped rollout "$r3f1/reaped-rollout.jsonl"
+  tmux_window_exists() { return 1; }
+  tmux() { [[ "$1" == list-clients ]] && return 0; return 1; }
+  jq -e '.classification == "reaped" and .eligibility == "complete" and (.next_action | contains("reap") | not)' <<<"$(lane_inspection_json already-reaped)" >/dev/null
+
   # LOW-1: the required-report explanation is emitted only when a contract
   # exists; a generic failed lane must not claim a report was required.
   awk '/^    failed\)/,/^      ;;/ { print }' "$root/bin/waspflow" >"$r3f1/failed-result-case"

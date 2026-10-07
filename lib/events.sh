@@ -159,7 +159,9 @@ lane_inspection_json() {
   local terminal source_state wait_state; terminal="$(jq -r '.turn_state == "terminal"' <<<"$tail")"; source_state="$(jq -r '.source.state' <<<"$tail")"; wait_state="$(lane_get "$lane" wait_state)"
   classification="corrupt/unknown"; eligibility="preserve"; next_action="waspflow reconcile --json"
   local -a reasons=("provider-log:$source_state")
-  if [[ "$wait_state" == stalled ]]; then classification="blocked-needs-human"; eligibility="needs-human"; next_action="waspflow peek $lane; waspflow revise $lane -- \"<response>\""; reasons+=("recorded-wait-stall")
+  if [[ "$state" == reaped ]]; then
+    classification="reaped"; eligibility="complete"; next_action="inspect durable cleanup receipt"; reasons+=("lifecycle-reaped")
+  elif [[ "$wait_state" == stalled ]]; then classification="blocked-needs-human"; eligibility="needs-human"; next_action="waspflow peek $lane; waspflow revise $lane -- \"<response>\""; reasons+=("recorded-wait-stall")
   elif [[ "$state" == live && "$exists" != true ]]; then classification="orphaned-control-plane"; eligibility="needs-human"; next_action="waspflow reconcile --json; waspflow reconcile --adopt $lane --owner <owner-ref> --apply"; reasons+=("live-record-missing-owned-window")
   elif [[ "$source_state" != tail-window ]]; then reasons+=("provider-receipt-not-trustworthy")
   elif [[ "$outcome" =~ ^(harvested|superseded|abandoned)$ && "$terminal" == true ]] \
@@ -169,7 +171,7 @@ lane_inspection_json() {
   elif [[ "$exists" == true ]]; then classification="active-observed"; eligibility="observe"; next_action="waspflow wait $lane"; reasons+=("owned-window-and-nonterminal-receipt")
   else reasons+=("insufficient-source-facts")
   fi
-  if [[ "$clients" =~ ^[0-9]+$ && "$clients" -gt 0 ]]; then
+  if [[ "$state" != reaped && "$clients" =~ ^[0-9]+$ && "$clients" -gt 0 ]]; then
     eligibility="vetoed-attached-client"
     reasons+=("attached-client-veto")
   fi
