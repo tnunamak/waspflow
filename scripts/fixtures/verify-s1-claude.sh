@@ -58,6 +58,38 @@ run_verify_s1_claude() {
   )
 
   (
+    export WASPFLOW_HOME="$base/footer-state" CLAUDE_PROJECTS_DIR="$base/footer-projects"
+    source "$root/lib/core.sh"
+    source "$root/lib/providers/claude.sh"
+    local sid=22222222-3333-4444-5555-666666666666 project rc
+    project="$CLAUDE_PROJECTS_DIR/project"; mkdir -p "$project"
+    printf '%s\n' '{"type":"assistant","message":{"stop_reason":"end_turn"}}' >"$project/$sid.jsonl"
+    lane_set claude-s1-footer provider claude status live session_id "$sid" cwd "$base" tmux_window @fixture
+    tmux_window_exists() { return 0; }
+    tmux_window_target() { printf '@fixture\n'; }
+    _claude_pane() { printf '%s\n' '1 shell still running'; }
+    set +e; claude_is_idle claude-s1-footer; rc=$?; set -e
+    [[ "$rc" -eq 2 ]] || { echo 'claude S1: background shell footer settled' >&2; exit 1; }
+    _claude_pane() { printf '%s\n' '2 shells still running'; }
+    set +e; claude_is_idle claude-s1-footer; rc=$?; set -e
+    [[ "$rc" -eq 2 ]] || { echo 'claude S1: plural background shell footer settled' >&2; exit 1; }
+    _claude_pane() { return 1; }
+    set +e; claude_is_idle claude-s1-footer; rc=$?; set -e
+    [[ "$rc" -eq 2 ]] || { echo 'claude S1: unreadable shell footer settled' >&2; exit 1; }
+    _claude_pane() { printf '%s\n' 'Ready'; }
+    claude_is_idle claude-s1-footer || { echo 'claude S1: cleared shell footer stayed busy' >&2; exit 1; }
+  )
+
+  (
+    source "$root/lib/selection.sh"
+    local warning
+    warn() { printf '%s\n' "$*"; }
+    warning="$(selection_emit_warnings '{"warnings":["availability_unknown"]}')"
+    [[ "$warning" == *'could not be verified'* && "$warning" == *'provider CLI will validate it'* && "$warning" != *'doctor --models'* ]] \
+      || { echo 'selection: availability_unknown lacked an explanation' >&2; exit 1; }
+  )
+
+  (
     export WASPFLOW_HOME="$base/revise-state"
     source "$root/lib/core.sh"
     source "$root/lib/providers/claude.sh"

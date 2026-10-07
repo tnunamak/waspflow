@@ -153,8 +153,13 @@ claude_spawn() {
   _claude_verify_started "$lane" "$target"
 }
 
-# Pane snapshot, de-escaped.
-_claude_pane() { tmux capture-pane -p -t "$1" -S -60 2>/dev/null | strip_ansi; }
+# Pane snapshot, de-escaped. Preserve capture failure so callers can make an
+# honest conservative decision instead of treating missing evidence as blank.
+_claude_pane() {
+  local raw
+  raw="$(tmux capture-pane -p -t "$1" -S -60 2>/dev/null)" || return 1
+  printf '%s\n' "$raw" | strip_ansi
+}
 
 # True when a pane is showing the folder-trust gate.
 #
@@ -375,6 +380,19 @@ _claude_children_active() {
   return 1
 }
 
+# Claude can complete its parent turn while an in-pane shell continues in the
+# background. The footer is the only provider evidence for that detached work;
+# do not let the parent end_turn launder it into an idle/reap decision.
+_claude_background_shell_active() {
+  local lane="$1" target pane
+  [[ -n "$(lane_get "$lane" tmux_window)" ]] || return 1
+  tmux_window_exists "$lane" || return 1
+  target="$(tmux_window_target "$lane")" || return 1
+  pane="$(_claude_pane "$target")" || return 0
+  pane="$(tail -n 12 <<<"$pane")"
+  grep -qiE '(^|[^[:alnum:]])[1-9][0-9]* shells? still running([^[:alnum:]]|$)' <<<"$pane"
+}
+
 # IDLE predicate: the parent's last assistant event ended its turn AND no child
 # subagent is still active. A Claude parent that spawned Task/subagents ends its
 # OWN turn (end_turn) while the children keep writing the deliverable; gating on
@@ -395,6 +413,7 @@ claude_is_idle() {
   if _claude_children_active "$lane" "$session_id"; then
     return 2   # distinct nonzero: "parent done, children still active" (not idle)
   fi
+  _claude_background_shell_active "$lane" && return 2
   return 0
 }
 
