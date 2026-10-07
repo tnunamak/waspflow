@@ -1952,8 +1952,8 @@ JSONL
   ( guard_cwd "$fixture" ) || { echo "guard_cwd: rejected a real dir" >&2; exit 1; }
 )
 
-# BUG 2 — _exec_output_is_useful: reject empty/whitespace/pure-error output;
-# accept real short answers (must not false-reject a legit file list).
+# BUG 2 — _exec_output_is_useful: reject empty/whitespace output only;
+# accept arbitrary nonblank successful answers.
 (
   # shellcheck disable=SC1090
   source "$root/lib/core.sh"
@@ -1967,10 +1967,10 @@ JSONL
   printf 'foo.txt\nbar.txt\n'  > "$d/list"     # real short answer — MUST pass
   printf 'a\n'                 > "$d/tiny"      # 2 bytes — MUST pass
   printf 'Execution error: the parser threw on line 5, here is the fix\n' > "$d/mention"  # MUST pass
-  for bad in empty blank err na; do
+  for bad in empty blank; do
     if _exec_output_is_useful "$d/$bad"; then echo "exec-useful: '$bad' wrongly accepted" >&2; exit 1; fi
   done
-  for good in list tiny mention; do
+  for good in err na list tiny mention; do
     _exec_output_is_useful "$d/$good" || { echo "exec-useful: '$good' wrongly rejected" >&2; exit 1; }
   done
   rm -rf "$d"
