@@ -20,7 +20,11 @@ provider_event_tail() {
       ;;
     claude)
       sid="$(claude_discover_session "$lane" 2>/dev/null || true)"
-      [[ -n "$sid" ]] && source="$(find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -type f -name "${sid}.jsonl" -printf '%T@\t%p\n' 2>/dev/null | sort -rn | head -1 | cut -f2-)"
+      # A lane can use a non-default Claude profile. Resolve the path through
+      # the adapter rather than reading an optional global under nounset.
+      local projects_dir
+      projects_dir="$(_claude_projects_dir "$lane" 2>/dev/null || true)"
+      [[ -n "$sid" && -n "$projects_dir" ]] && source="$(find "$projects_dir" -maxdepth 2 -type f -name "${sid}.jsonl" -printf '%T@\t%p\n' 2>/dev/null | sort -rn | head -1 | cut -f2-)"
       source_kind="session-jsonl"
       ;;
     grok)

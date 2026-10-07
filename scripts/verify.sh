@@ -7484,4 +7484,7 @@ EOF
   [[ ! -e "$WASPFLOW_LOCKS_DIR/busy.lock.owner" ]]
 )
 
+# S7 fleet reconciliation and durable event ownership.
+source "$root/scripts/fixtures/verify-s7-fleet.sh"
+
 echo "waspflow verify: ok"

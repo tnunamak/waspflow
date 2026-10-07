@@ -324,3 +324,20 @@ provenance_reconcile_lane() {
   fi
   lane_set "$lane" provenance_state "recorded"
 }
+
+# Record a current-owner transition separately from launch provenance. The
+# event id is deterministic, so retrying the same handoff cannot duplicate it.
+provenance_emit_owner_handoff() {
+  local lane="$1" from="$2" to="$3" lane_uuid provider event_id instance payload digest
+  lane_uuid="$(lane_get "$lane" lane_uuid)"; provider="$(lane_get "$lane" provider)"
+  [[ -n "$lane_uuid" && -n "$provider" && -n "$to" ]] || return 1
+  digest="$(_provenance_sha256 "$lane_uuid|$from|$to")" || return 1
+  [[ -n "$digest" ]] || return 1
+  event_id="owner-handoff-${digest:0:32}"
+  instance="$(provenance_instance_id)" || return 1
+  payload="$(jq -cn --arg event_id "$event_id" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg lane_uuid "$lane_uuid" --arg lane "$lane" --arg provider "$provider" \
+    --arg from "$from" --arg to "$to" --arg instance "$instance" \
+    '{schema:"agent-provenance/v1",schema_version:1,event_id:$event_id,event_type:"lane_owner_handoff",observed_at:$at,producer:{name:"waspflow",instance_id:$instance},lane:{id:$lane_uuid,label:$lane,provider:$provider},ownership:{from:(if $from == "" then null else $from end),to:$to,evidence_class:"explicit_operator_handoff"}}')" || return 1
+  _provenance_append "$event_id" "$payload"
+}

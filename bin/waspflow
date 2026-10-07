@@ -20,6 +20,8 @@
 #   wait    <lane> [--timeout S] [--interval S] [--reap]   block until idle, optionally reap
 #   park    <lane> [--reason TEXT] [--adopt-legacy]  stop a verified-idle owned window
 #   gc      [--lane-age S] [--project DIR] [--adopt-legacy] [--apply]  dry-run park candidates
+#   reconcile [--project DIR] [--owner REF] [--json]                 read-only fleet inventory
+#   reconcile --adopt LANE --owner REF --apply                        explicit owner handoff
 #   revise  <lane> [--out FILE] -- <message>      steer live, or resume if exited
 #   accept-runtime <lane> --reason TEXT            accept this exact observed Codex drift
 #   attach  <lane>                        attach your terminal to the pane
@@ -882,6 +884,9 @@ JQ
       else
       printf '%-20s %-8s %-8s %-11s %-48s %s\n' "$lane" "?" "$state_label" "?" "unknown" "($reason; preserved)"
       fi
+      # Corrupt records are rows in the requested durable-index prefix too.
+      # Without this, --limit could emit unbounded corrupt history.
+      emitted=$((emitted + 1))
       continue
     fi
     # Read each durable record once. All filtering and rendering below operates
@@ -2121,6 +2126,14 @@ main() {
   local verb="${1:-}"; shift || true
   case "$verb" in
     -h|--help|help|"") usage; return ;;
+    # Help text is maintained separately. Keep this maintenance-only command
+    # out of that shared registry until its documentation lands.
+    reconcile)
+      # shellcheck disable=SC1090
+      source "$WASPFLOW_LIB/reconcile.sh"
+      cmd_reconcile "$@"
+      return
+      ;;
   esac
 
   local command handler
