@@ -23,6 +23,27 @@
 )
 
 (
+  fixture="$(mktemp -d "$scratch/waspflow-r2-e-events-XXXXXX")"
+  trap 'rm -rf "$fixture"' EXIT
+  export WASPFLOW_HOME="$fixture/home" WASPFLOW_LIB="$root/lib" WASPFLOW_EVENT_TMPDIR="$fixture/tmp"
+  source "$root/lib/core.sh"
+  source "$root/lib/events.sh"
+
+  # DeepSeek's durable receipt is already a safe, typed lifecycle stream; it
+  # needs no provider session log and must classify like the other receipt APIs.
+  lane_set deepseek-events provider deepseek
+  mkdir -p "$(lane_dir deepseek-events)"
+  cat >"$(lane_dir deepseek-events)/deepseek-receipts.jsonl" <<'EOF'
+{"phase":"invocation","started_epoch":10}
+{"phase":"completion","outcome":"failed","completed_epoch":12}
+EOF
+  provider_event_tail deepseek-events 2 | jq -e '
+    .provider == "deepseek" and .source.kind == "deepseek-receipt-jsonl" and
+    .turn_state == "terminal" and ([.events[].event_type] == ["turn_started", "turn_completed"])
+  ' >/dev/null
+)
+
+(
   fixture="$(mktemp -d "$scratch/waspflow-r2-e-doctor-XXXXXX")"
   trap 'rm -rf "$fixture"' EXIT
   mkdir -p "$fixture/bin" "$fixture/home"
