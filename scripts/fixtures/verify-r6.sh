@@ -52,4 +52,31 @@ EOF
   if kill -0 "$leader" 2>/dev/null || kill -0 "$child" 2>/dev/null; then
     echo 'r6 C1: TERM-resistant group was not retired' >&2; exit 1
   fi
+
+  # B2: an unavailable process census is not evidence that a receipt is gone.
+  # Recovery must retain the checkout and ask an owner instead of starting a
+  # second provider against it.
+  source "$root/lib/fanin.sh"
+  source "$root/lib/turn-state.sh"
+  source "$root/lib/artifacts.sh"
+  lane_set ps-failed provider fake cwd "$r6" spawn_submitted true report "$r6/missing-report"
+  setsid bash -c 'while :; do sleep 1; done' &
+  observed=$!
+  sleep 0.05
+  read -r observed_pgid observed_sid < <(command ps -o pgid= -o sid= -p "$observed")
+  tmux_record_lane_detached_session ps-failed pane "$observed" "$observed_pgid" "$observed_sid" "$(process_start_ticks "$observed")"
+  ps() { return 77; }
+  if [[ "$(tmux_detached_session_receipt_group_state "$(tmux_lane_detached_session_receipts ps-failed)" || true)" != uncertain ]]; then
+    echo 'r6 B2: failed process enumeration was not uncertain' >&2; exit 1
+  fi
+  tmux_window_exists() { return 1; }
+  _artifacts_recover() { touch "$r6/unexpected-recovery"; }
+  if [[ "$(artifacts_finalize ps-failed fake)" != report_missing ]]; then
+    echo 'r6 B2: failed process enumeration did not stop recovery' >&2; exit 1
+  fi
+  if [[ -e "$r6/unexpected-recovery" || "$(lane_get ps-failed recovery_state)" != needs-owner ]]; then
+    echo 'r6 B2: recovery started after failed process enumeration' >&2; exit 1
+  fi
+  unset -f ps
+  kill -KILL "$observed" 2>/dev/null || true
 )
