@@ -6,7 +6,7 @@
     "type": "git",
     "url": "git+https://github.com/tnunamak/waspflow.git"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=20"
   },

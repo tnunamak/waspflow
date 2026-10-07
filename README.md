@@ -98,6 +98,7 @@ The default state directory holds prompts and transcripts. Treat it as sensitive
 
 ## More documentation
 
+- [Full reference](docs/reference.md) (selection gates, worktrees, reports, environment variables, wait internals)
 - [First run](docs/first-run.md)
 - [Prerequisites](docs/prerequisites.md)
 - [Project checks](docs/project-checks.md)
