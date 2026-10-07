@@ -61,4 +61,32 @@
   printf '%s\n' '{"type":"final","text":"completed"}' >>"$agy_log"
   _antigravity_output_has_deliverable b7 "$agy_log" \
     || { echo 'r3-f3 B7: Antigravity rejected a typed terminal result' >&2; exit 1; }
+
+  # B11: terminal classification consumes one validated snapshot. Reopening a
+  # live JSONL after validation can let a malformed concurrent append reuse an
+  # older terminal event.
+  source "$root/lib/providers/claude.sh"
+  claude_log="$fixture/claude.jsonl"
+  printf '%s\n' '{"type":"assistant","message":{"stop_reason":"end_turn"}}' >"$claude_log"
+  real_jq="$(command -v jq)"; jq_calls="$fixture/jq-calls"
+  : >"$jq_calls"
+  jq() {
+    local arg
+    for arg in "$@"; do
+      [[ "$arg" == "$claude_log" || "$arg" == "${grok_idle_events:-}" ]] && printf x >>"$jq_calls"
+    done
+    "$real_jq" "$@"
+  }
+  _claude_transcript_settled "$claude_log" \
+    || { echo 'r3-f3 B11: Claude rejected a valid terminal snapshot' >&2; exit 1; }
+  [[ "$(wc -c <"$jq_calls")" == 1 ]] \
+    || { echo 'r3-f3 B11: Claude reopened its transcript after validation' >&2; exit 1; }
+  grok_idle_events="$fixture/grok-idle-events.jsonl"
+  printf '%s\n' '{"type":"turn_ended"}' >"$grok_idle_events"
+  _grok_events_file() { printf '%s\n' "$grok_idle_events"; }
+  lane_set b11 provider grok session_id b11 cwd "$fixture/cwd"
+  : >"$jq_calls"
+  grok_is_idle b11 || { echo 'r3-f3 B11: Grok rejected a valid terminal snapshot' >&2; exit 1; }
+  [[ "$(wc -c <"$jq_calls")" == 1 ]] \
+    || { echo 'r3-f3 B11: Grok reopened its events after validation' >&2; exit 1; }
 )

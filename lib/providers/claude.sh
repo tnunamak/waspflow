@@ -472,18 +472,23 @@ claude_turn_settled() {
 # reusing an earlier completion, and gives child transcripts the same
 # resumed-turn protection as their parent session.
 _claude_transcript_settled() {
-  local jsonl="$1"
+  local jsonl="$1" last
   [[ -f "$jsonl" ]] || return 1
-  jq -e . "$jsonl" >/dev/null 2>&1 || return 1
-  [[ "$(jq -rc '
-    if .type=="assistant" then
-      if .message.stop_reason=="end_turn" then "end" else "active" end
-    elif .type=="user" then
-      ((.message.content // "") | if type=="string" then . elif type=="array" then (map(select(type=="object" and .type=="text") | .text) | join("")) else "" end) as $text
-      | if ($text | test("^<local-command-std(out|err)>")) then "end"
-        elif .isMeta == true or .isCompactSummary == true or ($text | test("^\\s*<(command-name|command-message|local-command-caveat)>")) then empty
-        else "user" end
-    else empty end' "$jsonl" 2>/dev/null | tail -n 1)" == end ]]
+  # Slurp once: a successful parse and its terminal classification must describe
+  # the same bytes. Reopening the log after validation can reuse a stale end
+  # after a writer appends malformed JSON.
+  last="$(jq -rs '
+    [ .[] |
+      if .type=="assistant" then
+        if .message.stop_reason=="end_turn" then "end" else "active" end
+      elif .type=="user" then
+        ((.message.content // "") | if type=="string" then . elif type=="array" then (map(select(type=="object" and .type=="text") | .text) | join("")) else "" end) as $text
+        | if ($text | test("^<local-command-std(out|err)>")) then "end"
+          elif .isMeta == true or .isCompactSummary == true or ($text | test("^\\s*<(command-name|command-message|local-command-caveat)>")) then empty
+          else "user" end
+      else empty end
+    ] | last // ""' "$jsonl" 2>/dev/null)" || return 1
+  [[ "$last" == end ]]
 }
 
 # Revise: re-enter the session and run one turn. Two paths:
