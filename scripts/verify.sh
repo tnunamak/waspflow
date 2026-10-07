@@ -5477,7 +5477,7 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
     local n
     n=$(( $(cat "$grok_calls") + 1 ))
     printf '%s\n' "$n" >"$grok_calls"
-    [[ "$n" -eq 2 ]] && printf '{"type":"turn_started"}\n' >>"$grok_events"
+    [[ "$n" -eq 2 ]] && printf '{"type":"turn_started","prompt":"prompt"}\n' >>"$grok_events"
     printf '%s\n' "$grok_events"
   }
   lane_set resume-grok cwd "$fixture" session_id grok-session pending_transition '{"to_arm":{"provider":"grok","model":"grok-new","effort":"high"},"provisional_session":{"session_id":"grok-session","ownership":{"tmux_session":"test","tmux_window":"@resume","tmux_pane_pid":"1"}}}'
