@@ -4367,6 +4367,11 @@ PROV
     || { echo "park/revise: lifecycle operation lock did not close the idle-proof race (${elapsed_ms}ms)" >&2; exit 1; }
 
   make_life_lane park-legacy yes yes "$fixture" "$((now - 1000))"
+  # This is an actual pre-tag legacy pane, not a modern tagged pane whose
+  # state receipt was merely lost. The latter remains unsafe to adopt.
+  park_legacy_window="$(jq -r .tmux_window "$lifehome/lanes/park-legacy/state.json")"
+  tmux set-option -wu -t "$park_legacy_window" @waspflow_home
+  tmux set-option -wu -t "$park_legacy_window" @waspflow_lane_uuid
   jq 'del(.tmux_session,.tmux_window,.tmux_pane_pid)' \
     "$lifehome/lanes/park-legacy/state.json" >"$lifehome/lanes/park-legacy/state.next"
   mv "$lifehome/lanes/park-legacy/state.next" "$lifehome/lanes/park-legacy/state.json"
@@ -4380,6 +4385,9 @@ PROV
   make_life_lane gc-good yes yes "$fixture" "$((now - 1000))"
   make_life_lane gc-other yes yes "$lifeother" "$((now - 1000))"
   make_life_lane gc-legacy yes yes "$fixture" "$((now - 1000))"
+  gc_legacy_window="$(jq -r .tmux_window "$lifehome/lanes/gc-legacy/state.json")"
+  tmux set-option -wu -t "$gc_legacy_window" @waspflow_home
+  tmux set-option -wu -t "$gc_legacy_window" @waspflow_lane_uuid
   jq 'del(.tmux_session,.tmux_window,.tmux_pane_pid)' \
     "$lifehome/lanes/gc-legacy/state.json" >"$lifehome/lanes/gc-legacy/state.next"
   mv "$lifehome/lanes/gc-legacy/state.next" "$lifehome/lanes/gc-legacy/state.json"
