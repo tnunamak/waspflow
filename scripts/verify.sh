@@ -2082,7 +2082,7 @@ JSONL
   # Case B: a FRESH child mid-turn (last event not end_turn) -> NOT idle (rc 2).
   child="$slug/$sid/subagents/agent-11111111.jsonl"
   printf '%s\n' '{"isSidechain":true,"type":"assistant","message":{"stop_reason":"tool_use"}}' > "$child"
-  # (freshly written -> mtime is now; within CLAUDE_SUBAGENT_ACTIVE_SECS)
+  # Fresh unfinished children must block settlement too.
   set +e; claude_is_idle claude-idle; rc=$?; set -e
   [[ "$rc" -eq 2 ]] || { echo "claude_is_idle: expected rc=2 (children active), got $rc" >&2; exit 1; }
 
@@ -2090,10 +2090,11 @@ JSONL
   printf '%s\n' '{"isSidechain":true,"type":"assistant","message":{"stop_reason":"end_turn"}}' > "$child"
   claude_is_idle claude-idle || { echo "claude_is_idle: expected idle after child end_turn" >&2; exit 1; }
 
-  # Case D: a mid-turn child that has gone COLD (mtime old) -> treated as done -> idle.
+  # Case D: a quiet unfinished child remains unsafe: age is not completion evidence.
   printf '%s\n' '{"isSidechain":true,"type":"assistant","message":{"stop_reason":"tool_use"}}' > "$child"
   touch -d '1 hour ago' "$child" 2>/dev/null || touch -t 202001010000 "$child"
-  claude_is_idle claude-idle || { echo "claude_is_idle: cold mid-turn child should not block idle" >&2; exit 1; }
+  set +e; claude_is_idle claude-idle; rc=$?; set -e
+  [[ "$rc" -eq 2 ]] || { echo "claude_is_idle: cold mid-turn child must block idle, got $rc" >&2; exit 1; }
 
   # Case E: parent itself NOT done (no end_turn) -> not idle (rc 1) regardless of children.
   printf '%s\n' '{"type":"assistant","message":{"stop_reason":"tool_use"}}' > "$slug/$sid.jsonl"
@@ -7484,4 +7485,5 @@ EOF
   [[ ! -e "$WASPFLOW_LOCKS_DIR/busy.lock.owner" ]]
 )
 
+source "$root/scripts/fixtures/verify-s1-claude.sh" # S1 Claude safe-settle checks
 echo "waspflow verify: ok"
