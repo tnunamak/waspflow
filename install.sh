@@ -10,12 +10,6 @@ ln -sf "$root/bin/waspflow" "$bindir/waspflow"
 echo "linked $bindir/waspflow -> $root/bin/waspflow"
 
 case ":$PATH:" in
-  *":$bindir:"*) ;;
-  *) echo "note: $bindir is not on your PATH — add it to use 'waspflow' directly." ;;
+  *":$bindir:"*) printf 'next: waspflow doctor\n' ;;
+  *) printf 'next: add %q to PATH, then run: %q doctor\n' "$bindir" "$bindir/waspflow" ;;
 esac
-
-echo
-if ! "$root/bin/waspflow" doctor; then
-  echo "install: linked waspflow, but doctor found missing prerequisites; fix them and rerun doctor." >&2
-  exit 1
-fi
