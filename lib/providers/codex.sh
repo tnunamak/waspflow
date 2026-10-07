@@ -1135,24 +1135,26 @@ _codex_task_started_mark() {
 # any increase in task_started. A queued message can coexist with another
 # already-started turn, so when Codex gives both events turn IDs they must agree.
 # Older event formats omit the user-message event entirely; preserve that narrow
-# compatibility fallback only in that case. Once an exact message is observed
-# without a matching started turn, uncertainty stays unconfirmed.
+# compatibility fallback only when no user-message event is present. A different
+# user message is evidence of unrelated current-turn activity, never a receipt.
 # Args: rollout message byte_offset
 _codex_revise_submission_confirmed() {
   local rollout="$1" message="$2" byte_offset="$3"
   [[ -f "$rollout" && "$byte_offset" =~ ^[0-9]+$ ]] || return 1
-  tail -c "+$(( byte_offset + 1 ))" "$rollout" 2>/dev/null | jq -ne --arg message "$message" '
+  tail -c "+$(( byte_offset + 1 ))" "$rollout" 2>/dev/null | jq -nre --arg message "$message" '
     reduce inputs as $row
-      ({saw_message:false, matched_ids:[], started:0, confirmed:false};
+      ({saw_message:false, saw_user_message:false, matched_ids:[], started:0, confirmed:false};
        ($row.payload // {}) as $p |
        ($p.type // $row.type // "") as $type |
        if $type == "user_message" then
+         .saw_user_message=true |
          if ($p.message // "") == $message then
            .saw_message=true |
            ($p.turn_id // $row.turn_id // "") as $id |
            if $id != "" then .matched_ids += [$id] else . end
          else . end
        elif $type == "item_completed" and ($p.item.type // "") == "UserMessage" then
+         .saw_user_message=true |
          ([$p.item.content[]? | select(.type == "text") | .text] | join("")) as $text |
          if $text == $message then
            .saw_message=true |
@@ -1164,7 +1166,7 @@ _codex_revise_submission_confirmed() {
          ($p.turn_id // $row.turn_id // "") as $id |
          if $id != "" and (.matched_ids | index($id)) != null then .confirmed=true else . end
        else . end)
-    | .confirmed or ((.saw_message | not) and .started > 0)
+    | .confirmed or ((.saw_user_message | not) and .started > 0)
   ' >/dev/null 2>&1
 }
 
