@@ -4368,6 +4368,11 @@ PROV
     || { echo "park/revise: lifecycle operation lock did not close the idle-proof race (${elapsed_ms}ms)" >&2; exit 1; }
 
   make_life_lane park-legacy yes yes "$fixture" "$((now - 1000))"
+  # This is an actual pre-tag legacy pane, not a modern tagged pane whose
+  # state receipt was merely lost. The latter remains unsafe to adopt.
+  park_legacy_window="$(jq -r .tmux_window "$lifehome/lanes/park-legacy/state.json")"
+  tmux set-option -wu -t "$park_legacy_window" @waspflow_home
+  tmux set-option -wu -t "$park_legacy_window" @waspflow_lane_uuid
   jq 'del(.tmux_session,.tmux_window,.tmux_pane_pid)' \
     "$lifehome/lanes/park-legacy/state.json" >"$lifehome/lanes/park-legacy/state.next"
   mv "$lifehome/lanes/park-legacy/state.next" "$lifehome/lanes/park-legacy/state.json"
@@ -4381,6 +4386,9 @@ PROV
   make_life_lane gc-good yes yes "$fixture" "$((now - 1000))"
   make_life_lane gc-other yes yes "$lifeother" "$((now - 1000))"
   make_life_lane gc-legacy yes yes "$fixture" "$((now - 1000))"
+  gc_legacy_window="$(jq -r .tmux_window "$lifehome/lanes/gc-legacy/state.json")"
+  tmux set-option -wu -t "$gc_legacy_window" @waspflow_home
+  tmux set-option -wu -t "$gc_legacy_window" @waspflow_lane_uuid
   jq 'del(.tmux_session,.tmux_window,.tmux_pane_pid)' \
     "$lifehome/lanes/gc-legacy/state.json" >"$lifehome/lanes/gc-legacy/state.next"
   mv "$lifehome/lanes/gc-legacy/state.next" "$lifehome/lanes/gc-legacy/state.json"
@@ -7284,7 +7292,8 @@ PROV
   # A running headless revise blocks reap; after it completes, its recorded
   # scope is stopped before cleanup can be reported complete.
   make_reap_lane headless abandoned
-  lane_set headless headless_revise_state running headless_revise_pid "$$"
+  lane_set headless headless_revise_state running headless_revise_pid "$$" \
+    headless_revise_pid_start_ticks "$(process_start_ticks "$$")"
   rc=0; _reap_one_locked headless 1 0 1 || rc=$?
   [[ "$rc" == 1 && "$(lane_get headless status)" != reaped ]]
   lane_set headless headless_revise_state completed headless_revise_pid ""
@@ -7558,6 +7567,8 @@ source "$root/scripts/fixtures/verify-s5-cleanup.sh" # S5 cleanup ownership and 
 # S7 fleet reconciliation and durable event ownership.
 source "$root/scripts/fixtures/verify-s7-fleet.sh"
 source "$root/scripts/fixtures/verify-r2-c.sh"
+# R2-A core cleanup and escalation regressions.
+source "$root/scripts/fixtures/verify-r2-a.sh"
 
 echo "waspflow verify: ok"
 source "$root/scripts/fixtures/verify-r2-b.sh"
