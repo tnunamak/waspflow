@@ -7484,4 +7484,7 @@ EOF
   [[ ! -e "$WASPFLOW_LOCKS_DIR/busy.lock.owner" ]]
 )
 
+# S3 Codex adapter hardening fixtures.
+source "$root/scripts/fixtures/verify-s3-codex.sh"
+
 echo "waspflow verify: ok"

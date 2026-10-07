@@ -145,9 +145,14 @@ CODEX_MODELS_CACHE="${CODEX_MODELS_CACHE:-$HOME/.codex/models_cache.json}"
 # its local cache is a fail-open fallback only. Never curate slugs here: Codex's
 # auth-scoped availability changes independently of waspflow releases.
 codex_valid_models() {
-  local source out
-  if command -v codex >/dev/null 2>&1; then
-    source="$(codex debug models 2>/dev/null || true)"
+  local source out timeout_seconds
+  timeout_seconds="$(numeric_knob WASPFLOW_CODEX_MODEL_DISCOVERY_TIMEOUT_SECONDS 2)"
+  # `codex debug models` is provider-owned state, but it can still hang while
+  # the CLI hydrates auth or waits for a backend. Model validation is advisory:
+  # use a bounded live observation when possible, then honestly fall back to
+  # the cache/unknown path rather than making a spawn wait forever.
+  if command -v codex >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    source="$(timeout "$timeout_seconds" codex debug models 2>/dev/null || true)"
     out="$(jq -r '.models[].slug // empty' <<<"$source" 2>/dev/null || true)"
     [[ -n "$out" ]] && { printf 'source=live_query\n%s\n' "$out"; return 0; }
   fi
@@ -795,19 +800,49 @@ _codex_find_rollout_for_submitted_prompt() {
     head -1 "$f" 2>/dev/null | jq -e 'select(.type=="session_meta") | ((.payload.source | type) == "object" and (.payload.source | has("subagent"))) | not' >/dev/null 2>&1 || continue
     # Exact text and task_started must belong to the same turn.
     jq -ne --arg full_prompt "$full_prompt" '
-      reduce inputs as $e ({started:false,matched:false,confirmed:false};
-        ($e.payload.type // $e.type) as $type |
-        if $type == "task_started" then
-          .matched = (if .started then false else .matched end) | .started = true
-        elif $type == "task_complete" or $type == "turn_aborted" then
-          .started = false | .matched = false
-        elif $type == "user_message" then
-          .matched = (($e.payload.message // "") == $full_prompt)
-        elif $e.type == "event_msg" and $type == "item_completed" and $e.payload.item.type == "UserMessage" then
-          .matched = (([$e.payload.item.content[]? | select(.type == "text") | .text] | join("")) == $full_prompt)
-        else . end |
-        .confirmed = (.confirmed or (.started and .matched))
-      ) | .confirmed' \
+      reduce inputs as $e
+        ({started_ids:[], started_legacy:0, matched_ids:[], matched_legacy:false, confirmed:false};
+         ($e.payload // {}) as $p |
+         ($p.type // $e.type // "") as $type |
+         if $type == "task_started" then
+           ($p.turn_id // $e.turn_id // "") as $id |
+           if $id == "" then
+             .started_legacy += 1 | .confirmed = (.confirmed or .matched_legacy)
+           else
+             .started_ids += [$id] | .confirmed = (.confirmed or ((.matched_ids | index($id)) != null))
+           end
+         elif $type == "user_message" then
+           if ($p.message // "") == $full_prompt then
+             ($p.turn_id // $e.turn_id // "") as $id |
+             if $id == "" then
+               .matched_legacy=true | .confirmed = (.confirmed or (.started_legacy > 0))
+             else
+               .matched_ids += [$id] | .confirmed = (.confirmed or ((.started_ids | index($id)) != null))
+             end
+           else . end
+         elif $type == "item_completed" and ($p.item.type // "") == "UserMessage" then
+           ([$p.item.content[]? | select(.type == "text") | .text] | join("")) as $text |
+           if $text == $full_prompt then
+             ($p.turn_id // $p.item.turn_id // $e.turn_id // "") as $id |
+             if $id == "" then
+               .matched_legacy=true | .confirmed = (.confirmed or (.started_legacy > 0))
+             else
+               .matched_ids += [$id] | .confirmed = (.confirmed or ((.started_ids | index($id)) != null))
+             end
+           else . end
+         elif $type == "task_complete" or $type == "turn_aborted" then
+           # Legacy records have no identity, so a terminal event closes their
+           # only possible pairing. With IDs, remove only that turn and leave a
+           # separately queued message eligible for its own later start.
+           ($p.turn_id // $e.turn_id // "") as $id |
+           if $id == "" then
+             .started_legacy=0 | .matched_legacy=false
+           else
+             .started_ids |= map(select(. != $id)) |
+             .matched_ids |= map(select(. != $id))
+           end
+         else . end)
+      | .confirmed' \
       "$f" >/dev/null 2>&1 || continue
     echo "$f"
     return 0
@@ -985,21 +1020,24 @@ codex_is_idle() {
   # Ordered current-turn evidence, with matching IDs when present.
   jq -ne '
     reduce inputs as $row
-      ({turn:"", complete:false, tools:{}};
-       if $row.type == "turn_context" then .complete=false
+      ({turn:"", outcome:"pending", tools:{}};
+       if $row.type == "turn_context" then .outcome="pending"
        elif $row.type == "event_msg" then
          $row.payload as $p |
-         if $p.type == "task_started" then .turn=($p.turn_id // "") | .complete=false | .tools={}
-         elif $p.type == "user_message" then .complete=false
+         if $p.type == "task_started" then .turn=($p.turn_id // "") | .outcome="pending"
+         elif $p.type == "user_message" then .outcome="pending"
          elif $p.type == "exec_command_begin" then
-           .tools[($p.call_id // "unknown")]=true | .complete=false
+           .tools[($p.call_id // "unknown")]=true | .outcome="pending"
          elif $p.type == "exec_command_end" then del(.tools[($p.call_id // "unknown")])
          elif $p.type == "task_complete" then
-           .complete=(.turn == "" or ($p.turn_id // "") == .turn)
-         elif $p.type == "turn_aborted" then .complete=false
+           if .outcome == "aborted" then .
+           elif .turn == "" or ($p.turn_id // "") == .turn then .outcome="complete"
+           else . end
+         elif $p.type == "turn_aborted" then
+           if .turn == "" or ($p.turn_id // "") == .turn then .outcome="aborted" else . end
          else . end
        else . end)
-    | .complete and (.tools | length == 0)
+    | .outcome == "complete" and (.tools | length == 0)
   ' "$rollout" >/dev/null 2>&1
 }
 
@@ -1053,6 +1091,54 @@ _codex_task_started_mark() {
   jq -rc 'select((.payload.type // .type) == "task_started") | 1' "$rollout" 2>/dev/null | wc -l
 }
 
+# Confirm a live revise from the delta written after its paste, rather than from
+# any increase in task_started. A queued message can coexist with another
+# already-started turn, so when Codex gives both events turn IDs they must agree.
+# Older event formats omit the user-message event entirely; preserve that narrow
+# compatibility fallback only in that case. Once an exact message is observed
+# without a matching started turn, uncertainty stays unconfirmed.
+# Args: rollout message byte_offset
+_codex_revise_submission_confirmed() {
+  local rollout="$1" message="$2" byte_offset="$3"
+  [[ -f "$rollout" && "$byte_offset" =~ ^[0-9]+$ ]] || return 1
+  tail -c "+$(( byte_offset + 1 ))" "$rollout" 2>/dev/null | jq -ne --arg message "$message" '
+    reduce inputs as $row
+      ({saw_message:false, matched_ids:[], started:0, confirmed:false};
+       ($row.payload // {}) as $p |
+       ($p.type // $row.type // "") as $type |
+       if $type == "user_message" then
+         if ($p.message // "") == $message then
+           .saw_message=true |
+           ($p.turn_id // $row.turn_id // "") as $id |
+           if $id != "" then .matched_ids += [$id] else . end
+         else . end
+       elif $type == "item_completed" and ($p.item.type // "") == "UserMessage" then
+         ([$p.item.content[]? | select(.type == "text") | .text] | join("")) as $text |
+         if $text == $message then
+           .saw_message=true |
+           ($p.turn_id // $p.item.turn_id // $row.turn_id // "") as $id |
+           if $id != "" then .matched_ids += [$id] else . end
+         else . end
+       elif $type == "task_started" then
+         .started += 1 |
+         ($p.turn_id // $row.turn_id // "") as $id |
+         if $id != "" and (.matched_ids | index($id)) != null then .confirmed=true else . end
+       else . end)
+    | .confirmed or ((.saw_message | not) and .started > 0)
+  ' >/dev/null 2>&1
+}
+
+_codex_headless_output_is_useful() {
+  local output="$1" last
+  [[ -s "$output" ]] || return 1
+  last="$(awk 'NF { line=$0 } END { print line }' "$output" 2>/dev/null)"
+  [[ -n "$last" ]] || return 1
+  case "${last,,}" in
+    *denied*|*not.authorized*|*unauthorized*|"no response"|"no output"|"(no output)") return 1 ;;
+  esac
+  return 0
+}
+
 # Normalize an existing directory without resolving a report filename. This is
 # the capability boundary for external recovery reports: the command line must
 # receive a physical directory, never a lexical path that can contain `..`.
@@ -1096,7 +1182,7 @@ codex_revise() {
     # Live in-pane steer. The Enter can race pane state, so verify a NEW
     # task_started event, not merely rollout growth: a user_message can remain
     # queued in Codex's composer without a task having started.
-    local target rollout before after attempt j attempts polls
+    local target rollout before after before_bytes attempt j attempts polls
     target="$(tmux_window_target "$lane")"
     # _codex_discover_session_cached already persists session_id/rollout on a
     # successful resolution, but an OLDER cached lane may still be missing
@@ -1116,6 +1202,13 @@ codex_revise() {
       return 1
     }
     before="$(_codex_task_started_mark "$rollout")"
+    before_bytes="$(wc -c <"$rollout" 2>/dev/null || echo '')"
+    [[ "$before_bytes" =~ ^[0-9]+$ ]] || {
+      lane_set "$lane" revise_submitted false revise_submission_state unconfirmed-rollout-read \
+        revise_submission_error rollout-read revise_task_started_mark ""
+      err "codex revise: cannot establish a safe rollout boundary for lane '$lane'"
+      return 1
+    }
     tmux send-keys -t "$target" C-u
     sleep 0.3
     tmux_paste_text "$target" "$message"
@@ -1130,7 +1223,7 @@ codex_revise() {
       tmux send-keys -t "$target" Enter
       for j in $(seq 1 "$polls"); do
         after="$(_codex_task_started_mark "$rollout")"
-        if [[ "$after" -gt "$before" ]]; then
+        if _codex_revise_submission_confirmed "$rollout" "$message" "$before_bytes"; then
           lane_set "$lane" revise_submitted true \
             revise_submission_state confirmed-task-started \
             revise_submission_error "" revise_task_started_mark "$after"
@@ -1206,6 +1299,10 @@ codex_revise() {
     -c sandbox_mode=workspace-write -c approval_policy=never "${MCP_ARGV[@]}" -o "$tmp" \
     >/dev/null 2>&1 || resume_rc=$?
   codex_refresh_runtime_settings "$lane"
+  if [[ "$resume_rc" -eq 0 ]] && ! _codex_headless_output_is_useful "$tmp"; then
+    err "codex revise: headless resume exited 0 but produced empty, denied, or placeholder output"
+    resume_rc=1
+  fi
   if [[ -z "$out_file" ]]; then cat "$tmp"; rm -f "$tmp"; fi
   return "$resume_rc"
 }
