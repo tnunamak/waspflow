@@ -4686,12 +4686,18 @@ PROV
   receiptfailbin="$(mktemp -d "$scratch/waspflow-scope-receiptfail-XXXXXX")"
   cat >"$receiptfailbin/jq" <<'FAILJQ'
 #!/usr/bin/env bash
+# The launcher records its headless PID before the scope starts. Fail only the
+# receipt append inside the scope, not unrelated state writes that precede it.
+for arg in "$@"; do
+  [[ "$arg" == *cgroup_scope_receipts* ]] || continue
 marker="$(compgen -G "$WASPFLOW_HOME/lanes/receipt-failure/.scope-started-waspflow-receipt-failure-*.scope" | head -n 1 || true)"
 [[ -n "$marker" ]] && printf marker-observed >"$WASPFLOW_HOME/receipt-failure-marker-observed"
 run_dir="$(compgen -G "$WASPFLOW_HOME/lanes/receipt-failure/.scope-run.*" | head -n 1 || true)"
 [[ -n "$run_dir" && ! -e "$run_dir/stdout" && ! -e "$run_dir/stderr" ]] \
   && printf captures-absent >"$WASPFLOW_HOME/receipt-failure-captures-absent"
 exit 1
+done
+PATH="${PATH#*:}" exec jq "$@"
 FAILJQ
   chmod +x "$receiptfailbin/jq"
   receipt_provider_marker="$scopework/receipt-provider-ran"
