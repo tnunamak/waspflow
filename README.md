@@ -18,7 +18,7 @@ Replace `codex` with an installed provider, such as `claude`, `grok`, or `antigr
 
 ## What a lane contains
 
-A lane keeps its prompt, transcript, session details, final git capture, and state under `$WASPFLOW_HOME` (default: `~/.local/state/waspflow`). It is useful when a worker needs follow-up instructions or you need to recover its state after closing a terminal.
+A lane keeps its prompt, transcript, session details, final git capture, and state under `$WASPFLOW_HOME` (default: `${XDG_STATE_HOME:-$HOME/.local/state}/waspflow`). It is useful when a worker needs follow-up instructions or you need to recover its state after closing a terminal.
 
 ```bash
 waspflow spawn --provider codex --accept-provider-default --lane fix -- \
@@ -46,7 +46,7 @@ waspflow exec --provider claude --accept-provider-default -- \
 | Grok | supported | partial — weaker completion evidence | partial — weaker submission evidence | supported | supported |
 | Antigravity (`agy`) | partial — receipt-based submission | partial — receipt-based completion | partial — headless revise only | supported | supported |
 | Qwen | supported | supported | supported | supported | supported |
-| DeepSeek (`dsh`) | supported | supported | partial — headless revise unsupported | supported | supported |
+| DeepSeek (`dsh`) | supported | supported | unsupported — start a new lane with the complete task | supported | supported |
 
 Claude has the strongest completion detection: Waspflow waits for terminal turn events and vetoes completion while known child or background-shell work remains active. Codex correlates rollout events with the lane’s turn; very new Codex versions can still drift from that event shape. Grok and Antigravity deliberately fail closed when submission or completion evidence is insufficient.
 
@@ -54,7 +54,7 @@ On first Codex use, resolve any update banner or trust prompt in the pane yourse
 
 ## Requirements
 
-Required tools are `tmux`, `jq`, `awk`, `python3`, `git`, `flock`, `timeout`, and `perl`, plus `uuidgen` or Linux `/proc/sys/kernel/random/uuid`, and at least one provider CLI. `waspflow doctor` checks these before you start. See [prerequisites](docs/prerequisites.md) for installation notes.
+Required tools are Bash 4 or later, GNU-compatible `find` and `timeout`, `tmux`, `jq`, `awk`, `python3`, `git`, `flock`, and `perl`, plus `uuidgen` or Linux `/proc/sys/kernel/random/uuid`, and at least one provider CLI. For DeepSeek, also configure its `dsh` headless profile. `waspflow doctor` checks basic availability before you start; it does not establish full platform compatibility. See [prerequisites](docs/prerequisites.md) for installation notes.
 
 Providers map to executables as follows: `claude`, `codex`, `grok`, `antigravity` → `agy`, `qwen`, and `deepseek` → `dsh`.
 
