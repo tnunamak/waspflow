@@ -5698,7 +5698,7 @@ PROV
     tmux has-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || tmux new-session -d -s "$WASPFLOW_TMUX_SESSION" -n _escalation
     old_window="$(tmux new-window -d -P -F '#{window_id}' -t "$WASPFLOW_TMUX_SESSION" -n "old-$lane" 'exec sleep 120')"
     IFS='|' read -r old_session _ old_pid < <(tmux display-message -p -t "$old_window" '#{session_name}|#{window_id}|#{pane_pid}')
-    lane_set "$lane" lane_uuid "$lane-uuid" provider codex model old model_requested old model_passed old effort medium effort_requested medium effort_passed medium op_mode standard endpoint_profile default raw_provider_args false billing_path "$billing" auth_principal "" model_validation_state available model_validation_source live_query model_validation_scope default model_validation_at "" selection_quota_observation '{"schema_version":1,"state":"absent","observation":null,"reason":"test"}' selection_quota_filtered false status live session_id "$lane-old-session" rollout "" tmux_session "$old_session" tmux_window "$old_window" tmux_pane_pid "$old_pid" cwd "$escwork" origin_cwd "$escwork" worktree "$escwork" verify_fork_point "$fork" spawn_epoch "$now" segment_started_epoch "$((now - 5))" segment_index 0 receipt_emitted false receipt_emitted_segment -1 arm_generation 3 arm_history '[]' escalation_path '[]' escalations_total 0 consecutive_failed_segments 0 segment_entered_via_escalation false ladder_cursor "" pending_transition "" escalation_error "" prompt "Repair the failing task without weakening its tests." verify_command false verify_timeout 5 verify_state failed verify_failure_class task verify_runs '[{"kind":"checkpoint","at":1,"state":"failed","failure_class":"task"}]' verify_checkpoint_epoch "$now" verify_checkpoint_fingerprint "$fingerprint" verify_epoch "$now" verify_exit_code 1 verify_test_files_changed false baseline_oracle_ran true baseline_oracle_state passed baseline_oracle_reason "" result "" runtime_settings_state unknown runtime_refresh_state pending
+    lane_set "$lane" lane_uuid "$lane-uuid" provider codex model old model_requested old model_passed old effort medium effort_requested medium effort_passed medium op_mode standard endpoint_profile default raw_provider_args false billing_path "$billing" auth_principal "" model_validation_state available model_validation_source live_query model_validation_scope default model_validation_at "" selection_quota_observation '{"schema_version":1,"state":"absent","observation":null,"reason":"test"}' selection_quota_filtered false status live session_id "$lane-old-session" rollout "" tmux_session "$old_session" tmux_window "$old_window" tmux_pane_pid "$old_pid" cwd "$escwork" origin_cwd "$escwork" verify_fork_point "$fork" spawn_epoch "$now" segment_started_epoch "$((now - 5))" segment_index 0 receipt_emitted false receipt_emitted_segment -1 arm_generation 3 arm_history '[]' escalation_path '[]' escalations_total 0 consecutive_failed_segments 0 segment_entered_via_escalation false ladder_cursor "" pending_transition "" escalation_error "" prompt "Repair the failing task without weakening its tests." verify_command false verify_timeout 5 verify_state failed verify_failure_class task verify_runs '[{"kind":"checkpoint","at":1,"state":"failed","failure_class":"task"}]' verify_checkpoint_epoch "$now" verify_checkpoint_fingerprint "$fingerprint" verify_epoch "$now" verify_exit_code 1 verify_test_files_changed false baseline_oracle_ran true baseline_oracle_state passed baseline_oracle_reason "" result "" runtime_settings_state unknown runtime_refresh_state pending
     printf 'verify head\n' >"$eschome/lanes/$lane/verify-stdout.txt"
     printf 'verify tail\n' >"$eschome/lanes/$lane/verify-stderr.txt"
   }
@@ -5923,6 +5923,13 @@ FAIL
   ! lane_update_if esc-cas 8 current runtime_refresh_state stale
   [[ "$(lane_get esc-cas runtime_refresh_state)" == pending ]] || { echo "escalate CAS: stale generation overwrote runtime state" >&2; exit 1; }
   make_escalation_lane esc-poison
+  # --reset-tree is valid only for a real isolated worktree. Keep the shared
+  # synthetic lanes non-isolated, then make this one case own a secondary
+  # checkout so its destructive reset assertion stays meaningful.
+  poison_worktree="$(mktemp -d "$scratch/waspflow-escalation-poison-worktree-XXXXXX")"
+  rmdir "$poison_worktree"
+  git -C "$escwork" worktree add -q -b waspflow/esc-poison "$poison_worktree"
+  lane_set esc-poison cwd "$poison_worktree" worktree "$poison_worktree" repo_root "$escwork" verify_fork_point "$(git -C "$poison_worktree" rev-parse HEAD)"
   lane_set esc-poison consecutive_failed_segments 2
   set +e; poison_json="$(run_escalate esc-poison --to codex/target/high --force --json 2>/dev/null)"; rc=$?; set -e
   [[ "$rc" -eq 1 ]] || { echo "escalate poison: expected rc1" >&2; exit 1; }
@@ -5932,11 +5939,12 @@ FAIL
   lane_set esc-poison consecutive_failed_segments 2
   lane_set esc-poison verify_state passed
   printf '%s\n' '{}' >"$eschome/lanes/esc-poison/verify-result.json"
-  _artifacts_record_verify_checkpoint esc-poison none false "$(artifacts_workspace_fingerprint "$escwork")" checkpoint
+  _artifacts_record_verify_checkpoint esc-poison none false "$(artifacts_workspace_fingerprint "$poison_worktree")" checkpoint
   [[ "$(lane_get esc-poison consecutive_failed_segments)" == 0 ]] || { echo "escalate poison: green checkpoint did not reset counter" >&2; exit 1; }
-  printf 'discarded by reset\n' >"$escwork/reset-sentinel"
+  printf 'discarded by reset\n' >"$poison_worktree/reset-sentinel"
   run_escalate esc-poison --to codex/other/high --handoff --reset-tree --force >/dev/null
-  [[ ! -e "$escwork/reset-sentinel" ]] || { echo "escalate reset-tree: untracked file survived" >&2; exit 1; }
+  [[ ! -e "$poison_worktree/reset-sentinel" ]] || { echo "escalate reset-tree: untracked file survived" >&2; exit 1; }
+  git -C "$escwork" worktree remove "$poison_worktree"
   lane_set esc-bare provider codex model old effort medium op_mode standard status live cwd "$escwork" arm_generation 0 session_id bare lane_uuid esc-bare-uuid segment_index 0 verify_state "" verify_runs '[]' ladder_cursor "" pending_transition ""
   set +e; bare_json="$(run_escalate esc-bare --json 2>/dev/null)"; rc=$?; set -e
   [[ "$rc" -eq 5 ]] || { echo "escalate bare: expected selection rc5" >&2; exit 1; }
