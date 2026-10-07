@@ -53,6 +53,18 @@
   grok_confirm_escalation_submission grok-escalation 'current escalation' \
     || { echo 'r2-d: Grok rejected current escalation receipt' >&2; exit 1; }
 
+  # The launch-side wait uses the same pre-launch baseline as recovery. A prior
+  # event with the same prompt must not satisfy the new submission.
+  printf '%s\n' '{"type":"user","content":"current escalation"}' '{"type":"turn_started","prompt":"current escalation"}' >"$grok_events"
+  tmux_window_if_owned() { printf '@r2d\n'; }
+  tmux_send_owned_window_shell_command() { :; }
+  tmux() { :; }
+  sleep() { :; }
+  lane_set grok-resume cwd "$r2d" pending_transition '{"to_arm":{"model":"grok-test","effort":""},"provisional_session":{"session_id":"grok-r2d","ownership":{"tmux_session":"r2d","tmux_window":"@r2d","tmux_pane_pid":"1"}}}'
+  if WASPFLOW_SUBMIT_ATTEMPTS=1 grok_resume_with_arm grok-resume 'current escalation' false; then
+    echo 'r2-d: Grok launch accepted a pre-launch receipt' >&2; exit 1
+  fi
+
   # A single allowed Antigravity raw flag must not inherit the post-increment's
   # nonzero status as the function return code.
   _antigravity_extra_args --sandbox \

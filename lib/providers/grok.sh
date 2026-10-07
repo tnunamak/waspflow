@@ -301,7 +301,6 @@ grok_resume_with_arm() {
   lane_set "$lane" pending_transition "$transition" || return 1
   tmux_send_owned_window_shell_command "$ownership" "bash -lc $(printf '%q' "${quoted# }")" || return 1
   tmux pipe-pane -t "$target" -o "$(transcript_capture_command "$(lane_transcript "$lane")")" 2>/dev/null || true
-  local before=0 events i
   for i in $(seq 1 "${WASPFLOW_SUBMIT_ATTEMPTS:-20}"); do
     events="$(_grok_events_file "$sid" || true)"
     _grok_submission_receipt_present "$events" "$prompt" "$before" && break
