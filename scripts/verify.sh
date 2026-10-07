@@ -2828,7 +2828,8 @@ PROV
 
   # The chosen headless revise writes headless_revise_state, not the dot
   # patch's synthetic revise_submission_state used by the fixture above.
-  lane_set barlane headless_revise_state running headless_revise_pid "$$"
+  lane_set barlane headless_revise_state running headless_revise_pid "$$" \
+    headless_revise_pid_start_ticks "$(process_start_ticks "$$")"
   set +e; run_wait 1 >/dev/null 2>&1; rc=$?; set -e
   [[ "$rc" -eq 1 ]] || { echo "wait: chosen running headless receipt reused old idle" >&2; exit 1; }
   lane_set barlane headless_revise_state timeout
@@ -2837,7 +2838,8 @@ PROV
   lane_set barlane headless_revise_state running headless_revise_pid 999999
   set +e; run_wait 5 >/dev/null 2>&1; rc=$?; set -e
   [[ "$rc" -eq 3 ]] || { echo "wait: dead headless pid did not interrupt wait" >&2; exit 1; }
-  lane_set barlane headless_revise_state running headless_revise_pid "$$"
+  lane_set barlane headless_revise_state running headless_revise_pid "$$" \
+    headless_revise_pid_start_ticks "$(process_start_ticks "$$")"
   (
     sleep 1
     printf 'headless deliverable\n' >"$ctl/headless-deliverable"
