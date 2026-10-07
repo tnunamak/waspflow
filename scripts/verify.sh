@@ -7491,4 +7491,7 @@ source "$root/scripts/fixtures/verify-s8-install.sh"
 source "$root/scripts/fixtures/verify-s6-runtime.sh"
 
 source "$root/scripts/fixtures/verify-s1-claude.sh" # S1 Claude safe-settle checks
+# S3 Codex adapter hardening fixtures.
+source "$root/scripts/fixtures/verify-s3-codex.sh"
+
 echo "waspflow verify: ok"
