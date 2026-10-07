@@ -7484,4 +7484,7 @@ EOF
   [[ ! -e "$WASPFLOW_LOCKS_DIR/busy.lock.owner" ]]
 )
 
+# S4: secondary provider adapters and neutral handoff.
+source "$root/scripts/fixtures/verify-s4-secondary.sh"
+
 echo "waspflow verify: ok"

@@ -340,6 +340,19 @@ escalate_mark_confirmed_locked() {
   escalate_commit_locked "$lane" "$json"
 }
 
+# A provider capability/availability refusal cannot be repaired by repeatedly
+# resuming the same provisional launch. Offer only state-preserving commands;
+# selecting a new handoff target remains an explicit operator choice.
+escalate_launch_failure_next_steps() {
+  local lane="$1" reason="$2"
+  case "$reason" in
+    *quota*|*model*|*unavailable*|*unsupported-hook*|*unsupported*)
+      printf '%s\n' "waspflow escalate $lane --abort-transition" "waspflow status $lane"
+      ;;
+    *) printf '%s\n' "waspflow escalate $lane --resume-transition" "waspflow escalate $lane --abort-transition" ;;
+  esac
+}
+
 escalate_resume_launch_locked() {
   local lane="$1" json="$2" transition="$3" provider mode prompt fresh confirm_fn resume_fn attempted
   provider="$(jq -r .to_arm.provider <<<"$transition")"; mode="$(jq -r .mode <<<"$transition")"
@@ -373,7 +386,9 @@ escalate_resume_launch_locked() {
     [[ "$(lane_get "$lane" recovery_state)" != needs-owner ]] || launch_error="needs-owner: $(lane_get "$lane" recovery_reason) (provider prompt left unanswered)"
     transition="$(jq -c --arg provider "$provider" --arg reason "$launch_error" '.launch_failure={provider:$provider,stage:"launch_provisioned",reason:$reason}' <<<"$transition")"
     lane_set "$lane" status escalate_failed pending_transition "$transition" escalation_error "$launch_error"
-    escalate_emit "$json" 2 "$launch_error; old arm unchanged" "$(jq -c .from_arm <<<"$transition")" "$(jq -c .to_arm <<<"$transition")" "$(jq -r .segment_index <<<"$transition")" "waspflow escalate $lane --resume-transition" "waspflow escalate $lane --abort-transition"
+    local -a next_steps=()
+    mapfile -t next_steps < <(escalate_launch_failure_next_steps "$lane" "$launch_error")
+    escalate_emit "$json" 2 "$launch_error; old arm unchanged" "$(jq -c .from_arm <<<"$transition")" "$(jq -c .to_arm <<<"$transition")" "$(jq -r .segment_index <<<"$transition")" "${next_steps[@]}"
     return
   fi
   escalate_mark_confirmed_locked "$lane" "$json" "$transition"
