@@ -7581,6 +7581,7 @@ source "$root/scripts/fixtures/verify-r3-f3.sh"
 source "$root/scripts/fixtures/verify-r3-f2.sh"
 # R3-F1 lifecycle, cleanup, and offline doctor regressions.
 source "$root/scripts/fixtures/verify-r3-f1.sh"
+source "$root/scripts/fixtures/verify-r4.sh"
 
 echo "waspflow verify: ok"
 source "$root/scripts/fixtures/verify-r3-f4.sh"

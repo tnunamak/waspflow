@@ -7,9 +7,8 @@
   source "$root/lib/core.sh"
   mkdir -p "$WASPFLOW_HOME"
 
-  # B1: if a detached session leader exits while a TERM-resistant descendant
-  # remains in its recorded process group, the group stays uncertain until the
-  # bounded TERM/KILL retirement proves it is gone.
+  # C1: if a detached session leader exits while a TERM-resistant descendant
+  # remains in its recorded process group, cleanup must leave it uncertain.
   release="$r3f1/release"
   cat >"$r3f1/child.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -28,6 +27,7 @@ EOF
   for _ in {1..100}; do [[ -s "$r3f1/ready.leader" && -s "$r3f1/ready.child" ]] && break; sleep 0.02; done
   [[ -s "$r3f1/ready.leader" && -s "$r3f1/ready.child" ]]
   recorded_leader="$(cat "$r3f1/ready.leader")"
+  child="$(cat "$r3f1/ready.child")"
   read -r recorded_pgid recorded_sid < <(ps -o pgid= -o sid= -p "$recorded_leader")
   lane_set descendants provider fake cwd "$r3f1" detached_session_receipts "[]"
   tmux_record_lane_detached_session descendants pane "$recorded_leader" "$recorded_pgid" "$recorded_sid" "$(process_start_ticks "$recorded_leader")"
@@ -35,7 +35,11 @@ EOF
   wait "$leader" 2>/dev/null || true
   receipt="$(tmux_lane_detached_session_receipts descendants)"
   [[ "$(tmux_detached_session_receipt_group_state "$receipt" || true)" == uncertain ]]
-  tmux_kill_owned_lane_detached_sessions descendants
+  if tmux_kill_owned_lane_detached_sessions descendants; then
+    echo 'r3-f1 C1: uncertain detached descendant was retired' >&2; exit 1
+  fi
+  kill -KILL "$child" 2>/dev/null || true
+  for _ in {1..100}; do [[ "$(tmux_detached_session_receipt_group_state "$receipt" || true)" == gone ]] && break; sleep 0.02; done
   [[ "$(tmux_detached_session_receipt_group_state "$receipt" || true)" == gone ]]
 
   # B3: detached-session receipt appends take the same state lock as lane_set,
@@ -44,7 +48,7 @@ EOF
   lock_file="$(lane_dir locked)/.state.lock"
   exec 8>"$lock_file"
   flock 8
-  ( tmux_record_lane_detached_session locked pane "$$" "$(ps -o pgid= -p "$$" | tr -d ' ')" "$(ps -o sid= -p "$$" | tr -d ' ')" "$(process_start_ticks "$$")"; touch "$r3f1/receipt-done" ) &
+  ( tmux_record_lane_detached_session locked pane 1 1 1 1; touch "$r3f1/receipt-done" ) &
   receipt_writer=$!
   sleep 0.1
   [[ ! -e "$r3f1/receipt-done" ]]
@@ -80,7 +84,7 @@ EOF
   lane_set retirement provider fake cwd "$r3f1"
   tmux_record_lane_detached_session retirement pane 1 1 1 1
   tmux_record_lane_detached_session retirement escalation:new 2 2 2 2
-  tmux_kill_detached_session_receipt_if_owned() { jq -r .execution <<<"$1" >>"$r3f1/retired"; }
+  tmux_kill_detached_session_receipt_if_owned() { jq -r .execution <<<"$2" >>"$r3f1/retired"; }
   tmux_kill_owned_lane_detached_sessions_except_execution retirement escalation:new
   [[ "$(cat "$r3f1/retired")" == pane ]]
   unset -f tmux_kill_detached_session_receipt_if_owned
