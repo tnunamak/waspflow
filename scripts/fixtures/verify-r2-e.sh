@@ -23,6 +23,27 @@
 )
 
 (
+  fixture="$(mktemp -d "$scratch/waspflow-r2-e-ledger-XXXXXX")"
+  trap 'rm -rf "$fixture"' EXIT
+  export WASPFLOW_HOME="$fixture/home" WASPFLOW_LIB="$root/lib"
+  source "$root/lib/core.sh"
+  source "$root/lib/reconcile.sh"
+
+  # The acknowledgement's supersession check must use every ledger row, not
+  # the final row only. A failed acknowledgement also leaves the shared lock
+  # available to the next event operation in this long-lived shell.
+  alpha_one="$(reconcile_event_emit alpha 1 completion)"
+  alpha_two="$(reconcile_event_emit alpha 2 completion)"
+  reconcile_event_emit beta 1 completion >/dev/null
+  reconcile_event_claim "$alpha_two" consumer 60 | jq -e '.ok == true' >/dev/null
+  reconcile_event_ack "$alpha_two" consumer
+  if reconcile_event_ack "$alpha_one" wrong-consumer; then
+    echo 'reconcile: stale acknowledgement succeeded' >&2; exit 1
+  fi
+  flock -n "$WASPFLOW_LOCKS_DIR/events.lock" true
+)
+
+(
   fixture="$(mktemp -d "$scratch/waspflow-r2-e-events-XXXXXX")"
   trap 'rm -rf "$fixture"' EXIT
   export WASPFLOW_HOME="$fixture/home" WASPFLOW_LIB="$root/lib" WASPFLOW_EVENT_TMPDIR="$fixture/tmp"

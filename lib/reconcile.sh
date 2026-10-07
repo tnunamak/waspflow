@@ -42,24 +42,25 @@ reconcile_fleet_health_json() {
 
 # Append a redacted delivery obligation. Event ids include the generation, so a
 # revised turn cannot acknowledge a previous turn's obligation.
-reconcile_event_emit() {
-  local lane="$1" generation="$2" kind="$3" event_id="${4:-}" ledger fd payload
+reconcile_event_emit() (
+  local lane="$1" generation="$2" kind="$3" event_id="${4:-}" ledger fd payload absent
   [[ -n "$lane" && "$generation" =~ ^[0-9]+$ && "$kind" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
   event_id="${event_id:-$(printf '%s' "$lane|$generation|$kind" | sha256sum | awk '{print substr($1,1,32)}')}"
   ledger="$(reconcile_event_ledger)"; mkdir -p -m 700 "$WASPFLOW_HOME" "$WASPFLOW_LOCKS_DIR" || return 1
   exec {fd}>"$WASPFLOW_LOCKS_DIR/events.lock" || return 1; flock -x "$fd" || return 1
   touch "$ledger" || { flock -u "$fd"; exec {fd}>&-; return 1; }
-  if ! jq -e --arg id "$event_id" 'select(.event_id == $id)' "$ledger" >/dev/null 2>&1; then
+  absent="$(jq -ser --arg id "$event_id" '[.[] | select(.event_id == $id)] | length == 0' "$ledger")" || return 1
+  if [[ "$absent" == true ]]; then
     payload="$(jq -cn --arg id "$event_id" --arg lane "$lane" --arg kind "$kind" --argjson generation "$generation" \
       '{schema:"waspflow-owner-event/v1",event_id:$id,lane:$lane,generation:$generation,kind:$kind,state:"pending",created_epoch:now}')" || return 1
     printf '%s\n' "$payload" >>"$ledger" || return 1
   fi
-  flock -u "$fd"; exec {fd}>&-; printf '%s\n' "$event_id"
-}
+  printf '%s\n' "$event_id"
+)
 
 # Claim and acknowledgement state is separate from immutable event evidence.
 # Leases make a crashed consumer recoverable without permitting two live claims.
-reconcile_event_claim() {
+reconcile_event_claim() (
   local event_id="$1" consumer="$2" lease_seconds="${3:-60}" claims fd now result
   [[ -n "$event_id" && -n "$consumer" && "$lease_seconds" =~ ^[1-9][0-9]*$ ]] || return 1
   claims="$(reconcile_event_claims)"; mkdir -p -m 700 "$WASPFLOW_HOME" "$WASPFLOW_LOCKS_DIR" || return 1
@@ -74,26 +75,26 @@ reconcile_event_claim() {
     local tmp; tmp="$(mktemp "$WASPFLOW_HOME/.event-claims.XXXXXX")" || return 1
     jq --arg id "$event_id" --argjson claim "$(jq -c '.claim' <<<"$result")" '.[$id] = $claim' "$claims" >"$tmp" && mv "$tmp" "$claims" || { rm -f "$tmp"; return 1; }
   fi
-  flock -u "$fd"; exec {fd}>&-; printf '%s\n' "$result"
-}
+  printf '%s\n' "$result"
+)
 
-reconcile_event_ack() {
+reconcile_event_ack() (
   local event_id="$1" consumer="$2" claims ledger fd tmp lane generation latest
   claims="$(reconcile_event_claims)"; [[ -f "$claims" ]] || return 1
   ledger="$(reconcile_event_ledger)"; [[ -f "$ledger" ]] || return 1
-  lane="$(jq -r --arg id "$event_id" 'select(.event_id == $id) | .lane' "$ledger" | tail -1)"
-  generation="$(jq -r --arg id "$event_id" 'select(.event_id == $id) | .generation' "$ledger" | tail -1)"
+  mkdir -p -m 700 "$WASPFLOW_HOME" "$WASPFLOW_LOCKS_DIR" || return 1
+  exec {fd}>"$WASPFLOW_LOCKS_DIR/events.lock" || return 1; flock -x "$fd" || return 1
+  lane="$(jq -sr --arg id "$event_id" 'map(select(.event_id == $id)) | last | .lane // ""' "$ledger")" || return 1
+  generation="$(jq -sr --arg id "$event_id" 'map(select(.event_id == $id)) | last | .generation // ""' "$ledger")" || return 1
   [[ -n "$lane" && "$generation" =~ ^[0-9]+$ ]] || return 1
-  latest="$(jq -r --arg lane "$lane" '[select(.lane == $lane) | .generation] | max // -1' "$ledger" | tail -1)"
+  latest="$(jq -sr --arg lane "$lane" '[.[] | select(.lane == $lane) | .generation] | max // -1' "$ledger")" || return 1
   # A newer generation supersedes this obligation. An old completion cannot
   # acknowledge current work merely because the same consumer still has it.
   [[ "$latest" == "$generation" ]] || return 1
-  exec {fd}>"$WASPFLOW_LOCKS_DIR/events.lock" || return 1; flock -x "$fd" || return 1
   jq -e --arg id "$event_id" --arg consumer "$consumer" '.[$id].consumer == $consumer and (.[$id].acked // false | not)' "$claims" >/dev/null || return 1
   tmp="$(mktemp "$WASPFLOW_HOME/.event-claims.XXXXXX")" || return 1
   jq --arg id "$event_id" '.[$id].acked = true | .[$id].acked_epoch = now' "$claims" >"$tmp" && mv "$tmp" "$claims" || { rm -f "$tmp"; return 1; }
-  flock -u "$fd"; exec {fd}>&-
-}
+)
 
 reconcile_lane_json() {
   local lane="$1" record active_scopes="$2" scopes_ok="$3" pid expected_start actual_start window=false lifecycle owner cwd outcome claims event_count=0 classification next_action evidence
