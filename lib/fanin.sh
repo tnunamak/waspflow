@@ -30,6 +30,9 @@ WASPFLOW_OUTCOMES=(open harvested superseded abandoned)
 # Where reap archives bundled branch tips before deletion.
 WASPFLOW_ARCHIVE_DIR="${WASPFLOW_ARCHIVE_DIR:-$WASPFLOW_HOME/archive}"
 
+# shellcheck disable=SC1090
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resource-ledger.sh"
+
 is_known_outcome() {
   local o
   for o in "${WASPFLOW_OUTCOMES[@]}"; do [[ "$o" == "$1" ]] && return 0; done
@@ -144,7 +147,7 @@ fanin_token_present() {
   esac
 }
 
-# Report CAPTURED | UNIQUE | PARTIAL for a lane against a ref, by content.
+# Report CAPTURED only for an exact supported diff; otherwise report UNKNOWN.
 # Prints a human summary to stderr and the verdict word to stdout.
 # Args: lane ref
 fanin_captured() {
@@ -163,40 +166,23 @@ fanin_captured() {
   git -C "$repo_root" rev-parse --verify --quiet "$ref" >/dev/null \
     || die "captured: ref '$ref' not found in $repo_root"
 
-  local tokens; tokens="$(fanin_signature_tokens "$repo_root" "$branch" "$ref")"
-  if [[ -z "$tokens" ]]; then
-    warn "captured: lane '$lane' has no signature tokens vs $ref (empty/whitespace diff?) — treating as CAPTURED"
-    echo "CAPTURED"; return 0
-  fi
-
-  local total=0 present=0 missing=()
-  local tok
-  while IFS= read -r tok; do
-    [[ -n "$tok" ]] || continue
-    total=$((total+1))
-    if fanin_token_present "$repo_root" "$ref" "$tok"; then
-      present=$((present+1))
-    else
-      missing+=("${tok#*:} (${tok%%:*})")   # "landed.ts (file)" / "uniqueThing (sym)"
-    fi
-  done <<<"$tokens"
-
-  local verdict
-  if [[ "$present" -eq "$total" ]]; then
-    verdict="CAPTURED"
-  elif [[ "$present" -eq 0 ]]; then
-    verdict="UNIQUE"
+  local base lane_patch ref_patch
+  base="$(git -C "$repo_root" merge-base "$branch" "$ref" 2>/dev/null || true)"
+  [[ -n "$base" ]] || base="$ref"
+  lane_patch="$(git -C "$repo_root" -c diff.external= -c core.attributesfile=/dev/null diff --no-ext-diff --binary --full-index "$base" "$branch" 2>/dev/null)"
+  ref_patch="$(git -C "$repo_root" -c diff.external= -c core.attributesfile=/dev/null diff --no-ext-diff --binary --full-index "$base" "$ref" 2>/dev/null)"
+  if [[ -n "$lane_patch" && "$lane_patch" == "$ref_patch" ]]; then
+    lane_set "$lane" capture_evidence_source exact-binary-diff capture_uncertainty none
+    warn "captured: lane '$lane' vs $ref — CAPTURED (exact binary diff from $base)"
+    echo CAPTURED
   else
-    verdict="PARTIAL"
+    # Names, basenames, and symbols are clues, not proof: an edit can be
+    # deleted, reimplemented, or merely share a name.  Fail closed until an
+    # exact supported comparison establishes the capture.
+    lane_set "$lane" capture_evidence_source exact-binary-diff capture_uncertainty insufficient
+    warn "captured: lane '$lane' vs $ref — UNKNOWN (no exact supported content evidence)"
+    echo UNKNOWN
   fi
-
-  warn "captured: lane '$lane' vs $ref — $verdict ($present/$total signature tokens present)"
-  if [[ "${#missing[@]}" -gt 0 ]]; then
-    warn "  unshipped tokens (harvest candidates):"
-    local m
-    for m in "${missing[@]}"; do warn "    $m"; done
-  fi
-  echo "$verdict"
 }
 
 # ---- Primitive 3: bundle-before-reap ---------------------------------------
@@ -212,9 +198,6 @@ fanin_bundle_lane() {
   git -C "$repo_root" rev-parse --verify --quiet "$branch" >/dev/null 2>&1 || return 0
 
   mkdir -p "$WASPFLOW_ARCHIVE_DIR"
-  local stamp bundle
-  stamp="$(date +%Y%m%d-%H%M%S)"
-  bundle="$WASPFLOW_ARCHIVE_DIR/${lane}-${stamp}.bundle"
 
   # Prefer a THIN bundle: only the lane's OWN commits (fork-point..tip), not the
   # branch's entire reachable history. On a large repo the full-history bundle is
@@ -235,31 +218,46 @@ fanin_bundle_lane() {
   # 1,474 of 1,525 bundles (14.2 of 14.4 GB) have a tip already in a live repo,
   # including 354 MB bundles whose unique content is a commit and its own revert.
   # Record it as merged and skip the bundle; the commits remain in the origin repo.
-  local tip; tip="$(git -C "$repo_root" rev-parse "$branch" 2>/dev/null || true)"
+  local tip content_hash archive_identity bundle bundle_tmp
+  tip="$(git -C "$repo_root" rev-parse "$branch" 2>/dev/null || true)"
+  content_hash="$(git -C "$repo_root" diff --binary --full-index "${base:-$tip}" "$tip" 2>/dev/null | git hash-object --stdin)"
+  archive_identity="v1:${tip}:${base:-none}:${content_hash}"
+  bundle="$WASPFLOW_ARCHIVE_DIR/${lane}-${tip}-${content_hash}.bundle"
+  if [[ "$(lane_get "$lane" archive_identity)" == "$archive_identity" ]] \
+     && [[ -f "$(lane_get "$lane" archive_bundle)" ]] \
+     && git -C "$repo_root" bundle verify "$(lane_get "$lane" archive_bundle)" >/dev/null 2>&1 \
+     && git -C "$repo_root" bundle list-heads "$(lane_get "$lane" archive_bundle)" 2>/dev/null | awk -v tip="$tip" '$1 == tip { found=1 } END { exit !found }'; then
+    log "reap: reusing verified archive for branch '$branch' (${tip:0:9})"
+    return 0
+  fi
   if [[ -n "$base" && -n "$tip" && "$base" == "$tip" ]]; then
-    lane_set "$lane" archive_skipped "merged" archive_merged_at "$tip"
+    lane_set "$lane" archive_skipped "merged" archive_merged_at "$tip" archive_identity "$archive_identity"
     log "reap: branch '$branch' is fully merged (${tip:0:9}); no bundle needed"
     return 0
   fi
 
   local made=0
+  bundle_tmp="${bundle}.tmp-$$"
   if [[ -n "$base" && "$base" != "$tip" ]]; then
-    if git -C "$repo_root" bundle create "$bundle" "${base}..${branch}" >/dev/null 2>&1 \
-       && git -C "$repo_root" bundle verify "$bundle" >/dev/null 2>&1; then
-      lane_set "$lane" archive_bundle "$bundle" archive_base "$base"
+    if git -C "$repo_root" bundle create "$bundle_tmp" "${base}..${branch}" >/dev/null 2>&1 \
+       && git -C "$repo_root" bundle verify "$bundle_tmp" >/dev/null 2>&1 \
+       && mv -f "$bundle_tmp" "$bundle" \
+       && lane_set "$lane" archive_bundle "$bundle" archive_base "$base" archive_identity "$archive_identity" archive_content_hash "$content_hash"; then
       log "reap: archived branch '$branch' (thin, base ${base:0:9}) -> $bundle (verified)"
       made=1
     fi
   fi
   if [[ "$made" -eq 0 ]]; then
     # Full-history fallback (no fork point, or thin create/verify failed).
-    if git -C "$repo_root" bundle create "$bundle" "$branch" >/dev/null 2>&1 \
-       && git -C "$repo_root" bundle verify "$bundle" >/dev/null 2>&1; then
-      lane_set "$lane" archive_bundle "$bundle"
+    if git -C "$repo_root" bundle create "$bundle_tmp" "$branch" >/dev/null 2>&1 \
+       && git -C "$repo_root" bundle verify "$bundle_tmp" >/dev/null 2>&1 \
+       && mv -f "$bundle_tmp" "$bundle" \
+       && lane_set "$lane" archive_bundle "$bundle" archive_identity "$archive_identity" archive_content_hash "$content_hash"; then
       log "reap: archived branch '$branch' -> $bundle (verified)"
       made=1
     fi
   fi
+  rm -f "$bundle_tmp"
   [[ "$made" -eq 1 ]] && return 0
   warn "reap: failed to bundle branch '$branch' (continuing without archive)"
   return 1

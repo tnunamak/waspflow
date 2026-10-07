@@ -104,3 +104,13 @@ worktree_remove() {
     || { warn "git worktree remove failed for $wt_path (left in place)"; return 1; }
   return 0
 }
+
+# Inventory the exact Git-visible work which --force would discard.  This does
+# not traverse the filesystem and therefore cannot enumerate or act on ambient
+# temporary directories.
+worktree_discard_inventory() {
+  local wt_path="$1"
+  [[ -d "$wt_path" ]] || return 1
+  git -C "$wt_path" status --porcelain=v1 --untracked-files=all --ignored 2>/dev/null \
+    | jq -Rsc 'split("\n") | map(select(length > 0))'
+}
