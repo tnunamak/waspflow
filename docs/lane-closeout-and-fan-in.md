@@ -2,7 +2,7 @@
 
 Status: implemented (2026-07-03) — all three primitives shipped in `bin/waspflow` + `lib/fanin.sh`.
 Created: 2026-07-03
-Related: `docs/slvp-ideal.md` (this closes a stated-but-unrealized gap in the ideal).
+Related: [SLVP ideal](slvp-ideal.md) (this closes a stated-but-unrealized gap in the ideal).
 
 Implementation notes (where the doc and the code differ):
 - The closeout state is a **separate `outcome` field** (open|harvested|superseded|abandoned),
@@ -24,7 +24,7 @@ onto a human (or an orchestrating agent) doing git archaeology, per lane. Creati
 reconciliation is O(hours). That asymmetry is the gap.
 
 This is not a new idea bolted on — the SLVP ideal already commits to it and just hasn't
-realized it. `docs/slvp-ideal.md` lists as reusable machinery:
+realized it. [SLVP ideal](slvp-ideal.md) lists as reusable machinery:
 
 - "durable lane artifacts: prompt, transcript, state, **status**, diff, and report" — the
   status field is named but under-used; there is no *outcome* status a fan-in can filter on.
@@ -85,9 +85,8 @@ Design notes:
 
 The deepest fan-in time-sink in practice: when integration cherry-picks or forward-ports lane
 work (rather than a straight merge), `git merge-base --is-ancestor <lane> <ref>` reports "not
-captured" even when the lane's content is 100% present. Observed three separate times in one
-pdpp fan-in (the g1 tranches, the autoquality lanes, the oj cluster) — every one was "0
-ancestors, ~100% captured **by content**." Ancestry is the wrong test; it is actively
+captured" even when the lane's content is 100% present. In several multi-lane integrations, every
+such case was "0 ancestors, ~100% captured **by content**." Ancestry is the wrong test; it is actively
 misleading after any non-merge integration, which is the norm for reconciliation work.
 
 ```
@@ -119,7 +118,7 @@ scripted pass plus a short human decision on the `UNIQUE`/`PARTIAL` set.
 
 ## Ops: bundle-before-reap (already learned, worth encoding)
 
-Nothing is pushed for most lanes, so `git branch -D` is irreversible. The pdpp fan-in used
+Nothing is pushed for most lanes, so `git branch -D` is irreversible. A safe fan-in uses
 `git bundle create` + `git bundle verify` per cohort before any deletion, giving a recoverable
 archive. `waspflow reap` should do this by default: bundle the reaped lanes' tips to
 `<archive>/reaped-<date>.bundle`, verify, *then* delete — so "reaping is cleanup, not data
@@ -132,8 +131,7 @@ disposable.
   about the *fan-in* seam.
 - **Not a replacement for project skepticism.** The consuming project's verify discipline
   (behavior-preservation gates, prove-the-diff, grep-after-rename) is what *catches lost work*
-  during harvest — a genuinely-lost bug fix and two unshipped fixes were saved by it in the
-  pdpp run. `captured` tells you *where* to look; it does not replace *checking*.
+  during harvest. `captured` tells you *where* to look; it does not replace *checking*.
 - **Not the `~/.tmp` reaper's job.** Age-based tmp cleanup stays as-is (safe fallback);
   `close`+`reap` handle the intent-driven common case. They're complementary.
 

@@ -23,7 +23,7 @@ Root also carries:
 - `policy_version` — pack semver
 - `doctrine` — short non-goals
 
-## `op-requirements.json` (DRAFT — owner review pending)
+## `op-requirements.json` (DRAFT — policy review pending)
 
 The recommender reads this policy and the catalog; it never edits `operating-points.json`.
 JSON Schema: [`schemas/op-requirements-v1.schema.json`](schemas/op-requirements-v1.schema.json).
@@ -63,14 +63,12 @@ and general `pass_at_<k>` fields calibrate same-arm retry alongside `pass_at_k`.
 
 | Default | Value | Source and meaning |
 |---------|-------|--------------------|
-| `attempt_overhead_usd` | $0.50 per attempt | Orchestrator review of 2026-09-23: allowance for verification and orchestrator review on **each** attempt. This is a policy estimate, not measured spend. |
-| `failure_detection_probability` for verified ops | 0.75 | Orchestrator review of 2026-09-23, informed by research on verify-failure escalation. The cited 28–76% gamed green-pass rates across specific evaluations do **not** directly measure detection probability. 0.75 is a sensitivity-tested policy prior. |
-| `failure_detection_probability` for judged ops | 0 | Orchestrator review of 2026-09-23: no automatic catch/retry for a review or advice miss. |
+| `attempt_overhead_usd` | $0.50 per attempt | Policy estimate for verification and coordination on **each** attempt; not measured spend. |
+| `failure_detection_probability` for verified ops | 0.75 | Policy prior informed by research on verify-failure escalation. The cited 28–76% gamed green-pass rates across specific evaluations do **not** directly measure detection probability. |
+| `failure_detection_probability` for judged ops | 0 | Policy assumption: no automatic catch/retry for a review or advice miss. |
 
-The same review supplies the following uncalibrated `silent_failure_cost_usd`
-defaults. They mean roughly what a missed problem costs in dollars; raise a
-value if misses hurt more. The original recommender brief already specified
-$100 for `review.audit` and $50 for `advisor.deep`.
+The following uncalibrated `silent_failure_cost_usd` defaults estimate what a
+missed problem costs in dollars; raise a value if misses hurt more.
 
 | Op | `silent_failure_cost_usd` | Reason for relative size |
 |----|---------------------------|--------------------------|
@@ -113,8 +111,9 @@ than a measured candidate. Vendor groups only flag this. `review.audit` excludes
 both makers' **vendors**, and shows maker and checker success rates side by side
 where available. If a maker is unresolved, its current `expands_to` supplies
 the vendor constraint. This vendor choice for `review.audit` is
-`OWNER_DECISION_PENDING`: the owner must decide vendor versus model-family
-independence. The recommender keeps the current vendor constraint meanwhile.
+`OWNER_DECISION_PENDING`: a policy decision is required on vendor versus
+model-family independence. The recommender keeps the current vendor constraint
+meanwhile.
 
 The default policy horizon is 90 days from the pinned `defaults.price_as_of`
 (initially the pack's `generated_at` date); `--price-as-of` overrides it.

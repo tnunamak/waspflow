@@ -14,7 +14,7 @@
 #   ops     list|explain|resolve|path     operating-point resolver (not a picker)
 #   init    [--profile NAME] [--cwd DIR] [--force] [--print]  write project config
 #   demo    --provider <claude|codex|grok|antigravity|qwen|deepseek> [--run] guided first lane
-#   list    [--status S,...] [--lifecycle-state S,...] [--project DIR] [--limit N] [--json]
+#   list    [--status S,...] [--lifecycle-state S,...] [--project DIR] [--limit N] [--hide-reaped] [--json]
 #   status  <lane>                        one lane's state (json)
 #   peek    <lane> [--lines N]            de-escaped tail of the live pane
 #   wait    <lane> [--timeout S] [--interval S] [--reap]   block until idle, optionally reap
@@ -797,13 +797,14 @@ cmd_receipts() {
 }
 
 cmd_list() {
-  local status_filter="" lifecycle_filter="" project="" limit="" json=0
+  local status_filter="" lifecycle_filter="" project="" limit="" hide_reaped=0 json=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --status) [[ $# -ge 2 ]] || die "list: --status requires a value"; status_filter="$2"; shift 2 ;;
       --lifecycle-state) [[ $# -ge 2 ]] || die "list: --lifecycle-state requires a value"; lifecycle_filter="$2"; shift 2 ;;
       --project) [[ $# -ge 2 ]] || die "list: --project requires a directory"; project="$2"; shift 2 ;;
       --limit) [[ $# -ge 2 ]] || die "list: --limit requires a value"; limit="$2"; shift 2 ;;
+      --hide-reaped) hide_reaped=1; shift ;;
       --json) json=1; shift ;;
       -*) die "list: unknown option '$1'" ;;
       *) shift ;;
@@ -835,10 +836,10 @@ cmd_list() {
   # Fast path: the common machine fleet inventory. Filters and prefix limits
   # intentionally use the exact conservative path below; this path handles the
   # healthy, unfiltered index without changing those semantics.
-  if [[ "$json" -eq 1 && -z "$status_filter" && -z "$lifecycle_filter" && -z "$project" && -z "$limit" ]]; then
+  if [[ "$json" -eq 1 && -z "$status_filter" && -z "$lifecycle_filter" && -z "$project" && -z "$limit" && "$hide_reaped" -eq 0 ]]; then
     if cmd_list_json_batch "$lanes" "$active_scopes" "$scope_query_available"; then return 0; fi
   fi
-  if [[ "$json" -eq 0 && -z "$status_filter" && -z "$lifecycle_filter" && -z "$project" && -z "$limit" ]]; then
+  if [[ "$json" -eq 0 && -z "$status_filter" && -z "$lifecycle_filter" && -z "$project" && -z "$limit" && "$hide_reaped" -eq 0 ]]; then
     local table_rows table_row table_provider table_state table_outcome table_intent table_cwd
     local table_batch_rc=0
     table_rows="$(cmd_list_table_batch "$lanes" "$active_scopes" "$scope_query_available")" || table_batch_rc=$?
@@ -908,6 +909,7 @@ JQ
       [[ ",$status_filter," == *",$outcome,"* ]] || continue
     fi
     [[ -z "$lifecycle_filter" || ",$lifecycle_filter," == *",$lifecycle,"* ]] || continue
+    [[ "$hide_reaped" -eq 0 || "$lifecycle" != reaped ]] || continue
     [[ -z "$project" ]] || lane_matches_project "$lane" "$project" || continue
     matched=1
     if [[ "$json" -eq 1 ]]; then

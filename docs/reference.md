@@ -23,7 +23,7 @@ an intentional top-level spawn; it records `declared_orphan` rather than
 You need `tmux`, `jq`, `awk`, `python3`, `git`, `flock`, and provider CLIs for
 the lanes you run. `codex` and `claude` are recommended; `grok`, `agy`, `qwen`,
 and `dsh` are optional. If something is missing, `waspflow doctor` tells you
-what to install. See [docs/prerequisites.md](docs/prerequisites.md) for links.
+what to install. See [prerequisites.md](prerequisites.md) for links.
 
 ## The Loop
 
@@ -185,7 +185,7 @@ waspflow init --profile serious-repo --profile live-stack-mutex
 
 The project supplies the facts: which files are blockers, which command checks
 matter, which mutex file protects a live system. Waspflow supplies the common
-machinery. See [docs/project-checks.md](docs/project-checks.md) for the full
+machinery. See [project-checks.md](project-checks.md) for the full
 config shape.
 
 ## Commands
@@ -200,7 +200,7 @@ config shape.
 | `inspect [<lane>] --json` | Read-only lane facts and explainable cleanup classifications |
 | `peek <lane> [--events]` | Pane/transcript capture for UI diagnosis; `--events` is the structured tail |
 | `revise <lane> -- <message>` | Send another instruction to the same session; nonzero means live submission was not confirmed |
-| `escalate <lane> [--to …] [--handoff] [--defer]` | Switch arms after a failed checkpoint; `--defer` waits for a cold-cache boundary and applies at the next `revise` ([deferred switches](docs/deferred-switch.md)); `revise` instead steers the same arm |
+| `escalate <lane> [--to …] [--handoff] [--defer]` | Switch arms after a failed checkpoint; `--defer` waits for a cold-cache boundary and applies at the next `revise` ([deferred switches](deferred-switch.md)); `revise` instead steers the same arm |
 | `accept-runtime <lane> --reason <text>` | Explicitly accept the current observed Codex model/effort mismatch |
 | `verify <lane> [--json]` | Run the configured prepare/verify contract without teardown (0 pass, 2 fail); failed task checkpoints propose `escalate` |
 | `reap <lane>` | Close the pane, verify outputs, and finalize state |
@@ -241,7 +241,7 @@ for those providers. Under Claude/Codex isolation, pass-through MCP config (and 
 config profiles) is rejected; choose `inherit` explicitly when a task needs it.
 
 For a one-time recovery of older missing parent records, see
-[forensic parent backfill](docs/provenance-backfill.md). It uses only exact
+[forensic parent backfill](provenance-backfill.md). It uses only exact
 spawn commands recorded as submitted tool arguments; it does not infer a parent
 from transcript or command output.
 
@@ -499,7 +499,7 @@ age-based cleanup parks rather than reaps.
 
 `list --json` exposes the durable global lane index to callers. It supports
 `--project DIR`, `--lifecycle-state live,interrupted,unknown,exited,parked,reaped`,
-and `--limit N` while continuing to show corrupt records rather than silently
+`--hide-reaped`, and `--limit N` while continuing to show corrupt records rather than silently
 dropping them. `live` is derived from a current waspflow systemd scope receipt;
 a stored `live` record with no active receipt is `interrupted`, and a lane that
 ran through the `scope-unavailable` fallback is `unknown`. `unknown` also

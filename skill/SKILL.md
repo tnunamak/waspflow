@@ -64,7 +64,7 @@ unsupported hard-fails; never silently demoted — Codex `xhigh` is real),
 
 For task-shaped selection, `--op <id>` expands to explicit flags + a decision card
 (explicit flags win over the expansion). Do NOT invent a `cheap|default|max`
-ladder. Full doctrine: **docs/operating-points.md**.
+ladder. Full doctrine: [operating points](../docs/operating-points.md).
 
 ```bash
 waspflow ops list --task implementation      # then: --op implement.standard, review.audit, …

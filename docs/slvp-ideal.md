@@ -85,12 +85,12 @@ The tool explains risks in operational language. It should not require a
 project-specific playbook to understand dirty worktrees, unreaped lanes, failed
 reports, blocker files, or open mutexes.
 
-### Flagship dogfood project
+### Reference project
 
-PDPP should be an example of the serious-project tier, not a fork of waspflow.
-PDPP can keep a short governance doc, but orchestration mechanics should remain
-in waspflow. If PDPP needs a new generic primitive, the default answer is to
-improve waspflow, then delete the local workaround.
+A serious project should exercise the reusable tier, not fork waspflow.
+Project-specific governance may remain local, but generic orchestration
+mechanics belong in waspflow. When a project needs a generic primitive, improve
+waspflow, then remove the local workaround.
 
 ## Prior Art Signals
 
@@ -114,8 +114,8 @@ The target is aligned with current leading-agent products:
 - Waspflow is not a project manager.
 - Waspflow is not an autonomous merge/deploy system by default.
 - Waspflow is not a replacement for repo-specific standards, specs, or CI.
-- Waspflow should not encode PDPP-specific paths, OpenSpec assumptions, or live
-  personal-data policy into its default behavior.
+- Waspflow should not encode project-specific paths, workflow assumptions, or
+  live policy into its default behavior.
 
 ## Product Invariants
 

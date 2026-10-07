@@ -97,7 +97,7 @@ reconcile_event_ack() (
 )
 
 reconcile_lane_json() {
-  local lane="$1" record active_scopes="$2" scopes_ok="$3" pid expected_start actual_start window=false lifecycle record_status owner cwd outcome claims event_count=0 classification next_action evidence
+  local lane="$1" record active_scopes="$2" scopes_ok="$3" pid expected_start actual_start window=false lifecycle record_status owner cwd outcome claims claims_file pending_events=0 pending_events_state=known superseded_pending_events=0 pending_events_reason="" event_summary classification next_action evidence
   local state_file; state_file="$(lane_state_file "$lane")"
   if [[ ! -f "$state_file" ]]; then jq -cn --arg lane "$lane" '{lane:$lane,status:"unknown",evidence:["missing-state.json"],next_action:"preserve forensic path; inspect record directory"}'; return; fi
   if ! record="$(jq -c . "$state_file" 2>/dev/null)"; then jq -cn --arg lane "$lane" '{lane:$lane,status:"unknown",evidence:["corrupt-state.json"],next_action:"preserve forensic path; repair or inspect record"}'; return; fi
@@ -110,8 +110,34 @@ reconcile_lane_json() {
   pid="$(jq -r '.tmux_pane_pid // ""' <<<"$record")"; expected_start="$(jq -r '.tmux_pane_pid_start_time // ""' <<<"$record")"
   actual_start="$(_reconcile_pid_start_time "$pid" 2>/dev/null || true)"
   if [[ -f "$(reconcile_event_ledger)" ]]; then
-    claims="$(cat "$(reconcile_event_claims)" 2>/dev/null || printf '{}')"
-    event_count="$(jq -s --arg lane "$lane" --argjson claims "$claims" '[.[] | select(.lane == $lane and .state == "pending") | select((($claims[.event_id].acked // false) | not))] | length' "$(reconcile_event_ledger)" 2>/dev/null || echo 0)"
+    claims_file="$(reconcile_event_claims)"
+    if [[ -f "$claims_file" ]] && ! claims="$(jq -c . "$claims_file" 2>/dev/null)"; then
+      pending_events=null; superseded_pending_events=null; pending_events_state=unknown; pending_events_reason="unreadable-event-claims"
+    elif [[ -f "$claims_file" ]] && ! jq -e 'type == "object"' >/dev/null <<<"$claims"; then
+      pending_events=null; superseded_pending_events=null; pending_events_state=unknown; pending_events_reason="unreadable-event-claims"
+    else
+      [[ -f "$claims_file" ]] || claims='{}'
+      if ! event_summary="$(jq -cs --arg lane "$lane" --argjson claims "$claims" '
+      [ .[] | select(.lane == $lane) ] as $events |
+      if any($events[]?; (.generation | type) != "number") then
+        {state:"unknown",pending:null,superseded:null,reason:"invalid-event-generation"}
+      else
+        [ $events[] | select(.state == "pending" and (($claims[.event_id].acked // false) | not)) ] as $unacked |
+        ($events | map(.generation) | max // null) as $latest |
+        {state:"known",
+         pending:([$unacked[] | select(.generation == $latest)] | length),
+         superseded:([$unacked[] | select(.generation != $latest)] | length),
+         reason:""}
+      end
+      ' "$(reconcile_event_ledger)" 2>/dev/null)"; then
+        pending_events=null; superseded_pending_events=null; pending_events_state=unknown; pending_events_reason="unreadable-event-ledger"
+      else
+        pending_events="$(jq -c .pending <<<"$event_summary")"
+        superseded_pending_events="$(jq -c .superseded <<<"$event_summary")"
+        pending_events_state="$(jq -r .state <<<"$event_summary")"
+        pending_events_reason="$(jq -r .reason <<<"$event_summary")"
+      fi
+    fi
   fi
   classification="$lifecycle"; next_action="inspect durable receipt"
   # Derived lifecycle is stronger evidence than historical pane metadata. A
@@ -133,8 +159,8 @@ reconcile_lane_json() {
   elif [[ "$lifecycle" == unknown ]]; then next_action="identity evidence is incomplete; preserve and inspect"
   fi
   evidence="$(jq -cn --arg lifecycle "$lifecycle" --arg pid "$pid" --arg expected "$expected_start" --arg actual "$actual_start" '["recorded-lifecycle:" + $lifecycle] + (if $pid == "" then [] else ["pane-pid:" + $pid] end) + (if $expected == "" then [] else ["recorded-pid-start:" + $expected] end) + (if $actual == "" then [] else ["observed-pid:absent"] end)')" || return 1
-  jq -cn --arg lane "$lane" --arg status "$classification" --arg owner "$owner" --arg next "$next_action" --argjson window "$window" --argjson pending "$event_count" --argjson evidence "$evidence" \
-    '{lane:$lane,status:$status,current_owner:(if $owner == "" then null else $owner end),tmux_window_exists:$window,pending_events:$pending,evidence:$evidence,next_action:$next}'
+  jq -cn --arg lane "$lane" --arg status "$classification" --arg owner "$owner" --arg next "$next_action" --arg pending_state "$pending_events_state" --arg pending_reason "$pending_events_reason" --argjson window "$window" --argjson pending "$pending_events" --argjson superseded "$superseded_pending_events" --argjson evidence "$evidence" \
+    '{lane:$lane,status:$status,current_owner:(if $owner == "" then null else $owner end),tmux_window_exists:$window,pending_events:$pending,pending_events_state:$pending_state,pending_events_reason:(if $pending_reason == "" then null else $pending_reason end),superseded_pending_events:$superseded,evidence:$evidence,next_action:$next}'
 }
 
 cmd_reconcile() {
