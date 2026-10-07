@@ -103,6 +103,13 @@ EOF
   [[ "$(artifacts_finalize recovery fake)" == report_missing && ! -e "$r3f1/unexpected-recovery" ]]
   [[ "$(lane_get recovery recovery_reason)" == detached-process-retirement-uncertain ]]
 
+  # B2-residual: the same fail-closed retirement applies when the pane has
+  # already disappeared; detached writers can still be live or uncertain.
+  lane_set recovery-gone-pane provider fake cwd "$r3f1" spawn_submitted true report "$r3f1/missing-report-gone-pane"
+  tmux_window_exists() { return 1; }
+  [[ "$(artifacts_finalize recovery-gone-pane fake)" == report_missing && ! -e "$r3f1/unexpected-recovery" ]]
+  [[ "$(lane_get recovery-gone-pane recovery_reason)" == detached-process-retirement-uncertain ]]
+
   # B10: doctor treats an unavailable remote version probe as an advisory WARN.
   mkdir -p "$r3f1/bin"
   printf '#!/usr/bin/env bash\nexit 0\n' >"$r3f1/bin/codex"

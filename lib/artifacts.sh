@@ -326,14 +326,21 @@ artifacts_finalize() {
   # the recovery prompt is multi-line and a TUI send-keys mangles it. Kill the
   # live window first (the worktree stays — recovery needs it to read the diff
   # and write the report) so the provider's revise takes the headless branch.
+  local recovery_had_window=false
   if tmux_window_exists "$lane"; then
+    recovery_had_window=true
     tmux kill-window -t "$(tmux_window_target "$lane")" 2>/dev/null || true
-    if ! tmux_kill_owned_lane_detached_sessions "$lane"; then
-      turn_state_finish_generation "$lane" report_missing
-      lane_set "$lane" report_state "${report_failure_state:-absent}" recovery_state needs-owner recovery_reason detached-process-retirement-uncertain
-      warn "lane '$lane': required report recovery was not started because a detached execution group could not be retired"
-      echo "report_missing"; return 0
-    fi
+  fi
+  # A missing pane does not prove its detached descendants are gone. Retire
+  # every known execution before resuming against the same checkout, and keep
+  # the lane for owner inspection on any ambiguous identity.
+  if ! tmux_kill_owned_lane_detached_sessions "$lane"; then
+    turn_state_finish_generation "$lane" report_missing
+    lane_set "$lane" report_state "${report_failure_state:-absent}" recovery_state needs-owner recovery_reason detached-process-retirement-uncertain
+    warn "lane '$lane': required report recovery was not started because a detached execution group could not be retired"
+    echo "report_missing"; return 0
+  fi
+  if [[ "$recovery_had_window" == true ]]; then
     # Wait for the session to become resumable. A just-killed interactive session
     # may not have flushed its session log yet; resuming too soon yields
     # "No conversation found". Poll the provider's resumability up to ~8s.
