@@ -1698,6 +1698,10 @@ _revise_one() {
     lane_set "$lane" surface_changed "true" headless_revise_state running headless_revise_pid "$$" \
       headless_revise_started_epoch "$(date +%s)" headless_revise_ended_epoch "" headless_revise_error "" headless_revise_rc ""
   fi
+  # Capture report freshness and retire any prior result before the provider can
+  # synchronously write its reply. This is also the durable boundary that stops
+  # a failed headless revision from reusing an earlier success on direct reap.
+  artifacts_begin_turn_generation "$lane"
   "${provider}_revise" "$lane" "$message" "$out" || revise_rc=$?
   if [[ "$headless" -eq 1 ]]; then
     local headless_state=completed headless_error=""
@@ -1710,8 +1714,10 @@ _revise_one() {
     lane_set "$lane" headless_revise_state "$headless_state" headless_revise_error "$headless_error" \
       headless_revise_rc "$revise_rc" headless_revise_ended_epoch "$(date +%s)"
   fi
-  [[ "$revise_rc" -eq 0 ]] || return "$revise_rc"
-  artifacts_begin_turn_generation "$lane"
+  if [[ "$revise_rc" -ne 0 ]]; then
+    turn_state_finish_generation "$lane" failed
+    return "$revise_rc"
+  fi
   # A delivered instruction supersedes one a failed deferred switch left behind;
   # if it was a different instruction, show what is being discarded.
   local undelivered; undelivered="$(lane_get "$lane" undelivered_message)"
