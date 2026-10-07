@@ -85,7 +85,7 @@ exec_run() {
   [[ -n "$provider" ]] || die "exec: --provider is required (claude|codex|grok|antigravity|qwen|deepseek; or use --op)"
   is_known_provider "$provider" || die "exec: unknown provider '$provider'"
   [[ -n "$prompt" ]] || die "exec: a task prompt is required after '--'"
-  cwd="$(cd "$cwd" && pwd)" || die "exec: --cwd does not exist"
+  cwd="$(cd "$cwd" 2>/dev/null && pwd)" || die "exec: --cwd does not exist"
   guard_cwd "$cwd"   # never run a worker with cwd '/' silently (known crash class)
   if [[ "$provider" == qwen && -n "$effort" ]]; then
     die "exec/qwen: --effort is not supported by Qwen Code"

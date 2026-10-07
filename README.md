@@ -79,7 +79,9 @@ Use `--isolate` on `spawn` when workers should get separate Git worktrees. `--re
 - There is no completion callback: `wait` polls provider logs.
 - Worktree isolation is **not an OS sandbox**. Lanes run provider CLIs with permissive provider modes; only run tasks you trust.
 - Waspflow uses `systemd-run --user --scope` for scope tracking when available. Without it, it warns and continues with tmux-only supervision; lifecycle state can remain unknown and cleanup has less process-tree evidence.
-- Set `WASPFLOW_TMUX_SOCKET=name` to make every Waspflow tmux call use `tmux -L name` instead of your default tmux server.
+- Set `WASPFLOW_TMUX_SOCKET=name` to make every Waspflow tmux call use `tmux -L name` instead of your default tmux server. Export it in every shell that manages those lanes; a new shell without it looks at the default server and will not see them.
+- `revise` on Codex can report "not confirmed submitted" even though the message was applied. Run `waspflow peek NAME` before sending it again.
+- Codex lanes use whichever `codex` the lane's login shell resolves, which can differ from the one in your current shell. If a stale copy shows an update prompt, update or remove the older install.
 - `reap` refuses a live lane that the provider does not report as idle unless you pass `--force`.
 - Legacy tmux windows without Waspflow ownership tags are not adopted automatically; explicit legacy adoption is required for parking.
 - Provider CLIs change their TUIs and event formats. Live behavior can drift; stalled waits should be diagnosed with `waspflow peek`.

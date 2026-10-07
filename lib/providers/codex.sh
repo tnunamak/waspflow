@@ -492,8 +492,11 @@ _codex_paused_goal_prompt_visible() {
 _codex_startup_blocker() {
   local pane="$1" reason
   reason="$(wf_pane_startup_menu "$pane")" || return 1
+  # The composer placeholder text rotates between Codex versions, so key on the
+  # composer marker line and on the ABSENCE of modal choices, not on its wording.
   if [[ "$reason" == "startup update prompt" ]] \
-     && grep -qiE '(^|[[:space:]])(›|❯|>)[[:space:]]*Ask Codex|Ask Codex to do anything' <<<"$pane"; then
+     && grep -qE '^[[:space:]]*(›|❯|>)([[:space:]]|$)' <<<"$pane" \
+     && ! grep -qiE 'update now|skip until next version|remind me later|^[[:space:]]*[›❯>]?[[:space:]]*[0-9]\.[[:space:]]' <<<"$pane"; then
     return 1
   fi
   printf '%s\n' "$reason"
@@ -1276,7 +1279,7 @@ codex_revise() {
       revise_submission_error no-task-started revise_task_started_mark "$before"
     # Keep the caller's completed-turn barrier intact. A human can still submit
     # the pasted message later, and wait must not mistake the prior idle for it.
-    warn "codex revise: message was not confirmed submitted for lane '$lane' (no new task_started event)"
+    warn "codex revise: message was not confirmed submitted for lane '$lane' (no new task_started event); it may still have been applied, so run 'waspflow peek $lane' before sending it again"
     return 1
   fi
 

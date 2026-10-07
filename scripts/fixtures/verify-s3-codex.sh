@@ -20,6 +20,8 @@
   # and a trust prompt still block with an actionable, non-contradictory path.
   update_with_composer=$'Update available! 0.159.3 -> 0.160.1\nRun bun install -g...\n› Ask Codex to do anything'
   ! _codex_startup_blocker "$update_with_composer"
+  update_rotating=$'Update available! 0.159.3 -> 0.160.1\nRun bun install -g...\n› What are we poking with a metaphorical stick?\n  Tip: use /model'
+  ! _codex_startup_blocker "$update_rotating"
   update_menu=$'Update available! 0.159.3 -> 0.160.1\n1. Update now\n2. Skip'
   [[ "$(_codex_startup_blocker "$update_menu")" == "startup update prompt" ]]
   trust_menu=$'Do you trust the contents of this directory?\n1. Yes, continue\n2. No, quit'
