@@ -2,7 +2,7 @@
 
 Status: proposal (design only — no implementation yet)
 Created: 2026-07-06
-Related: `docs/spike.md` (verified resume mechanics), `docs/lane-closeout-and-fan-in.md`
+Related: [spike](spike.md) (verified resume mechanics), [lane closeout and fan-in](lane-closeout-and-fan-in.md)
 (the bundle-before-reap artifact this reuses).
 
 ## The ask
@@ -16,7 +16,7 @@ trustworthy "warm restart," because the naive version is subtly dangerous.
 
 ## Scope: warm WORKER restart, not the advisor lane
 
-The `2026-07-05` note describes an **advisor lane** — a long-lived reasoning agent you consult
+The related advisor-lane proposal describes an **advisor lane** — a long-lived reasoning agent you consult
 repeatedly, no worktree, no deliverable, detach-not-reap. That's real but *separate*: it's
 stateless-consult-made-stateful, and the machinery (spawn once, `revise` per question) already
 covers it with only docs missing.
@@ -180,7 +180,7 @@ State to add: **`last_seen`** (git ref, set at spawn and each `wait`/revise) —
 
 ## What this is explicitly NOT
 
-- **Not the advisor lane** (`2026-07-05`) — that's docs over existing `spawn`/`revise`; this is a
+- **Not the advisor lane** — that's docs over existing `spawn`/`revise`; this is a
   new re-grounding + worktree-rehydration surface for worker reuse.
 - **Not trajectory replay** (OpenHands-style deterministic re-execution) — a different feature.
 - **Not a claim that warm > cold** — it's a claim that the *choice* should be cheap, explicit, and

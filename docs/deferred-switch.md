@@ -2,7 +2,7 @@
 
 Status: implemented (`escalate --defer`)
 Created: 2026-09-25
-Related: `docs/warm-worker-restart.md` (why a resumed session is a transcript replay).
+Related: [warm worker restart](warm-worker-restart.md) (why a resumed session is a transcript replay).
 
 ## Why
 

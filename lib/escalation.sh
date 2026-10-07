@@ -522,10 +522,8 @@ escalate_begin_locked() {
 }
 
 # Deferred switches: decide a model/effort change now, apply it at a cold-cache
-# boundary. A mid-session switch makes the next call re-read the whole transcript
-# uncached (local Claude logs: median 520K tokens, 2% cache hit); the first call
-# after a compaction re-read ~12x less, and idle gaps past the 1-hour TTL lost the
-# cache anyway. waspflow has no daemon, so `revise` checks for a boundary before it
+# boundary. A mid-session switch can make the next call re-read the transcript
+# uncached. waspflow has no daemon, so `revise` checks for a boundary before it
 # sends and, when one holds, runs the ordinary escalation transition with the
 # revise instruction as its submission. Only in-place switches defer: a handoff
 # starts a fresh session, so it has no cache to protect and applies at once.

@@ -63,14 +63,12 @@ and general `pass_at_<k>` fields calibrate same-arm retry alongside `pass_at_k`.
 
 | Default | Value | Source and meaning |
 |---------|-------|--------------------|
-| `attempt_overhead_usd` | $0.50 per attempt | Orchestrator review of 2026-09-23: allowance for verification and orchestrator review on **each** attempt. This is a policy estimate, not measured spend. |
-| `failure_detection_probability` for verified ops | 0.75 | Orchestrator review of 2026-09-23, informed by research on verify-failure escalation. The cited 28–76% gamed green-pass rates across specific evaluations do **not** directly measure detection probability. 0.75 is a sensitivity-tested policy prior. |
-| `failure_detection_probability` for judged ops | 0 | Orchestrator review of 2026-09-23: no automatic catch/retry for a review or advice miss. |
+| `attempt_overhead_usd` | $0.50 per attempt | Policy estimate for verification and coordination on **each** attempt; not measured spend. |
+| `failure_detection_probability` for verified ops | 0.75 | Policy prior informed by research on verify-failure escalation. The cited 28–76% gamed green-pass rates across specific evaluations do **not** directly measure detection probability. |
+| `failure_detection_probability` for judged ops | 0 | Policy assumption: no automatic catch/retry for a review or advice miss. |
 
-The same review supplies the following uncalibrated `silent_failure_cost_usd`
-defaults. They mean roughly what a missed problem costs in dollars; raise a
-value if misses hurt more. The original recommender brief already specified
-$100 for `review.audit` and $50 for `advisor.deep`.
+The following uncalibrated `silent_failure_cost_usd` defaults estimate what a
+missed problem costs in dollars; raise a value if misses hurt more.
 
 | Op | `silent_failure_cost_usd` | Reason for relative size |
 |----|---------------------------|--------------------------|

@@ -54,7 +54,7 @@ On first Codex use, resolve any update banner or trust prompt in the pane yourse
 
 ## Requirements
 
-Required tools are `tmux`, `jq`, `awk`, `python3`, `git`, and `flock`, plus at least one provider CLI. `waspflow doctor` checks these before you start. See [prerequisites](docs/prerequisites.md) for installation notes.
+Required tools are `tmux`, `jq`, `awk`, `python3`, `git`, `flock`, `timeout`, and `perl`, plus `uuidgen` or Linux `/proc/sys/kernel/random/uuid`, and at least one provider CLI. `waspflow doctor` checks these before you start. See [prerequisites](docs/prerequisites.md) for installation notes.
 
 Providers map to executables as follows: `claude`, `codex`, `grok`, `antigravity` → `agy`, `qwen`, and `deepseek` → `dsh`.
 

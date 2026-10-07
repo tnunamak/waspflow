@@ -64,3 +64,15 @@
   jq -e 'map(.lane) | index("r3-f4-reaped") == null' "$fixture/active.json" >/dev/null \
     || { echo 'r3-f4: --hide-reaped retained a reaped lane' >&2; exit 1; }
 )
+
+(
+  grep -q '`timeout`, and `perl`, plus `uuidgen` or Linux `/proc/sys/kernel/random/uuid`' "$root/README.md" \
+    || { echo 'r3-f4: README omits required timeout, perl, or UUID source' >&2; exit 1; }
+  if rg -n '\]\(docs/' "$root/docs" "$root/skill/SKILL.md" >/dev/null; then
+    echo 'r3-f4: documentation retains broken docs/ relative links' >&2; exit 1
+  fi
+  if rg -n -i 'pdpp|autoquality|oj cluster|2026-07-05|orchestrator review' \
+      "$root/docs" "$root/data/model-choice-policy" "$root/lib/core.sh" "$root/lib/escalation.sh" >/dev/null; then
+    echo 'r3-f4: public documents retain private project or review context' >&2; exit 1
+  fi
+)
