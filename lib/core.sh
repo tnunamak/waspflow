@@ -935,7 +935,13 @@ tmux_detached_session_receipt_group_members() {
   rows="$(ps -eo pid=,pgid=,sid= 2>/dev/null)" || return 1
   while read -r member got_pgid got_sid; do
     [[ "$member" =~ ^[0-9]+$ && "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]] || continue
-    ticks="$(process_start_ticks "$member")" || return 1
+    ticks="$(process_start_ticks "$member")" || {
+      # A member can exit after a successful group census. That is a safe
+      # disappearance, not an observation failure; a still-present unreadable
+      # proc entry remains uncertain and blocks retirement.
+      [[ ! -e "/proc/$member" ]] && continue
+      return 1
+    }
     [[ "$ticks" =~ ^[0-9]+$ ]] || return 1
     printf '%s\t%s\n' "$member" "$ticks"
   done <<<"$rows"
