@@ -11,6 +11,9 @@ EOF
   cat >"$s7/bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 # The fixture deliberately exposes no owned panes and never contacts a server.
+if [[ "${1:-}" == list-clients ]]; then
+  exit 0
+fi
 exit 1
 EOF
   chmod +x "$s7/bin/systemctl" "$s7/bin/tmux"
@@ -19,10 +22,13 @@ EOF
   source "$root/lib/core.sh"
   source "$root/lib/providers/claude.sh"
   source "$root/lib/events.sh"
-  lane_set claude-alt provider claude session_id session-alt claude_config_dir "$s7/projects/alternate"
+  lane_set claude-alt provider claude status live session_id session-alt claude_config_dir "$s7/projects/alternate"
   printf '%s\n' '{"type":"assistant","message":{"stop_reason":"end_turn"}}' >"$s7/projects/alternate/projects/p/session-alt.jsonl"
   unset CLAUDE_PROJECTS_DIR
   provider_event_tail claude-alt 1 | jq -e '.source.state == "tail-window" and .turn_state == "terminal"' >/dev/null
+  PATH="$s7/bin:$PATH" "$root/bin/waspflow" inspect claude-alt >"$s7/inspect.json" 2>"$s7/inspect.err"
+  jq -e '.classification == "orphaned-control-plane" and (.next_action | contains("waspflow reconcile"))' "$s7/inspect.json" >/dev/null
+  [[ ! -s "$s7/inspect.err" ]]
 
   # Corrupt rows are part of the durable-index prefix and still diagnose rc 2.
   for n in 1 2 3 4 5 6; do mkdir -p "$WASPFLOW_LANES_DIR/bad$n"; printf '{' >"$WASPFLOW_LANES_DIR/bad$n/state.json"; done
@@ -47,6 +53,9 @@ EOF
   jq -e 'map(select(.lane == "dead" and .status == "interrupted")) | length == 1' "$s7/all.json" >/dev/null
   jq -e 'map(select(.lane == "reused" and .status == "unknown")) | length == 1' "$s7/all.json" >/dev/null
   jq -e 'map(select(.lane == "missing-wt" and .status == "unknown")) | length == 1' "$s7/all.json" >/dev/null
+  WASPFLOW_DOCTOR_LATEST_TAG=v999.0.0 PATH="$s7/bin:$PATH" "$root/bin/waspflow" doctor >"$s7/doctor.out"
+  grep -q 'WARN fleet recovery: unknown=.*orphaned=' "$s7/doctor.out"
+  grep -q 'waspflow reconcile --json' "$s7/doctor.out"
 
   # Ownership changes require an explicit apply and append exactly one handoff;
   # they never stop a pane, remove a worktree, or reconstruct a lane.

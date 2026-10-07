@@ -20,6 +20,26 @@ _reconcile_pid_start_time() {
 reconcile_event_ledger() { printf '%s\n' "${WASPFLOW_EVENT_LEDGER:-$WASPFLOW_HOME/events.jsonl}"; }
 reconcile_event_claims() { printf '%s\n' "${WASPFLOW_EVENT_CLAIMS:-$WASPFLOW_HOME/event-claims.json}"; }
 
+# A small read-only doctor surface. It intentionally observes only persisted
+# state and owned tmux identities; it never opens provider logs or starts work.
+reconcile_fleet_health_json() {
+  local active_scopes='[]' scopes_ok=true lane record record_status window unknown=0 orphaned=0
+  local -a samples=()
+  if ! active_scopes="$(waspflow_active_scope_snapshot 2>/dev/null)"; then scopes_ok=false; fi
+  while IFS= read -r lane; do
+    [[ -n "$lane" ]] || continue
+    record="$(jq -c . "$(lane_state_file "$lane")" 2>/dev/null || true)"
+    if [[ -z "$record" ]]; then unknown=$((unknown + 1)); samples+=("$lane"); continue; fi
+    record_status="$(jq -r '.status // ""' <<<"$record")"
+    window=false; tmux_owned_lane_window_exists "$lane" && window=true
+    if [[ "$record_status" == live && "$window" != true ]]; then orphaned=$((orphaned + 1)); samples+=("$lane")
+    elif [[ "$(waspflow_derived_lane_lifecycle "$record" "$active_scopes" "$scopes_ok")" == unknown ]]; then unknown=$((unknown + 1)); samples+=("$lane")
+    fi
+  done < <(list_lanes)
+  jq -cn --argjson unknown "$unknown" --argjson orphaned "$orphaned" --argjson samples "$(printf '%s\n' "${samples[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
+    '{unknown:$unknown,orphaned:$orphaned,samples:$samples}'
+}
+
 # Append a redacted delivery obligation. Event ids include the generation, so a
 # revised turn cannot acknowledge a previous turn's obligation.
 reconcile_event_emit() {
