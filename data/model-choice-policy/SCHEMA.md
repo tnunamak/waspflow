@@ -64,7 +64,7 @@ and general `pass_at_<k>` fields calibrate same-arm retry alongside `pass_at_k`.
 | Default | Value | Source and meaning |
 |---------|-------|--------------------|
 | `attempt_overhead_usd` | $0.50 per attempt | Orchestrator review of 2026-09-23: allowance for verification and orchestrator review on **each** attempt. This is a policy estimate, not measured spend. |
-| `failure_detection_probability` for verified ops | 0.75 | Orchestrator review of 2026-09-23, informed by `ai/research/model-routing/escalation-triggers-on-verify-failure-not-verify-success-and-walks-the-model-effort-frontier.md` in the dotfiles research corpus. The note reports 28–76% gamed green passes across specific evaluations; those rates do **not** directly measure detection probability. 0.75 is a sensitivity-tested policy prior. |
+| `failure_detection_probability` for verified ops | 0.75 | Orchestrator review of 2026-09-23, informed by research on verify-failure escalation. The cited 28–76% gamed green-pass rates across specific evaluations do **not** directly measure detection probability. 0.75 is a sensitivity-tested policy prior. |
 | `failure_detection_probability` for judged ops | 0 | Orchestrator review of 2026-09-23: no automatic catch/retry for a review or advice miss. |
 
 The same review supplies the following uncalibrated `silent_failure_cost_usd`

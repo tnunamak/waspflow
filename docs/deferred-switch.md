@@ -2,8 +2,7 @@
 
 Status: implemented (`escalate --defer`)
 Created: 2026-09-25
-Related: `docs/design/ESCALATION_V1.md` (the transition this reuses),
-`docs/warm-worker-restart.md` (why a resumed session is a transcript replay).
+Related: `docs/warm-worker-restart.md` (why a resumed session is a transcript replay).
 
 ## Why
 
@@ -20,9 +19,7 @@ whole transcript uncached. Local Claude Code logs (30 days, 2,059 sessions) show
 
 A switch right after a compaction re-reads about 12x less. After more than 60
 idle minutes (the 1-hour cache TTL), the cache is gone anyway, so the switch
-costs nothing extra. Source: `ai/research/model-routing/mid-session-model-switches-rewrite-about-12x-more-uncached-prompt-than-switching-right-after-compaction-so-defer-switches-to-cold-cache-boundaries.md`
-in the dotfiles repo. Devin Fusion times model switches to compaction boundaries
-for the same reason.
+costs nothing extra.
 
 ## Switch now or defer
 

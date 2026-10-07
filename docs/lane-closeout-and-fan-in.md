@@ -2,8 +2,7 @@
 
 Status: implemented (2026-07-03) — all three primitives shipped in `bin/waspflow` + `lib/fanin.sh`.
 Created: 2026-07-03
-Related: `docs/slvp-ideal.md` (this closes a stated-but-unrealized gap in the ideal),
-`inbox/2026-07-03-fan-in-closeout-ledger-gap.md` (the real-run diagnosis this is drawn from)
+Related: `docs/slvp-ideal.md` (this closes a stated-but-unrealized gap in the ideal).
 
 Implementation notes (where the doc and the code differ):
 - The closeout state is a **separate `outcome` field** (open|harvested|superseded|abandoned),

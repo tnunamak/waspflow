@@ -36,9 +36,9 @@ not a `stale` boolean or an authorization to mutate:
 - `closeout-ready`
 - `corrupt/unknown`
 
-An attached tmux client changes inspection to `blocked-needs-human` with
-`eligibility: vetoed-attached-client`; it is an operative veto, not merely a
-diagnostic reason.
+An attached tmux client sets `eligibility: vetoed-attached-client`; it is an
+operative veto, not merely a diagnostic reason. It does not rewrite the
+underlying inspection classification.
 Inspection never sends keys, attaches, captures a pane, changes lane state, or
 parks/reaps a lane. Existing explicit `close`, `park`, and `reap` boundaries
 remain responsible for mutation.

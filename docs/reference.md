@@ -514,7 +514,7 @@ resolved provider argv/env; use `status <lane>` for one full record.
 |---|---|---|
 | `WASPFLOW_HOME` | `~/.local/state/waspflow` | Lane state and transcripts |
 | `WASPFLOW_TMUX_SESSION` | `waspflow` | tmux session that holds worker windows |
-| `WASPFLOW_TMUX_HISTORY_LIMIT` | _(unset — inherit)_ | Scrollback lines for future waspflow windows. Unset, empty, or `0` inherits tmux's own setting (no cap). Set a number (e.g. `100000`) to bound retained scrollback during large fan-outs |
+| `WASPFLOW_TMUX_HISTORY_LIMIT` | `100000` for new owned windows | Scrollback lines for future waspflow windows. Set empty or `0` to inherit tmux's own setting. Set another number to choose a different cap. |
 | `WASPFLOW_LANE_PAGER` | `cat` | Pager command for provider children in new lanes; overrides inherited `PAGER` and `GIT_PAGER` for those children only |
 | `WASPFLOW_TRANSCRIPT_RAW` | empty | Set to `1` to keep new transcripts verbatim. By default waspflow strips terminal control sequences while writing readable transcripts; this does not alter existing transcripts. |
 | `WASPFLOW_PROVENANCE_GATE` | `warn` | Parent-attribution gate: `warn` or `enforce` (exit 6) |
@@ -545,12 +545,11 @@ session, never to tmux's global setting or another session such as `main`.
 It affects windows created after the setting is applied; it does not shrink the
 scrollback already retained by open windows.
 
-It defaults to unset (inherit) rather than to a cap. tmux has no "unlimited"
-value — a literal `0` means *no* scrollback — so opting out means removing the
-session-local override and letting tmux's own `history-limit` apply. Under a
-large fan-out, retained scrollback is a real memory cost (hundreds of panes
-each climbing toward the global ceiling), so set an explicit limit for those
-runs rather than paying it by default.
+New owned windows default to a 100000-line cap. tmux has no "unlimited" value
+— a literal `0` means *no* scrollback — so opting out means removing the
+window override and letting tmux's own `history-limit` apply. Under a large
+fan-out, retained scrollback is a real memory cost (hundreds of panes each
+climbing toward the global ceiling).
 
 ## Architecture
 
@@ -566,4 +565,3 @@ Waspflow is shell around tmux plus provider adapters:
 
 Adding another provider means adding `lib/providers/<name>.sh` with the provider
 contract functions.
-
