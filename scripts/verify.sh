@@ -6377,6 +6377,7 @@ done
 if [[ -n "$log_file" && -z "$conversation" && "${AGY_FAIL:-0}" != 1 ]]; then
   printf 'Created conversation 123e4567-e89b-12d3-a456-426614174000\n' >"$log_file"
 fi
+[[ -z "$log_file" || "${AGY_FAIL:-0}" == 1 ]] || printf '%s\n' '{"type":"result","text":"agy test output"}' >>"$log_file"
 [[ "${AGY_FAIL:-0}" != 1 ]] || exit 9
 case " $all_args " in *" --print "*) printf 'agy test output\n' ;; *) exit 2 ;; esac
 AGY
