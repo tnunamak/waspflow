@@ -1175,14 +1175,21 @@ tmux_lane_login_shell() {
   [[ "$seconds" -gt 0 ]] || { err "shell startup timeout must be positive"; return 1; }
   ready="$(mktemp "$(lane_dir "$lane")/.shell-ready.XXXXXX")" || return 1
   ticks=$((seconds * 10))
+  [[ -n "$command_text" ]] || return 2
   local -a login_shell=(bash -lc "printf ready >$(printf '%q' "$ready"); bash -c $(printf '%q' "$identity") -- $(printf '%q' "$lane") \"\$(command -v $(printf '%q' "$provider") || true)\" \"\$(type -t $(printf '%q' "$provider") || true)\" $(printf '%q' "$spawner"); $command_text")
-  command -v setsid >/dev/null 2>&1 && login_shell=(setsid "${login_shell[@]}")
+  if command -v setsid >/dev/null 2>&1; then login_shell=(setsid "${login_shell[@]}"); detached=1; fi
   if ( : </dev/tty ) 2>/dev/null; then
     "${login_shell[@]}" </dev/tty &
   else
     "${login_shell[@]}" </dev/null &
   fi
   child=$!
+  if [[ "$detached" -eq 1 ]]; then
+    child_ticks="$(process_start_ticks "$child" || true)"
+    read -r pgid sid < <(ps -o pgid= -o sid= -p "$child" 2>/dev/null)
+    [[ "$child_ticks" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ ]] \
+      && tmux_record_lane_detached_session "$lane" "$execution" "$child" "$pgid" "$sid" "$child_ticks" || true
+  fi
   (
     local i
     for ((i=0; i<ticks; i++)); do
@@ -1190,11 +1197,18 @@ tmux_lane_login_shell() {
       sleep 0.1
     done
     [[ -s "$ready" ]] && exit 0
-    lane_set "$lane" status spawn_failed spawn_submitted false startup_blocker shell-hydration-timeout
-    err "lane '$lane': login-shell hydration timed out after ${seconds}s; stopping only its owned processes"
+    if [[ "$execution" == escalation:* ]]; then
+      err "lane '$lane': provisional login-shell hydration timed out after ${seconds}s; preserving the committed lane"
+    else
+      lane_set "$lane" status spawn_failed spawn_submitted false startup_blocker shell-hydration-timeout
+      err "lane '$lane': login-shell hydration timed out after ${seconds}s; stopping only its owned processes"
+    fi
     kill -- "-$child" 2>/dev/null || kill "$child" 2>/dev/null || true
-    tmux_kill_owned_lane_scopes "$lane"
-    tmux_kill_owned_lane_window "$lane" || true
+    if [[ "$execution" != escalation:* ]]; then
+      tmux_kill_owned_lane_scopes "$lane"
+      tmux_kill_owned_lane_detached_sessions "$lane"
+      tmux_kill_owned_lane_window "$lane" || true
+    fi
   ) &
   watchdog=$!
   wait "$child" || rc=$?
