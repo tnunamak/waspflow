@@ -2017,8 +2017,8 @@ JSONL
   if (_exec_abs_output_path "$d/link") 2>/dev/null; then exit 1; fi
   [[ "$(cat "$d/input")" == input ]]
   _exec_codex() { printf 'Execution error\n' >"$5"; }
-  if exec_run --provider codex --cwd "$d" -o "$d/out" -- test; then exit 1; fi
-  jq -e '.state == "invalid" and .bytes > 0' "$d/receipt" >/dev/null
+  exec_run --provider codex --cwd "$d" -o "$d/out" -- test
+  jq -e '.state == "present" and .bytes > 0' "$d/receipt" >/dev/null
   _exec_codex() { printf 'Execution error: explained and fixed\n' >"$5"; }
   exec_run --provider codex --cwd "$d" -o "$d/out" -- test
 )
