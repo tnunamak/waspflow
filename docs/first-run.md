@@ -1,17 +1,14 @@
-# First Run
-
-This is the shortest path to feeling what waspflow does.
+# First run
 
 ## 1. Install
 
 ```bash
-git clone <waspflow-repo-url> ~/code/waspflow
-~/code/waspflow/install.sh
+git clone https://github.com/tnunamak/waspflow /path/to/waspflow
+cd /path/to/waspflow && ./install.sh
+export PATH="$HOME/.local/bin:$PATH" # use the directory printed by install.sh if different
 ```
 
-You need `tmux`, `jq`, `git`, `curl`, `uuidgen`, and at least one agent CLI:
-`codex`, `claude`, `grok`, or `agy`. If any are missing, use
-[Prerequisites](prerequisites.md).
+`install.sh` adds a `waspflow` symlink to `$HOME/.local/bin` by default. It cannot change the current shell’s `PATH`; open a new shell or export the path before running the next command.
 
 ## 2. Check the machine
 
@@ -19,77 +16,35 @@ You need `tmux`, `jq`, `git`, `curl`, `uuidgen`, and at least one agent CLI:
 waspflow doctor
 ```
 
-If a required dependency is missing, install it and rerun `doctor`.
+Install every required tool that `doctor` reports missing, then run it again. You need one supported agent CLI; see [Prerequisites](prerequisites.md).
 
-## 3. Run the no-edit demo
-
-Preview the commands:
+## 3. Run the safe demo
 
 ```bash
 waspflow demo --provider codex
-```
-
-Run them:
-
-```bash
 waspflow demo --provider codex --run
 ```
 
-Use `--provider claude`, `--provider grok`, or `--provider antigravity` if that
-is your available agent CLI. For Antigravity, inspect available models first:
+Replace `codex` with `claude`, `grok`, or `antigravity` when that is the installed CLI. Antigravity uses the `agy` executable. The demo runs a worker, waits for its turn, shows the result, and reaps the lane without editing your project.
+
+If Codex displays an update or trust prompt on the first run, answer it in the pane yourself and rerun the command. Waspflow will not paste the demo prompt into an unresolved menu.
+
+## 4. Run a small task
+
+From a Git repository:
 
 ```bash
-agy models
-```
-
-The demo launches a worker, waits until it finishes one turn, shows the result,
-and reaps the lane. It does not edit your files.
-
-Reaping means closing the worker pane and finalizing its state. The lane record
-and artifacts remain inspectable.
-
-## 4. Delegate real work
-
-From any git repo:
-
-A **lane** is one durable unit of delegated work. Use the lane name in every
-later command for that worker.
-
-```bash
-waspflow spawn --provider codex --accept-provider-default --lane first-task -- "Find one small bug or cleanup opportunity. Do not edit yet; report what you found."
+waspflow spawn --provider codex --accept-provider-default --lane first-task -- \
+  "Find one small bug or cleanup opportunity. Do not edit; report what you found."
 waspflow wait first-task
 waspflow peek first-task
 ```
 
-If you like the direction:
+To continue the same worker:
 
 ```bash
 waspflow revise first-task -- "Implement the smallest safe fix and add a test if appropriate."
-waspflow wait first-task
-waspflow peek first-task
-waspflow reap first-task
+waspflow wait first-task --reap
 ```
 
-## 5. Add project policy only when you need it
-
-Small projects do not need config. Serious repos can add it:
-
-```bash
-waspflow init --profile serious-repo
-waspflow check --explain
-```
-
-If your repo uses OpenSpec:
-
-```bash
-waspflow init --profile serious-repo --profile openspec --force
-```
-
-If your repo has a live deploy/database window that only one operator should
-touch at a time:
-
-```bash
-waspflow init --profile serious-repo --profile live-stack-mutex --force
-```
-
-Edit `.waspflow/config.json` to point at your actual mutex or report files.
+A lane is a durable worker record. Reaping closes its pane and finalizes state; saved artifacts remain under `$WASPFLOW_HOME`.
