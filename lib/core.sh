@@ -32,7 +32,7 @@ WASPFLOW_ROOT="${WASPFLOW_ROOT:-$(cd "$WASPFLOW_LIB/.." && pwd)}"
 # universal — the per-provider whitelist stays the real gate.
 WASPFLOW_EFFORT_TOKENS="none|minimal|low|medium|high|xhigh|max|ultra"
 
-# Generated effort unions from minnows capabilities (optional; adapters hard-fail themselves).
+# Generated effort unions from a capabilities catalog (optional; adapters hard-fail themselves).
 if [[ -f "$WASPFLOW_LIB/generated/effort-whitelists.sh" ]]; then
   # shellcheck source=/dev/null
   source "$WASPFLOW_LIB/generated/effort-whitelists.sh"

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Regenerate lib/generated/effort-whitelists.sh from minnows capabilities."""
+"""Regenerate lib/generated/effort-whitelists.sh from a capabilities catalog."""
 from __future__ import annotations
 import json, os, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-cap = Path(os.environ.get(
-    "MODEL_CATALOG_CAPABILITIES",
-    str(Path.home() / "code/minnows/data/model-catalog/capabilities/effort-surfaces-2026-07.json"),
-))
+catalog_path = os.environ.get("MODEL_CATALOG_CAPABILITIES")
+if not catalog_path:
+    print("set MODEL_CATALOG_CAPABILITIES to a capabilities catalog JSON path", file=sys.stderr)
+    sys.exit(2)
+cap = Path(catalog_path)
 if not cap.is_file():
     print(f"missing {cap}", file=sys.stderr)
     sys.exit(1)
@@ -29,9 +30,9 @@ for s in data.get("surfaces") or []:
 # CLI gate with no trace of why. Unknown levels sort last and are reported.
 ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 lines = [
-    "# Generated from model-catalog capabilities and provider-local contracts — do not hand-edit.",
-    "# Regenerate: python3 scripts/gen_effort_whitelists.py (or minnows sync).",
-    "# Catalog source: MODEL_CATALOG_CAPABILITIES or the local minnows checkout.",
+    "# Generated from a capabilities catalog and provider-local contracts — do not hand-edit.",
+    "# Regenerate: set MODEL_CATALOG_CAPABILITIES, then run python3 scripts/gen_effort_whitelists.py.",
+    "# Catalog source: MODEL_CATALOG_CAPABILITIES.",
     "",
 ]
 unknown_seen = set()

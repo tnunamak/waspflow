@@ -77,14 +77,13 @@
 )
 
 (
-  grep -q '`timeout`, and `perl`, plus `uuidgen` or Linux `/proc/sys/kernel/random/uuid`' "$root/README.md" \
-    || { echo 'r3-f4: README omits required timeout, perl, or UUID source' >&2; exit 1; }
+  grep -q 'Bash 4 or later' "$root/README.md" \
+    || { echo 'r3-f4: README omits the Bash 4 requirement' >&2; exit 1; }
   if rg -n '\]\(docs/' "$root/docs" "$root/skill/SKILL.md" >/dev/null; then
     echo 'r3-f4: documentation retains broken docs/ relative links' >&2; exit 1
   fi
-  if rg -n -i 'pdpp|autoquality|oj cluster|2026-07-05|orchestrator review' \
-      "$root/docs" "$root/data/model-choice-policy" "$root/lib/core.sh" "$root/lib/escalation.sh" "$root/lib/project.sh" >/dev/null; then
-    echo 'r3-f4: public documents retain private project or review context' >&2; exit 1
+  if git -C "$root" ls-files -z | xargs -0 rg -n -i '/home/[^/[:space:]]+|/Users/[^/[:space:]]+|synthetic-private-(project|review)' >/dev/null; then
+    echo 'r3-f4: tracked files retain a user home path or synthetic privacy marker' >&2; exit 1
   fi
   if rg -n -i 'owner-approved|owner-policy|owner.s direction' "$root/data/model-choice-policy/operating-points.json" >/dev/null; then
     echo 'r3-f4: policy data retains owner-specific judgments' >&2; exit 1

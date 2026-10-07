@@ -226,7 +226,7 @@ Useful `spawn` options:
 - `--prepare <cmd>` runs setup before that oracle; `--verify-timeout <seconds>` bounds both commands.
 - `--verify-strength <suite|smoke>` declares receipt comparability; it is never inferred.
 - `--model <id>` selects a provider model.
-- `--effort <none|minimal|low|medium|high|xhigh|max>` passes reasoning effort **exactly** where supported (never silent demotion; Antigravity supports `low`, `medium`, and `high`; Qwen Code does not support `--effort`).
+- `--effort <none|minimal|low|medium|high|xhigh|max|ultra>` passes reasoning effort **exactly** where supported (never silent demotion; `ultra` is Codex-only; Antigravity supports `low`, `medium`, and `high`; Qwen Code does not support `--effort`).
 - `--mcp <auto|none|inherit>` controls worker MCP exposure. `auto` is the default and is MCP-minimal where the provider supports it; use `inherit` only when the task needs the current provider configuration.
 - `--op <id>` expands a task-shaped operating point (`waspflow ops list`); explicit flags win over expansion.
 - `--cwd <dir>` starts the worker in another directory.
@@ -254,8 +254,9 @@ one-shot transform) that shape is overkill: it leaves a lane and a branch to
 reconcile for something you only read once.
 
 `exec` is the cheap path. It runs one headless turn, blocks until it finishes,
-writes the final message to a file (or stdout), and leaves nothing behind — no
-tmux window, no worktree, no lane record, no reap.
+writes the final message to a file (or stdout), and creates no tmux window,
+worktree, or lane record. It writes a durable execution receipt and any
+requested output.
 
 ```bash
 # Analysis to a file, blocking:
@@ -512,7 +513,7 @@ resolved provider argv/env; use `status <lane>` for one full record.
 
 | Var | Default | Purpose |
 |---|---|---|
-| `WASPFLOW_HOME` | `~/.local/state/waspflow` | Lane state and transcripts |
+| `WASPFLOW_HOME` | `${XDG_STATE_HOME:-$HOME/.local/state}/waspflow` | Lane state and transcripts |
 | `WASPFLOW_TMUX_SESSION` | `waspflow` | tmux session that holds worker windows |
 | `WASPFLOW_TMUX_HISTORY_LIMIT` | `100000` for new owned windows | Scrollback lines for future waspflow windows. Set empty or `0` to inherit tmux's own setting. Set another number to choose a different cap. |
 | `WASPFLOW_LANE_PAGER` | `cat` | Pager command for provider children in new lanes; overrides inherited `PAGER` and `GIT_PAGER` for those children only |

@@ -4,10 +4,9 @@ waspflow lanes.
 
 This is a BACKFILL for bytes already on disk. It does not change waspflow's
 capture path (that is a separate task) and it never touches state.json, a
-worktree, a tmux window, a scope, or a process. See the brief this implements:
-~/.tmp/waspflow-briefs/transcript-backfill.md
+worktree, a tmux window, a scope, or a process.
 
-Safety model (all required, see brief for the full rationale):
+Safety model (all required):
   1. Only lanes whose state.json status == "reaped" are eligible.
   2. Status is re-read from state.json IMMEDIATELY before touching each file,
      never from a captured/sorted list -- lane state changes fleet-wide within

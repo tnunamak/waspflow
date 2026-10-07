@@ -4,6 +4,8 @@ Waspflow is a shell tool. It does not install system packages because package ma
 
 ## Required tools
 
+- Bash 4 or later — Waspflow uses Bash features that older releases do not provide.
+- GNU-compatible `find` with `-printf`, and `timeout` with `--kill-after`.
 - `tmux` — keeps lane panes alive after the launching shell disconnects.
 - `jq` — reads JSON lane state and provider events.
 - `awk`, `python3`, and `git` — used by the CLI and artifact capture.
@@ -23,7 +25,7 @@ Install at least one of these and make it available on `PATH`:
 | Grok | `grok` |
 | Antigravity | `agy` |
 | Qwen | `qwen` |
-| DeepSeek | `dsh` |
+| DeepSeek | `dsh` plus a configured headless profile |
 
 After `./install.sh`, add `$HOME/.local/bin` to `PATH` unless the installer printed a different directory. For example:
 
