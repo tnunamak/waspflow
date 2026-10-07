@@ -61,10 +61,52 @@ _antigravity_receipt() {
     >>"$file"
 }
 
+# The agy print contract accepts these configuration flags in addition to the
+# fields waspflow owns. Flags that can replace the prompt, conversation, model,
+# permission mode, or log are provider controls, not safe caller configuration.
+_antigravity_extra_args() {
+  local -a extra=("$@")
+  ANTIGRAVITY_EXTRA_ARGS=()
+  local i=0 arg value
+  while [[ "$i" -lt "${#extra[@]}" ]]; do
+    arg="${extra[$i]}"
+    case "$arg" in
+      --add-dir|--agent|--input-format|--json-schema|--output-format|--print-timeout|--project)
+        ((++i)); value="${extra[$i]:-}"
+        [[ -n "$value" && "$value" != --* ]] || { err "antigravity: $arg requires a value"; return 1; }
+        ANTIGRAVITY_EXTRA_ARGS+=("$arg" "$value")
+        ;;
+      --add-dir=*|--agent=*|--input-format=*|--json-schema=*|--output-format=*|--print-timeout=*|--project=*) ANTIGRAVITY_EXTRA_ARGS+=("$arg") ;;
+      --disable-slash-commands|--new-project|--remote-control|--sandbox) ANTIGRAVITY_EXTRA_ARGS+=("$arg") ;;
+      *) err "antigravity: unsupported raw argument '$arg'"; return 1 ;;
+    esac
+    ((i++))
+  done
+}
+
+_antigravity_output_has_deliverable() {
+  local lane="$1" log="$2" report
+  report="$(lane_get "$lane" report)"
+  # A contracted report is the deliverable. Do not accept a final message while
+  # it is absent; S2's artifact contract remains its authoritative validator.
+  if [[ -n "$report" ]]; then [[ -s "$report" ]]; return; fi
+  # A tool invocation is progress, not a completed answer. Require a final/result
+  # event with non-empty content when no report contract exists. The log also
+  # contains plaintext provider diagnostics, so parse only its JSON records.
+  grep -aE '^[[:space:]]*\{' "$log" 2>/dev/null | jq -e '
+    (.text // .content // .message // "") as $content |
+    select((.type == "result" or .type == "final" or .type == "assistant")
+      and ($content | type == "string" and length > 0)
+      and ($content | test("<(tool_call|tool_use)|\\\"type\\\"[[:space:]]*:[[:space:]]*\\\"tool"; "i") | not))
+  ' >/dev/null 2>&1 \
+    || grep -aEv '^[[:space:]]*(Created conversation|\{|$)' "$log" 2>/dev/null | grep -aviE '(<tool|tool_call|tool_use|diagnostic|warning|error)' | grep -q .
+}
+
 # This command is evaluated inside the lane-owned tmux process.  The raw log
 # never enters a receipt or transcript and is removed on every normal path.
 _antigravity_shell() {
   local lane="$1" model="$2" effort="$3" conversation="$4" prompt="$5" kind="$6"; shift 6
+  local extra=("$@")
   local log adapter core; log="$(lane_dir "$lane")/.agy-log.$$"
   adapter="${WASPFLOW_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/providers/antigravity.sh"
   core="${WASPFLOW_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/core.sh"
@@ -73,10 +115,11 @@ _antigravity_shell() {
   [[ -n "$model" ]] && argv+=(--model "$model")
   [[ -n "$effort" ]] && argv+=(--effort "$effort")
   argv+=(--mode accept-edits --dangerously-skip-permissions --log-file "$log")
+  argv+=("${extra[@]}")
   local q a; q=""
   for a in "${argv[@]}"; do q+=" $(printf '%q' "$a")"; done
-  printf 'source %q; source %q; trap '\''rm -f %q'\'' EXIT; started=$(date +%%s); _antigravity_receipt %q invocation started 0 "" "$started" "$started" %q; set +e; %s; rc=$?; set -e; sid=$(grep -aEio "Created conversation[[:space:]]+[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}" %q 2>/dev/null | grep -Eo "[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}" | tail -1 || true); [ -n "$sid" ] || sid=%q; finished=$(date +%%s); outcome=failed; if [[ "$rc" -eq 0 && -n "$sid" ]]; then outcome=succeeded; fi; _antigravity_receipt %q completion "$outcome" "$rc" "$sid" "$started" "$finished" %q; if [[ -n "$sid" ]]; then lane_set %q session_id "$sid"; fi; exit "$rc"' \
-    "$core" "$adapter" "$log" "$lane" "$kind" "${q# }" "$log" "$conversation" "$lane" "$kind" "$lane"
+  printf 'source %q; source %q; trap '\''rm -f %q'\'' EXIT; started=$(date +%%s); _antigravity_receipt %q invocation started 0 "" "$started" "$started" %q; set +e; %s >>%q 2>&1; rc=$?; set -e; sid=$(grep -aEio "Created conversation[[:space:]]+[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}" %q 2>/dev/null | grep -Eo "[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}" | tail -1 || true); [ -n "$sid" ] || sid=%q; finished=$(date +%%s); outcome=failed; if [[ "$rc" -eq 0 && -n "$sid" ]] && _antigravity_output_has_deliverable %q %q; then outcome=succeeded; else rc=$(( rc == 0 ? 2 : rc )); fi; _antigravity_receipt %q completion "$outcome" "$rc" "$sid" "$started" "$finished" %q; if [[ -n "$sid" ]]; then lane_set %q session_id "$sid"; fi; if [[ "$outcome" != succeeded ]]; then lane_set %q result failed provider_terminal_outcome failed provider_failure_class provider; elif [[ "$(lane_get %q result)" == failed ]]; then lane_set %q result "" provider_terminal_outcome succeeded provider_failure_class ""; fi; exit "$rc"' \
+    "$core" "$adapter" "$log" "$lane" "$kind" "${q# }" "$log" "$log" "$conversation" "$lane" "$log" "$lane" "$kind" "$lane" "$lane" "$lane" "$lane"
 }
 
 _antigravity_effort_args() {
@@ -99,7 +142,8 @@ antigravity_spawn() {
   antigravity_validate_model_effort "$model" "$effort" || return 1
   receipt_file="$(_antigravity_receipt_file "$lane")"
   : >"$receipt_file"
-  local cmd; cmd="$(_antigravity_shell "$lane" "$model" "$effort" "" "$prompt" spawn)"
+  _antigravity_extra_args "$@" || return 1
+  local cmd; cmd="$(_antigravity_shell "$lane" "$model" "$effort" "" "$prompt" spawn "${ANTIGRAVITY_EXTRA_ARGS[@]}")"
   local target; target="$(tmux_create_owned_lane_window "$lane" "$cwd" "bash -lc $(printf '%q' "$cmd")")" || return 1
   tmux pipe-pane -t "$target" -o "$(transcript_capture_command "$transcript")" 2>/dev/null || true
   attempts="${WASPFLOW_SUBMIT_ATTEMPTS:-20}"
@@ -137,13 +181,13 @@ antigravity_revise() {
   antigravity_validate_model_effort "$model" "$effort" || return 1
   cmd="$(_antigravity_shell "$lane" "$model" "$effort" "$sid" "$message" revise)"
   if [[ -n "$out_file" ]]; then
-    tmux_run_owned_lane_command "$lane" "${cwd:-$PWD}" headless-revise -- bash -lc "$cmd" </dev/null >"$out_file"
+    tmux_run_owned_lane_command "$lane" "${cwd:-$PWD}" headless-revise -- bash -lc "$cmd" </dev/null >"$out_file" && lane_set "$lane" latest_steering "$message"
   else
-    tmux_run_owned_lane_command "$lane" "${cwd:-$PWD}" headless-revise -- bash -lc "$cmd" </dev/null
+    tmux_run_owned_lane_command "$lane" "${cwd:-$PWD}" headless-revise -- bash -lc "$cmd" </dev/null && lane_set "$lane" latest_steering "$message"
   fi
 }
 
 # agy has no documented escalation/resume hook distinct from conversation
 # resume. The core must fail explicitly rather than treating this as supported.
-antigravity_resume_with_arm() { err "antigravity: escalation hooks are unsupported by agy 1.1.5"; return 1; }
-antigravity_confirm_escalation_submission() { err "antigravity: escalation confirmation is unsupported by agy 1.1.5"; return 1; }
+antigravity_resume_with_arm() { WASPFLOW_PROVIDER_LAUNCH_ERROR=unsupported-hook; err "antigravity: escalation hooks are unsupported by agy 1.1.5"; return 1; }
+antigravity_confirm_escalation_submission() { WASPFLOW_PROVIDER_LAUNCH_ERROR=unsupported-hook; err "antigravity: escalation confirmation is unsupported by agy 1.1.5"; return 1; }

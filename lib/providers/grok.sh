@@ -70,6 +70,10 @@ _grok_events_file() {
     | sort -rn | head -1 | cut -f2-
 }
 
+_grok_event_line_count() {
+  [[ -n "${1:-}" && -f "$1" ]] && wc -l <"$1" || echo 0
+}
+
 # Spawn an interactive, resumable grok into the lane's tmux window.
 # Args: lane cwd model session_id transcript prompt [extra...]
 grok_spawn() {
@@ -108,38 +112,48 @@ grok_spawn() {
   local a
   for a in "${argv[@]}"; do quoted+=" $(printf '%q' "$a")"; done
 
-  local target
+  local events before=0 target
+  events="$(_grok_events_file "$session_id" || true)"
+  before="$(_grok_event_line_count "$events")"
   target="$(tmux_create_owned_lane_window "$lane" "$cwd" "bash -lc${quoted:+ }$(printf '%q' "${quoted# }")")" \
     || return 1
   tmux pipe-pane -t "$target" -o "$(transcript_capture_command "$transcript")" 2>/dev/null || true
 
   # Best-effort: wait for the session dir / first turn to appear.
-  _grok_verify_started "$lane" "$target"
-  return 0
+  _grok_verify_started "$lane" "$target" "$prompt" "$before"
 }
 
 _grok_pane() { tmux capture-pane -p -t "$1" -S -60 2>/dev/null | strip_ansi; }
 
-# Ensure events.jsonl appears (turn started). Best-effort; wait/idle is the real gate.
+# A submission is proven only by a new turn_started receipt and the exact prompt
+# in a new event. Session files can contain prior turns and unrelated MCP noise.
+_grok_submission_receipt_present() {
+  local events="$1" prompt="$2" before="$3" first
+  [[ -n "$events" && -f "$events" && "$before" =~ ^[0-9]+$ ]] || return 1
+  first=$((before + 1))
+  tail -n +"$first" "$events" 2>/dev/null | jq -s -e --arg prompt "$prompt" '
+    def exact_prompt: [.. | strings? | select(. == $prompt)] | length > 0;
+    . as $events |
+    (any($events[]; .type == "turn_started" and exact_prompt))
+    or any(range(0; ($events | length)); . as $i |
+      ($events[$i].type | test("^(user|prompt|input)(_.*)?$")) and ($events[$i] | exact_prompt)
+      and any(range($i + 1; ($events | length)); . as $j | $events[$j].type == "turn_started"))
+  ' >/dev/null 2>&1
+}
+
+# Ensure events.jsonl records this exact submission, not merely session activity.
 _grok_verify_started() {
-  local lane="$1" target="$2" sid events i
+  local lane="$1" target="$2" prompt="$3" before="${4:-0}" sid events i
   sid="$(grok_discover_session "$lane")"
-  [[ -n "$sid" ]] || return 0
-  for i in $(seq 1 20); do
+  [[ -n "$sid" ]] || { WASPFLOW_PROVIDER_LAUNCH_ERROR=missing-session; return 1; }
+  for i in $(seq 1 "${WASPFLOW_SUBMIT_ATTEMPTS:-20}"); do
     events="$(_grok_events_file "$sid" || true)"
-    if [[ -n "$events" && -s "$events" ]]; then
-      # Prefer seeing turn_started, but any events file means the session is live.
-      if grep -q '"type":"turn_started"' "$events" 2>/dev/null \
-         || grep -q '"type":"turn_ended"' "$events" 2>/dev/null \
-         || grep -q 'turn_started\|phase_changed' "$events" 2>/dev/null; then
-        return 0
-      fi
-      return 0
-    fi
+    _grok_submission_receipt_present "$events" "$prompt" "$before" && { WASPFLOW_PROVIDER_LAUNCH_ERROR=""; return 0; }
     sleep 1
   done
-  warn "grok spawn: session events not visible yet for lane '$lane' (sid=$sid). Inspect: waspflow attach $lane"
-  return 0
+  WASPFLOW_PROVIDER_LAUNCH_ERROR=receipt-timeout
+  err "grok: submission receipt did not confirm the current prompt for lane '$lane'"
+  return 1
 }
 
 # Session is resumable once its events file exists with content.
@@ -193,10 +207,10 @@ grok_revise() {
   billing_preflight_provider grok || return 1
 
   if tmux_window_exists "$lane"; then
-    local target events before after attempt j
+    local target events before attempt j
     target="$(tmux_window_target "$lane")"
     events="$(_grok_events_file "$session_id" || true)"
-    before="$(wc -l <"$events" 2>/dev/null || echo 0)"
+    before="$(_grok_event_line_count "$events")"
     tmux send-keys -t "$target" C-u
     sleep 0.3
     tmux_paste_text "$target" "$message"
@@ -205,18 +219,17 @@ grok_revise() {
       tmux send-keys -t "$target" Enter
       for j in $(seq 1 6); do
         [[ -z "$events" ]] && events="$(_grok_events_file "$session_id" || true)"
-        after="$(wc -l <"$events" 2>/dev/null || echo 0)"
-        # A new turn appends turn_started (and more); line count growing is enough.
-        if [[ "$after" -gt "$before" ]]; then
-          # Prefer an actual turn_started after our before-mark when possible.
+        if _grok_submission_receipt_present "$events" "$message" "$before"; then
+          lane_set "$lane" latest_steering "$message"
           return 0
         fi
         sleep 1
       done
       warn "grok revise: steer attempt $attempt didn't start a turn for lane '$lane'; retrying Enter"
     done
-    warn "grok revise: message may not have submitted for lane '$lane' (events did not grow)"
-    return 0
+    WASPFLOW_PROVIDER_LAUNCH_ERROR=receipt-timeout
+    err "grok revise: submission receipt did not confirm the current prompt for lane '$lane'"
+    return 1
   fi
 
   # Headless resume after the pane exited. Run from the lane's cwd so project
@@ -233,7 +246,9 @@ grok_revise() {
       return 1
       ;;
   esac
-  local tmp; tmp="${out_file:-$(mktemp)}"
+  local tmp events before=0; tmp="${out_file:-$(mktemp)}"
+  events="$(_grok_events_file "$session_id" || true)"
+  before="$(_grok_event_line_count "$events")"
   local attempt rc=0
   for attempt in 1 2 3 4 5; do
     rc=0
@@ -248,6 +263,8 @@ grok_revise() {
     fi
     break
   done
+  if [[ "${rc:-0}" -eq 0 ]] && ! _grok_verify_started "$lane" "" "$message" "$before"; then rc=1; fi
+  [[ "${rc:-0}" -ne 0 ]] || lane_set "$lane" latest_steering "$message"
   [[ -n "$out_file" ]] || { cat "$tmp"; rm -f "$tmp"; }
   return "${rc:-0}"
 }

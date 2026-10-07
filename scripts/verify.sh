@@ -7493,5 +7493,7 @@ source "$root/scripts/fixtures/verify-s6-runtime.sh"
 source "$root/scripts/fixtures/verify-s1-claude.sh" # S1 Claude safe-settle checks
 # S3 Codex adapter hardening fixtures.
 source "$root/scripts/fixtures/verify-s3-codex.sh"
+# S4: secondary provider adapters and neutral handoff.
+source "$root/scripts/fixtures/verify-s4-secondary.sh"
 
 echo "waspflow verify: ok"
