@@ -111,7 +111,15 @@ selection_prepare_op() {
 
 selection_emit_warnings() {
   local disposition="$1" warning
-  while IFS= read -r warning; do [[ -z "$warning" ]] || warn "selection: $warning"; done < <(jq -r '.warnings[]' <<<"$disposition")
+  while IFS= read -r warning; do
+    case "$warning" in
+      availability_unknown)
+        warn "selection: availability unknown; provider model availability could not be verified. Continuing with the selected model; the provider CLI will validate it."
+        ;;
+      '') ;;
+      *) warn "selection: $warning" ;;
+    esac
+  done < <(jq -r '.warnings[]' <<<"$disposition")
 }
 
 selection_gate_op() {

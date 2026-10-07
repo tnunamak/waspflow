@@ -43,7 +43,9 @@ _claude_auth_env() {
   else
     CLAUDE_AUTH_ENV+=(-u CLAUDE_CONFIG_DIR)
   fi
-  [[ ${ANTHROPIC_API_KEY+x} ]] || CLAUDE_AUTH_ENV+=(-u ANTHROPIC_API_KEY)
+  # An empty caller value is not credentials. Clear it as well as an absent
+  # value so an inherited tmux-server key cannot silently authorize the turn.
+  [[ -n "${ANTHROPIC_API_KEY:-}" ]] || CLAUDE_AUTH_ENV+=(-u ANTHROPIC_API_KEY)
   [[ -n "$config_assignment" ]] && CLAUDE_AUTH_ENV+=("$config_assignment")
   return 0
 }
@@ -151,8 +153,13 @@ claude_spawn() {
   _claude_verify_started "$lane" "$target"
 }
 
-# Pane snapshot, de-escaped.
-_claude_pane() { tmux capture-pane -p -t "$1" -S -60 2>/dev/null | strip_ansi; }
+# Pane snapshot, de-escaped. Preserve capture failure so callers can make an
+# honest conservative decision instead of treating missing evidence as blank.
+_claude_pane() {
+  local raw
+  raw="$(tmux capture-pane -p -t "$1" -S -60 2>/dev/null)" || return 1
+  printf '%s\n' "$raw" | strip_ansi
+}
 
 # True when a pane is showing the folder-trust gate.
 #
@@ -171,6 +178,10 @@ _claude_trust_option_number() {
   # Echoes the digit labelling the "trust" option, or nothing when unnumbered.
   sed -n 's/.*\([0-9]\)[.)][[:space:]]*[Yy]es,[[:space:]]*I[[:space:]]*trust.*/\1/p' <<<"$1" |
     head -n 1
+}
+
+_claude_trust_affirmative_highlighted() {
+  grep -qiE '[❯>][[:space:]]*[Yy]es,[[:space:]]*I[[:space:]]*trust' <<<"$1"
 }
 
 # Answer Claude's folder-trust prompt if/when it appears. No-op for
@@ -203,11 +214,13 @@ _claude_clear_trust_prompt() {
         # separators.
         local k
         for k in $(seq 1 5); do
-          grep -qiE '[❯>][[:space:]]*[Yy]es,[[:space:]]*I[[:space:]]*trust' \
-            <<<"$(_claude_pane "$target")" && break
+          _claude_trust_affirmative_highlighted "$(_claude_pane "$target")" && break
           tmux send-keys -t "$target" Down
           sleep 1
         done
+        # An unreadable or changed dialog is not authority to confirm its
+        # current selection. Leave it visible for the caller to report.
+        _claude_trust_affirmative_highlighted "$(_claude_pane "$target")" || return 1
         tmux send-keys -t "$target" Enter
       fi
       local j
@@ -215,12 +228,14 @@ _claude_clear_trust_prompt() {
         _claude_trust_prompt_visible "$(_claude_pane "$target")" || return 0
         sleep 1
       done
-      return 0
+      return 1
     fi
     # Composer already up (no trust gate) → nothing to clear.
     grep -qiE "bypass permissions|/effort|Welcome back" <<<"$pane" && return 0
     sleep 1
   done
+  # No visible gate is a no-op. A visible gate that could not be cleared has
+  # already returned failure above.
   return 0
 }
 
@@ -252,9 +267,13 @@ _claude_verify_started() {
       fi
     fi
     pane="$(_claude_pane "$target")"
-    # Re-clear the trust gate if it (re)appeared.
+    # Re-clear the trust gate if it (re)appeared. The resolver reads the
+    # affirmative row itself; never send a positional fallback here.
     if _claude_trust_prompt_visible "$pane"; then
-      tmux send-keys -t "$target" "1"; sleep 1; tmux send-keys -t "$target" Enter
+      _claude_clear_trust_prompt "$target" || {
+        WASPFLOW_PROVIDER_LAUNCH_ERROR=trust-gate-unconfirmed
+        return 1
+      }
     fi
     sleep 1
   done
@@ -319,12 +338,6 @@ claude_session_resumable() {
   [[ -n "$jsonl" && -s "$jsonl" ]]
 }
 
-# How recently a subagent transcript must have been written to count as "still
-# active". A running subagent flushes events continuously; once it finishes (or
-# dies) its file goes cold. This bounds the wait so a killed/hung child can't
-# block reaping forever, while being generous enough to survive slow model turns.
-CLAUDE_SUBAGENT_ACTIVE_SECS="${CLAUDE_SUBAGENT_ACTIVE_SECS:-45}"
-
 # Are any of the parent session's Task/subagents still running?
 #
 # Signal (ground-truthed against real ~/.claude/projects files, 2026-07):
@@ -336,20 +349,18 @@ CLAUDE_SUBAGENT_ACTIVE_SECS="${CLAUDE_SUBAGENT_ACTIVE_SECS:-45}"
 #   pruned/compacted away — so the parent file alone cannot tell us a child is
 #   live. The child FILES are the observable signal.
 #
-# A subagent is treated as ACTIVE when its transcript was modified within
-# CLAUDE_SUBAGENT_ACTIVE_SECS AND its last event is not a clean terminal turn
-# (assistant/end_turn). The mtime gate ignores children that already finished
-# (cold files); the terminal-state gate ignores a child that finished cleanly
-# but whose file is coincidentally fresh.
+# A subagent is active until its transcript proves a clean terminal turn
+# (assistant/end_turn). File age is not completion evidence: a quiet child can
+# still own live work, and an unreadable transcript is uncertain rather than
+# successful. The conservative result blocks automated cleanup.
 #
 # Reliability, stated honestly: this is a heuristic, biased toward the SAFE side
-# (waiting too long beats reaping an empty worktree). A subagent that stalls
-# without writing for >ACTIVE_SECS reads as done; conversely a child mid-turn
-# always reads as active. It cannot see subagents that never wrote a file yet
-# (sub-second race right after spawn) — the parent's end_turn gate below plus
-# wait's polling covers that in practice. Returns 0 if any child looks active.
+# (waiting too long beats reaping an empty worktree). It cannot see subagents
+# that never wrote a file yet (sub-second race right after spawn) — the parent
+# end_turn gate below plus wait's polling covers that in practice. Returns 0 if
+# any observed child is unfinished or uncertain.
 _claude_children_active() {
-  local lane="$1" session_id="$2" subdir sub last_mtime now age
+  local lane="$1" session_id="$2" subdir sub
   # Parent transcript dir: <projects>/<slug>/<session-id>/subagents/
   # Locate it via the parent jsonl's dir so we don't guess the slug.
   local parent_jsonl parent_dir
@@ -359,19 +370,27 @@ _claude_children_active() {
   subdir="$parent_dir/${session_id}/subagents"
   [[ -d "$subdir" ]] || return 1
 
-  now="$(date +%s)"
   while IFS= read -r sub; do
     [[ -n "$sub" && -f "$sub" ]] || continue
-    last_mtime="$(stat -c %Y "$sub" 2>/dev/null || echo 0)"
-    age=$(( now - last_mtime ))
-    # Cold file → that child is done (or dead); skip it.
-    [[ "$age" -le "$CLAUDE_SUBAGENT_ACTIVE_SECS" ]] || continue
-    # Fresh file: active unless its last assistant turn already ended cleanly.
+    # Only a typed terminal event proves this child is done.
     local child_reason
     child_reason="$(jq -rc 'select(.type=="assistant") | .message.stop_reason // empty' "$sub" 2>/dev/null | tail -1)"
     [[ "$child_reason" == "end_turn" ]] || return 0
   done < <(find "$subdir" -maxdepth 1 -type f -name 'agent-*.jsonl' 2>/dev/null)
   return 1
+}
+
+# Claude can complete its parent turn while an in-pane shell continues in the
+# background. The footer is the only provider evidence for that detached work;
+# do not let the parent end_turn launder it into an idle/reap decision.
+_claude_background_shell_active() {
+  local lane="$1" target pane
+  [[ -n "$(lane_get "$lane" tmux_window)" ]] || return 1
+  tmux_window_exists "$lane" || return 1
+  target="$(tmux_window_target "$lane")" || return 1
+  pane="$(_claude_pane "$target")" || return 0
+  pane="$(tail -n 12 <<<"$pane")"
+  grep -qiE '(^|[^[:alnum:]])[1-9][0-9]* shells? still running([^[:alnum:]]|$)' <<<"$pane"
 }
 
 # IDLE predicate: the parent's last assistant event ended its turn AND no child
@@ -394,6 +413,7 @@ claude_is_idle() {
   if _claude_children_active "$lane" "$session_id"; then
     return 2   # distinct nonzero: "parent done, children still active" (not idle)
   fi
+  _claude_background_shell_active "$lane" && return 2
   return 0
 }
 
@@ -482,7 +502,8 @@ claude_revise() {
     target="$(tmux_window_target "$lane")"
     jsonl="$(find "$(_claude_projects_dir "$lane")" -maxdepth 2 -type f -name "${session_id}.jsonl" 2>/dev/null | head -1)"
     [[ -f "$jsonl" && -r "$jsonl" ]] && before="$(wc -l <"$jsonl")"
-    lane_set "$lane" claude_submission_state pending claude_submission_reason ""
+    lane_set "$lane" claude_submission_state pending claude_submission_reason "" \
+      revise_submitted false revise_submission_state unconfirmed-pending revise_submission_error ""
     tmux send-keys -t "$target" C-u
     sleep 0.3
     tmux_paste_text "$target" "$message"
@@ -495,7 +516,8 @@ claude_revise() {
           | jq -e --arg message "$message" 'select(.type == "user" and .isMeta != true and .isCompactSummary != true)
             | (.message.content // "" | if type == "array" then map(select(.type == "text") | .text) | join("") else . end)
             | select(. == $message)' >/dev/null 2>&1; then
-          lane_set "$lane" claude_submission_state submitted claude_submission_reason "correlated-user-event"
+          lane_set "$lane" claude_submission_state submitted claude_submission_reason "correlated-user-event" \
+            revise_submitted true revise_submission_state confirmed-task-started revise_submission_error ""
           return 0
         fi
         sleep 1
@@ -504,7 +526,8 @@ claude_revise() {
     done
     local reason=correlated-receipt-missing
     [[ -f "$jsonl" && -r "$jsonl" ]] || reason=session-log-unavailable
-    lane_set "$lane" claude_submission_state unconfirmed claude_submission_reason "$reason"
+    lane_set "$lane" claude_submission_state unconfirmed claude_submission_reason "$reason" \
+      revise_submitted false revise_submission_state unconfirmed-no-task-started revise_submission_error "$reason"
     warn "claude revise: submission unconfirmed for lane '$lane' ($reason)"
     return 1
   fi
@@ -517,8 +540,10 @@ claude_revise() {
   # though its JSONL is on disk ("No conversation found"). Retry with backoff —
   # the file-existence check alone is insufficient; the real signal is the
   # resume succeeding. Args already validated above.
-  local model_args=()
+  local model_args=() effort_args=() effort
   [[ -n "$model" ]] && model_args=(--model "$model")
+  effort="$(lane_get "$lane" effort)"
+  [[ -n "$effort" ]] && effort_args=(--effort "$effort")
   mcp_policy_load_lane "$lane"
   local tmp; tmp="${out_file:-$(mktemp)}"
   local attempt rc
@@ -526,11 +551,16 @@ claude_revise() {
     rc=0
     # Resume from the lane's cwd: claude --resume is scoped to the project dir.
     tmux_run_owned_lane_command "$lane" "${cwd:-$PWD}" headless-revise -- \
-      env "${CLAUDE_AUTH_ENV[@]}" "${MCP_ENV[@]}" claude --resume "$session_id" --print "${model_args[@]}" \
+      env "${CLAUDE_AUTH_ENV[@]}" "${MCP_ENV[@]}" claude --resume "$session_id" --print "${model_args[@]}" "${effort_args[@]}" \
       --dangerously-skip-permissions "${MCP_ARGV[@]}" -- "$message" </dev/null >"$tmp" 2>&1 || rc=$?
     if grep -q "No conversation found" "$tmp" 2>/dev/null; then
       sleep $(( attempt * 2 ))
       continue
+    fi
+    # Claude may exit zero after ending a print turn at its background-task
+    # ceiling. Preserve the partial output, but do not report it as completed.
+    if [[ "$rc" -eq 0 ]] && grep -Eq 'Background tasks still running after [^[:cntrl:]]*terminating' "$tmp"; then
+      rc=3
     fi
     break
   done
