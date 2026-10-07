@@ -48,3 +48,19 @@
   escalate_select_target r3-f4-claude claude/claude-haiku-4-5/low false false
   escalate_select_target r3-f4-claude claude/sonnet/low false false
 )
+
+(
+  fixture="$(mktemp -d "${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}/waspflow-r3-f4-list-XXXXXX")"
+  trap 'rm -rf "$fixture"' EXIT
+  export WASPFLOW_HOME="$fixture/home" WASPFLOW_LIB="$root/lib"
+  source "$root/lib/core.sh"
+  lane_set r3-f4-live provider fake status live cwd "$fixture"
+  lane_set r3-f4-reaped provider fake status reaped cwd "$fixture"
+
+  "$root/bin/waspflow" list --json >"$fixture/all.json"
+  jq -e 'map(.lane) | index("r3-f4-reaped") != null' "$fixture/all.json" >/dev/null \
+    || { echo 'r3-f4: list stopped showing reaped lanes without an opt-in filter' >&2; exit 1; }
+  "$root/bin/waspflow" list --hide-reaped --json >"$fixture/active.json"
+  jq -e 'map(.lane) | index("r3-f4-reaped") == null' "$fixture/active.json" >/dev/null \
+    || { echo 'r3-f4: --hide-reaped retained a reaped lane' >&2; exit 1; }
+)

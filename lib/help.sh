@@ -301,13 +301,14 @@ help_usage_list() {
 List durable lanes from the global lane index.
 
 Usage:
-  waspflow list [--status <outcomes>] [--lifecycle-state <states>] [--project <dir>] [--limit <n>] [--json]
+  waspflow list [--status <outcomes>] [--lifecycle-state <states>] [--project <dir>] [--limit <n>] [--hide-reaped] [--json]
 
 Flags:
   --status <outcomes>         Filter by comma-separated fan-in outcomes.
   --lifecycle-state <states>  Filter by comma-separated live, interrupted, unknown, exited, parked, or reaped states.
   --project <dir>             Filter to lanes for this project directory.
   --limit <n>                 Limit output to a positive number of lanes.
+  --hide-reaped               Omit lanes whose cleanup is complete.
   --json                      Emit lane rows as JSON.
 
 Examples:

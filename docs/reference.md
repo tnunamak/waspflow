@@ -499,7 +499,7 @@ age-based cleanup parks rather than reaps.
 
 `list --json` exposes the durable global lane index to callers. It supports
 `--project DIR`, `--lifecycle-state live,interrupted,unknown,exited,parked,reaped`,
-and `--limit N` while continuing to show corrupt records rather than silently
+`--hide-reaped`, and `--limit N` while continuing to show corrupt records rather than silently
 dropping them. `live` is derived from a current waspflow systemd scope receipt;
 a stored `live` record with no active receipt is `interrupted`, and a lane that
 ran through the `scope-unavailable` fallback is `unknown`. `unknown` also
