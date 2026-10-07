@@ -2101,7 +2101,13 @@ _reap_one_locked() {
     recovered)       warn "reap: lane '$lane' reaped — result=recovered (report rebuilt by recovery pass)" ;;
     verify_failed)   err  "reap: lane '$lane' reaped — result=verify_failed" ;;
     report_missing)  err  "reap: lane '$lane' reaped — result=report_missing (recovery disabled)" ;;
-    failed)          err  "reap: lane '$lane' reaped — result=failed (required report never produced)" ;;
+    failed)
+      if [[ -n "$(lane_get "$lane" report)" ]]; then
+        err "reap: lane '$lane' reaped — result=failed (required report never produced)"
+      else
+        err "reap: lane '$lane' reaped — result=failed"
+      fi
+      ;;
     abandoned)       warn "reap: lane '$lane' reaped — result=abandoned (closed out via 'close --status $(lane_outcome "$lane")'; deliverable not judged, no recovery run)" ;;
     runtime_drift)   err  "reap: lane '$lane' reaped — result=runtime_drift" ;;
     runtime_unverified) err "reap: lane '$lane' reaped — result=runtime_unverified" ;;

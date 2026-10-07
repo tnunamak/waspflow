@@ -122,4 +122,9 @@ EOF
     headless_revise_state running headless_revise_pid "$$" headless_revise_pid_start_ticks 0
   status_output="$("$root/bin/waspflow" status reused-headless)"
   jq -e '(.headless_revise_active // false) == false and .headless_revise_state == "interrupted"' <<<"$status_output" >/dev/null
+
+  # LOW-1: the required-report explanation is emitted only when a contract
+  # exists; a generic failed lane must not claim a report was required.
+  awk '/^    failed\)/,/^      ;;/ { print }' "$root/bin/waspflow" >"$r3f1/failed-result-case"
+  grep -q 'if \[\[ -n "$(lane_get "\$lane" report)" \]\]' "$r3f1/failed-result-case"
 )
