@@ -14,7 +14,7 @@ turn_state_begin_generation() {
       '{generation:$generation,result:$result,report_state:(if $report_state == "" then null else $report_state end),finished_epoch:($at|tonumber)}' >>"$history"
   fi
   generation=$((generation + 1))
-  lane_set "$lane" turn_generation "$generation" turn_state running turn_started_epoch "$now" result "" report_state pending report_before_signature "$report_signature" verify_runs "[]" verify_state "" verify_failure_class "" verify_test_files_changed "" verify_checkpoint_epoch "" verify_checkpoint_fingerprint "" verify_epoch "" verify_exit_code "" prepare_state "" prepare_exit_code "" prepare_epoch "" baseline_oracle_ran "" baseline_oracle_state "" baseline_oracle_reason ""
+  lane_set "$lane" turn_generation "$generation" turn_state running turn_started_epoch "$now" result "" report_state pending report_before_signature "$report_signature" receipt_emitted "false" receipt_emitted_generation "" receipt_id "" verify_runs "[]" verify_state "" verify_failure_class "" verify_test_files_changed "" verify_checkpoint_epoch "" verify_checkpoint_fingerprint "" verify_epoch "" verify_exit_code "" prepare_state "" prepare_exit_code "" prepare_epoch "" baseline_oracle_ran "" baseline_oracle_state "" baseline_oracle_reason ""
 }
 
 turn_state_finish_generation() {
