@@ -112,8 +112,15 @@ reconcile_lane_json() {
     event_count="$(jq -s --arg lane "$lane" --argjson claims "$claims" '[.[] | select(.lane == $lane and .state == "pending") | select((($claims[.event_id].acked // false) | not))] | length' "$(reconcile_event_ledger)" 2>/dev/null || echo 0)"
   fi
   classification="$lifecycle"; next_action="inspect durable receipt"
-  if [[ -n "$cwd" && ! -d "$cwd" ]]; then classification="unknown"; next_action="recorded working directory is missing; preserve and inspect"
+  # Derived lifecycle is stronger evidence than historical pane metadata. A
+  # completed reap may deliberately remove its cwd, and a live scope may keep
+  # descendants running after the pane shell has gone away.
+  if [[ "$lifecycle" == reaped || "$lifecycle" == parked ]]; then
+    next_action="inspect durable receipt"
+  elif [[ "$lifecycle" == live ]]; then
+    classification="live"; next_action="observe or use normal wait/revise controls"
   elif [[ "$window" == true ]]; then classification="live"; next_action="observe or use normal wait/revise controls"
+  elif [[ -n "$cwd" && ! -d "$cwd" ]]; then classification="unknown"; next_action="recorded working directory is missing; preserve and inspect"
   elif [[ "$lifecycle" == interrupted ]]; then next_action="inspect before explicit recovery or adoption"
   elif [[ -n "$expected_start" && -z "$actual_start" ]]; then classification="interrupted"; next_action="recorded pane process exited; inspect before recovery"
   elif [[ -n "$expected_start" && "$actual_start" != "$expected_start" ]]; then classification="unknown"; next_action="PID identity changed; refuse adoption and inspect"
