@@ -1702,6 +1702,7 @@ _revise_one() {
     # status shows it (pid liveness distinguishes a running turn from a dead one).
     headless=1
     lane_set "$lane" surface_changed "true" headless_revise_state running headless_revise_pid "$$" \
+      headless_revise_pid_start_ticks "$(process_start_ticks "$$")" \
       headless_revise_started_epoch "$(date +%s)" headless_revise_ended_epoch "" headless_revise_error "" headless_revise_rc ""
   fi
   # Capture report freshness and retire any prior result before the provider can
