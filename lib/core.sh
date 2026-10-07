@@ -864,23 +864,61 @@ tmux_detached_session_receipt_live() {
   [[ "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]]
 }
 
+# A detached receipt proves its leader identity at launch.  Once that leader
+# exits, a surviving group member is still potentially owned, but no longer has
+# the same strong proof.  Keep that distinction explicit: callers must retain
+# an uncertain group rather than treating a dead leader as an empty group.
+# Prints one of: live, uncertain, gone, invalid.
+tmux_detached_session_receipt_group_state() {
+  local receipt="$1" pid pgid sid ticks actual got_pgid got_sid
+  pid="$(jq -r '.pid // empty' <<<"$receipt")"; pgid="$(jq -r '.pgid // empty' <<<"$receipt")"
+  sid="$(jq -r '.sid // empty' <<<"$receipt")"; ticks="$(jq -r '.start_ticks // empty' <<<"$receipt")"
+  if [[ ! "$pid" =~ ^[0-9]+$ || ! "$pgid" =~ ^[0-9]+$ || ! "$sid" =~ ^[0-9]+$ || ! "$ticks" =~ ^[0-9]+$ ]]; then
+    printf 'invalid\n'; return 2
+  fi
+  if ! ps -eo pgid=,sid= 2>/dev/null | awk -v pgid="$pgid" -v sid="$sid" '$1 == pgid && $2 == sid { found=1 } END { exit !found }'; then
+    printf 'gone\n'; return 1
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    actual="$(process_start_ticks "$pid" || true)"
+    read -r got_pgid got_sid < <(ps -o pgid= -o sid= -p "$pid" 2>/dev/null)
+    if [[ "$actual" == "$ticks" && "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]]; then
+      printf 'live\n'; return 0
+    fi
+  fi
+  printf 'uncertain\n'; return 2
+}
+
 tmux_kill_detached_session_receipt_if_owned() {
-  local receipt="$1" pgid
-  tmux_detached_session_receipt_live "$receipt" || return 0
+  local receipt="$1" pgid state _
   pgid="$(jq -r .pgid <<<"$receipt")"
-  kill -- "-$pgid" 2>/dev/null || true
+  state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
+  case "$state" in
+    gone) return 0 ;;
+    live|uncertain) ;;
+    *) return 1 ;;
+  esac
+  kill -TERM -- "-$pgid" 2>/dev/null || true
   for _ in 1 2 3 4 5; do
     sleep 0.1
-    tmux_detached_session_receipt_live "$receipt" || return 0
+    state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
+    [[ "$state" == gone ]] && return 0
   done
   kill -KILL -- "-$pgid" 2>/dev/null || true
+  for _ in 1 2 3 4 5; do
+    sleep 0.1
+    state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
+    [[ "$state" == gone ]] && return 0
+  done
+  return 1
 }
 
 tmux_kill_owned_lane_detached_sessions() {
-  local lane="$1" receipt
+  local lane="$1" receipt rc=0
   while IFS= read -r receipt; do
-    [[ -n "$receipt" ]] && tmux_kill_detached_session_receipt_if_owned "$receipt"
+    [[ -z "$receipt" ]] || tmux_kill_detached_session_receipt_if_owned "$receipt" || rc=1
   done < <(tmux_lane_detached_session_receipts "$lane")
+  return "$rc"
 }
 
 tmux_lane_scope_start_marker() {

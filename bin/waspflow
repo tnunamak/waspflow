@@ -1857,9 +1857,16 @@ _reap_remaining_resources() {
     state="$(timeout 5 systemctl --user show "$unit" -p ActiveState --value 2>/dev/null)" || state=unknown
     case "$state" in inactive|failed) ;; *) remaining+=("scope:$unit:$state") ;; esac
   done < <(tmux_lane_scope_receipts "$lane")
+  local detached_state detached_group
   while IFS= read -r receipt; do
-    tmux_detached_session_receipt_live "$receipt" || continue
-    remaining+=("process-group:$(jq -r .pgid <<<"$receipt")")
+    [[ -n "$receipt" ]] || continue
+    detached_group="$(jq -r '.pgid // empty' <<<"$receipt")"
+    detached_state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
+    case "$detached_state" in
+      live) remaining+=("process-group:$detached_group") ;;
+      uncertain) remaining+=("process-group:${detached_group:-unknown}:uncertain") ;;
+      invalid) remaining+=("process-group:unknown:uncertain") ;;
+    esac
   done < <(tmux_lane_detached_session_receipts "$lane")
   wt="$(lane_get "$lane" worktree)"
   if [[ -n "$wt" && -e "$wt" ]]; then remaining+=("worktree:$wt"); fi
