@@ -1046,10 +1046,39 @@ codex_refresh_runtime_settings() {
   return 0
 }
 
+# Reduce the rollout to the evidence that is safe to attribute to its current
+# turn. A new user message invalidates the earlier turn immediately: an old
+# completion can arrive late, but must never make that queued newer turn idle.
+# Args: rollout; stdout: JSON state with outcome, pending tools, and completions
+_codex_current_turn_state() {
+  local rollout="$1"
+  [[ -f "$rollout" ]] || return 1
+  jq -nce '
+    reduce inputs as $row
+      ({turn:"", outcome:"pending", tools:{}, completed:0};
+       if $row.type == "turn_context" then .turn="" | .outcome="pending"
+       elif $row.type == "event_msg" then
+         $row.payload as $p |
+         if $p.type == "task_started" then .turn=($p.turn_id // "") | .outcome="pending"
+         elif $p.type == "user_message" then .turn="" | .outcome="pending"
+         elif $p.type == "exec_command_begin" then
+           .tools[($p.call_id // "unknown")]=true | .outcome="pending"
+         elif $p.type == "exec_command_end" then del(.tools[($p.call_id // "unknown")])
+         elif $p.type == "task_complete" then
+           if .outcome == "aborted" then .
+           elif .turn != "" and ($p.turn_id // "") == .turn then .outcome="complete" | .completed += 1
+           else . end
+         elif $p.type == "turn_aborted" then
+           if .turn != "" and ($p.turn_id // "") == .turn then .outcome="aborted" else . end
+         else . end
+       else . end)
+  ' "$rollout"
+}
+
 # IDLE predicate: the current turn completed and no turn-owned exec is pending.
 # Args: lane
 codex_is_idle() {
-  local lane="$1" sid rollout last
+  local lane="$1" sid rollout state
   sid="$(_codex_discover_session_cached "$lane")"
   [[ -n "$sid" ]] || return 1
   rollout="$(lane_get "$lane" rollout)"
@@ -1057,35 +1086,15 @@ codex_is_idle() {
     rollout="$(_codex_rollout_for_session "$sid" || true)"
   fi
   [[ -n "$rollout" && -f "$rollout" ]] || return 1
-  # Ordered current-turn evidence, with matching IDs when present.
-  jq -ne '
-    reduce inputs as $row
-      ({turn:"", outcome:"pending", tools:{}};
-       if $row.type == "turn_context" then .outcome="pending"
-       elif $row.type == "event_msg" then
-         $row.payload as $p |
-         if $p.type == "task_started" then .turn=($p.turn_id // "") | .outcome="pending"
-         elif $p.type == "user_message" then .outcome="pending"
-         elif $p.type == "exec_command_begin" then
-           .tools[($p.call_id // "unknown")]=true | .outcome="pending"
-         elif $p.type == "exec_command_end" then del(.tools[($p.call_id // "unknown")])
-         elif $p.type == "task_complete" then
-           if .outcome == "aborted" then .
-           elif .turn == "" or ($p.turn_id // "") == .turn then .outcome="complete"
-           else . end
-         elif $p.type == "turn_aborted" then
-           if .turn == "" or ($p.turn_id // "") == .turn then .outcome="aborted" else . end
-         else . end
-       else . end)
-    | .outcome == "complete" and (.tools | length == 0)
-  ' "$rollout" >/dev/null 2>&1
+  state="$(_codex_current_turn_state "$rollout")" || return 1
+  jq -e '.outcome == "complete" and (.tools | length == 0)' <<<"$state" >/dev/null
 }
 
 # turn_mark: count of COMPLETED turns (task_complete events) in the rollout. Like
 # claude's, this advances ONLY when a turn finishes — not on the submitted user
 # message — so the wait barrier clears exactly when the revised turn completes.
 codex_turn_mark() {
-  local lane="$1" sid rollout
+  local lane="$1" sid rollout state
   sid="$(_codex_discover_session_cached "$lane")"
   [[ -n "$sid" ]] || { echo 0; return 0; }
   rollout="$(lane_get "$lane" rollout)"
@@ -1093,7 +1102,8 @@ codex_turn_mark() {
     rollout="$(_codex_rollout_for_session "$sid" || true)"
   fi
   [[ -n "$rollout" && -f "$rollout" ]] || { echo 0; return 0; }
-  jq -rc 'select((.payload.type // .type) == "task_complete") | 1' "$rollout" 2>/dev/null | wc -l
+  state="$(_codex_current_turn_state "$rollout")" || { echo 0; return 0; }
+  jq -r '.completed' <<<"$state"
 }
 
 # Deferred-switch hooks (lib/escalation.sh). escalate_resume_launch_locked can
