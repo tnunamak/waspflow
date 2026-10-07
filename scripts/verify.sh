@@ -6996,20 +6996,41 @@ PROV
   sess="wf-steer-$$"
   tmux new-session -d -s "$sess" -n _h
   swf() { WASPFLOW_LIB="$sl" WASPFLOW_HOME="$sh_home" WASPFLOW_TMUX_SESSION="$sess" "$root/bin/waspflow" "$@"; }
+  state_uuid_counter=0
   mkstate() { # lane status [extra-json]
+    local lane_uuid
+    state_uuid_counter=$((state_uuid_counter + 1))
+    lane_uuid="$(printf '00000000-0000-4000-8000-%012d' "$state_uuid_counter")"
     mkdir -p "$sh_home/lanes/$1"; : >"$sh_home/lanes/$1/transcript.log"
-    jq -n --arg cwd "$sh_work" --arg st "$2" --argjson x "${3:-{\}}" '{provider:"steerp",status:$st,cwd:$cwd,session_id:"sid"} + $x' >"$sh_home/lanes/$1/state.json"
+    jq -n --arg cwd "$sh_work" --arg st "$2" --arg uuid "$lane_uuid" --argjson x "${3:-{\}}" '{provider:"steerp",status:$st,cwd:$cwd,session_id:"sid",lane_uuid:$uuid} + $x' >"$sh_home/lanes/$1/state.json"
   }
   st() { jq -r ".$2 // empty" "$sh_home/lanes/$1/state.json"; }
   stmod() { jq "$2" "$sh_home/lanes/$1/state.json" >"$sh_work/s.json" && mv "$sh_work/s.json" "$sh_home/lanes/$1/state.json"; }
   # Fresh shells (bash -c) so no function stubbed earlier in this suite leaks in.
-  own() { WASPFLOW_HOME="$sh_home" WASPFLOW_TMUX_SESSION="$sess" bash -c 'source "$1/core.sh"; tmux_capture_lane_ownership "$2" "$3:$2"' _ "$sl" "$1" "$sess"; }
+  own() {
+    WASPFLOW_HOME="$sh_home" WASPFLOW_TMUX_SESSION="$sess" bash -c '
+      source "$1/core.sh"
+      target="$(tmux display-message -p -t "$WASPFLOW_TMUX_SESSION:$2" "#{window_id}")"
+      tmux set-option -w -t "$target" @waspflow_home "$(cd "$WASPFLOW_HOME" && pwd -P)"
+      tmux set-option -w -t "$target" @waspflow_lane_uuid "$(lane_get "$2" lane_uuid)"
+      tmux set-option -w -t "$target" @waspflow_provider "$(lane_get "$2" provider)"
+      tmux set-option -w -t "$target" @waspflow_session_id "$(lane_get "$2" session_id)"
+      tmux_capture_lane_ownership "$2" "$target"
+    ' _ "$sl" "$1"
+  }
 
   # 1. Reboot-restored window: recorded id stale, one same-named window in the
   #    lane's cwd -> revise steers it live (no parallel headless resume) and the
   #    durable ownership is repaired. Ambiguity / foreign cwd fail closed.
-  tmux new-window -d -t "$sess" -n drift -c "$sh_work" 'exec sleep 120'
+  drift_window="$(tmux new-window -d -P -F '#{window_id}' -t "$sess" -n drift -c "$sh_work" 'exec tail -f /dev/null')"
   mkstate drift live "{\"tmux_session\":\"$sess\",\"tmux_window\":\"@9999\",\"tmux_pane_pid\":\"1\"}"
+  drift_uuid="$(st drift lane_uuid)"
+  tmux set-option -w -t "$drift_window" @waspflow_home "$(cd "$sh_home" && pwd -P)"
+  tmux set-option -w -t "$drift_window" @waspflow_lane_uuid "$drift_uuid"
+  tmux set-option -w -t "$drift_window" @waspflow_provider steerp
+  tmux set-option -w -t "$drift_window" @waspflow_session_id sid
+  [[ "$(tmux display-message -p -t "$drift_window" '#{pane_current_command}')" != sleep && "$(tmux display-message -p -t "$drift_window" '#{pane_current_command}')" != cat ]] \
+    || { echo "steer: restored fixture window has a non-adoptable pane command" >&2; exit 1; }
   : >"$STEER_CTL/revise.log"
   swf revise drift -- "next" >/dev/null 2>&1 || { echo "steer: drifted-window revise failed" >&2; exit 1; }
   [[ "$(<"$STEER_CTL/revise.log")" == "live:next" ]] || { echo "steer: stale window id led to a headless resume instead of live steer" >&2; exit 1; }
@@ -7022,9 +7043,15 @@ PROV
   [[ "$rc" -ne 0 && ! -s "$STEER_CTL/revise.log" && "$out" == *"identity cannot be proven"* && "$(st drift tmux_window)" == "@9999" ]] \
     || { echo "steer: duplicate same-named windows must fail closed without state change" >&2; exit 1; }
   mkstate foreign live "{\"tmux_session\":\"$sess\",\"tmux_window\":\"@9999\",\"tmux_pane_pid\":\"1\",\"cwd\":\"/\"}"
-  tmux new-window -d -t "$sess" -n foreign -c "$sh_work" 'exec sleep 120'
-  set +e; swf revise foreign -- "x" >/dev/null 2>&1; rc=$?; set -e
-  [[ "$rc" -ne 0 && "$(st foreign tmux_window)" == "@9999" ]] || { echo "steer: cwd-mismatched window must not be adopted" >&2; exit 1; }
+  foreign_window="$(tmux new-window -d -P -F '#{window_id}' -t "$sess" -n foreign -c "$sh_work" 'exec tail -f /dev/null')"
+  tmux set-option -w -t "$foreign_window" @waspflow_home "$(cd "$sh_home" && pwd -P)"
+  tmux set-option -w -t "$foreign_window" @waspflow_lane_uuid "$(st foreign lane_uuid)"
+  tmux set-option -w -t "$foreign_window" @waspflow_provider steerp
+  tmux set-option -w -t "$foreign_window" @waspflow_session_id sid
+  : >"$STEER_CTL/revise.log"
+  set +e; out="$(swf revise foreign -- "x" 2>&1)"; rc=$?; set -e
+  [[ "$rc" -ne 0 && ! -s "$STEER_CTL/revise.log" && "$out" == *"identity cannot be proven"* && "$(st foreign tmux_window)" == "@9999" ]] \
+    || { echo "steer: cwd-mismatched window must fail closed without a provider call" >&2; exit 1; }
 
   # 2. Reaped lane whose worktree is gone: fail before advertising a resume.
   mkstate gone reaped '{"cwd":"/nonexistent/waspflow-gone-worktree"}'
@@ -7034,14 +7061,14 @@ PROV
      && "$(st gone headless_revise_state)" == failed-before-submission ]] \
     || { echo "steer: missing-worktree resume did not fail early and durably" >&2; exit 1; }
 
-  # 3. Headless revise of reaped and parked lanes is visible work, then terminal.
+  # 3. A completed headless provider call starts a fresh, unverified turn.
   for kind in reaped parked; do
     mkstate "h-$kind" "$kind" '{"result":"succeeded"}'
     swf revise "h-$kind" -- "go" >/dev/null 2>&1 || { echo "steer: $kind headless revise failed" >&2; exit 1; }
     jq -e '.headless_revise_active == true and .headless_revise_state == "running" and .record_status == "'"$kind"'"' "$STEER_CTL/status-during.json" >/dev/null \
       || { echo "steer: $kind headless revise was invisible to status while running" >&2; exit 1; }
-    [[ "$(st "h-$kind" headless_revise_state)" == completed && "$(st "h-$kind" result)" == succeeded && -n "$(st "h-$kind" headless_revise_ended_epoch)" ]] \
-      || { echo "steer: $kind headless revise did not reach a terminal state" >&2; exit 1; }
+    [[ "$(st "h-$kind" headless_revise_state)" == completed && -z "$(st "h-$kind" result)" && "$(st "h-$kind" turn_state)" == running && -n "$(st "h-$kind" headless_revise_ended_epoch)" ]] \
+      || { echo "steer: $kind headless revise did not start a fresh turn" >&2; exit 1; }
   done
   set +e; swf revise h-parked -- "timeout please" >/dev/null 2>&1; rc=$?; set -e
   [[ "$rc" -eq 124 && "$(st h-parked headless_revise_state)" == timeout ]] || { echo "steer: provider timeout was not recorded/propagated" >&2; exit 1; }
