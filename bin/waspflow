@@ -1877,7 +1877,12 @@ _reap_remaining_resources() {
     state="$(timeout 5 systemctl --user show "$unit" -p ActiveState --value 2>/dev/null)" || state=unknown
     case "$state" in inactive|failed) ;; *) remaining+=("scope:$unit:$state") ;; esac
   done < <(tmux_lane_scope_receipts "$lane")
-  local detached_state detached_group
+  local detached_state detached_group pending_launch_id pending
+  while IFS= read -r pending; do
+    [[ -n "$pending" ]] || continue
+    pending_launch_id="$(jq -r '.launch_id // "unknown"' <<<"$pending")"
+    remaining+=("pending-launch:${pending_launch_id}:uncertain")
+  done < <(tmux_lane_pending_detached_launches "$lane")
   while IFS= read -r receipt; do
     [[ -n "$receipt" ]] || continue
     detached_group="$(jq -r '.pgid // empty' <<<"$receipt")"

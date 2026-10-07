@@ -79,4 +79,48 @@ EOF
   fi
   unset -f ps
   kill -KILL "$observed" 2>/dev/null || true
+
+  # R4-N1: receipt conversion is bound to the current lane life and launch.
+  # A stale writer cannot append its receipt after a respawn has replaced state.
+  lane_set stale provider fake cwd "$r6" lane_uuid "$(new_uuid)"
+  stale_uuid="$(lane_get stale lane_uuid)"
+  stale_launch="$(new_uuid)"
+  setsid bash -c 'while :; do sleep 1; done' &
+  stale_child=$!
+  sleep 0.05
+  read -r stale_pgid stale_sid < <(ps -o pgid= -o sid= -p "$stale_child")
+  stale_ticks="$(process_start_ticks "$stale_child")"
+  tmux_record_pending_detached_launch stale "$stale_uuid" "$stale_launch" pane "$stale_child" "$stale_ticks"
+  if tmux_record_lane_detached_session stale pane "$stale_child" "$stale_pgid" "$stale_sid" "$stale_ticks" "$stale_uuid" "$(new_uuid)"; then
+    echo 'r6 N1: stale launch receipt append was accepted' >&2; exit 1
+  fi
+  if [[ -n "$(tmux_lane_detached_session_receipts stale)" ]]; then
+    echo 'r6 N1: stale launch wrote a receipt' >&2; exit 1
+  fi
+  lane_set stale lane_uuid "$(new_uuid)"
+  if tmux_record_lane_detached_session stale pane "$stale_child" "$stale_pgid" "$stale_sid" "$stale_ticks" "$stale_uuid" "$stale_launch"; then
+    echo 'r6 N1: stale lane-life receipt append was accepted' >&2; exit 1
+  fi
+  kill -KILL "$stale_child" 2>/dev/null || true
+
+  # An unretired pending child receives TERM only by matching direct identity,
+  # then keeps reap partial and listed as an uncertain remaining resource.
+  cat >"$r6/pending-ignore-term.sh" <<'EOF'
+#!/usr/bin/env bash
+trap '' TERM
+while :; do sleep 1; done
+EOF
+  chmod +x "$r6/pending-ignore-term.sh"
+  setsid "$r6/pending-ignore-term.sh" &
+  pending_child=$!
+  sleep 0.05
+  lane_set pending provider codex cwd "$r6" lane_uuid "$(new_uuid)" spawn_submitted false
+  tmux_record_pending_detached_launch pending "$(lane_get pending lane_uuid)" "$(new_uuid)" pane "$pending_child" "$(process_start_ticks "$pending_child")"
+  if WASPFLOW_TMUX_SOCKET="wf-test-$$" "$root/bin/waspflow" reap pending --keep-worktree --no-archive >"$r6/reap.out" 2>"$r6/reap.err"; then
+    echo 'r6 N1: reap reported complete with a pending launch' >&2; exit 1
+  fi
+  if [[ "$(lane_get pending reap_cleanup_state)" != partial ]] || ! jq -e '.[] | startswith("pending-launch:")' <<<"$(lane_get pending reap_remaining_resources)" >/dev/null; then
+    echo 'r6 N1: reap did not preserve the pending launch as uncertain' >&2; exit 1
+  fi
+  kill -KILL "$pending_child" 2>/dev/null || true
 )

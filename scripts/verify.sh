@@ -1923,8 +1923,9 @@ JSONL
 )
 
 # Pin: the ambiguous cwd-only fallback must not exist in the shipped adapter.
-! grep -q '_codex_find_rollout_for_cwd' "$root/lib/providers/codex.sh" \
-  || { echo "codex: ambiguous cwd-only rollout fallback regressed back in" >&2; exit 1; }
+if grep -q '_codex_find_rollout_for_cwd' "$root/lib/providers/codex.sh"; then
+  echo "codex: ambiguous cwd-only rollout fallback regressed back in" >&2; exit 1
+fi
 grep -q 'FAILS' "$root/lib/providers/codex.sh" || { echo "codex: fail-closed discovery comment missing" >&2; exit 1; }
 
 # Grok idle/resumable: last turn_* event is turn_ended (MCP noise after is fine).
@@ -2927,7 +2928,9 @@ grep -q 'turn_mark' "$root/lib/core.sh" || { echo "core: turn_mark not in provid
 # the user's interactive profile, which was nondeterministic under load and flakily
 # failed passing verify commands. Guard against regressing to -lc.
 grep -q 'bash -c "\$command"' "$root/lib/artifacts.sh" || { echo "artifacts: verify must use bash -c (non-login), not -lc" >&2; exit 1; }
-! grep -q 'bash -lc "\$command"' "$root/lib/artifacts.sh" || { echo "artifacts: verify regressed to login shell (-lc)" >&2; exit 1; }
+if grep -q 'bash -lc "\$command"' "$root/lib/artifacts.sh"; then
+  echo "artifacts: verify regressed to login shell (-lc)" >&2; exit 1
+fi
 # Pin: cmd_spawn ends with an explicit success so a contract-less spawn does not
 # exit nonzero (which trained callers to ignore spawn's exit code, hiding real fails).
 grep -q 'spawn_submitted' "$root/bin/waspflow" || { echo "spawn: submission-confirmation (spawn_submitted) missing" >&2; exit 1; }
@@ -4096,9 +4099,10 @@ PROV
 # deliberately exclude historical incident/confidence records from this check. For the
 # bundled policy pack only operating-points.json routes; its README changelog and
 # pack.json description are history and stay byte-identical to the released pack.
-! rg -n 'gpt-5\.5|gpt-5\.4-mini' \
-  "$root/data/model-choice-policy/operating-points.json" "$root/scripts/live-soak.sh" "$root/docs/operating-points.md" "$root/README.md" "$root/skill/SKILL.md" \
-  || { echo "active model guidance still references an old Codex model" >&2; exit 1; }
+if rg -n 'gpt-5\.5|gpt-5\.4-mini' \
+  "$root/data/model-choice-policy/operating-points.json" "$root/scripts/live-soak.sh" "$root/docs/operating-points.md" "$root/README.md" "$root/skill/SKILL.md"; then
+  echo "active model guidance still references an old Codex model" >&2; exit 1
+fi
 
 # Thin bundle-before-reap (2026-07-10): archive only the lane's OWN commits
 # (fork-point..tip), not full branch history — the dominant cost of batch reap on a
@@ -5070,9 +5074,10 @@ JQ
 sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/verify.sh" \
   | rg -q 'parity_tmux\(\).*real_tmux.*-L.*WASPFLOW_TMUX_SOCKET' \
   || { echo "batch parity: bare tmux invocation regressed" >&2; exit 1; }
-! sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/verify.sh" \
-  | rg -q '^[[:space:]]*tmux[[:space:]]+(new-|display-|kill-)' \
-  || { echo "batch parity: direct tmux lifecycle invocation regressed" >&2; exit 1; }
+if sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/verify.sh" \
+  | rg -q '^[[:space:]]*tmux[[:space:]]+(new-|display-|kill-)'; then
+  echo "batch parity: direct tmux lifecycle invocation regressed" >&2; exit 1
+fi
 
 # Structured observation: all providers normalize only lifecycle facts, never
 # raw message/tool content. These fixtures also prove malformed/truncated and
@@ -7673,4 +7678,5 @@ source "$root/scripts/fixtures/verify-r3-f1.sh"
 source "$root/scripts/fixtures/verify-r4.sh"
 
 source "$root/scripts/fixtures/verify-r3-f4.sh"
+source "$root/scripts/fixtures/verify-r6.sh"
 echo "waspflow verify: ok"
