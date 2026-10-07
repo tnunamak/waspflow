@@ -50,7 +50,7 @@ allowed lanes and efforts, missed-failure cost, and constraints.
 catalog, or reports missing model/board coverage. It uses a 90-day price horizon
 and requires independent cross-model evidence for model changes. It never edits
 `operating-points.json`. See
-[SCHEMA.md](SCHEMA.md#op-requirementsjson-draft--owner-review-pending).
+[SCHEMA.md](SCHEMA.md#op-requirementsjson-draft--policy-review-pending).
 
 ```bash
 ./scripts/recommend_ops.py            # markdown table + per-op detail

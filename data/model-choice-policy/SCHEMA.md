@@ -23,7 +23,7 @@ Root also carries:
 - `policy_version` — pack semver
 - `doctrine` — short non-goals
 
-## `op-requirements.json` (DRAFT — owner review pending)
+## `op-requirements.json` (DRAFT — policy review pending)
 
 The recommender reads this policy and the catalog; it never edits `operating-points.json`.
 JSON Schema: [`schemas/op-requirements-v1.schema.json`](schemas/op-requirements-v1.schema.json).
@@ -111,8 +111,9 @@ than a measured candidate. Vendor groups only flag this. `review.audit` excludes
 both makers' **vendors**, and shows maker and checker success rates side by side
 where available. If a maker is unresolved, its current `expands_to` supplies
 the vendor constraint. This vendor choice for `review.audit` is
-`OWNER_DECISION_PENDING`: the owner must decide vendor versus model-family
-independence. The recommender keeps the current vendor constraint meanwhile.
+`OWNER_DECISION_PENDING`: a policy decision is required on vendor versus
+model-family independence. The recommender keeps the current vendor constraint
+meanwhile.
 
 The default policy horizon is 90 days from the pinned `defaults.price_as_of`
 (initially the pack's `generated_at` date); `--price-as-of` overrides it.
