@@ -1131,14 +1131,11 @@ _codex_task_started_mark() {
   jq -rc 'select((.payload.type // .type) == "task_started") | 1' "$rollout" 2>/dev/null | wc -l
 }
 
-# Confirm a live revise from the delta written after its paste, rather than from
-# any increase in task_started. A queued message can coexist with another
-# already-started turn, so when Codex gives both events turn IDs they must agree.
-# Older event formats omit the user-message event entirely; preserve that narrow
-# compatibility fallback only when no user-message event is present. A different
-# user message is evidence of unrelated current-turn activity, never a receipt.
-# Args: rollout message byte_offset
-_codex_revise_submission_confirmed() {
+# Classify the live-revise delta written after its paste. An exact message
+# without a matching start proves the paste submitted, but not that the current
+# turn began, so callers must wait without pressing Enter again.
+# Args: rollout message byte_offset; stdout: confirmed|message-seen|not-seen
+_codex_revise_submission_state() {
   local rollout="$1" message="$2" byte_offset="$3"
   [[ -f "$rollout" && "$byte_offset" =~ ^[0-9]+$ ]] || return 1
   tail -c "+$(( byte_offset + 1 ))" "$rollout" 2>/dev/null | jq -nre --arg message "$message" '
@@ -1166,8 +1163,58 @@ _codex_revise_submission_confirmed() {
          ($p.turn_id // $row.turn_id // "") as $id |
          if $id != "" and (.matched_ids | index($id)) != null then .confirmed=true else . end
        else . end)
-    | .confirmed or ((.saw_user_message | not) and .started > 0)
-  ' >/dev/null 2>&1
+    | if .confirmed then "confirmed"
+      elif .saw_message then "message-seen"
+      elif ((.saw_user_message | not) and .started > 0) then "confirmed"
+      else "not-seen"
+      end
+  ' 2>/dev/null
+}
+
+# Refuse to type into a pane when its UI owns the keyboard. Reuse the same
+# modal detectors as spawn, and include mid-turn model-choice prompts because
+# a normal revise message must never accidentally choose a model.
+# Args: pane_text; stdout: blocker reason
+_codex_revise_input_blocker() {
+  local pane="$1" reason
+  if _codex_paused_goal_prompt_visible "$pane"; then
+    printf '%s\n' "paused-goal prompt"
+    return 0
+  fi
+  if reason="$(_codex_startup_blocker "$pane")"; then
+    printf '%s\n' "$reason"
+    return 0
+  fi
+  if reason="$(wf_pane_looks_blocked "$pane")"; then
+    printf '%s\n' "$reason"
+    return 0
+  fi
+  return 1
+}
+
+# Guard every live-revise key injection. The pane can change between attempts,
+# so this intentionally takes a fresh snapshot immediately before each key.
+# Args: lane target
+_codex_revise_pane_accepts_input() {
+  local lane="$1" target="$2" pane reason
+  pane="$(_codex_pane "$target")"
+  if [[ -z "$pane" ]]; then
+    lane_set "$lane" revise_submitted false \
+      revise_submission_state unconfirmed-pane-unreadable \
+      revise_submission_error pane-unreadable revise_task_started_mark ""
+    err "codex revise: cannot inspect pane for lane '$lane'; no keys were sent"
+    return 1
+  fi
+  if reason="$(_codex_revise_input_blocker "$pane")"; then
+    lane_set "$lane" revise_submitted false \
+      revise_submission_state unconfirmed-provider-modal \
+      revise_submission_error "$reason" revise_task_started_mark ""
+    err "codex revise: lane '$lane' is showing a $reason; no keys were sent"
+    err "  inspect: waspflow peek $lane"
+    err "  next: resolve the provider prompt yourself, then retry the revise"
+    return 1
+  fi
+  return 0
 }
 
 _codex_headless_output_is_useful() {
@@ -1224,7 +1271,8 @@ codex_revise() {
     # Live in-pane steer. The Enter can race pane state, so verify a NEW
     # task_started event, not merely rollout growth: a user_message can remain
     # queued in Codex's composer without a task having started.
-    local target rollout before after before_bytes attempt j attempts polls
+    local target rollout before after before_bytes attempt j attempts polls submission_state
+    local message_submitted=false
     target="$(tmux_window_target "$lane")"
     # _codex_discover_session_cached already persists session_id/rollout on a
     # successful resolution, but an OLDER cached lane may still be missing
@@ -1251,8 +1299,10 @@ codex_revise() {
       err "codex revise: cannot establish a safe rollout boundary for lane '$lane'"
       return 1
     }
+    _codex_revise_pane_accepts_input "$lane" "$target" || return 1
     tmux send-keys -t "$target" C-u
     sleep 0.3
+    _codex_revise_pane_accepts_input "$lane" "$target" || return 1
     tmux_paste_text "$target" "$message"
     sleep 1
     # These bounded defaults are production behavior. The env seams only let
@@ -1262,19 +1312,30 @@ codex_revise() {
     [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=5
     [[ "$polls" =~ ^[1-9][0-9]*$ ]] || polls=6
     for attempt in $(seq 1 "$attempts"); do
-      tmux send-keys -t "$target" Enter
+      if [[ "$message_submitted" != true ]]; then
+        _codex_revise_pane_accepts_input "$lane" "$target" || return 1
+        tmux send-keys -t "$target" Enter
+      fi
       for j in $(seq 1 "$polls"); do
         after="$(_codex_task_started_mark "$rollout")"
-        if _codex_revise_submission_confirmed "$rollout" "$message" "$before_bytes"; then
-          lane_set "$lane" revise_submitted true \
-            revise_submission_state confirmed-task-started \
-            revise_submission_error "" revise_task_started_mark "$after"
-          codex_refresh_runtime_settings "$lane"
-          return 0
-        fi
+        submission_state="$(_codex_revise_submission_state "$rollout" "$message" "$before_bytes" || true)"
+        case "$submission_state" in
+          confirmed)
+            lane_set "$lane" revise_submitted true \
+              revise_submission_state confirmed-task-started \
+              revise_submission_error "" revise_task_started_mark "$after"
+            codex_refresh_runtime_settings "$lane"
+            return 0
+            ;;
+          message-seen) message_submitted=true ;;
+        esac
         sleep 1
       done
-      warn "codex revise: steer attempt $attempt didn't start a turn for lane '$lane'; retrying Enter"
+      if [[ "$message_submitted" == true ]]; then
+        warn "codex revise: the pasted message was observed for lane '$lane', but its task has not started; waiting without re-sending Enter"
+      else
+        warn "codex revise: steer attempt $attempt didn't start a turn for lane '$lane'; retrying Enter"
+      fi
     done
     lane_set "$lane" revise_submitted false \
       revise_submission_state unconfirmed-no-task-started \

@@ -61,4 +61,37 @@
   fi
   [[ "$(lane_get revise revise_submission_state)" == unconfirmed-no-task-started ]]
 
+  # #9: all known keyboard-owning modals reject a normal revise before C-u,
+  # paste, or Enter. This uses only fake panes and never contacts a provider.
+  for fixture_pane in \
+    $'Update available!\n1. Update now\n2. Skip' \
+    $'Do you trust this directory?\n1. Yes, continue\n2. No, quit' \
+    $'Switch to a lesser model?\n1. Continue\n2. Stop' \
+    $'Resume paused goal?\n1. Resume goal\n2. Leave paused'; do
+    reset_lane; event_case=''
+    if codex_revise revise 'revise message' >/dev/null 2>&1; then
+      echo 'r2-c #9: revise accepted a modal pane' >&2
+      exit 1
+    fi
+    [[ ! -s "$key_log" ]] || { echo 'r2-c #9: revise sent keys to a modal' >&2; exit 1; }
+    [[ "$(lane_get revise revise_submission_state)" == unconfirmed-provider-modal ]]
+  done
+
+  reset_lane; fixture_pane=''; event_case=''
+  if codex_revise revise 'revise message' >/dev/null 2>&1; then
+    echo 'r2-c #9: revise accepted an unreadable pane' >&2
+    exit 1
+  fi
+  [[ ! -s "$key_log" && "$(lane_get revise revise_submission_state)" == unconfirmed-pane-unreadable ]]
+
+  # Seeing the exact user message proves the paste left the composer even if
+  # task_started has not arrived. Keep polling, but never press Enter twice.
+  reset_lane; fixture_pane='› Ask Codex to do anything'; event_case=message-seen
+  if codex_revise revise 'revise message' >/dev/null 2>&1; then
+    echo 'r2-c #9: unstarted message unexpectedly confirmed' >&2
+    exit 1
+  fi
+  [[ "$(grep -c '^key:Enter$' "$key_log")" -eq 1 ]] \
+    || { echo 'r2-c #9: revise re-pressed Enter after message submission' >&2; exit 1; }
+
 )

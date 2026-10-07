@@ -39,6 +39,7 @@
   }
   event_case=none
   tmux() {
+    [[ "$1" == capture-pane ]] && { printf '› Ask Codex to do anything\n'; return 0; }
     [[ "${!#}" == Enter ]] || return 0
     case "$event_case" in
       unrelated)

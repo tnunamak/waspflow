@@ -2558,6 +2558,7 @@ JSONL
   enter_count=0
   revise_event=""
   tmux() {
+    [[ "$1" == capture-pane ]] && { printf '› Ask Codex to do anything\n'; return 0; }
     local last="${!#}"
     if [[ "$last" == Enter ]]; then
       ((++enter_count))
