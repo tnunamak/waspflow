@@ -16,7 +16,10 @@
   event_row="$(reconcile_lane_json r3-f4-events '[]' true)"
   jq -e '.pending_events == 0 and .superseded_pending_events == 1 and .pending_events_state == "known" and .pending_events_reason == null' <<<"$event_row" >/dev/null \
     || { echo 'r3-f4: superseded events remained pending' >&2; exit 1; }
-  ! reconcile_event_ack "$old_event" consumer
+  if reconcile_event_ack "$old_event" consumer; then
+    echo 'verify: unexpected success at scripts/fixtures/verify-r3-f4.sh:19' >&2
+    exit 1
+  fi
 
   printf '{\n' >>"$(reconcile_event_claims)"
   event_row="$(reconcile_lane_json r3-f4-events '[]' true)"

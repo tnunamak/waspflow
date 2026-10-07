@@ -84,7 +84,10 @@ done
       echo "Claude receipt: $mode falsely confirmed" >&2; exit 1
     fi
     [[ "$(lane_get receipt claude_submission_state)" == unconfirmed && "$(wc -l <"$fixture/enters")" == 5 ]]
-    ! grep -q 'No such file\|ambiguous redirect' "$fixture/errors"
+    if grep -q 'No such file\|ambiguous redirect' "$fixture/errors"; then
+      echo 'verify: unexpected success at scripts/verify.sh:87' >&2
+      exit 1
+    fi
   done
   rm -f "$log_file"; : >"$fixture/enters"; mode=delayed
   claude_revise receipt "requested update" 2>"$fixture/errors"
@@ -94,10 +97,16 @@ done
   _claude_pane() { echo ""; }
   WASPFLOW_SUBMIT_ATTEMPTS=1
   rm -f "$log_file"
-  ! _claude_verify_started receipt @fixture "prompt" session nonce
+  if _claude_verify_started receipt @fixture "prompt" session nonce; then
+    echo 'verify: unexpected success at scripts/verify.sh:97' >&2
+    exit 1
+  fi
   [[ "$WASPFLOW_PROVIDER_LAUNCH_ERROR" == session-log-unavailable ]]
   printf '%s\n' '{"type":"assistant","message":{"content":"nonce"}}' >"$log_file"
-  ! _claude_verify_started receipt @fixture "prompt" session nonce
+  if _claude_verify_started receipt @fixture "prompt" session nonce; then
+    echo 'verify: unexpected success at scripts/verify.sh:100' >&2
+    exit 1
+  fi
   [[ "$WASPFLOW_PROVIDER_LAUNCH_ERROR" == receipt-timeout ]]
   printf '%s\n' '{"type":"user","message":{"content":"nonce"}}' >>"$log_file"
   _claude_verify_started receipt @fixture "prompt" session nonce
@@ -116,10 +125,19 @@ done
   printf '@1|shared|%s|uuid-a\n' "$WASPFLOW_HOME" >"$fixture/windows"
   [[ "$(tmux_window_target shared)" == @1 ]]
   printf '@2|shared|%s|uuid-b\n' "$fixture/other" >>"$fixture/windows"
-  ! tmux_window_target shared >/dev/null 2>&1
-  ! tmux_window_exists shared
+  if tmux_window_target shared >/dev/null 2>&1; then
+    echo 'verify: unexpected success at scripts/verify.sh:119' >&2
+    exit 1
+  fi
+  if tmux_window_exists shared; then
+    echo 'verify: unexpected success at scripts/verify.sh:120' >&2
+    exit 1
+  fi
   tail -1 "$fixture/windows" >"$fixture/foreign"; mv "$fixture/foreign" "$fixture/windows"
-  ! tmux_window_target shared >"$fixture/result" 2>"$fixture/error"
+  if tmux_window_target shared >"$fixture/result" 2>"$fixture/error"; then
+    echo 'verify: unexpected success at scripts/verify.sh:122' >&2
+    exit 1
+  fi
   grep -q 'foreign home' "$fixture/error"
   [[ "$(cat "$fixture/result")" == '!waspflow-unresolved!' ]]
 )
@@ -239,8 +257,14 @@ grep -q '`flock`' "$root/docs/prerequisites.md"
 grep -Eq 'policy_version' "$root/bin/waspflow"
 grep -Eq 'catalog_ref' "$root/bin/waspflow"
 # The disallowed three-value group is a literal source fragment, not an ERE.
-! grep -Fq 'high|xhigh|max' "$root/lib/providers/codex.sh"
-! grep -Fq 'high|xhigh|max' "$root/lib/exec.sh"
+if grep -Fq 'high|xhigh|max' "$root/lib/providers/codex.sh"; then
+  echo 'verify: unexpected success at scripts/verify.sh:242' >&2
+  exit 1
+fi
+if grep -Fq 'high|xhigh|max' "$root/lib/exec.sh"; then
+  echo 'verify: unexpected success at scripts/verify.sh:243' >&2
+  exit 1
+fi
 
 # Claude folder-trust gate. Two independent bugs made an untrusted --cwd fatal:
 # the pane text is strip_ansi'd so its padding collapses ("Yes,Itrustthisfolder"),
@@ -1321,7 +1345,10 @@ grep -q 'qwen' "$root/lib/core.sh"
 # must probe the binary that actually exists.
 grep -q 'command -v dsh' <<<"$demo_body"
 grep -q 'provider="deepseek"' <<<"$demo_body"
-! grep -q 'command -v deepseek' <<<"$demo_body"
+if grep -q 'command -v deepseek' <<<"$demo_body"; then
+  echo 'verify: unexpected success at scripts/verify.sh:1324' >&2
+  exit 1
+fi
 grep -q 'deepseek' "$root/lib/core.sh"
 
 set +e
@@ -5352,7 +5379,10 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   cp "$WASPFLOW_HOME/receipts.jsonl" "$att_home/sumhome/receipts.jsonl"
   printf '%s\n' 'this is not json {' >>"$att_home/sumhome/receipts.jsonl"
   summary_out="$(WASPFLOW_HOME="$att_home/sumhome" "$root/bin/waspflow" receipts summary --json)"
-  ! "$root/bin/waspflow" receipts summary --bogus >/dev/null 2>&1
+  if "$root/bin/waspflow" receipts summary --bogus >/dev/null 2>&1; then
+    echo 'verify: unexpected success at scripts/verify.sh:5355' >&2
+    exit 1
+  fi
   jq -e '.lanes >= 2 and (.by_arm | type == "array") and (.eligible | type == "number") and (.top_ineligibility | type == "array")' <<<"$summary_out" >/dev/null
 
   lane_set segment-repair provider grok status live result succeeded lane_uuid segment-repair-uuid segment_index 0 receipt_emitted false receipt_emitted_segment -1
@@ -5443,7 +5473,10 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   export CLAUDE_PROJECTS_DIR="$resume_home/claude-projects"
   mkdir -p "$CLAUDE_PROJECTS_DIR/p"
   printf '%s\n' '{"type":"user","message":{"content":"escalation prompt without the transition nonce"}}' >"$CLAUDE_PROJECTS_DIR/p/claude-session.jsonl"
-  ! WASPFLOW_SUBMIT_ATTEMPTS=1 _claude_verify_started resume-claude @resume 'escalation prompt transition-nonce' claude-session transition-nonce
+  if WASPFLOW_SUBMIT_ATTEMPTS=1 _claude_verify_started resume-claude @resume 'escalation prompt transition-nonce' claude-session transition-nonce; then
+    echo 'verify: unexpected success at scripts/verify.sh:5446' >&2
+    exit 1
+  fi
   printf '%s\n' '{"type":"user","message":{"content":"escalation prompt transition-nonce"}}' >>"$CLAUDE_PROJECTS_DIR/p/claude-session.jsonl"
   lane_set resume-claude cwd "$fixture" session_id claude-session pending_transition '{"to_arm":{"provider":"claude","model":"claude-new","effort":"high"},"submission_nonce":"transition-nonce","provisional_session":{"session_id":"claude-session","ownership":{"tmux_session":"test","tmux_window":"@resume","tmux_pane_pid":"1"}}}'
   claude_resume_with_arm resume-claude 'escalation prompt transition-nonce' false
@@ -5939,7 +5972,10 @@ FAIL
   grep -Fq 'waspflow escalate esc-committed-reap --resume-transition' "$eschome/committed-reap.out" && grep -Fq 'waspflow escalate esc-committed-reap --abort-transition' "$eschome/committed-reap.out" \
     || { echo "escalate committed reap: recovery escapes missing" >&2; exit 1; }
   lane_set esc-cas arm_generation 9 session_id current runtime_refresh_state pending
-  ! lane_update_if esc-cas 8 current runtime_refresh_state stale
+  if lane_update_if esc-cas 8 current runtime_refresh_state stale; then
+    echo 'verify: unexpected success at scripts/verify.sh:5942' >&2
+    exit 1
+  fi
   [[ "$(lane_get esc-cas runtime_refresh_state)" == pending ]] || { echo "escalate CAS: stale generation overwrote runtime state" >&2; exit 1; }
   make_escalation_lane esc-poison
   # --reset-tree is valid only for a real isolated worktree. Keep the shared
@@ -6405,7 +6441,10 @@ AGY
   grep -Fq -- '--print deterministic prompt --model test-model --effort medium --mode accept-edits --dangerously-skip-permissions' "$agy_args"
   set +e; "$root/bin/waspflow" exec --provider antigravity --effort xhigh -o "$fixture/bad.out" -- x >/dev/null 2>&1; agy_bad_rc=$?; set -e
   [[ "$agy_bad_rc" -eq 1 ]]
-  ! antigravity_validate_model_effort gpt-test-medium low
+  if antigravity_validate_model_effort gpt-test-medium low; then
+    echo 'verify: unexpected success at scripts/verify.sh:6408' >&2
+    exit 1
+  fi
 
   agy_lifecycle=agy-lifecycle
   lane_set "$agy_lifecycle" provider antigravity status live cwd "$fixture" model test-model effort medium
@@ -6415,7 +6454,10 @@ AGY
   antigravity_is_idle "$agy_lifecycle"
   antigravity_session_resumable "$agy_lifecycle"
   [[ "$(antigravity_turn_mark "$agy_lifecycle")" -eq 1 ]]
-  ! find "$(lane_dir "$agy_lifecycle")" -maxdepth 1 -name '.agy-log.*' | grep -q .
+  if find "$(lane_dir "$agy_lifecycle")" -maxdepth 1 -name '.agy-log.*' | grep -q .; then
+    echo 'verify: unexpected success at scripts/verify.sh:6418' >&2
+    exit 1
+  fi
 
   agy_cmd="$(_antigravity_shell "$agy_lifecycle" test-model medium "$(lane_get "$agy_lifecycle" session_id)" "second turn" revise)"
   bash -c "$agy_cmd" >"$fixture/agy-revise.out"
@@ -6428,7 +6470,10 @@ AGY
   [[ "$agy_failed_rc" -eq 9 ]]
   antigravity_is_idle "$agy_failed"
   jq -e 'select(.phase=="completion" and .outcome=="failed" and .exit_code==9)' "$(_antigravity_receipt_file "$agy_failed")" >/dev/null
-  ! find "$(lane_dir "$agy_failed")" -maxdepth 1 -name '.agy-log.*' | grep -q .
+  if find "$(lane_dir "$agy_failed")" -maxdepth 1 -name '.agy-log.*' | grep -q .; then
+    echo 'verify: unexpected success at scripts/verify.sh:6431' >&2
+    exit 1
+  fi
 
   agy_lane=agy-events; lane_set "$agy_lane" provider antigravity status live cwd "$fixture"
   agy_receipt="$(_antigravity_receipt_file "$agy_lane")"
@@ -6506,7 +6551,10 @@ QWEN
   qwen_is_idle "$qwen_lifecycle"
   qwen_session_resumable "$qwen_lifecycle"
   [[ "$(qwen_turn_mark "$qwen_lifecycle")" -eq 1 ]]
-  ! find "$(lane_dir "$qwen_lifecycle")" -maxdepth 1 -name '.qwen-log.*' | grep -q .
+  if find "$(lane_dir "$qwen_lifecycle")" -maxdepth 1 -name '.qwen-log.*' | grep -q .; then
+    echo 'verify: unexpected success at scripts/verify.sh:6509' >&2
+    exit 1
+  fi
 
   qwen_cmd="$(_qwen_shell "$qwen_lifecycle" test-model "$(lane_get "$qwen_lifecycle" session_id)" "second turn" revise)"
   (cd "$fixture" && bash -c "$qwen_cmd") >"$fixture/qwen-revise.out"
@@ -6521,7 +6569,10 @@ QWEN
   [[ "$qwen_no_session_rc" -ne 0 ]]
   qwen_is_idle "$qwen_no_session"
   [[ "$(qwen_turn_mark "$qwen_no_session")" -eq 0 ]]
-  ! qwen_session_resumable "$qwen_no_session"
+  if qwen_session_resumable "$qwen_no_session"; then
+    echo 'verify: unexpected success at scripts/verify.sh:6524' >&2
+    exit 1
+  fi
   jq -e 'select(.phase=="completion" and .outcome=="no_session" and .session_id==null)' "$(_qwen_receipt_file "$qwen_no_session")" >/dev/null
 
   # Generated cleanup shell remains valid when the state path contains a quote.
@@ -6535,7 +6586,10 @@ QWEN
   bash -n <<<"$qwen_cmd"
   (cd "$fixture" && bash -c "$qwen_cmd") >"$fixture/qwen-quoted.out"
   qwen_is_idle "$qwen_quoted"
-  ! find "$(lane_dir "$qwen_quoted")" -maxdepth 1 -name '.qwen-log.*' | grep -q .
+  if find "$(lane_dir "$qwen_quoted")" -maxdepth 1 -name '.qwen-log.*' | grep -q .; then
+    echo 'verify: unexpected success at scripts/verify.sh:6538' >&2
+    exit 1
+  fi
   export WASPFLOW_HOME="$ordinary_home"
   WASPFLOW_LANES_DIR="$ordinary_lanes_dir"
 
@@ -6583,7 +6637,10 @@ QWEN
   [[ "$qwen_failed_rc" -eq 9 ]]
   qwen_is_idle "$qwen_failed"
   jq -e 'select(.phase=="completion" and .outcome=="failed" and .exit_code==9)' "$(_qwen_receipt_file "$qwen_failed")" >/dev/null
-  ! find "$(lane_dir "$qwen_failed")" -maxdepth 1 -name '.qwen-log.*' | grep -q .
+  if find "$(lane_dir "$qwen_failed")" -maxdepth 1 -name '.qwen-log.*' | grep -q .; then
+    echo 'verify: unexpected success at scripts/verify.sh:6586' >&2
+    exit 1
+  fi
 
   # A failed tee means lifecycle evidence was not persisted reliably, even if
   # Qwen itself exited zero.
@@ -6612,9 +6669,18 @@ QWEN
   unset BAILIAN_TOKEN_PLAN_API_KEY
 
   # Spawn/escalation may not persist an effort Qwen silently ignores.
-  ! qwen_validate_model_effort test-model high
-  ! qwen_resume_with_arm "$qwen_lifecycle" prompt false
-  ! qwen_confirm_escalation_submission "$qwen_lifecycle" prompt false
+  if qwen_validate_model_effort test-model high; then
+    echo 'verify: unexpected success at scripts/verify.sh:6615' >&2
+    exit 1
+  fi
+  if qwen_resume_with_arm "$qwen_lifecycle" prompt false; then
+    echo 'verify: unexpected success at scripts/verify.sh:6616' >&2
+    exit 1
+  fi
+  if qwen_confirm_escalation_submission "$qwen_lifecycle" prompt false; then
+    echo 'verify: unexpected success at scripts/verify.sh:6617' >&2
+    exit 1
+  fi
 
   # Quota mapping.
   clawmeter() { cat <<'JSON'
@@ -6795,7 +6861,10 @@ DSH
   grep -Fq -- '--profile headless --patch ' "$dsh_args"
   grep -Fq -- '-- deterministic prompt' "$dsh_args"
   # Anything resembling the old Qwen-shaped invocation is a regression.
-  ! grep -Eq -- '(^| )-p( |$)|--yolo|--output-format|--model ' "$dsh_args"
+  if grep -Eq -- '(^| )-p( |$)|--yolo|--output-format|--model ' "$dsh_args"; then
+    echo 'verify: unexpected success at scripts/verify.sh:6798' >&2
+    exit 1
+  fi
   grep -Fq 'dsh test output' "$exec_out"
 
   # Effort rejection (dsh exposes effort only through global settings.yaml).
@@ -6811,7 +6880,10 @@ DSH
   [[ "$deepseek_sid" == session-* ]]
   deepseek_is_idle "$deepseek_lifecycle"
   [[ "$(deepseek_turn_mark "$deepseek_lifecycle")" -eq 1 ]]
-  ! find "$(lane_dir "$deepseek_lifecycle")" -maxdepth 1 -name '.deepseek-log.*' | grep -q .
+  if find "$(lane_dir "$deepseek_lifecycle")" -maxdepth 1 -name '.deepseek-log.*' | grep -q .; then
+    echo 'verify: unexpected success at scripts/verify.sh:6814' >&2
+    exit 1
+  fi
   # The lane's model patch really was written, and really carries the model.
   grep -Fq 'model: deepseek-v4-pro' "$(_deepseek_patch_file "$deepseek_lifecycle")"
 
@@ -6821,7 +6893,10 @@ DSH
 
   # v0.1 cannot continue a session: every invocation mints a fresh UUID, so
   # both resumability and revise must refuse rather than silently start over.
-  ! deepseek_session_resumable "$deepseek_lifecycle"
+  if deepseek_session_resumable "$deepseek_lifecycle"; then
+    echo 'verify: unexpected success at scripts/verify.sh:6824' >&2
+    exit 1
+  fi
   set +e; deepseek_revise "$deepseek_lifecycle" "second turn" >/dev/null 2>&1; deepseek_revise_rc=$?; set -e
   [[ "$deepseek_revise_rc" -ne 0 ]]
 
@@ -6859,9 +6934,18 @@ DSH
   unset DEEPSEEK_API_KEY
 
   # Escalation hooks unsupported.
-  ! deepseek_validate_model_effort deepseek-v4-pro high
-  ! deepseek_resume_with_arm "$deepseek_lifecycle" prompt false
-  ! deepseek_confirm_escalation_submission "$deepseek_lifecycle" prompt false
+  if deepseek_validate_model_effort deepseek-v4-pro high; then
+    echo 'verify: unexpected success at scripts/verify.sh:6862' >&2
+    exit 1
+  fi
+  if deepseek_resume_with_arm "$deepseek_lifecycle" prompt false; then
+    echo 'verify: unexpected success at scripts/verify.sh:6863' >&2
+    exit 1
+  fi
+  if deepseek_confirm_escalation_submission "$deepseek_lifecycle" prompt false; then
+    echo 'verify: unexpected success at scripts/verify.sh:6864' >&2
+    exit 1
+  fi
 
   # Help/doctor.
   help_text="$("$root/bin/waspflow" --help)"

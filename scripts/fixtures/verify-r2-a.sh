@@ -22,7 +22,10 @@
   tmux set-option -w -t "$owned" @waspflow_home "$(cd "$WASPFLOW_HOME" && pwd -P)"
   tmux set-option -w -t "$owned" @waspflow_lane_uuid 11111111-1111-1111-1111-111111111111
   lane_set uncertain lane_uuid 11111111-1111-1111-1111-111111111111 tmux_session waspflow tmux_window "$owned" tmux_pane_pid 1
-  ! tmux_window_exists uncertain
+  if tmux_window_exists uncertain; then
+    echo 'verify: unexpected success at scripts/fixtures/verify-r2-a.sh:25' >&2
+    exit 1
+  fi
   tmux_lane_window_cleanup_uncertain uncertain
 
   # #13 + #14: explicit legacy adoption tags exactly one untagged pane, using
@@ -59,7 +62,10 @@
   # #19: PID reuse no longer blocks reap; only the start-tick identity counts.
   sleep 30 & reused=$!
   lane_set headless headless_revise_pid "$reused" headless_revise_pid_start_ticks 0
-  ! lane_headless_writer_active headless
+  if lane_headless_writer_active headless; then
+    echo 'verify: unexpected success at scripts/fixtures/verify-r2-a.sh:62' >&2
+    exit 1
+  fi
   kill "$reused"; wait "$reused" 2>/dev/null || true
 
   # #4: run the real login wrapper with a fake provider on an unavailable
@@ -79,6 +85,9 @@
   child="$(jq -r .pid <<<"$receipt")"
   tmux_kill_owned_lane_detached_sessions detached
   for _ in {1..30}; do kill -0 "$child" 2>/dev/null || break; sleep 0.05; done
-  ! kill -0 "$child" 2>/dev/null
+  if kill -0 "$child" 2>/dev/null; then
+    echo 'verify: unexpected success at scripts/fixtures/verify-r2-a.sh:82' >&2
+    exit 1
+  fi
   wait "$wrapper" 2>/dev/null || true
 )

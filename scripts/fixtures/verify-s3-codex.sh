@@ -19,9 +19,15 @@
   # longer owns the keyboard once Codex shows its normal composer. A real menu
   # and a trust prompt still block with an actionable, non-contradictory path.
   update_with_composer=$'Update available! 0.159.3 -> 0.160.1\nRun bun install -g...\n› Ask Codex to do anything'
-  ! _codex_startup_blocker "$update_with_composer"
+  if _codex_startup_blocker "$update_with_composer"; then
+    echo 'verify: unexpected success at scripts/fixtures/verify-s3-codex.sh:22' >&2
+    exit 1
+  fi
   update_rotating=$'Update available! 0.159.3 -> 0.160.1\nRun bun install -g...\n› What are we poking with a metaphorical stick?\n  Tip: use /model'
-  ! _codex_startup_blocker "$update_rotating"
+  if _codex_startup_blocker "$update_rotating"; then
+    echo 'verify: unexpected success at scripts/fixtures/verify-s3-codex.sh:24' >&2
+    exit 1
+  fi
   update_menu=$'Update available! 0.159.3 -> 0.160.1\n1. Update now\n2. Skip'
   [[ "$(_codex_startup_blocker "$update_menu")" == "startup update prompt" ]]
   trust_menu=$'Do you trust the contents of this directory?\n1. Yes, continue\n2. No, quit'
@@ -72,15 +78,27 @@
   codex_is_idle idle
   jq -cn '{type:"event_msg",payload:{type:"task_started",turn_id:"newer"}}' >>"$rollout"
   jq -cn '{type:"event_msg",payload:{type:"task_complete",turn_id:"old"}}' >>"$rollout"
-  ! codex_is_idle idle
+  if codex_is_idle idle; then
+    echo 'verify: unexpected success at scripts/fixtures/verify-s3-codex.sh:75' >&2
+    exit 1
+  fi
   jq -cn '{type:"event_msg",payload:{type:"exec_command_begin",call_id:"call"}}' >>"$rollout"
-  ! codex_is_idle idle
+  if codex_is_idle idle; then
+    echo 'verify: unexpected success at scripts/fixtures/verify-s3-codex.sh:77' >&2
+    exit 1
+  fi
   jq -cn '{type:"event_msg",payload:{type:"exec_command_end",call_id:"call"}}' >>"$rollout"
   jq -cn '{type:"event_msg",payload:{type:"turn_aborted",turn_id:"newer"}}' >>"$rollout"
   jq -cn '{type:"event_msg",payload:{type:"task_complete",turn_id:"newer"}}' >>"$rollout"
-  ! codex_is_idle idle
+  if codex_is_idle idle; then
+    echo 'verify: unexpected success at scripts/fixtures/verify-s3-codex.sh:81' >&2
+    exit 1
+  fi
   printf '%s' '{"type":"event_msg"' >>"$rollout"
-  ! codex_is_idle idle
+  if codex_is_idle idle; then
+    echo 'verify: unexpected success at scripts/fixtures/verify-s3-codex.sh:83' >&2
+    exit 1
+  fi
 
   # A bounded discovery cannot hang a launch. A timed-out live query reports
   # the cache state, never a fabricated available model.

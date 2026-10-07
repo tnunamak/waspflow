@@ -76,8 +76,14 @@ EOF
   jq --arg id "$first" '.[$id].lease_until = 0' "$claims_file" >"$claims_file.tmp"
   mv "$claims_file.tmp" "$claims_file"
   reconcile_event_claim "$first" consumer-b 2 | jq -e '.ok == true' >/dev/null
-  ! reconcile_event_ack "$first" consumer-b
+  if reconcile_event_ack "$first" consumer-b; then
+    echo 'verify: unexpected success at scripts/fixtures/verify-s7-fleet.sh:79' >&2
+    exit 1
+  fi
   reconcile_event_claim "$second" consumer-b 2 | jq -e '.ok == true' >/dev/null
   reconcile_event_ack "$second" consumer-b
-  ! reconcile_event_claim "$second" consumer-a 2 | jq -e '.ok == true' >/dev/null
+  if reconcile_event_claim "$second" consumer-a 2 | jq -e '.ok == true' >/dev/null; then
+    echo 'verify: unexpected success at scripts/fixtures/verify-s7-fleet.sh:82' >&2
+    exit 1
+  fi
 )
