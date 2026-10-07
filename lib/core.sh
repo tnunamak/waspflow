@@ -1153,7 +1153,7 @@ tmux_run_owned_lane_shell_command() {
   # Provider adapters already quote their single bash -lc argument. Preserve
   # that exact argument and the login environment; wrap only fresh pane starts.
   if [[ ( "$execution" == pane || "$execution" == escalation:* ) && "$shell_command" == "bash -lc "* ]]; then
-    shell_command="source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_lane_login_shell $(printf '%q' "$lane") ${shell_command#bash -lc }"
+    shell_command="source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_lane_login_shell $(printf '%q' "$lane") $(printf '%q' "$execution") ${shell_command#bash -lc }"
   fi
   tmux_run_owned_lane_command "$lane" "$cwd" "$execution" -- bash -c "$shell_command"
 }
@@ -1293,7 +1293,7 @@ tmux_create_owned_lane_window() {
   if [[ ! "$lane_uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
     # Legacy lane records predate lane_uuid. Ownership tagging needs one, so
     # mint it now rather than creating an untagged window that cannot be claimed.
-    lane_uuid="$(uuidgen)" && lane_set "$lane" lane_uuid "$lane_uuid" || return 1
+    lane_uuid="$(new_uuid)" && lane_set "$lane" lane_uuid "$lane_uuid" || return 1
   fi
   if [[ "$lane_uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
     lane_parent_ref="waspflow:$lane_uuid"
