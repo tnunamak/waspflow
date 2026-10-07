@@ -18,6 +18,12 @@
     || { echo 'r3-f4: superseded events remained pending' >&2; exit 1; }
   ! reconcile_event_ack "$old_event" consumer
 
+  printf '{\n' >>"$(reconcile_event_claims)"
+  event_row="$(reconcile_lane_json r3-f4-events '[]' true)"
+  jq -e '.pending_events == null and .superseded_pending_events == null and .pending_events_state == "unknown" and .pending_events_reason == "unreadable-event-claims"' <<<"$event_row" >/dev/null \
+    || { echo 'r3-f4: unreadable event claims were reported as healthy' >&2; exit 1; }
+  printf '{}\n' >"$(reconcile_event_claims)"
+
   printf '{\n' >>"$(reconcile_event_ledger)"
   event_row="$(reconcile_lane_json r3-f4-events '[]' true)"
   jq -e '.pending_events == null and .superseded_pending_events == null and .pending_events_state == "unknown" and .pending_events_reason == "unreadable-event-ledger"' <<<"$event_row" >/dev/null \
@@ -40,11 +46,14 @@
     echo 'r3-f4: unacknowledged unknown Claude model was accepted' >&2; exit 1
   fi
   [[ "$ESC_REASON" == *'not a known Claude model'* ]]
-  if escalate_select_target r3-f4-claude claude/not-a-model/low true false; then
+  if escalate_select_target r3-f4-claude claude/not-a-model/low false true; then
     echo 'r3-f4: --force without acknowledgement accepted an unknown Claude model' >&2; exit 1
   fi
   escalate_select_target r3-f4-claude claude/not-a-model/low true true
   [[ "$(jq -r .model <<<"$ESC_ARM")" == not-a-model ]]
+  if escalate_select_target r3-f4-claude claude/claude-sonnet-999-999/low false false; then
+    echo 'r3-f4: an unknown model-shaped Claude id was accepted' >&2; exit 1
+  fi
   escalate_select_target r3-f4-claude claude/claude-haiku-4-5/low false false
   escalate_select_target r3-f4-claude claude/sonnet/low false false
 )
@@ -72,7 +81,10 @@
     echo 'r3-f4: documentation retains broken docs/ relative links' >&2; exit 1
   fi
   if rg -n -i 'pdpp|autoquality|oj cluster|2026-07-05|orchestrator review' \
-      "$root/docs" "$root/data/model-choice-policy" "$root/lib/core.sh" "$root/lib/escalation.sh" >/dev/null; then
+      "$root/docs" "$root/data/model-choice-policy" "$root/lib/core.sh" "$root/lib/escalation.sh" "$root/lib/project.sh" >/dev/null; then
     echo 'r3-f4: public documents retain private project or review context' >&2; exit 1
+  fi
+  if rg -n -i 'owner-approved|owner-policy|owner.s direction' "$root/data/model-choice-policy/operating-points.json" >/dev/null; then
+    echo 'r3-f4: policy data retains owner-specific judgments' >&2; exit 1
   fi
 )

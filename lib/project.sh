@@ -2,7 +2,7 @@
 #
 # project.sh — generic project/process integrity checks for waspflow.
 #
-# This is deliberately not PDPP-specific. Projects can add a small
+# This is deliberately not project-specific. Projects can add a small
 # .waspflow/config.json file to teach waspflow about local mutex files, blocker
 # globs, report globs, and extra health commands. The built-in checks remain
 # useful in any git repo: current worktree state, all repo worktrees, and

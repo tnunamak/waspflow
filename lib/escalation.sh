@@ -72,9 +72,9 @@ escalate_kill_provisional() {
 escalate_claude_model_known() {
   case "$1" in
     opus|sonnet|haiku) return 0 ;;
-    claude-*) [[ "$1" =~ ^claude-(opus|sonnet|haiku)-[0-9]+(-[0-9]+)*$ ]] ;;
-    *) return 1 ;;
+    claude-opus-4-5|claude-opus-4-6|claude-opus-4-8|claude-opus-5|claude-opus-5-5|claude-sonnet-4-5|claude-sonnet-4-6|claude-sonnet-5|claude-sonnet-5-5|claude-haiku-3-5|claude-haiku-4-5) return 0 ;;
   esac
+  [[ "$1" =~ ^(claude-opus-4-5|claude-opus-4-6|claude-opus-4-8|claude-opus-5|claude-opus-5-5|claude-sonnet-4-5|claude-sonnet-4-6|claude-sonnet-5|claude-sonnet-5-5|claude-haiku-3-5|claude-haiku-4-5)-[0-9]{8}$ ]]
 }
 
 escalate_select_target() {

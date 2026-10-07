@@ -97,7 +97,7 @@ reconcile_event_ack() (
 )
 
 reconcile_lane_json() {
-  local lane="$1" record active_scopes="$2" scopes_ok="$3" pid expected_start actual_start window=false lifecycle record_status owner cwd outcome claims pending_events=0 pending_events_state=known superseded_pending_events=0 pending_events_reason="" event_summary classification next_action evidence
+  local lane="$1" record active_scopes="$2" scopes_ok="$3" pid expected_start actual_start window=false lifecycle record_status owner cwd outcome claims claims_file pending_events=0 pending_events_state=known superseded_pending_events=0 pending_events_reason="" event_summary classification next_action evidence
   local state_file; state_file="$(lane_state_file "$lane")"
   if [[ ! -f "$state_file" ]]; then jq -cn --arg lane "$lane" '{lane:$lane,status:"unknown",evidence:["missing-state.json"],next_action:"preserve forensic path; inspect record directory"}'; return; fi
   if ! record="$(jq -c . "$state_file" 2>/dev/null)"; then jq -cn --arg lane "$lane" '{lane:$lane,status:"unknown",evidence:["corrupt-state.json"],next_action:"preserve forensic path; repair or inspect record"}'; return; fi
@@ -110,10 +110,14 @@ reconcile_lane_json() {
   pid="$(jq -r '.tmux_pane_pid // ""' <<<"$record")"; expected_start="$(jq -r '.tmux_pane_pid_start_time // ""' <<<"$record")"
   actual_start="$(_reconcile_pid_start_time "$pid" 2>/dev/null || true)"
   if [[ -f "$(reconcile_event_ledger)" ]]; then
-    claims="$(jq -c . "$(reconcile_event_claims)" 2>/dev/null || true)"
-    if [[ -z "$claims" ]] || ! jq -e 'type == "object"' >/dev/null <<<"$claims"; then
+    claims_file="$(reconcile_event_claims)"
+    if [[ -f "$claims_file" ]] && ! claims="$(jq -c . "$claims_file" 2>/dev/null)"; then
       pending_events=null; superseded_pending_events=null; pending_events_state=unknown; pending_events_reason="unreadable-event-claims"
-    elif ! event_summary="$(jq -cs --arg lane "$lane" --argjson claims "$claims" '
+    elif [[ -f "$claims_file" ]] && ! jq -e 'type == "object"' >/dev/null <<<"$claims"; then
+      pending_events=null; superseded_pending_events=null; pending_events_state=unknown; pending_events_reason="unreadable-event-claims"
+    else
+      [[ -f "$claims_file" ]] || claims='{}'
+      if ! event_summary="$(jq -cs --arg lane "$lane" --argjson claims "$claims" '
       [ .[] | select(.lane == $lane) ] as $events |
       if any($events[]?; (.generation | type) != "number") then
         {state:"unknown",pending:null,superseded:null,reason:"invalid-event-generation"}
@@ -125,13 +129,14 @@ reconcile_lane_json() {
          superseded:([$unacked[] | select(.generation != $latest)] | length),
          reason:""}
       end
-    ' "$(reconcile_event_ledger)" 2>/dev/null)"; then
-      pending_events=null; superseded_pending_events=null; pending_events_state=unknown; pending_events_reason="unreadable-event-ledger"
-    else
-      pending_events="$(jq -c .pending <<<"$event_summary")"
-      superseded_pending_events="$(jq -c .superseded <<<"$event_summary")"
-      pending_events_state="$(jq -r .state <<<"$event_summary")"
-      pending_events_reason="$(jq -r .reason <<<"$event_summary")"
+      ' "$(reconcile_event_ledger)" 2>/dev/null)"; then
+        pending_events=null; superseded_pending_events=null; pending_events_state=unknown; pending_events_reason="unreadable-event-ledger"
+      else
+        pending_events="$(jq -c .pending <<<"$event_summary")"
+        superseded_pending_events="$(jq -c .superseded <<<"$event_summary")"
+        pending_events_state="$(jq -r .state <<<"$event_summary")"
+        pending_events_reason="$(jq -r .reason <<<"$event_summary")"
+      fi
     fi
   fi
   classification="$lifecycle"; next_action="inspect durable receipt"
