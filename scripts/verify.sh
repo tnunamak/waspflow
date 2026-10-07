@@ -7484,4 +7484,7 @@ EOF
   [[ ! -e "$WASPFLOW_LOCKS_DIR/busy.lock.owner" ]]
 )
 
+# S8 clean-install contract.
+source "$root/scripts/fixtures/verify-s8-install.sh"
+
 echo "waspflow verify: ok"

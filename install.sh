@@ -15,4 +15,7 @@ case ":$PATH:" in
 esac
 
 echo
-"$root/bin/waspflow" doctor || true
+if ! "$root/bin/waspflow" doctor; then
+  echo "install: linked waspflow, but doctor found missing prerequisites; fix them and rerun doctor." >&2
+  exit 1
+fi
