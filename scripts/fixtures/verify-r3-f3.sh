@@ -47,4 +47,18 @@
   printf '%s\n' '{"type":"turn_started","prompt":"requested"}' >>"$grok_events"
   _grok_submission_receipt_present "$grok_events" requested 0 \
     || { echo 'r3-f3 B6: Grok rejected prompt evidence on its turn start' >&2; exit 1; }
+
+  # B7: generic assistant commentary is progress, not provider-terminal proof.
+  source "$root/lib/providers/antigravity.sh"
+  agy_log="$fixture/agy.log"
+  printf '%s\n' \
+    '{"type":"assistant","text":"I will investigate"}' \
+    '{"type":"tool","name":"search"}' >"$agy_log"
+  lane_set b7 provider antigravity report ''
+  if _antigravity_output_has_deliverable b7 "$agy_log"; then
+    echo 'r3-f3 B7: Antigravity accepted non-terminal assistant commentary' >&2; exit 1
+  fi
+  printf '%s\n' '{"type":"final","text":"completed"}' >>"$agy_log"
+  _antigravity_output_has_deliverable b7 "$agy_log" \
+    || { echo 'r3-f3 B7: Antigravity rejected a typed terminal result' >&2; exit 1; }
 )

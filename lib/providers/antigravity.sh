@@ -96,7 +96,7 @@ _antigravity_output_has_deliverable() {
   # Plaintext agy lines are diagnostics and cannot prove task completion.
   grep -aE '^[[:space:]]*\{' "$log" 2>/dev/null | jq -e '
     (.text // .content // .message // "") as $content |
-    select((.type == "result" or .type == "final" or .type == "assistant")
+    select((.type == "result" or .type == "final")
       and ($content | type == "string" and length > 0)
       and ($content | test("<(tool_call|tool_use)|\\\"type\\\"[[:space:]]*:[[:space:]]*\\\"tool"; "i") | not))
   ' >/dev/null 2>&1
