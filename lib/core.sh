@@ -883,63 +883,63 @@ tmux_detached_session_receipt_live() {
 # the same strong proof.  Keep that distinction explicit: callers must retain
 # an uncertain group rather than treating a dead leader as an empty group.
 # Prints one of: live, uncertain, gone, invalid.
-tmux_detached_session_receipt_group_state() {
-  local receipt="$1" pid pgid sid ticks actual got_pgid got_sid
+tmux_detached_session_receipt_group_members() {
+  local receipt="$1" pid pgid sid ticks rows member got_pgid got_sid
   pid="$(jq -r '.pid // empty' <<<"$receipt")"; pgid="$(jq -r '.pgid // empty' <<<"$receipt")"
   sid="$(jq -r '.sid // empty' <<<"$receipt")"; ticks="$(jq -r '.start_ticks // empty' <<<"$receipt")"
-  if [[ ! "$pid" =~ ^[0-9]+$ || ! "$pgid" =~ ^[0-9]+$ || ! "$sid" =~ ^[0-9]+$ || ! "$ticks" =~ ^[0-9]+$ ]]; then
-    printf 'invalid\n'; return 2
-  fi
-  if [[ "$pid" != "$pgid" || "$pid" != "$sid" ]]; then
-    printf 'invalid\n'; return 2
-  fi
-  if ! ps -eo pgid=,sid= 2>/dev/null | awk -v pgid="$pgid" -v sid="$sid" '$1 == pgid && $2 == sid { found=1 } END { exit !found }'; then
-    printf 'gone\n'; return 1
-  fi
-  if kill -0 "$pid" 2>/dev/null; then
-    actual="$(process_start_ticks "$pid" || true)"
-    read -r got_pgid got_sid < <(ps -o pgid= -o sid= -p "$pid" 2>/dev/null)
-    if [[ "$actual" == "$ticks" && "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]]; then
-      printf 'live\n'; return 0
-    fi
+  [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ticks" =~ ^[0-9]+$ ]] || return 2
+  [[ "$pid" == "$pgid" && "$pid" == "$sid" ]] || return 2
+  rows="$(ps -eo pid=,pgid=,sid= 2>/dev/null)" || return 1
+  while read -r member got_pgid got_sid; do
+    [[ "$member" =~ ^[0-9]+$ && "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]] || continue
+    ticks="$(process_start_ticks "$member")" || return 1
+    [[ "$ticks" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\t%s\n' "$member" "$ticks"
+  done <<<"$rows"
+}
+
+tmux_detached_session_receipt_member_matches() {
+  local receipt="$1" member="$2" expected_ticks="$3" pgid sid actual got_pgid got_sid
+  pgid="$(jq -r '.pgid // empty' <<<"$receipt")"; sid="$(jq -r '.sid // empty' <<<"$receipt")"
+  [[ "$member" =~ ^[0-9]+$ && "$expected_ticks" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$member" 2>/dev/null || return 1
+  actual="$(process_start_ticks "$member" || true)"
+  [[ "$actual" == "$expected_ticks" ]] || return 1
+  read -r got_pgid got_sid < <(ps -o pgid= -o sid= -p "$member" 2>/dev/null)
+  [[ "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]]
+}
+
+tmux_detached_session_receipt_original_members_alive() {
+  local receipt="$1" members="$2" member ticks
+  while IFS=$'\t' read -r member ticks; do
+    [[ -n "$member" ]] || continue
+    tmux_detached_session_receipt_member_matches "$receipt" "$member" "$ticks" && return 0
+  done <<<"$members"
+  return 1
+}
+
+tmux_detached_session_receipt_group_state() {
+  local receipt="$1" pid ticks members
+  pid="$(jq -r '.pid // empty' <<<"$receipt")"; ticks="$(jq -r '.start_ticks // empty' <<<"$receipt")"
+  members="$(tmux_detached_session_receipt_group_members "$receipt")" || { printf 'uncertain\n'; return 2; }
+  [[ -n "$members" ]] || { printf 'gone\n'; return 1; }
+  if tmux_detached_session_receipt_member_matches "$receipt" "$pid" "$ticks"; then
+    printf 'live\n'; return 0
   fi
   printf 'uncertain\n'; return 2
 }
 
-tmux_detached_session_receipt_target_is_safe() {
-  local lane="$1" receipt="$2" pgid sid self_pgid self_sid pane_pid pane_pgid pane_sid
-  pgid="$(jq -r '.pgid // empty' <<<"$receipt")"; sid="$(jq -r '.sid // empty' <<<"$receipt")"
-  [[ "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ ]] || return 1
-  read -r self_pgid self_sid < <(ps -o pgid= -o sid= -p "$$" 2>/dev/null)
-  [[ "$self_pgid" =~ ^[0-9]+$ && "$self_sid" =~ ^[0-9]+$ ]] || return 1
-  # A corrupt/stale receipt must never target this cleanup shell's own process
-  # group or session. A group signal here could otherwise kill the caller.
-  [[ "$pgid" != "$self_pgid" && "$sid" != "$self_sid" ]] || return 1
-  pane_pid="$(lane_get "$lane" tmux_pane_pid)"
-  if [[ "$pane_pid" =~ ^[0-9]+$ ]] && kill -0 "$pane_pid" 2>/dev/null; then
-    read -r pane_pgid pane_sid < <(ps -o pgid= -o sid= -p "$pane_pid" 2>/dev/null)
-    [[ "$pane_pgid" =~ ^[0-9]+$ && "$pane_sid" =~ ^[0-9]+$ ]] || return 1
-    [[ "$pgid" != "$pane_pgid" && "$sid" != "$pane_sid" ]] || return 1
-  fi
-}
-
-tmux_detached_session_receipt_group_survived_term() {
-  local receipt="$1" pid pgid sid
-  pid="$(jq -r '.pid // empty' <<<"$receipt")"; pgid="$(jq -r '.pgid // empty' <<<"$receipt")"
-  sid="$(jq -r '.sid // empty' <<<"$receipt")"
-  [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ ]] || return 1
-  [[ "$pid" == "$pgid" && "$pid" == "$sid" ]] || return 1
-  # This is valid only after this function proved the leader live immediately
-  # before TERM. If the leader then exits while its PGID/SID still has members,
-  # that group ID cannot have been reused; it remains safe to complete the
-  # bounded retirement for its TERM-resistant descendants.
-  ! kill -0 "$pid" 2>/dev/null || return 1
-  ps -eo pgid=,sid= 2>/dev/null | awk -v pgid="$pgid" -v sid="$sid" '$1 == pgid && $2 == sid { found=1 } END { exit !found }'
+tmux_detached_session_receipt_signal_members() {
+  local receipt="$1" signal="$2" members="$3" member ticks
+  while IFS=$'\t' read -r member ticks; do
+    [[ -n "$member" ]] || continue
+    tmux_detached_session_receipt_member_matches "$receipt" "$member" "$ticks" || continue
+    kill "-$signal" "$member" 2>/dev/null || true
+  done <<<"$members"
 }
 
 tmux_kill_detached_session_receipt_if_owned() {
-  local lane="$1" receipt="$2" pgid state _
-  pgid="$(jq -r .pgid <<<"$receipt")"
+  local lane="$1" receipt="$2" state members original_members _
   state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
   case "$state" in
     gone) return 0 ;;
@@ -949,30 +949,45 @@ tmux_kill_detached_session_receipt_if_owned() {
       return 1
       ;;
   esac
-  tmux_detached_session_receipt_target_is_safe "$lane" "$receipt" || {
-    warn "detached execution remains unretired: receipt could target this caller or pane; inspect lane '$lane'"
+  # Snapshot concrete process identities before any signal. A numeric PGID is
+  # recyclable once its leader exits, so retirement only targets a member whose
+  # PID and start ticks still match this owned session.
+  original_members="$(tmux_detached_session_receipt_group_members "$receipt")" || {
+    warn "detached execution remains unretired: process enumeration failed; inspect lane '$lane' before cleanup"
     return 1
   }
-  # Revalidate immediately before every group signal. The leader's PID can
-  # exit or be reused while cleanup is deciding what to do.
-  [[ "$(tmux_detached_session_receipt_group_state "$receipt" || true)" == live ]] || return 1
-  kill -TERM -- "-$pgid" 2>/dev/null || true
+  [[ -n "$original_members" ]] || return 0
+  tmux_detached_session_receipt_signal_members "$receipt" TERM "$original_members"
   for _ in 1 2 3 4 5; do
     sleep 0.1
-    state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
-    [[ "$state" == gone ]] && return 0
+    members="$(tmux_detached_session_receipt_group_members "$receipt")" || {
+      warn "detached execution remains unretired: process enumeration failed; inspect lane '$lane' before cleanup"
+      return 1
+    }
+    [[ -n "$members" ]] || return 0
+    if ! tmux_detached_session_receipt_original_members_alive "$receipt" "$original_members"; then
+      warn "detached execution remains unretired: original members exited while group members remain; inspect lane '$lane' before cleanup"
+      return 1
+    fi
+    tmux_detached_session_receipt_signal_members "$receipt" TERM "$members"
   done
-  state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
-  [[ "$state" == live ]] || tmux_detached_session_receipt_group_survived_term "$receipt" || {
-    warn "detached execution remains unretired after TERM: leader/group identity is no longer provable; inspect lane '$lane'"
+  members="$(tmux_detached_session_receipt_group_members "$receipt")" || {
+    warn "detached execution remains unretired: process enumeration failed; inspect lane '$lane' before cleanup"
     return 1
   }
-  tmux_detached_session_receipt_target_is_safe "$lane" "$receipt" || return 1
-  kill -KILL -- "-$pgid" 2>/dev/null || true
+  [[ -n "$members" ]] || return 0
+  if ! tmux_detached_session_receipt_original_members_alive "$receipt" "$original_members"; then
+    warn "detached execution remains unretired after TERM: original members exited while group members remain; inspect lane '$lane' before cleanup"
+    return 1
+  fi
+  tmux_detached_session_receipt_signal_members "$receipt" KILL "$members"
   for _ in 1 2 3 4 5; do
     sleep 0.1
-    state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
-    [[ "$state" == gone ]] && return 0
+    members="$(tmux_detached_session_receipt_group_members "$receipt")" || {
+      warn "detached execution remains unretired: process enumeration failed; inspect lane '$lane' before cleanup"
+      return 1
+    }
+    [[ -z "$members" ]] && return 0
   done
   warn "detached execution remains unretired after TERM/KILL; inspect lane '$lane' before cleanup"
   return 1
