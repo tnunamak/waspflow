@@ -958,24 +958,59 @@ tmux_detached_session_receipt_member_matches() {
   [[ "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]]
 }
 
-tmux_detached_session_receipt_original_members_alive() {
-  local receipt="$1" members="$2" member ticks
-  while IFS=$'\t' read -r member ticks; do
-    [[ -n "$member" ]] || continue
-    tmux_detached_session_receipt_member_matches "$receipt" "$member" "$ticks" && return 0
-  done <<<"$members"
-  return 1
+# A numeric PGID/SID is only a locator. It becomes authority to inspect a new
+# member set when an identity already authorized by the receipt brackets the
+# census. That prevents a recycled leader PID from donating its new session to
+# an old receipt.
+tmux_detached_session_receipt_continuity_anchors() {
+  local receipt="$1" trusted_members="$2" pid ticks
+  pid="$(jq -r '.pid // empty' <<<"$receipt")"
+  ticks="$(jq -r '.start_ticks // empty' <<<"$receipt")"
+  if tmux_detached_session_receipt_member_matches "$receipt" "$pid" "$ticks"; then
+    printf '%s\t%s\n' "$pid" "$ticks"
+  fi
+  while IFS=$'\t' read -r pid ticks; do
+    [[ -n "$pid" ]] || continue
+    tmux_detached_session_receipt_member_matches "$receipt" "$pid" "$ticks" \
+      && printf '%s\t%s\n' "$pid" "$ticks"
+  done <<<"$trusted_members"
+}
+
+# Print a member snapshot only if a receipt-proven identity was alive both
+# immediately before and immediately after its census.  `trusted_members` is
+# a union of earlier validated snapshots; members newly found here become
+# trusted only after this function returns successfully.
+tmux_detached_session_receipt_continuous_group_members() {
+  local receipt="$1" trusted_members="$2" members before after shared
+  before="$(tmux_detached_session_receipt_continuity_anchors "$receipt" "$trusted_members")"
+  if [[ -z "$before" ]]; then
+    # An identity-less observation can only prove absence.  Do not let a
+    # nonempty numeric group become authority after every trusted anchor died.
+    members="$(tmux_detached_session_receipt_group_members "$receipt")" || return 1
+    [[ -z "$members" ]] && return 0
+    return 2
+  fi
+  members="$(tmux_detached_session_receipt_group_members "$receipt")" || return 1
+  # An empty census cannot authorize a signal, so its direct observation is
+  # enough to establish gone even if its final member exits immediately after.
+  [[ -z "$members" ]] && return 0
+  after="$(tmux_detached_session_receipt_continuity_anchors "$receipt" "$trusted_members")"
+  shared="$(awk 'NR == FNR { seen[$0] = 1; next } seen[$0] { print; exit }' \
+    <(printf '%s\n' "$before") <(printf '%s\n' "$after"))"
+  [[ -n "$shared" ]] || return 2
+  printf '%s\n' "$members"
+}
+
+tmux_detached_session_receipt_member_union() {
+  local earlier="$1" later="$2"
+  awk -F $'\t' 'NF == 2 && !seen[$0]++ { print }' <<<"$earlier"$'\n'"$later"
 }
 
 tmux_detached_session_receipt_group_state() {
-  local receipt="$1" pid ticks members
-  pid="$(jq -r '.pid // empty' <<<"$receipt")"; ticks="$(jq -r '.start_ticks // empty' <<<"$receipt")"
-  members="$(tmux_detached_session_receipt_group_members "$receipt")" || { printf 'uncertain\n'; return 2; }
+  local receipt="$1" members
+  members="$(tmux_detached_session_receipt_continuous_group_members "$receipt" '')" || { printf 'uncertain\n'; return 2; }
   [[ -n "$members" ]] || { printf 'gone\n'; return 1; }
-  if tmux_detached_session_receipt_member_matches "$receipt" "$pid" "$ticks"; then
-    printf 'live\n'; return 0
-  fi
-  printf 'uncertain\n'; return 2
+  printf 'live\n'; return 0
 }
 
 tmux_detached_session_receipt_signal_members() {
@@ -988,52 +1023,40 @@ tmux_detached_session_receipt_signal_members() {
 }
 
 tmux_kill_detached_session_receipt_if_owned() {
-  local lane="$1" receipt="$2" state members original_members _
-  state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
-  case "$state" in
-    gone) return 0 ;;
-    live) ;;
-    *)
-      warn "detached execution remains unretired: receipt identity is $state; inspect lane '$lane' before cleanup"
-      return 1
-      ;;
-  esac
-  # Snapshot concrete process identities before any signal. A numeric PGID is
-  # recyclable once its leader exits, so retirement only targets a member whose
-  # PID and start ticks still match this owned session.
-  original_members="$(tmux_detached_session_receipt_group_members "$receipt")" || {
-    warn "detached execution remains unretired: process enumeration failed; inspect lane '$lane' before cleanup"
-    return 1
-  }
-  [[ -n "$original_members" ]] || return 0
-  tmux_detached_session_receipt_signal_members "$receipt" TERM "$original_members"
-  for _ in 1 2 3 4 5; do
-    sleep 0.1
-    members="$(tmux_detached_session_receipt_group_members "$receipt")" || {
-      warn "detached execution remains unretired: process enumeration failed; inspect lane '$lane' before cleanup"
-      return 1
-    }
-    [[ -n "$members" ]] || return 0
-    if ! tmux_detached_session_receipt_original_members_alive "$receipt" "$original_members"; then
-      warn "detached execution remains unretired: original members exited while group members remain; inspect lane '$lane' before cleanup"
-      return 1
-    fi
-    tmux_detached_session_receipt_signal_members "$receipt" TERM "$members"
-  done
-  members="$(tmux_detached_session_receipt_group_members "$receipt")" || {
-    warn "detached execution remains unretired: process enumeration failed; inspect lane '$lane' before cleanup"
+  local lane="$1" receipt="$2" members trusted_members _
+  # The first snapshot is valid only while the receipt leader brackets it.
+  # Later snapshots may extend this set, but only while an earlier identity
+  # brackets their census.  Never acquire authority from PGID/SID alone.
+  members="$(tmux_detached_session_receipt_continuous_group_members "$receipt" '')" || {
+    warn "detached execution remains unretired: receipt identity continuity is uncertain; inspect lane '$lane' before cleanup"
     return 1
   }
   [[ -n "$members" ]] || return 0
-  if ! tmux_detached_session_receipt_original_members_alive "$receipt" "$original_members"; then
-    warn "detached execution remains unretired after TERM: original members exited while group members remain; inspect lane '$lane' before cleanup"
+  trusted_members="$members"
+  tmux_detached_session_receipt_signal_members "$receipt" TERM "$members"
+  for _ in 1 2 3 4 5; do
+    sleep 0.1
+    members="$(tmux_detached_session_receipt_continuous_group_members "$receipt" "$trusted_members")" || {
+      warn "detached execution remains unretired: receipt identity continuity is uncertain; inspect lane '$lane' before cleanup"
+      return 1
+    }
+    [[ -n "$members" ]] || return 0
+    trusted_members="$(tmux_detached_session_receipt_member_union "$trusted_members" "$members")"
+    tmux_detached_session_receipt_signal_members "$receipt" TERM "$members"
+  done
+  members="$(tmux_detached_session_receipt_continuous_group_members "$receipt" "$trusted_members")" || {
+    warn "detached execution remains unretired after TERM: receipt identity continuity is uncertain; inspect lane '$lane' before cleanup"
     return 1
-  fi
+  }
+  [[ -n "$members" ]] || return 0
   tmux_detached_session_receipt_signal_members "$receipt" KILL "$members"
   for _ in 1 2 3 4 5; do
     sleep 0.1
+    # KILL removes every continuity anchor. An identity-less census may prove
+    # only that the numeric group is empty; a nonempty result is uncertain and
+    # must not trigger another signal.
     members="$(tmux_detached_session_receipt_group_members "$receipt")" || {
-      warn "detached execution remains unretired: process enumeration failed; inspect lane '$lane' before cleanup"
+      warn "detached execution remains unretired after KILL: process enumeration failed; inspect lane '$lane' before cleanup"
       return 1
     }
     [[ -z "$members" ]] && return 0

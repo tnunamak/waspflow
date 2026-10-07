@@ -7679,4 +7679,5 @@ source "$root/scripts/fixtures/verify-r4.sh"
 
 source "$root/scripts/fixtures/verify-r3-f4.sh"
 source "$root/scripts/fixtures/verify-r6.sh"
+source "$root/scripts/fixtures/verify-r7.sh"
 echo "waspflow verify: ok"
