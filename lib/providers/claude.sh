@@ -372,10 +372,10 @@ _claude_children_active() {
 
   while IFS= read -r sub; do
     [[ -n "$sub" && -f "$sub" ]] || continue
-    # Only a typed terminal event proves this child is done.
-    local child_reason
-    child_reason="$(jq -rc 'select(.type=="assistant") | .message.stop_reason // empty' "$sub" 2>/dev/null | tail -1)"
-    [[ "$child_reason" == "end_turn" ]] || return 0
+    # Only a complete transcript whose final relevant event is a terminal
+    # assistant turn proves this child is done. A resumed child retains its old
+    # end_turn, so its later user or incomplete assistant event must win.
+    _claude_transcript_settled "$sub" || return 0
   done < <(find "$subdir" -maxdepth 1 -type f -name 'agent-*.jsonl' 2>/dev/null)
   return 1
 }
@@ -464,8 +464,18 @@ claude_compactions_since() {
 claude_turn_settled() {
   local jsonl
   jsonl="$(claude_session_log "$1")" || return 1
+  _claude_transcript_settled "$jsonl"
+}
+
+# A transcript is settled only when its final relevant event is
+# assistant/end_turn. This gives child transcripts the same resumed-turn
+# protection as their parent session.
+_claude_transcript_settled() {
+  local jsonl="$1"
+  [[ -f "$jsonl" ]] || return 1
   [[ "$(jq -rc '
-    if .type=="assistant" and .message.stop_reason=="end_turn" then "end"
+    if .type=="assistant" then
+      if .message.stop_reason=="end_turn" then "end" else "active" end
     elif .type=="user" then
       ((.message.content // "") | if type=="string" then . elif type=="array" then (map(select(type=="object" and .type=="text") | .text) | join("")) else "" end) as $text
       | if ($text | test("^<local-command-std(out|err)>")) then "end"
