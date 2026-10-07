@@ -5,6 +5,7 @@
   export WASPFLOW_HOME="$s5/home" WASPFLOW_ARCHIVE_DIR="$s5/archive"
   source "$root/lib/core.sh"
   source "$root/lib/worktree.sh"
+  source "$root/lib/artifacts.sh"
   source "$root/lib/fanin.sh"
 
   repo="$s5/repo"
@@ -86,4 +87,15 @@
   cmd_close resources --status abandoned --reason 'fixture stop' --stop >/dev/null
   [[ -e "$s5/owned-worker-stopped" && -e "$s5/owned-scope-stopped" && -e "$foreign" ]] \
     || { echo 's5: close --stop did not isolate owned worker cleanup' >&2; exit 1; }
+
+  # A reap is final after all recorded scopes are inactive: a historical
+  # scope-unavailable fallback must not turn the final state back into unknown.
+  [[ "$(waspflow_derived_lane_lifecycle '{"status":"reaped","cgroup_fallbacks":[{"reason":"scope-unavailable"}]}' '[]' false)" == reaped ]] \
+    || { echo 's5: finalized reap was relabeled unknown' >&2; exit 1; }
+
+  # A lane whose first submission was never confirmed has no turn to recover.
+  lane_set never-submitted provider fake status spawn_failed spawn_submitted false cwd "$repo" report "$s5/missing-report"
+  _artifacts_recover() { : >"$s5/recovery-called"; }
+  [[ "$(artifacts_finalize never-submitted fake 1)" == report_missing && ! -e "$s5/recovery-called" ]] \
+    || { echo 's5: never-submitted lane attempted report recovery' >&2; exit 1; }
 )

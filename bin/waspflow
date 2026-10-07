@@ -2040,7 +2040,12 @@ _reap_one_locked() {
   # the diff, enforce any --report contract, and — if the report is missing —
   # run one recovery pass. Recovery may resume the live pane OR the exited
   # session, and needs the worktree intact to read the diff + write the report.
-  local result; result="$(artifacts_finalize "$lane" "$provider" "$closed")" || return 1
+  # A failed submission has no provider turn to resume. Reap may still preserve
+  # artifacts and release owned resources, but a report recovery pass would be
+  # an extra, misleading provider invocation against a lane that never ran.
+  local cleanup_only="$closed"
+  [[ "$(lane_get "$lane" spawn_submitted)" == true ]] || cleanup_only=1
+  local result; result="$(artifacts_finalize "$lane" "$provider" "$cleanup_only")" || return 1
   if [[ "$closed" == 0 ]]; then
     result="$(artifacts_verify "$lane" "$result")" || return 1
   fi
