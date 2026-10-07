@@ -4781,11 +4781,11 @@ fi
   export WASPFLOW_HOME="$nosystemd_home"
   # shellcheck disable=SC1090
   source "$root/lib/core.sh"
-  tmux_cgroup_scope_available() { return 1; }
+  tmux_cgroup_scope_unavailable_reason() { printf 'fixture-unavailable\n'; return 0; }
   lane_set no-systemd status live cwd "$nosystemd_cwd"
   tmux_run_owned_lane_command no-systemd "$nosystemd_cwd" headless-revise -- bash -c 'printf fallback > ran'
   [[ -f "$nosystemd_cwd/ran" ]] \
-    && jq -e '(.cgroup_scope_receipts // []) == [] and .cgroup_fallbacks[-1].reason == "scope-unavailable"' \
+    && jq -e '(.cgroup_scope_receipts // []) == [] and .cgroup_fallbacks[-1].reason == "scope-unavailable:fixture-unavailable"' \
       "$nosystemd_home/lanes/no-systemd/state.json" >/dev/null \
     || { echo "scope: no-systemd fallback was not truthful/executable" >&2; exit 1; }
   rm -rf "$nosystemd_home" "$nosystemd_cwd"
