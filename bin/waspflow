@@ -2091,15 +2091,18 @@ cmd_doctor() {
   for c in tmux jq awk python3 git flock; do
     if command -v "$c" >/dev/null 2>&1; then echo "PASS tool $c"; else echo "FAIL tool $c (required)"; ok=0; fi
   done
+  for c in timeout perl; do
+    if command -v "$c" >/dev/null 2>&1; then echo "PASS tool $c"; else echo "FAIL tool $c (required)"; ok=0; fi
+  done
   # Binaries whose name differs from the waspflow provider name get the
   # provider annotated, so `doctor` output stays greppable by provider.
-  local label
+  local label provider_available=0
   for c in claude codex grok agy qwen dsh uuidgen; do
     label="$c"
     case "$c" in agy) label="agy (antigravity)" ;; dsh) label="dsh (deepseek)" ;; esac
     if command -v "$c" >/dev/null 2>&1; then
       case "$c" in
-        claude|codex|grok|agy|qwen|dsh) echo "PASS provider $label" ;;
+        claude|codex|grok|agy|qwen|dsh) echo "PASS provider $label"; provider_available=1 ;;
         uuidgen) echo "PASS tool $label" ;;
       esac
     elif [[ "$c" == "uuidgen" ]]; then
@@ -2110,6 +2113,9 @@ cmd_doctor() {
       echo "WARN provider $label (optional)"
     fi
   done
+  if [[ "$provider_available" -eq 0 ]]; then
+    echo "FAIL provider CLI (install one supported provider)"; ok=0
+  fi
   if ! command -v uuidgen >/dev/null 2>&1 && [[ -r /proc/sys/kernel/random/uuid ]]; then
     echo "PASS UUID source /proc/sys/kernel/random/uuid"
   elif ! command -v uuidgen >/dev/null 2>&1; then

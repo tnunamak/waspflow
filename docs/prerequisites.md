@@ -7,6 +7,8 @@ Waspflow is a shell tool. It does not install system packages because package ma
 - `tmux` — keeps lane panes alive after the launching shell disconnects.
 - `jq` — reads JSON lane state and provider events.
 - `awk`, `python3`, and `git` — used by the CLI and artifact capture.
+- `timeout` — bounds cleanup and transcript inspection.
+- `perl` — strips terminal control sequences from saved transcripts.
 - `flock` — serializes lane state transitions. It is supplied by util-linux on most Linux systems; macOS needs a compatible `flock` command.
 - `uuidgen`, or Linux `/proc/sys/kernel/random/uuid` — creates supported provider session IDs.
 
