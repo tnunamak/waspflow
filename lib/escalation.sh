@@ -381,6 +381,9 @@ escalate_resume_launch_locked() {
   resume_fn="${provider}_resume_with_arm"
   WASPFLOW_PROVISIONAL_SESSION_ID=""; WASPFLOW_PROVISIONAL_ROLLOUT=""
   WASPFLOW_PROVIDER_LAUNCH_ERROR=""
+  # The replacement may write its report before its adapter returns. Start its
+  # generation before submission so the previous report cannot satisfy it.
+  artifacts_begin_turn_generation "$lane"
   if ! "$resume_fn" "$lane" "$prompt" "$fresh"; then
     local launch_error="$provider: ${WASPFLOW_PROVIDER_LAUNCH_ERROR:-launch-or-confirmation-failed} (launch_provisioned)"
     [[ "$(lane_get "$lane" recovery_state)" != needs-owner ]] || launch_error="needs-owner: $(lane_get "$lane" recovery_reason) (provider prompt left unanswered)"
