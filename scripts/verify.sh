@@ -3336,7 +3336,10 @@ grep -q 'corrupted state.json' "$root/bin/waspflow" || { echo "status: corrupt-j
   tmux new-window -d -t "$WASPFLOW_TMUX_SESSION" -n stalled \
     "bash -c 'printf \"some generic output with no prompt words at all\n\"; exec cat'" 2>/dev/null
   mkdir -p "$state_home/lanes/stalled"
-  echo '{"provider":"claude","status":"live","session_id":"no-such","cwd":"/tmp"}' > "$state_home/lanes/stalled/state.json"
+  stall_uuid="$(uuidgen)"
+  tmux set-option -w -t "$WASPFLOW_TMUX_SESSION:stalled" @waspflow_home "$(cd "$state_home" && pwd -P)"
+  tmux set-option -w -t "$WASPFLOW_TMUX_SESSION:stalled" @waspflow_lane_uuid "$stall_uuid"
+  echo '{"provider":"claude","status":"live","session_id":"no-such","cwd":"/tmp","lane_uuid":"'"$stall_uuid"'"}' > "$state_home/lanes/stalled/state.json"
   : > "$state_home/lanes/stalled/transcript.log"
   set +e
   t0="$(date +%s)"
@@ -3595,7 +3598,7 @@ CLAUDE
   set -e
   [[ "$ceiling_rc" -ne 0 && "$ceiling_err" == *'background-task wait ceiling'* \
     && "$ceiling_err" == *'CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0'* \
-    && "$(cat "$ceiling_out")" == *'partial worker output'* ]] \
+    && "$(cat "$ceiling_out.partial")" == *'partial worker output'* ]] \
     || { echo "claude exec: background ceiling was reported as success or output was lost" >&2; exit 1; }
 
   ceiling_out="$claude_ceiling_home/stderr-partial.out"
@@ -3618,7 +3621,7 @@ CLAUDE
   set -e
   ceiling_err="$(cat "$ceiling_log")"
   [[ "$ceiling_rc" -ne 0 && "$ceiling_err" == *'CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0'* \
-    && "$(cat "$ceiling_out")" == *'partial worker output'* ]] \
+    && "$(cat "$ceiling_out.partial")" == *'partial worker output'* ]] \
     || { echo "claude exec: stderr background ceiling was not detected" >&2; exit 1; }
 
   ceiling_out="$claude_ceiling_home/quoted.out"
@@ -3995,7 +3998,7 @@ PROV
   # not a hand-written replacement state file: both receipts must survive and
   # have independent identities.
   WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
-    "$root/bin/waspflow" reap mcp-state --no-archive >/dev/null
+    "$root/bin/waspflow" reap mcp-state --no-archive --force >/dev/null
   [[ "$(wc -l <"$mcphome/receipts.jsonl")" -eq 1 ]] \
     || { echo "receipt reuse: first lane life did not append exactly one receipt" >&2; exit 1; }
   first_receipt_id="$(jq -r '.receipt_id' "$mcphome/receipts.jsonl")"
@@ -4008,7 +4011,7 @@ PROV
     "$mcphome/lanes/mcp-state/state.json" >/dev/null \
     || { echo "receipt reuse: spawn retained schema lifecycle state" >&2; exit 1; }
   WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
-    "$root/bin/waspflow" reap mcp-state --no-archive >/dev/null
+    "$root/bin/waspflow" reap mcp-state --no-archive --force >/dev/null
   [[ "$(wc -l <"$mcphome/receipts.jsonl")" -eq 2 ]] \
     || { echo "receipt reuse: second lane life did not append a second receipt" >&2; exit 1; }
   jq -s --arg first_receipt_id "$first_receipt_id" --arg first_lane_uuid "$first_lane_uuid" '
@@ -4282,6 +4285,12 @@ PROV
       --arg idle "$idle" --arg resumable "$resumable" --arg spawned "$spawned" \
       '{provider:"life",status:"live",cwd:$cwd,origin_cwd:$cwd,transcript:$t,session_id:"life-session",terminal_idle:$idle,resumable:$resumable,turn_mark:"1",spawn_epoch:$spawned,tmux_session:$session,tmux_window:$window,tmux_pane_pid:$pid}' \
       >"$lifehome/lanes/$lane/state.json"
+    # Ownership tags: cleanup only closes windows it can prove it owns.
+    life_uuid="$(uuidgen)"
+    tmux set-option -w -t "$target" @waspflow_home "$(cd "$lifehome" && pwd -P)"
+    tmux set-option -w -t "$target" @waspflow_lane_uuid "$life_uuid"
+    jq --arg u "$life_uuid" '. + {lane_uuid:$u}' "$lifehome/lanes/$lane/state.json" >"$lifehome/lanes/$lane/state.tag" \
+      && mv "$lifehome/lanes/$lane/state.tag" "$lifehome/lanes/$lane/state.json"
   }
 
   now="$(date +%s)"

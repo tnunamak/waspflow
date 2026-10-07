@@ -183,7 +183,15 @@ exec_run() {
   artifacts_emit_exec_receipt_v1 "$exec_id" "$provider" "$model" "$effort" "${OP_MODE:-standard}" "$billing" "$availability" "$invoked_epoch" "$completed_epoch" "$result" "$rc" "$output_metadata" \
     || warn "exec: could not emit receipt"
   if [[ "$rc" -ne 0 ]]; then
-    [[ -z "$staged_output" ]] || rm -f "$staged_output"
+    if [[ -n "$staged_output" ]]; then
+      # Keep whatever the failed run wrote for diagnosis, beside (never at) the
+      # destination so a failure cannot pass as the new result.
+      if [[ -s "$staged_output" ]] && mv -f "$staged_output" "$output_path.partial"; then
+        warn "exec: failed run's partial output kept at $output_path.partial"
+      else
+        rm -f "$staged_output"
+      fi
+    fi
     [[ "$should_cat" -eq 1 ]] && rm -f "$output_path"
     return "$rc"
   fi

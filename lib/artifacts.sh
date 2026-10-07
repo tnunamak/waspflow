@@ -556,7 +556,7 @@ artifacts_classify_pre_existing() {
   fi
   lane_set "$lane" baseline_oracle_ran "true" baseline_oracle_state "$state" baseline_oracle_reason ""
   if [[ "$state" == failed ]]; then
-    candidate_signature="$(cat "$(lane_dir "$lane")/verify-stdout.txt" "$(lane_dir "$lane")/verify-stderr.txt" 2>/dev/null | cksum | awk '{print $1 ":" $2}')"
+    candidate_signature="$({ cat "$(lane_dir "$lane")/verify-stdout.txt" "$(lane_dir "$lane")/verify-stderr.txt" 2>/dev/null || true; } | cksum | awk '{print $1 ":" $2}')"
     if [[ -n "$candidate_signature" && "$candidate_signature" == "$baseline_signature" ]]; then
       lane_set "$lane" verify_failure_class "pre_existing" baseline_oracle_reason "matching-failure-output"
       local runs; runs="$(lane_get "$lane" verify_runs)"

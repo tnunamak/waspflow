@@ -1999,6 +1999,15 @@ _reap_one_locked() {
   case "$(lane_outcome "$lane")" in
     harvested|abandoned|superseded) closed=1 ;;
   esac
+  # Cleanup kills the window and its process tree. A lane that is still working
+  # (live pane, provider says not idle) must not be reaped by accident; the owner
+  # closes it out explicitly or passes --force.
+  if [[ "$closed" == 0 && "$force" != 1 && "$(lane_get "$lane" spawn_submitted)" == true ]] \
+     && tmux_window_exists "$lane" && ! "${provider}_is_idle" "$lane"; then
+    err "reap: lane '$lane' is not verified idle (provider reports active work); refusing to clean it up"
+    err "  next: waspflow wait $lane   # then reap, or 'close --status abandoned' / 'reap --force' to discard it"
+    return 1
+  fi
   if [[ "$closed" == 1 ]]; then
     # Closeout authorizes cleanup, not a fresh provider turn or attestation.
     lane_set "$lane" runtime_verification_state not_applicable_closed || return 1

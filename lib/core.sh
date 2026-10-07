@@ -1258,6 +1258,11 @@ tmux_create_owned_lane_window() {
   # receipt would be written to the operator's default state directory and an
   # explicit pager override would be lost to the tmux server environment.
   lane_uuid="$(lane_get "$lane" lane_uuid)"
+  if [[ ! "$lane_uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
+    # Legacy lane records predate lane_uuid. Ownership tagging needs one, so
+    # mint it now rather than creating an untagged window that cannot be claimed.
+    lane_uuid="$(uuidgen)" && lane_set "$lane" lane_uuid "$lane_uuid" || return 1
+  fi
   if [[ "$lane_uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
     lane_parent_ref="waspflow:$lane_uuid"
   fi
