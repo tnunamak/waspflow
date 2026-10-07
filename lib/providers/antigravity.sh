@@ -91,16 +91,15 @@ _antigravity_output_has_deliverable() {
   # A contracted report is the deliverable. Do not accept a final message while
   # it is absent; S2's artifact contract remains its authoritative validator.
   if [[ -n "$report" ]]; then [[ -s "$report" ]]; return; fi
-  # A tool invocation is progress, not a completed answer. Require a final/result
-  # event with non-empty content when no report contract exists. The log also
-  # contains plaintext provider diagnostics, so parse only its JSON records.
+  # A tool invocation is progress, not a completed answer. Require a typed
+  # final/result event with non-empty content when no report contract exists.
+  # Plaintext agy lines are diagnostics and cannot prove task completion.
   grep -aE '^[[:space:]]*\{' "$log" 2>/dev/null | jq -e '
     (.text // .content // .message // "") as $content |
     select((.type == "result" or .type == "final" or .type == "assistant")
       and ($content | type == "string" and length > 0)
       and ($content | test("<(tool_call|tool_use)|\\\"type\\\"[[:space:]]*:[[:space:]]*\\\"tool"; "i") | not))
-  ' >/dev/null 2>&1 \
-    || grep -aEv '^[[:space:]]*(Created conversation|\{|$)' "$log" 2>/dev/null | grep -aviE '(<tool|tool_call|tool_use|diagnostic|warning|error)' | grep -q .
+  ' >/dev/null 2>&1
 }
 
 # This command is evaluated inside the lane-owned tmux process.  The raw log

@@ -62,4 +62,15 @@
   _antigravity_extra_args --project="$r2d/project" \
     || { echo 'r2-d: Antigravity rejected --project=value' >&2; exit 1; }
 
+  # Connection diagnostics without a typed final result are not a deliverable.
+  diagnostic_log="$r2d/agy-diagnostic.log"
+  printf '%s\n' 'Created conversation 11111111-2222-3333-4444-555555555555' 'Connected to service' >"$diagnostic_log"
+  lane_set agy-r2d provider antigravity report ''
+  if _antigravity_output_has_deliverable agy-r2d "$diagnostic_log"; then
+    echo 'r2-d: Antigravity accepted diagnostic-only output' >&2; exit 1
+  fi
+  printf '%s\n' '{"type":"result","text":"delivered"}' >>"$diagnostic_log"
+  _antigravity_output_has_deliverable agy-r2d "$diagnostic_log" \
+    || { echo 'r2-d: Antigravity rejected a typed final result' >&2; exit 1; }
+
 )
