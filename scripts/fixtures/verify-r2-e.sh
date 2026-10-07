@@ -19,6 +19,9 @@
   reconcile_lane_json reaped '[]' true | jq -e '.status == "reaped"' >/dev/null
   reconcile_lane_json parked '[]' true | jq -e '.status == "parked"' >/dev/null
   reconcile_lane_json scoped '["waspflow-r2-e.scope"]' true | jq -e '.status == "live"' >/dev/null
+  mkdir -p "$fixture/parked-cwd"
+  lane_set parked-no-scope provider fake status parked cwd "$fixture/parked-cwd" tmux_pane_pid 999999 tmux_pane_pid_start_time 1
+  reconcile_lane_json parked-no-scope '[]' false | jq -e '.status == "parked"' >/dev/null
 
 )
 
@@ -35,6 +38,9 @@
   alpha_one="$(reconcile_event_emit alpha 1 completion)"
   alpha_two="$(reconcile_event_emit alpha 2 completion)"
   reconcile_event_emit beta 1 completion >/dev/null
+  event_count_before="$(wc -l <"$(reconcile_event_ledger)")"
+  [[ "$(reconcile_event_emit alpha 2 completion "$alpha_two")" == "$alpha_two" ]]
+  [[ "$(wc -l <"$(reconcile_event_ledger)")" == "$event_count_before" ]]
   reconcile_event_claim "$alpha_two" consumer 60 | jq -e '.ok == true' >/dev/null
   reconcile_event_ack "$alpha_two" consumer
   if reconcile_event_ack "$alpha_one" wrong-consumer; then

@@ -49,7 +49,7 @@ reconcile_event_emit() (
   ledger="$(reconcile_event_ledger)"; mkdir -p -m 700 "$WASPFLOW_HOME" "$WASPFLOW_LOCKS_DIR" || return 1
   exec {fd}>"$WASPFLOW_LOCKS_DIR/events.lock" || return 1; flock -x "$fd" || return 1
   touch "$ledger" || { flock -u "$fd"; exec {fd}>&-; return 1; }
-  absent="$(jq -ser --arg id "$event_id" '[.[] | select(.event_id == $id)] | length == 0' "$ledger")" || return 1
+  absent="$(jq -sr --arg id "$event_id" '[.[] | select(.event_id == $id)] | length == 0' "$ledger")" || return 1
   if [[ "$absent" == true ]]; then
     payload="$(jq -cn --arg id "$event_id" --arg lane "$lane" --arg kind "$kind" --argjson generation "$generation" \
       '{schema:"waspflow-owner-event/v1",event_id:$id,lane:$lane,generation:$generation,kind:$kind,state:"pending",created_epoch:now}')" || return 1
@@ -97,12 +97,13 @@ reconcile_event_ack() (
 )
 
 reconcile_lane_json() {
-  local lane="$1" record active_scopes="$2" scopes_ok="$3" pid expected_start actual_start window=false lifecycle owner cwd outcome claims event_count=0 classification next_action evidence
+  local lane="$1" record active_scopes="$2" scopes_ok="$3" pid expected_start actual_start window=false lifecycle record_status owner cwd outcome claims event_count=0 classification next_action evidence
   local state_file; state_file="$(lane_state_file "$lane")"
   if [[ ! -f "$state_file" ]]; then jq -cn --arg lane "$lane" '{lane:$lane,status:"unknown",evidence:["missing-state.json"],next_action:"preserve forensic path; inspect record directory"}'; return; fi
   if ! record="$(jq -c . "$state_file" 2>/dev/null)"; then jq -cn --arg lane "$lane" '{lane:$lane,status:"unknown",evidence:["corrupt-state.json"],next_action:"preserve forensic path; repair or inspect record"}'; return; fi
   tmux_owned_lane_window_exists "$lane" && window=true
   lifecycle="$(waspflow_derived_lane_lifecycle "$record" "$active_scopes" "$scopes_ok")"
+  record_status="$(jq -r '.status // ""' <<<"$record")"
   owner="$(jq -r '.owner_ref // ""' <<<"$record")"
   cwd="$(jq -r '.cwd // ""' <<<"$record")"
   outcome="$(jq -r '.outcome // ""' <<<"$record")"
@@ -116,7 +117,7 @@ reconcile_lane_json() {
   # Derived lifecycle is stronger evidence than historical pane metadata. A
   # completed reap may deliberately remove its cwd, and a live scope may keep
   # descendants running after the pane shell has gone away.
-  if [[ "$lifecycle" == reaped || "$lifecycle" == parked ]]; then
+  if [[ "$lifecycle" == reaped || "$record_status" == parked ]]; then
     next_action="inspect durable receipt"
   elif [[ "$lifecycle" == live ]]; then
     classification="live"; next_action="observe or use normal wait/revise controls"
@@ -126,7 +127,7 @@ reconcile_lane_json() {
   elif [[ -n "$expected_start" && -z "$actual_start" ]]; then classification="interrupted"; next_action="recorded pane process exited; inspect before recovery"
   elif [[ -n "$expected_start" && "$actual_start" != "$expected_start" ]]; then classification="unknown"; next_action="PID identity changed; refuse adoption and inspect"
   elif [[ -n "$expected_start" && "$actual_start" == "$expected_start" ]]; then classification="live"; next_action="recorded process identity is live; inspect its owned resources"
-  elif [[ -n "$outcome" && "$(jq -r '.status // ""' <<<"$record")" != reaped ]]; then classification="closed-unreaped"; next_action="explicitly reap only after inspecting cleanup evidence"
+  elif [[ -n "$outcome" && "$record_status" != reaped ]]; then classification="closed-unreaped"; next_action="explicitly reap only after inspecting cleanup evidence"
   elif [[ "$lifecycle" == unknown ]]; then next_action="identity evidence is incomplete; preserve and inspect"
   fi
   evidence="$(jq -cn --arg lifecycle "$lifecycle" --arg pid "$pid" --arg expected "$expected_start" --arg actual "$actual_start" '["recorded-lifecycle:" + $lifecycle] + (if $pid == "" then [] else ["pane-pid:" + $pid] end) + (if $expected == "" then [] else ["recorded-pid-start:" + $expected] end) + (if $actual == "" then [] else ["observed-pid:absent"] end)')" || return 1
