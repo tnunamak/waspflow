@@ -93,4 +93,10 @@ EOF
   doctor_output="$(PATH="$r3f1/bin:$PATH" "$root/bin/waspflow" doctor)"
   grep -q 'WARN release version: latest tag unavailable' <<<"$doctor_output"
   grep -q -- '-> ready' <<<"$doctor_output"
+
+  # B12: PID existence alone cannot make a reused headless-writer PID active.
+  lane_set reused-headless provider fake cwd "$r3f1" status live \
+    headless_revise_state running headless_revise_pid "$$" headless_revise_pid_start_ticks 0
+  status_output="$("$root/bin/waspflow" status reused-headless)"
+  jq -e '(.headless_revise_active // false) == false and .headless_revise_state == "interrupted"' <<<"$status_output" >/dev/null
 )

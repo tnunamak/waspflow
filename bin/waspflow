@@ -1133,9 +1133,10 @@ cmd_status() {
   local deferred=null
   [[ -z "$(jq -r '.deferred_switch // ""' <<<"$record")" ]] || deferred="$(deferred_status_json "$lane")"
   # A headless revise records its pid; "running" with a dead pid was interrupted.
-  local headless_alive=false headless_pid
-  headless_pid="$(jq -r 'select(.headless_revise_state == "running") | .headless_revise_pid // empty' <<<"$record")"
-  [[ ! "$headless_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$headless_pid" 2>/dev/null || headless_alive=true
+  local headless_alive=false
+  if [[ "$(jq -r '.headless_revise_state // empty' <<<"$record")" == running ]] && lane_headless_writer_active "$lane"; then
+    headless_alive=true
+  fi
   local report_observation; report_observation="$(artifacts_report_observation "$lane")"
   case "$lifecycle" in
     idle|exited|parked)
@@ -1317,8 +1318,7 @@ cmd_wait() {
       headless_state="$(lane_get "$lane" headless_revise_state)"
       case "$headless_state" in
         running)
-          headless_pid="$(lane_get "$lane" headless_revise_pid)"
-          if [[ "$headless_pid" =~ ^[0-9]+$ ]] && kill -0 "$headless_pid" 2>/dev/null; then
+          if lane_headless_writer_active "$lane"; then
             headless_running=1
           else
             lane_set "$lane" wait_state interrupted
