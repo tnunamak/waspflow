@@ -55,12 +55,14 @@ an `observed_harness_env` parent context.
 
 ## Choosing provider / model / effort
 
-Raw flags are canonical: `--provider claude|codex|grok|antigravity|qwen`, `--model <id>` (omit for
-default), `--effort <none|minimal|low|medium|high|xhigh|max>` (provider-specific;
-unsupported hard-fails; never silently demoted — Codex `xhigh` is real),
+Raw flags are canonical: `--provider claude|codex|grok|antigravity|qwen|deepseek`, `--model <id>` (omit for
+default), `--effort <none|minimal|low|medium|high|xhigh|max|ultra>` (provider-specific;
+unsupported hard-fails; `ultra` is Codex-only; never silently demoted — Codex `xhigh` is real),
 `--mcp auto|none|inherit` (default `auto`, MCP-minimal where supported), and
 `--arg <flag>` (repeatable) to pass a flag straight to the underlying CLI. Use
 `--mcp inherit` only when the task specifically needs configured MCP servers.
+DeepSeek does not support `revise` or effort selection; start a new lane with the
+full task when its work needs correction.
 
 For task-shaped selection, `--op <id>` expands to explicit flags + a decision card
 (explicit flags win over the expansion). Do NOT invent a `cheap|default|max`
@@ -80,15 +82,17 @@ stdin prompt. `--auto` requires `--op`; `--ack-deprecated` applies only to `--au
 
 ```bash
 waspflow spawn --provider codex --accept-provider-default --lane audit --report findings.md -- "Audit auth.ts, write findings.md"
-waspflow wait audit && waspflow reap audit   # reap verifies findings.md exists + is substantial
+waspflow wait audit && waspflow reap audit   # reap verifies findings.md is non-empty
 ```
 
 If the report is missing at reap, one **recovery pass** resumes the session
 (write-enabled) to reconstruct it from transcript + git diff, then stamps an honest
 `result`: `succeeded`/`recovered`/`failed` (also `verified`/`verify_failed` with
 `--verify`). `reap` exits nonzero on failure — no false "done"; check `status
-<lane>` → `.result`. Every lane auto-saves `prompt.txt`, `git-diff.txt`, and
-`git-status-before/after.txt`, so "what changed?" is always answerable. (Optional
+<lane>` → `.result`. Reap requires a non-empty report and, for new contracts, a
+changed report signature; it does not judge report quality. Every lane saves
+`prompt.txt`. Git status and diff captures
+are conditional on a Git workspace and are not a complete filesystem audit. (Optional
 spawn flags: `--verify <cmd>`, `--prepare <cmd>`, `--isolate`, and `--base <ref>`.)
 
 ## Verify before destructive cleanup (`verify`)
@@ -103,8 +107,10 @@ waspflow verify fix
 waspflow reap fix
 ```
 
-`verify` never touches tmux, lane status, result, session, or worktree. It exits
-0 on pass and 2 on failure, and writes command/stdout/stderr/JSON receipts. The
+`verify` preserves lane lifecycle state and avoids tmux teardown. Configured
+commands can modify workspace files; baseline classification also uses a temporary
+detached worktree. It exits 0 on pass and 2 on failure, and writes
+command/stdout/stderr/JSON receipts. The
 JSON carries `failure_class` (`task`, `prepare`, `timeout`, `infra`,
 `invalid_oracle`, `pre_existing`, `none`) plus
 the advisory `verify_test_files_changed` heuristic. Reap consumes a checkpoint
@@ -144,7 +150,7 @@ for L in a b; do waspflow reap "$L"; done
 
 **Billing safety before you fan out.** If `ANTHROPIC_API_KEY` is set, headless
 Claude workers bill pay-as-you-go **API** rates, not your subscription — and a
-fleet multiplies that (a stray key ran up $1,800+ in two days). waspflow
+fleet multiplies that cost. waspflow
 hard-stops a Claude `spawn`/`exec`/`revise` when the key is set. Unset it to use
 your subscription, or opt in with `WASPFLOW_ALLOW_API_BILLING=1`. Accident guard,
 not a spend cap; `waspflow doctor` shows the active auth path.
@@ -160,7 +166,8 @@ waspflow exec --provider claude --accept-provider-default -- "Which files import
 ```
 
 `exec` runs one headless turn, blocks, writes to `-o <file>` (or stdout), and
-leaves no lane/worktree/reap. Use `spawn` when you need to steer or harvest; use
+leaves no lane/worktree/reap; it writes a durable execution receipt. Use `spawn`
+when you need to steer or harvest; use
 `exec` when you just need the answer.
 
 ## Recovering after YOUR OWN compaction
@@ -174,8 +181,9 @@ waspflow status <lane>     # full JSON: provider, session_id, cwd, prompt
 waspflow peek <lane>       # what it last said
 ```
 
-If a window already exited, `revise` resumes the session **headlessly** and
-returns the reply — capture it with `--out <file>`:
+If a window already exited, `revise` can resume a supported provider session
+**headlessly** when the lane cwd still exists. A reaped isolated lane may need a
+new lane or a restored cwd. Capture a returned reply with `--out <file>`:
 
 ```bash
 waspflow revise <lane> --out /tmp/reply.txt -- "Summarize what you changed."
@@ -191,10 +199,13 @@ Claude-registered background Bash task can notify its still-live parent session.
 In Codex unified exec, a background PTY exit is only pollable: it does not wake or
 start a new owner turn, so the active owner must explicitly await/poll the tool
 session. Do not promise automatic notification unless a verified harness adapter
-is active. Exit codes: `0` idle (done), `1` timeout, `4` **stalled** — the worker produced
-no output for `WASPFLOW_STALL_SECONDS` (default 45) while its turn hadn't ended.
-That usually means it's waiting on a mid-run interactive prompt (a quota/model-
-downgrade offer, a security check, a y/n) but can also be a hang or a very slow tool.
+is active. Exit codes: `0` idle (done), `1` timeout, `3` failed or interrupted
+resumed work, and `4` **blocked or stalled**. Code 4 can return immediately for
+a blocked prompt or an attached client with `--reap`; otherwise it can indicate
+no output for `WASPFLOW_STALL_SECONDS` (default 45) while a turn has not ended.
+That often means a mid-run interactive prompt (a quota/model-downgrade offer, a
+security check, a y/n), but can also be a hang or a very slow tool. With `--reap`,
+reap failures are also propagated.
 waspflow **surfaces** the stall fast (in seconds, not at timeout) but never auto-
 answers — it hands the decision to you. On rc 4: `waspflow peek <lane>` to see exactly
 what it's waiting on, then `waspflow revise <lane> -- "<answer>"` (e.g. `1`/`yes`/`no`)
@@ -202,10 +213,12 @@ to answer, then `wait` again — or raise `WASPFLOW_STALL_SECONDS` if the turn i
 slow. The trigger is the stall itself, not any specific prompt wording (robust to new
 or reworded prompts).
 
-For a live Codex lane, `revise` returns zero only after a new provider-log
-`task_started` event confirms the instruction left the composer. A nonzero result
-means the submission is unconfirmed (including a queued `user_message`); inspect or
-attach before deciding what to do next. Its receipt is recorded in `status` as
+For an ordinary live Codex task, `revise` returns zero only after a new provider-log
+`task_started` event confirms the instruction left the composer. An explicit answer
+to an already-blocked prompt returns zero after sending the choice and recording an
+`answered-prompt` receipt, without a `task_started` event. Other nonzero results mean
+the submission is unconfirmed (including a queued `user_message`); inspect or attach
+before deciding what to do next. Its receipt is recorded in `status` as
 `revise_submitted`, `revise_submission_state`, and `revise_submission_error`.
 
 For a native background worker whose calling harness needs a completion signal,

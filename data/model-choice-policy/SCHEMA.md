@@ -122,7 +122,7 @@ benchmark task cost from the rate valid on that row's `observed_at` to the
 horizon rate, including when `price_as_of` is after a promotion. It scales only when all
 published token rates change by the same factor; otherwise the future task
 cost is unknown and that arm cannot win on E. Pricing rows can record future
-rates in `post_valid_until`. `--availability` reads a `clawmeter status --json`
+rates in `post_valid_until`. `--availability` reads an optional quota-monitor
 snapshot and excludes arms whose relevant lane quota window is exhausted.
 Token counts are shown per task on quota lanes when rows provide structured
 counts and a task count.

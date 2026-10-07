@@ -50,8 +50,8 @@ catch the regression, re-fix — is the bar.
 |---|---|---|
 | reap / verify state machine (`verified`/`verify_failed`/timeout/prepare) | **~98%** | rich behavioral tests, deterministic |
 | fan-in ledger (`close`, `captured` content-check) | **~95%** | tested incl. the forward-port case ancestry would miss |
-| idle detection: claude (incl. subagents), codex, grok | **~92%** | all three tested on realistic fixtures; claude gated on 3,299 real files |
-| revise/wait barrier | **~90%** | deterministic test drives real cmd_wait; live-proven once, but live re-run limited by quota |
+| idle detection: claude (incl. subagents), codex, grok | **~92%** | all supported providers tested on representative fixtures |
+| revise/wait barrier | **~90%** | deterministic test drives real cmd_wait; live exercise was limited |
 | exec cheap-fanout (output validation, guard_cwd) | **~95%** | tested accept/reject incl. false-reject guard |
 | **live spawn→submit across all 3 providers, many real tasks** | **~75%** | THE GAP: only hand-run a few times; providers self-verify submission but no automated live matrix |
 | token efficiency (SKILL −32%, hot-path output) | **~97%** | measured; capabilities grep-verified intact |
@@ -60,8 +60,8 @@ catch the regression, re-fix — is the bar.
 
 1. **A live provider matrix** — automated spawn/wait/revise/reap against a cheap real
    task for claude AND codex AND grok, run repeatedly, asserting the file actually
-   changed. Today only claude was live-exercised, and quota-limited at that. This is
-   the biggest single lever; ~1 focused session, gated on quota headroom.
+   changed. Only a subset had been live-exercised under available capacity. This is
+   the biggest single lever; a focused session, gated on capacity headroom.
 2. **Soak / concurrency** — a real fleet of N isolated lanes reaped together, proving
    no cross-lane state corruption under load. Untested at scale.
 3. **Failure-injection** — provider crash mid-turn, proxy down, worktree deleted under
@@ -81,11 +81,9 @@ than the confidence number.
 
 ## UPDATE 2026-07-10: ~97%, and the one thing between us and 98
 
-All three providers now live-verified end-to-end on their real (cheap/subscription)
-auth paths: claude (full loop + N=4 concurrent + dead-on-arrival), codex (full loop +
-submission-confirm, works under 2-way concurrent load, subscription via
-`env -u OPENAI_API_KEY` + gpt-5.4-mini), grok (full loop). Deterministic suite: 70
-assertions, green + stable under load. The submission guarantee catches dead-on-arrival
+Supported providers were live-verified end-to-end through configured authentication
+paths, including concurrent and dead-on-arrival cases. The deterministic suite was
+green and stable under load. The submission guarantee catches dead-on-arrival
 on all three (exit 3, not a phantom "spawned").
 
 THE REMAINING RISK (why 97, not 98+): a 3-way mixed-provider fleet run simultaneously
@@ -107,9 +105,9 @@ waspflow correctly REJECTED as an unknown option (no silent mangle). With args p
 correctly:
 
 - Mixed-provider fleet (claude+codex+grok concurrent): GREEN, zero contamination.
-- **N=8 soak** (5 claude + 3 grok, concurrent, full loop): 8/8 GREEN, zero contamination.
-- **N=9 mixed soak** (3 each claude/codex/grok, scripts/live-soak.sh): 9/9 GREEN, zero
-  contamination. Cheap: haiku + gpt-5.4-mini on subscription; quotas barely moved.
+- Concurrent soak runs completed without cross-lane contamination.
+- The mixed-provider soak in `scripts/live-soak.sh` also completed without contamination.
+  Low-cost models kept the capacity impact limited.
 
 Two false alarms surfaced and were dispatched (both TEST artifacts, product behaved
 correctly): the unquoted --model arg, and an isolation-check regex that mis-flagged files

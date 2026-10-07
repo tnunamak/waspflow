@@ -14,12 +14,11 @@ must re-learn the repo from zero. The resume machinery already exists (`revise` 
 resumes the provider session headlessly). The question is what DX turns that primitive into a
 trustworthy "warm restart," because the naive version is subtly dangerous.
 
-## Scope: warm WORKER restart, not the advisor lane
+## Scope: warm WORKER restart, not an advisor workflow
 
-The related advisor-lane proposal describes an **advisor lane** — a long-lived reasoning agent you consult
-repeatedly, no worktree, no deliverable, detach-not-reap. That's real but *separate*: it's
-stateless-consult-made-stateful, and the machinery (spawn once, `revise` per question) already
-covers it with only docs missing.
+An advisor workflow is a long-lived reasoning agent consulted repeatedly, without a
+worktree or deliverable and with detach-not-reap lifecycle. It is separate from this
+proposal; the existing spawn-once and `revise` mechanics already cover its basics.
 
 This doc is the harder, more valuable case: a **worker** that finished, whose value is its
 built-up *codebase* context (repo structure, where things live, what it already changed), and which

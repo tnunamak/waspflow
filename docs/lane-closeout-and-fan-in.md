@@ -132,7 +132,7 @@ disposable.
 - **Not a replacement for project skepticism.** The consuming project's verify discipline
   (behavior-preservation gates, prove-the-diff, grep-after-rename) is what *catches lost work*
   during harvest. `captured` tells you *where* to look; it does not replace *checking*.
-- **Not the `~/.tmp` reaper's job.** Age-based tmp cleanup stays as-is (safe fallback);
+- **Not an optional temporary-directory cleanup job.** Age-based cleanup stays as-is (safe fallback);
   `close`+`reap` handle the intent-driven common case. They're complementary.
 
 ## Priority

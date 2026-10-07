@@ -21,7 +21,7 @@ Doctrine:
 1. Pick **task family** first (implement / review / recover / fanout / advisor / ui / docs).
 2. Pick **constraint** second (balanced / quota-tight / dollar-tight / …).
 3. Resolve to an explicit operating point; read the decision card (frontier, evidence, escalate path).
-4. Check **quota** (clawmeter) separately from **API dollars** (tokensmash) — never merge without an explicit exchange rate.
+4. Check **quota** with an optional monitor separately from **API dollars** — never merge without an explicit exchange rate.
 5. Prefer non-dominated points with adequate evidence; escalate after failed verification, not by default.
 6. Do **not** use providers with **missing** quality evidence for high-risk work unless the user opts into exploration (`grok.explore-only`).
 7. Log/record catalog + policy versions when available; raw `--provider/--model/--effort` remains canonical.
