@@ -1185,6 +1185,11 @@ def waspflow_derived_lifecycle($active_scopes; $scope_query_available):
   waspflow_scope_units as $units
   | if (.status // "") == "spawn_failed" then "spawn_failed"
     elif ($units | any(.[]; . as $unit | ($active_scopes | index($unit)) != null)) then "live"
+    # A completed reap is authoritative once no recorded scope is active.  A
+    # historical scope-unavailable fallback explains why liveness could not be
+    # observed while the lane was live; it must not relabel final cleanup as
+    # unknown after every owned resource was reconciled.
+    elif (.status // "") == "reaped" then "reaped"
     elif ($scope_query_available | not) then "unknown"
     elif waspflow_scope_unavailable then "unknown"
     elif (.status // "") == "live" then "interrupted"

@@ -2615,7 +2615,7 @@ JSONL
 )
 
 # Fan-in ledger — `close` sets outcome + requires provenance; `captured` reports
-# CAPTURED/UNIQUE/PARTIAL by CONTENT. Both are trust-critical for fleet cleanup
+# CAPTURED/UNKNOWN by exact content evidence. Both are trust-critical for fleet cleanup
 # yet had no behavioral coverage. Deterministic, no agent needed.
 (
   export WASPFLOW_HOME="$state_home"
@@ -2641,7 +2641,7 @@ JSONL
   if fanin_outcome_matches fi-close "harvested"; then echo "close: filter should NOT match harvested now" >&2; exit 1; fi
 
   # captured: build a real git repo, a lane branch that adds a file+symbol, and
-  # three refs — one WITH the work (CAPTURED), one WITHOUT (UNIQUE).
+  # three refs — one WITH the work (CAPTURED), one without exact evidence (UNKNOWN).
   crepo="$(mktemp -d "$scratch/waspflow-captured-XXXXXX")"
   git -C "$crepo" init -q
   git -C "$crepo" config user.email t@e.invalid; git -C "$crepo" config user.name T
@@ -2664,7 +2664,7 @@ JSONL
   verdict_cap="$(fanin_captured fi-cap integrated 2>/dev/null)"
   [[ "$verdict_cap" == "CAPTURED" ]] || { echo "captured: expected CAPTURED vs integrated, got '$verdict_cap'" >&2; exit 1; }
   verdict_uniq="$(fanin_captured fi-cap main 2>/dev/null)"
-  [[ "$verdict_uniq" == "UNIQUE" ]] || { echo "captured: expected UNIQUE vs fork point, got '$verdict_uniq'" >&2; exit 1; }
+  [[ "$verdict_uniq" == "UNKNOWN" ]] || { echo "captured: expected UNKNOWN without exact evidence vs fork point, got '$verdict_uniq'" >&2; exit 1; }
   rm -rf "$crepo"
 )
 
@@ -7096,6 +7096,7 @@ PROV
   export WASPFLOW_HOME="$rr/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"
   source "$root/lib/artifacts.sh"
+  source "$root/lib/worktree.sh"
   source "$root/lib/fanin.sh"
   for fn in _reap_remaining_resources _reap_cleanup_record _reap_cleanup_finish _reap_cleanup _reap_one _reap_one_locked; do
     eval "$(sed -n "/^$fn()/,/^}/p" "$root/bin/waspflow")"
@@ -7120,6 +7121,7 @@ PROV
     rm -rf "$2"
     if [[ -f "$rr/interrupt" ]]; then kill -TERM "$BASHPID"; fi
   }
+  worktree_discard_inventory() { printf '%s\n' '[]'; }
   make_reap_lane() {
     lane_set "$1" provider codex status live outcome "$2" cwd "$rr" \
       git_tracked false runtime_receipt_enforced true runtime_refresh_state unknown \
@@ -7498,4 +7500,5 @@ source "$root/scripts/fixtures/verify-s4-secondary.sh"
 
 # S2 generation-specific result and exec-output fixtures.
 source "$root/scripts/fixtures/verify-s2-results.sh"
+source "$root/scripts/fixtures/verify-s5-cleanup.sh" # S5 cleanup ownership and archive evidence
 echo "waspflow verify: ok"
