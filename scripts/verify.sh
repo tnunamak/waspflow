@@ -7501,4 +7501,7 @@ source "$root/scripts/fixtures/verify-s4-secondary.sh"
 # S2 generation-specific result and exec-output fixtures.
 source "$root/scripts/fixtures/verify-s2-results.sh"
 source "$root/scripts/fixtures/verify-s5-cleanup.sh" # S5 cleanup ownership and archive evidence
+# S7 fleet reconciliation and durable event ownership.
+source "$root/scripts/fixtures/verify-s7-fleet.sh"
+
 echo "waspflow verify: ok"
