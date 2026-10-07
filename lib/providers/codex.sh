@@ -1150,7 +1150,7 @@ _codex_revise_submission_state() {
   [[ -f "$rollout" && "$byte_offset" =~ ^[0-9]+$ ]] || return 1
   tail -c "+$(( byte_offset + 1 ))" "$rollout" 2>/dev/null | jq -nre --arg message "$message" '
     reduce inputs as $row
-      ({saw_message:false, saw_user_message:false, matched_ids:[], started:0, confirmed:false};
+      ({saw_message:false, saw_user_message:false, matched_ids:[], started_ids:[], started:0, confirmed:false};
        ($row.payload // {}) as $p |
        ($p.type // $row.type // "") as $type |
        if $type == "user_message" then
@@ -1158,7 +1158,10 @@ _codex_revise_submission_state() {
          if ($p.message // "") == $message then
            .saw_message=true |
            ($p.turn_id // $row.turn_id // "") as $id |
-           if $id != "" then .matched_ids += [$id] else . end
+           if $id != "" then
+             .matched_ids += [$id] |
+             if (.started_ids | index($id)) != null then .confirmed=true else . end
+           else . end
          else . end
        elif $type == "item_completed" and ($p.item.type // "") == "UserMessage" then
          .saw_user_message=true |
@@ -1166,12 +1169,18 @@ _codex_revise_submission_state() {
          if $text == $message then
            .saw_message=true |
            ($p.turn_id // $p.item.turn_id // $row.turn_id // "") as $id |
-           if $id != "" then .matched_ids += [$id] else . end
+           if $id != "" then
+             .matched_ids += [$id] |
+             if (.started_ids | index($id)) != null then .confirmed=true else . end
+           else . end
          else . end
        elif $type == "task_started" then
          .started += 1 |
          ($p.turn_id // $row.turn_id // "") as $id |
-         if $id != "" and (.matched_ids | index($id)) != null then .confirmed=true else . end
+         if $id != "" then
+           .started_ids += [$id] |
+           if (.matched_ids | index($id)) != null then .confirmed=true else . end
+         else . end
        else . end)
     | if .confirmed then "confirmed"
       elif .saw_message then "message-seen"
