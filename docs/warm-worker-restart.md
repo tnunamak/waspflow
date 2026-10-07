@@ -3,8 +3,7 @@
 Status: proposal (design only — no implementation yet)
 Created: 2026-07-06
 Related: `docs/spike.md` (verified resume mechanics), `docs/lane-closeout-and-fan-in.md`
-(the bundle-before-reap artifact this reuses), `inbox/2026-07-05-advisor-lane-stateless-consult-gap.md`
-(the sibling "advisor lane" pattern — a *different* reuse shape; see "Scope" below).
+(the bundle-before-reap artifact this reuses).
 
 ## The ask
 

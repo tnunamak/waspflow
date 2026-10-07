@@ -70,7 +70,11 @@ EOF
   [[ "$first" != "$second" ]]
   reconcile_event_claim "$first" consumer-a 1 | jq -e '.ok == true' >/dev/null
   reconcile_event_claim "$first" consumer-b 1 | jq -e '.ok == false and .reason == "claimed"' >/dev/null
-  sleep 1
+  # A one-second sleep races the integer-second lease boundary. Expire the
+  # fixture claim explicitly so the next assertion is deterministic.
+  claims_file="$(reconcile_event_claims)"
+  jq --arg id "$first" '.[$id].lease_until = 0' "$claims_file" >"$claims_file.tmp"
+  mv "$claims_file.tmp" "$claims_file"
   reconcile_event_claim "$first" consumer-b 2 | jq -e '.ok == true' >/dev/null
   ! reconcile_event_ack "$first" consumer-b
   reconcile_event_claim "$second" consumer-b 2 | jq -e '.ok == true' >/dev/null

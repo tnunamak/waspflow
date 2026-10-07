@@ -7572,6 +7572,7 @@ source "$root/scripts/fixtures/verify-r2-c.sh"
 source "$root/scripts/fixtures/verify-r2-a.sh"
 # r2-d provider hardening: fail closed on stale, malformed, and diagnostic evidence.
 source "$root/scripts/fixtures/verify-r2-d.sh"
+source "$root/scripts/fixtures/verify-r2-e.sh"
 
 echo "waspflow verify: ok"
 source "$root/scripts/fixtures/verify-r2-b.sh"

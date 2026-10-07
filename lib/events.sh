@@ -42,6 +42,11 @@ provider_event_tail() {
       source="$(_qwen_receipt_file "$lane")"
       source_kind="qwen-receipt-jsonl"
       ;;
+    deepseek)
+      load_provider deepseek
+      source="$(_deepseek_receipt_file "$lane")"
+      source_kind="deepseek-receipt-jsonl"
+      ;;
     *) jq -cn --arg provider "$provider" '{provider:$provider,source:{state:"unknown-provider"},events:[]}'; return 0 ;;
   esac
   if [[ -z "$source" || ! -f "$source" ]]; then
@@ -107,6 +112,12 @@ provider_event_tail() {
           else empty end' <<<"$parsed")"; then rm -f "$snapshot" "$events_file"; return 1; fi
         ;;
       qwen)
+        if ! event="$(jq -c '
+          if .phase == "invocation" then {event_time:(.started_epoch // ""),event_type:"turn_started",turn_started_mark:true}
+          elif .phase == "completion" then {event_time:(.completed_epoch // ""),event_type:"turn_completed",turn_completed_mark:true}
+          else empty end' <<<"$parsed")"; then rm -f "$snapshot" "$events_file"; return 1; fi
+        ;;
+      deepseek)
         if ! event="$(jq -c '
           if .phase == "invocation" then {event_time:(.started_epoch // ""),event_type:"turn_started",turn_started_mark:true}
           elif .phase == "completion" then {event_time:(.completed_epoch // ""),event_type:"turn_completed",turn_completed_mark:true}
