@@ -7486,5 +7486,7 @@ EOF
 
 # S8 clean-install contract.
 source "$root/scripts/fixtures/verify-s8-install.sh"
+# S6: tmux/process ownership and startup-watchdog boundaries.
+source "$root/scripts/fixtures/verify-s6-runtime.sh"
 
 echo "waspflow verify: ok"
