@@ -14,6 +14,7 @@ ops_policy_path() {
     p="${DATA_PACKS_HOME}/model-choice-policy/operating-points.json"
     if [[ -f "$p" ]]; then printf '%s\n' "$p"; return 0; fi
   fi
+  # Compatibility path for an optional local policy data directory.
   p="${HOME}/.local/share/minnows-data/model-choice-policy/operating-points.json"
   if [[ -f "$p" ]]; then printf '%s\n' "$p"; return 0; fi
   p="${WASPFLOW_ROOT}/data/model-choice-policy/operating-points.json"

@@ -507,7 +507,7 @@ claude_revise() {
 
   # Billing guard BEFORE the live-vs-headless branch: revising an already-live
   # pane bills API turns too, so the guard must cover that path — not just the
-  # headless resume below. (Fixes the "$1,800-trap" bypass on live-pane steering.)
+  # headless resume below. This prevents accidental API-charge exposure on live-pane steering.
   billing_preflight_provider claude || return 1
 
   if tmux_window_exists "$lane"; then

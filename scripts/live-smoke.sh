@@ -78,7 +78,7 @@ one_lane() {
 
 rundir="$(mktemp -d "$scratch/wf-live-run-XXXXXX")"
 echo "=== waspflow LIVE smoke: provider=$prov, model=$model, $N parallel lanes ==="
-echo "quota before:"; clawmeter status --agent --plain 2>/dev/null | grep -oE 'Claude 5h\([^)]*\)' | head -1
+echo "capacity monitor before:"; clawmeter status --agent --plain 2>/dev/null | grep -oE 'Claude 5h\([^)]*\)' | head -1
 
 pids=()
 for i in $(seq 1 "$N"); do
@@ -102,7 +102,7 @@ for i in $(seq 1 "$N"); do
 done
 
 echo ""
-echo "quota after:"; clawmeter status --agent --plain 2>/dev/null | grep -oE 'Claude 5h\([^)]*\)' | head -1
+echo "capacity monitor after:"; clawmeter status --agent --plain 2>/dev/null | grep -oE 'Claude 5h\([^)]*\)' | head -1
 echo "=== SMOKE TOTAL: pass=$pass fail=$fail ==="
 rm -rf "$rundir" 2>/dev/null
 [[ "$fail" -eq 0 ]] && echo "LIVE MATRIX: GREEN" || echo "LIVE MATRIX: $fail FAILURES"
