@@ -5699,6 +5699,8 @@ PROV
     tmux has-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || tmux new-session -d -s "$WASPFLOW_TMUX_SESSION" -n _escalation
     old_window="$(tmux new-window -d -P -F '#{window_id}' -t "$WASPFLOW_TMUX_SESSION" -n "old-$lane" 'exec sleep 120')"
     IFS='|' read -r old_session _ old_pid < <(tmux display-message -p -t "$old_window" '#{session_name}|#{window_id}|#{pane_pid}')
+    tmux set-option -w -t "$old_window" @waspflow_home "$(cd "$eschome" && pwd -P)"
+    tmux set-option -w -t "$old_window" @waspflow_lane_uuid "$lane_uuid"
     lane_set "$lane" lane_uuid "$lane_uuid" provider codex model old model_requested old model_passed old effort medium effort_requested medium effort_passed medium op_mode standard endpoint_profile default raw_provider_args false billing_path "$billing" auth_principal "" model_validation_state available model_validation_source live_query model_validation_scope default model_validation_at "" selection_quota_observation '{"schema_version":1,"state":"absent","observation":null,"reason":"test"}' selection_quota_filtered false status live session_id "$lane-old-session" rollout "" tmux_session "$old_session" tmux_window "$old_window" tmux_pane_pid "$old_pid" cwd "$escwork" origin_cwd "$escwork" verify_fork_point "$fork" spawn_epoch "$now" segment_started_epoch "$((now - 5))" segment_index 0 receipt_emitted false receipt_emitted_segment -1 arm_generation 3 arm_history '[]' escalation_path '[]' escalations_total 0 consecutive_failed_segments 0 segment_entered_via_escalation false ladder_cursor "" pending_transition "" escalation_error "" prompt "Repair the failing task without weakening its tests." verify_command false verify_timeout 5 verify_state failed verify_failure_class task verify_runs '[{"kind":"checkpoint","at":1,"state":"failed","failure_class":"task"}]' verify_checkpoint_epoch "$now" verify_checkpoint_fingerprint "$fingerprint" verify_epoch "$now" verify_exit_code 1 verify_test_files_changed false baseline_oracle_ran true baseline_oracle_state passed baseline_oracle_reason "" result "" runtime_settings_state unknown runtime_refresh_state pending
     printf 'verify head\n' >"$eschome/lanes/$lane/verify-stdout.txt"
     printf 'verify tail\n' >"$eschome/lanes/$lane/verify-stderr.txt"
@@ -6211,7 +6213,7 @@ JSON
   attached_window="$(lane_get dfs-attached tmux_window)"
   tmux select-window -t "$attached_window"
   # CI's TERM=dumb is not a usable tmux terminal, even inside script's pty.
-  TERM=xterm-256color script -qfc "tmux attach-session -t $WASPFLOW_TMUX_SESSION" /dev/null >/dev/null 2>&1 &
+  TERM=xterm-256color script -qfc "tmux -L $WASPFLOW_TMUX_SOCKET attach-session -t $WASPFLOW_TMUX_SESSION" /dev/null >/dev/null 2>&1 &
   attach_pid=$!
   for i in $(seq 1 50); do [[ "$(tmux display-message -p -t "$attached_window" '#{window_active_clients}')" -gt 0 ]] && break; sleep 0.1; done
   [[ "$(tmux display-message -p -t "$attached_window" '#{window_active_clients}')" -gt 0 ]] || { echo "deferred attached: could not attach a test client" >&2; exit 1; }
