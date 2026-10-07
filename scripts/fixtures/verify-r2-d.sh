@@ -28,4 +28,18 @@
     echo 'r2-d: completed Claude child stayed active' >&2; exit 1
   fi
 
+  # A partial JSON append is uncertain, never the previous terminal event.
+  printf '%s\n' '{"type":"assistant","message":{"stop_reason":"end_turn"}}' '{"type":"assistant"' >"$parent_dir/$sid.jsonl"
+  if claude_is_idle claude-r2d; then
+    echo 'r2-d: Claude accepted a malformed transcript tail' >&2; exit 1
+  fi
+
+  grok_events="$r2d/grok-events.jsonl"
+  printf '%s\n' '{"type":"turn_ended"}' '{"type":"turn_started"' >"$grok_events"
+  _grok_events_file() { printf '%s\n' "$grok_events"; }
+  lane_set grok-r2d provider grok session_id grok-r2d cwd "$r2d"
+  if grok_is_idle grok-r2d; then
+    echo 'r2-d: Grok accepted a malformed transcript tail' >&2; exit 1
+  fi
+
 )

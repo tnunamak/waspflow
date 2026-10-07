@@ -174,6 +174,9 @@ grok_is_idle() {
   [[ -n "$session_id" ]] || return 1
   events="$(_grok_events_file "$session_id" || true)"
   [[ -n "$events" && -f "$events" ]] || return 1
+  # A partial append is live/uncertain evidence, not permission to reuse an
+  # earlier turn_ended event while automated cleanup is deciding what to reap.
+  jq -e . "$events" >/dev/null 2>&1 || return 1
   # Ignore MCP/lifecycle noise that can land after turn_ended.
   last_turn="$(jq -rc 'select(.type=="turn_started" or .type=="turn_ended") | .type' \
                 "$events" 2>/dev/null | tail -1)"

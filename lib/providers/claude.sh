@@ -467,12 +467,14 @@ claude_turn_settled() {
   _claude_transcript_settled "$jsonl"
 }
 
-# A transcript is settled only when its final relevant event is
-# assistant/end_turn. This gives child transcripts the same resumed-turn
-# protection as their parent session.
+# A transcript is settled only when every record is valid and its final relevant
+# event is assistant/end_turn. This rejects a malformed append rather than
+# reusing an earlier completion, and gives child transcripts the same
+# resumed-turn protection as their parent session.
 _claude_transcript_settled() {
   local jsonl="$1"
   [[ -f "$jsonl" ]] || return 1
+  jq -e . "$jsonl" >/dev/null 2>&1 || return 1
   [[ "$(jq -rc '
     if .type=="assistant" then
       if .message.stop_reason=="end_turn" then "end" else "active" end
