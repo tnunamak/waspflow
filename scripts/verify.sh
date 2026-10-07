@@ -7496,4 +7496,6 @@ source "$root/scripts/fixtures/verify-s3-codex.sh"
 # S4: secondary provider adapters and neutral handoff.
 source "$root/scripts/fixtures/verify-s4-secondary.sh"
 
+# S2 generation-specific result and exec-output fixtures.
+source "$root/scripts/fixtures/verify-s2-results.sh"
 echo "waspflow verify: ok"

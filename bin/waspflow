@@ -1119,7 +1119,7 @@ cmd_status() {
   case "$lifecycle" in
     idle|exited|parked)
       case "$(jq -r '.report_current_state' <<<"$report_observation")" in
-        absent|insubstantial|unchanged) warn "status: lane '$lane' has no current substantial report; no recovery was invoked" ;;
+        absent|empty|unchanged) warn "status: lane '$lane' has no current report that satisfies its contract; no recovery was invoked" ;;
       esac ;;
   esac
   jq --argjson report_observation "$report_observation" --arg lifecycle "$lifecycle" --argjson deferred "$deferred" --argjson headless_alive "$headless_alive" '
@@ -1128,7 +1128,7 @@ cmd_status() {
     | .record_status = $record_status
     | . += $report_observation
     | if (.headless_revise_state // "") == "running" then
-        (if $headless_alive then .headless_revise_active = true else .headless_revise_state = "interrupted" end)
+        (if $headless_alive then .headless_revise_active = true | .turn_state = "running" | .result = "" else .headless_revise_state = "interrupted" end)
       else . end
     | if $deferred == null then . else .deferred_switch_status = $deferred end
   ' <<<"$record"
@@ -1691,6 +1691,7 @@ _revise_one() {
       headless_revise_rc "$revise_rc" headless_revise_ended_epoch "$(date +%s)"
   fi
   [[ "$revise_rc" -eq 0 ]] || return "$revise_rc"
+  artifacts_begin_turn_generation "$lane"
   # A delivered instruction supersedes one a failed deferred switch left behind;
   # if it was a different instruction, show what is being discarded.
   local undelivered; undelivered="$(lane_get "$lane" undelivered_message)"
