@@ -597,7 +597,7 @@ Flags:
   --handoff                   Start the target as a fresh handoff instead of reusing the session.
   --reset-tree                Reset the worktree during a handoff.
   --force                     Escalate without an eligible failed checkpoint.
-  --ack-deprecated            Permit a deprecated target fallback.
+  --ack-deprecated            Permit a deprecated target fallback; with --force, acknowledge an unknown Claude model.
   --note <text>               Record an escalation note in the transition.
   --defer                     Record the switch as pending; the next revise applies it at a cold-cache boundary.
   --cancel-deferred           Drop the pending deferred switch; the lane keeps its current arm.

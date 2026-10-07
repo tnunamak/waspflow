@@ -69,9 +69,17 @@ escalate_kill_provisional() {
   done < <(jq -c '.[]' <<<"$scopes")
 }
 
+escalate_claude_model_known() {
+  case "$1" in
+    opus|sonnet|haiku) return 0 ;;
+    claude-*) [[ "$1" =~ ^claude-(opus|sonnet|haiku)-[0-9]+(-[0-9]+)*$ ]] ;;
+    *) return 1 ;;
+  esac
+}
+
 escalate_select_target() {
   # globals: ESC_ARM ESC_OP ESC_CURSOR ESC_REASON ESC_CODE
-  local lane="$1" requested="$2" ack="$3"
+  local lane="$1" requested="$2" ack="$3" force="${4:-false}"
   ESC_ARM=""; ESC_OP=""; ESC_CURSOR=""; ESC_REASON=""; ESC_CODE=0
   ops_load
   if [[ -n "$requested" ]]; then
@@ -96,6 +104,15 @@ escalate_select_target() {
     if declare -F "${provider}_validate_model_effort" >/dev/null \
        && ! "${provider}_validate_model_effort" "$model" "$effort"; then
       ESC_REASON="target $(escalate_arm_label "$ESC_ARM") has incompatible model/effort"; ESC_CODE=1; return 1
+    fi
+    # Claude exposes no enumerable catalog, so normal availability observation
+    # cannot reject a mistyped model. Keep its documented aliases and versioned
+    # family IDs available, but require both explicit override signals before
+    # attempting an unrecognised name.
+    if [[ "$provider" == claude ]] && ! escalate_claude_model_known "$model" \
+       && [[ "$force" != true || "$ack" != true ]]; then
+      ESC_REASON="target $(escalate_arm_label "$ESC_ARM") is not a known Claude model; retry only if intended with --force --ack-deprecated"
+      ESC_CODE=1; return 1
     fi
     observation="$(selection_observe_availability "$provider" "$model" default)"
     if [[ "$(jq -r .state <<<"$observation")" == unavailable ]]; then
@@ -460,7 +477,7 @@ escalate_locked() {
   if [[ -n "$transition" ]]; then
     to="$(jq -c .to_arm <<<"$transition")"; mode="$(jq -r .mode <<<"$transition")"
     if [[ -n "$requested" || "$handoff" == true || "$reset_tree" == true ]]; then
-      if ! escalate_select_target "$lane" "$requested" "$ack"; then escalate_emit "$json" "$ESC_CODE" "$ESC_REASON" "$from" "$to" "$index" "waspflow escalate $lane --resume-transition" "waspflow escalate $lane --abort-transition"; return; fi
+      if ! escalate_select_target "$lane" "$requested" "$ack" "$force"; then escalate_emit "$json" "$ESC_CODE" "$ESC_REASON" "$from" "$to" "$index" "waspflow escalate $lane --resume-transition" "waspflow escalate $lane --abort-transition"; return; fi
       local requested_mode=in_place; [[ "$handoff" == true || "$(jq -r .provider <<<"$ESC_ARM")" != "$(lane_get "$lane" provider)" ]] && requested_mode=handoff
       if [[ "$(jq -cS . <<<"$ESC_ARM")" != "$(jq -cS . <<<"$to")" || "$requested_mode" != "$mode" ]]; then escalate_emit "$json" 1 "a different escalation transition is pending; target is immutably bound" "$from" "$to" "$index" "waspflow escalate $lane --resume-transition" "waspflow escalate $lane --abort-transition"; return; fi
     elif [[ "$resume" != true ]]; then
@@ -472,7 +489,7 @@ escalate_locked() {
   fi
   status="$(lane_get "$lane" status)"
   if [[ "$status" != live && "$status" != exited && "$status" != parked && "$status" != escalate_failed ]]; then escalate_emit "$json" 1 "lane lifecycle status '$status' cannot escalate" "$from" null "$index"; return; fi
-  if ! escalate_select_target "$lane" "$requested" "$ack"; then escalate_emit "$json" "$ESC_CODE" "$ESC_REASON" "$from" null "$index" "waspflow ops list"; return; fi
+  if ! escalate_select_target "$lane" "$requested" "$ack" "$force"; then escalate_emit "$json" "$ESC_CODE" "$ESC_REASON" "$from" null "$index" "waspflow ops list"; return; fi
   to="$ESC_ARM"; mode=in_place; [[ "$handoff" == true || "$(jq -r .provider <<<"$to")" != "$(lane_get "$lane" provider)" ]] && mode=handoff
   if [[ "$reset_tree" == true && "$mode" != handoff ]]; then escalate_emit "$json" 1 "--reset-tree requires --handoff" "$from" "$to" "$index"; return; fi
   if [[ "$reset_tree" == true && -z "$(lane_get "$lane" worktree)" ]]; then escalate_emit "$json" 1 "--reset-tree is allowed only for isolated lanes" "$from" "$to" "$index"; return; fi
