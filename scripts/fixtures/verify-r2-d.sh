@@ -53,4 +53,13 @@
   grok_confirm_escalation_submission grok-escalation 'current escalation' \
     || { echo 'r2-d: Grok rejected current escalation receipt' >&2; exit 1; }
 
+  # A single allowed Antigravity raw flag must not inherit the post-increment's
+  # nonzero status as the function return code.
+  _antigravity_extra_args --sandbox \
+    || { echo 'r2-d: Antigravity rejected --sandbox' >&2; exit 1; }
+  [[ "${ANTIGRAVITY_EXTRA_ARGS[*]}" == --sandbox ]] \
+    || { echo 'r2-d: Antigravity lost --sandbox' >&2; exit 1; }
+  _antigravity_extra_args --project="$r2d/project" \
+    || { echo 'r2-d: Antigravity rejected --project=value' >&2; exit 1; }
+
 )

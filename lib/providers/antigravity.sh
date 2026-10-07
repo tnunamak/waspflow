@@ -80,8 +80,9 @@ _antigravity_extra_args() {
       --disable-slash-commands|--new-project|--remote-control|--sandbox) ANTIGRAVITY_EXTRA_ARGS+=("$arg") ;;
       *) err "antigravity: unsupported raw argument '$arg'"; return 1 ;;
     esac
-    ((i++))
+    ((++i))
   done
+  return 0
 }
 
 _antigravity_output_has_deliverable() {
