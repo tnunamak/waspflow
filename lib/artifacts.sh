@@ -777,9 +777,20 @@ artifacts_emit_receipt_v1() {
     [[ "$emitted_segment" =~ ^[0-9]+$ && "$emitted_segment" -ge "$segment_index" ]] && return 0
     wall_start="$(lane_get "$lane" segment_started_epoch)"
   else
-    [[ "$(lane_get "$lane" receipt_emitted)" == true ]] && return 0
     generation="$(lane_get "$lane" turn_generation)"
     [[ "$generation" =~ ^[0-9]+$ ]] || generation=0
+    local emitted_generation
+    emitted_generation="$(lane_get "$lane" receipt_emitted_generation)"
+    # Legacy markers predate generation attribution. They are valid only for
+    # generation zero; an old or missing marker must not suppress a new turn.
+    if [[ "$(lane_get "$lane" receipt_emitted)" == true ]]; then
+      if [[ "$emitted_generation" =~ ^[0-9]+$ && "$emitted_generation" -eq "$generation" ]]; then
+        return 0
+      fi
+      if [[ -z "$emitted_generation" && "$generation" -eq 0 ]]; then
+        return 0
+      fi
+    fi
     segment_index="$(lane_get "$lane" segment_index)"
     history="$(lane_get "$lane" arm_history)"
     if [[ "$segment_index" =~ ^[0-9]+$ && "$segment_index" -gt 0 ]]; then

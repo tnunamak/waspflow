@@ -51,6 +51,17 @@
   [[ "$(jq -r .receipt_id "$(lane_dir ledger)/receipt.json")" == "$second_id" ]]
   [[ "$(jq -s --arg uuid r3-f2-ledger 'map(select(.receipt_kind == "lane" and .lane_uuid == $uuid)) | length' "$WASPFLOW_HOME/receipts.jsonl")" == 2 ]]
 
+  # B9-migration: a stale prior-generation marker, and a legacy marker with
+  # no generation, cannot suppress this generation's durable receipt.
+  lane_set stale-marker provider codex cwd "$r3f2" git_tracked false lane_uuid r3-f2-stale spawn_epoch 1 result succeeded turn_generation 1 receipt_emitted true receipt_emitted_generation 0
+  artifacts_emit_receipt_v1 stale-marker succeeded
+  [[ "$(jq -r .generation "$(lane_dir stale-marker)/receipt.json")" == 1 ]]
+  [[ "$(lane_get stale-marker receipt_emitted_generation)" == 1 ]]
+  lane_set legacy-marker provider codex cwd "$r3f2" git_tracked false lane_uuid r3-f2-legacy spawn_epoch 1 result failed turn_generation 1 receipt_emitted true receipt_emitted_generation ''
+  artifacts_emit_receipt_v1 legacy-marker failed
+  [[ "$(jq -r .generation "$(lane_dir legacy-marker)/receipt.json")" == 1 ]]
+  [[ "$(lane_get legacy-marker receipt_emitted_generation)" == 1 ]]
+
   # Finding #18 and LOW-5: all nonblank exit-zero answers publish, and
   # stdout-mode output is newline-terminated even when Codex omits it.
   split_after_ddash() {
