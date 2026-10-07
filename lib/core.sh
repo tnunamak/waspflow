@@ -832,19 +832,29 @@ tmux_record_lane_cgroup_fallback() {
 # `setsid` detaches login-shell hydration from tmux when user scopes are
 # unavailable. Persist a process-group receipt so cleanup can still stop it.
 # PID start ticks make PID reuse fail closed.
-tmux_record_lane_detached_session() {
-  local lane="$1" execution="$2" pid="$3" pgid="$4" sid="$5" ticks="$6" dir tmp
+_lane_detached_session_receipt_append_locked() {
+  local dir="$1" execution="$2" pid="$3" pgid="$4" sid="$5" ticks="$6" sf="$dir/state.json" tmp
   [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ticks" =~ ^[0-9]+$ ]] || return 1
-  dir="$(lane_dir "$lane")"; mkdir -p "$dir"
   tmp="$(mktemp "$dir/.state.XXXXXX")" || return 1
   if jq --arg execution "$execution" --arg pid "$pid" --arg pgid "$pgid" --arg sid "$sid" --arg ticks "$ticks" '
       .detached_session_receipts = ((.detached_session_receipts // []) | if type == "array" then . else [] end
         | if any(.[]; .pid == $pid and .start_ticks == $ticks) then .
           else . + [{execution:$execution,pid:$pid,pgid:$pgid,sid:$sid,start_ticks:$ticks}] end)
-    ' "$(lane_state_file "$lane")" >"$tmp" 2>/dev/null; then
-    mv "$tmp" "$(lane_state_file "$lane")"
+      | .updated_at = (now | floor | tostring)
+    ' "$sf" >"$tmp" 2>/dev/null; then
+    mv "$tmp" "$sf"
   else
     rm -f "$tmp"; return 1
+  fi
+}
+
+tmux_record_lane_detached_session() {
+  local lane="$1" execution="$2" pid="$3" pgid="$4" sid="$5" ticks="$6" dir
+  dir="$(lane_dir "$lane")"; mkdir -p "$dir" || return 1
+  if command -v flock >/dev/null 2>&1; then
+    ( flock 9; _lane_detached_session_receipt_append_locked "$dir" "$execution" "$pid" "$pgid" "$sid" "$ticks" ) 9>"$dir/.state.lock"
+  else
+    _lane_detached_session_receipt_append_locked "$dir" "$execution" "$pid" "$pgid" "$sid" "$ticks"
   fi
 }
 
@@ -864,23 +874,74 @@ tmux_detached_session_receipt_live() {
   [[ "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]]
 }
 
+# A detached receipt proves its leader identity at launch.  Once that leader
+# exits, a surviving group member is still potentially owned, but no longer has
+# the same strong proof.  Keep that distinction explicit: callers must retain
+# an uncertain group rather than treating a dead leader as an empty group.
+# Prints one of: live, uncertain, gone, invalid.
+tmux_detached_session_receipt_group_state() {
+  local receipt="$1" pid pgid sid ticks actual got_pgid got_sid
+  pid="$(jq -r '.pid // empty' <<<"$receipt")"; pgid="$(jq -r '.pgid // empty' <<<"$receipt")"
+  sid="$(jq -r '.sid // empty' <<<"$receipt")"; ticks="$(jq -r '.start_ticks // empty' <<<"$receipt")"
+  if [[ ! "$pid" =~ ^[0-9]+$ || ! "$pgid" =~ ^[0-9]+$ || ! "$sid" =~ ^[0-9]+$ || ! "$ticks" =~ ^[0-9]+$ ]]; then
+    printf 'invalid\n'; return 2
+  fi
+  if ! ps -eo pgid=,sid= 2>/dev/null | awk -v pgid="$pgid" -v sid="$sid" '$1 == pgid && $2 == sid { found=1 } END { exit !found }'; then
+    printf 'gone\n'; return 1
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    actual="$(process_start_ticks "$pid" || true)"
+    read -r got_pgid got_sid < <(ps -o pgid= -o sid= -p "$pid" 2>/dev/null)
+    if [[ "$actual" == "$ticks" && "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]]; then
+      printf 'live\n'; return 0
+    fi
+  fi
+  printf 'uncertain\n'; return 2
+}
+
 tmux_kill_detached_session_receipt_if_owned() {
-  local receipt="$1" pgid
-  tmux_detached_session_receipt_live "$receipt" || return 0
+  local receipt="$1" pgid state _
   pgid="$(jq -r .pgid <<<"$receipt")"
-  kill -- "-$pgid" 2>/dev/null || true
+  state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
+  case "$state" in
+    gone) return 0 ;;
+    live|uncertain) ;;
+    *) return 1 ;;
+  esac
+  kill -TERM -- "-$pgid" 2>/dev/null || true
   for _ in 1 2 3 4 5; do
     sleep 0.1
-    tmux_detached_session_receipt_live "$receipt" || return 0
+    state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
+    [[ "$state" == gone ]] && return 0
   done
   kill -KILL -- "-$pgid" 2>/dev/null || true
+  for _ in 1 2 3 4 5; do
+    sleep 0.1
+    state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
+    [[ "$state" == gone ]] && return 0
+  done
+  return 1
 }
 
 tmux_kill_owned_lane_detached_sessions() {
-  local lane="$1" receipt
+  local lane="$1" receipt rc=0
   while IFS= read -r receipt; do
-    [[ -n "$receipt" ]] && tmux_kill_detached_session_receipt_if_owned "$receipt"
+    [[ -z "$receipt" ]] || tmux_kill_detached_session_receipt_if_owned "$receipt" || rc=1
   done < <(tmux_lane_detached_session_receipts "$lane")
+  return "$rc"
+}
+
+# Escalation launches the new arm before retiring the old one.  Preserve the
+# freshly-provisioned execution while retiring every older detached group.
+tmux_kill_owned_lane_detached_sessions_except_execution() {
+  local lane="$1" keep_execution="$2" receipt execution rc=0
+  while IFS= read -r receipt; do
+    [[ -n "$receipt" ]] || continue
+    execution="$(jq -r '.execution // empty' <<<"$receipt")"
+    [[ "$execution" == "$keep_execution" ]] && continue
+    tmux_kill_detached_session_receipt_if_owned "$receipt" || rc=1
+  done < <(tmux_lane_detached_session_receipts "$lane")
+  return "$rc"
 }
 
 tmux_lane_scope_start_marker() {

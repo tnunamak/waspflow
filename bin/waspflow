@@ -1134,9 +1134,10 @@ cmd_status() {
   local deferred=null
   [[ -z "$(jq -r '.deferred_switch // ""' <<<"$record")" ]] || deferred="$(deferred_status_json "$lane")"
   # A headless revise records its pid; "running" with a dead pid was interrupted.
-  local headless_alive=false headless_pid
-  headless_pid="$(jq -r 'select(.headless_revise_state == "running") | .headless_revise_pid // empty' <<<"$record")"
-  [[ ! "$headless_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$headless_pid" 2>/dev/null || headless_alive=true
+  local headless_alive=false
+  if [[ "$(jq -r '.headless_revise_state // empty' <<<"$record")" == running ]] && lane_headless_writer_active "$lane"; then
+    headless_alive=true
+  fi
   local report_observation; report_observation="$(artifacts_report_observation "$lane")"
   case "$lifecycle" in
     idle|exited|parked)
@@ -1318,8 +1319,7 @@ cmd_wait() {
       headless_state="$(lane_get "$lane" headless_revise_state)"
       case "$headless_state" in
         running)
-          headless_pid="$(lane_get "$lane" headless_revise_pid)"
-          if [[ "$headless_pid" =~ ^[0-9]+$ ]] && kill -0 "$headless_pid" 2>/dev/null; then
+          if lane_headless_writer_active "$lane"; then
             headless_running=1
           else
             lane_set "$lane" wait_state interrupted
@@ -1503,6 +1503,11 @@ _park_one_locked() {
   fi
   tmux_kill_owned_lane_window "$lane" \
     || { err "park: lane '$lane' ownership changed before its window could be stopped"; return 1; }
+  if ! tmux_kill_owned_lane_detached_sessions "$lane"; then
+    lane_set "$lane" park_retirement_state uncertain
+    err "park: lane '$lane' has a detached execution group that could not be retired; preserving its checkout"
+    return 1
+  fi
   lane_set "$lane" status "parked" parked_at "$(date +%s)" park_reason "$reason"
   if [[ "$PARK_CLEARS_BARRIER" -eq 1 ]]; then
     # Keep the failed-submission receipt (revise_submission_*) as evidence; only
@@ -1709,6 +1714,7 @@ _revise_one() {
     # status shows it (pid liveness distinguishes a running turn from a dead one).
     headless=1
     lane_set "$lane" surface_changed "true" headless_revise_state running headless_revise_pid "$$" \
+      headless_revise_pid_start_ticks "$(process_start_ticks "$$")" \
       headless_revise_started_epoch "$(date +%s)" headless_revise_ended_epoch "" headless_revise_error "" headless_revise_rc ""
   fi
   # Capture report freshness and retire any prior result before the provider can
@@ -1869,9 +1875,16 @@ _reap_remaining_resources() {
     state="$(timeout 5 systemctl --user show "$unit" -p ActiveState --value 2>/dev/null)" || state=unknown
     case "$state" in inactive|failed) ;; *) remaining+=("scope:$unit:$state") ;; esac
   done < <(tmux_lane_scope_receipts "$lane")
+  local detached_state detached_group
   while IFS= read -r receipt; do
-    tmux_detached_session_receipt_live "$receipt" || continue
-    remaining+=("process-group:$(jq -r .pgid <<<"$receipt")")
+    [[ -n "$receipt" ]] || continue
+    detached_group="$(jq -r '.pgid // empty' <<<"$receipt")"
+    detached_state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
+    case "$detached_state" in
+      live) remaining+=("process-group:$detached_group") ;;
+      uncertain) remaining+=("process-group:${detached_group:-unknown}:uncertain") ;;
+      invalid) remaining+=("process-group:unknown:uncertain") ;;
+    esac
   done < <(tmux_lane_detached_session_receipts "$lane")
   wt="$(lane_get "$lane" worktree)"
   if [[ -n "$wt" && -e "$wt" ]]; then remaining+=("worktree:$wt"); fi
@@ -1922,7 +1935,7 @@ _reap_cleanup_finish() {
 
 _reap_cleanup() {
   local lane="$1" force="$2" keep_wt="$3" no_archive="$4" result="$5"
-  local errors='[]' wt repo_root unit invocation actual report preserved archive_ok=1 loss_inventory
+  local errors='[]' wt repo_root unit invocation actual report preserved report_preservation archive_ok=1 loss_inventory
   _reap_cleanup_record "$lane" running '[]' "$(_reap_remaining_resources "$lane")" || return 1
   # Called in a subshell: handled interruption leaves a terminal receipt.
   # SIGKILL still leaves the durable running journal for an idempotent retry.
@@ -1952,12 +1965,13 @@ _reap_cleanup() {
   # Preserve an in-worktree report before deletion, including its durable path.
   if [[ -n "$wt" && "$keep_wt" != 1 && "$report" == "$wt/"* && -f "$report" ]]; then
     preserved="$(lane_dir "$lane")/reaped-report"
-    if ! cp -- "$report" "$preserved" \
+    if ! report_preservation="$(worktree_preserve_report_for_cleanup "$wt" "$report" "$preserved")" \
         || ! lane_set "$lane" report_original "$report" report "$preserved"; then
       errors="$(jq -c '. + ["report-preservation"]' <<<"$errors")"
       archive_ok=0
     else
       resource_ledger_register "$lane" report "$preserved" retained || errors="$(jq -c '. + ["report-ledger"]' <<<"$errors")"
+      [[ "$report_preservation" == moved ]] || log "reap: report '$report' is tracked and remains in the worktree for the dirty-tree guard"
     fi
   fi
   # Never remove a workspace while an owned process might still use it, or
@@ -2100,7 +2114,13 @@ _reap_one_locked() {
     recovered)       warn "reap: lane '$lane' reaped — result=recovered (report rebuilt by recovery pass)" ;;
     verify_failed)   err  "reap: lane '$lane' reaped — result=verify_failed" ;;
     report_missing)  err  "reap: lane '$lane' reaped — result=report_missing (recovery disabled)" ;;
-    failed)          err  "reap: lane '$lane' reaped — result=failed (required report never produced)" ;;
+    failed)
+      if [[ -n "$(lane_get "$lane" report)" ]]; then
+        err "reap: lane '$lane' reaped — result=failed (required report never produced)"
+      else
+        err "reap: lane '$lane' reaped — result=failed"
+      fi
+      ;;
     abandoned)       warn "reap: lane '$lane' reaped — result=abandoned (closed out via 'close --status $(lane_outcome "$lane")'; deliverable not judged, no recovery run)" ;;
     runtime_drift)   err  "reap: lane '$lane' reaped — result=runtime_drift" ;;
     runtime_unverified) err "reap: lane '$lane' reaped — result=runtime_unverified" ;;
@@ -2189,7 +2209,10 @@ cmd_doctor() {
     if [[ -n "$installed" && "$distance" =~ ^[1-9][0-9]*$ ]]; then installed="$installed+$distance commits"; fi
     latest="${WASPFLOW_DOCTOR_LATEST_TAG:-}"
     if [[ -z "$latest" ]] && command -v timeout >/dev/null 2>&1; then
-      latest="$(timeout 5 git -C "$WASPFLOW_ROOT" ls-remote --tags --refs origin 'v[0-9]*' 2>/dev/null | awk -F/ '{print $NF}' | sort -V | tail -1)"
+      # Release discovery is advisory.  In offline clones, a missing origin or
+      # timeout must produce the documented warning, never abort doctor under
+      # strict pipefail handling.
+      latest="$(timeout 5 git -C "$WASPFLOW_ROOT" ls-remote --tags --refs origin 'v[0-9]*' 2>/dev/null | awk -F/ '{print $NF}' | sort -V | tail -1 || true)"
     fi
     if [[ -z "$latest" ]]; then echo "WARN release version: latest tag unavailable"
     elif [[ "$installed" == "$latest" ]]; then echo "PASS release version: $installed (latest $latest)"
