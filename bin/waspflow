@@ -445,6 +445,7 @@ cmd_spawn() {
     outcome_reason "" \
     outcome_epoch "" \
     receipt_emitted "false" \
+    receipt_emitted_generation "" \
     receipt_emitted_segment "-1" \
     receipt_id "" \
     cwd "$work_cwd" \

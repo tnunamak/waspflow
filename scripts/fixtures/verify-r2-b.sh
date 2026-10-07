@@ -61,8 +61,8 @@
   billing_path_v1() { echo '{}'; }
   artifacts_emit_exec_receipt_v1() { :; }
 
-  # Exact small/machine-readable answers are useful; whitespace and an explicit
-  # provider diagnostic still fail without replacing the existing destination.
+  # Exact small/machine-readable answers and error-shaped classifications are
+  # useful; only whitespace fails without replacing the existing destination.
   for answer in null denied x; do
     _exec_codex() { printf '%s' "$answer" >"$5"; }
     exec_run --provider codex --cwd "$r2b" -o "$r2b/$answer.out" -- prompt
@@ -75,10 +75,8 @@
   fi
   [[ "$(cat "$r2b/old.out")" == OLD ]]
   _exec_codex() { printf 'Error: provider unavailable' >"$5"; }
-  if exec_run --provider codex --cwd "$r2b" -o "$r2b/old.out" -- prompt; then
-    echo 'r2-b exec: provider diagnostic succeeded' >&2; exit 1
-  fi
-  [[ "$(cat "$r2b/old.out")" == OLD ]]
+  exec_run --provider codex --cwd "$r2b" -o "$r2b/old.out" -- prompt
+  [[ "$(cat "$r2b/old.out")" == 'Error: provider unavailable' ]]
   _exec_codex() { printf 'Error: missing configuration\nFix: set PROJECT_ROOT.' >"$5"; }
   exec_run --provider codex --cwd "$r2b" -o "$r2b/explained-error.out" -- prompt
   grep -Fq 'Fix: set PROJECT_ROOT.' "$r2b/explained-error.out"

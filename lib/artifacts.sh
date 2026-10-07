@@ -656,30 +656,35 @@ _receipts_heal_tail() {
 }
 
 # Append a final lane/exec receipt, idempotent across the append→marker crash
-# window (F1). Dedup key is (lane_uuid, receipt_kind=="lane"), NOT receipt_id:
+# window (F1). Dedup key is (lane_uuid, receipt_kind=="lane", generation), NOT receipt_id:
 # the caller (artifacts_emit_receipt_v1) mints a FRESH receipt_id on every
 # re-emit, so a receipt_id key would never match a crash-orphaned row. This
 # mirrors the segment path's (lane_uuid, index) model. exec receipts have no
 # lane_uuid — they carry a unique exec_id and are never re-emitted (one-shot),
 # so they append unconditionally.
 _receipts_append() {
-  local receipt="$1" fd kind lane_uuid
+  local receipt="$1" fd kind lane_uuid generation existing
   [[ -n "$receipt" ]] && jq -e 'type == "object"' >/dev/null <<<"$receipt" 2>/dev/null \
     || { err "receipt: generated JSON is empty or invalid"; return 1; }
   kind="$(jq -r '.receipt_kind // "lane"' <<<"$receipt")"
   lane_uuid="$(jq -r '.lane_uuid // empty' <<<"$receipt")"
+  generation="$(jq -r '.generation // 0' <<<"$receipt")"
   mkdir -p "$WASPFLOW_HOME" "$WASPFLOW_LOCKS_DIR"
   command -v flock >/dev/null 2>&1 || { err "receipt: flock is required"; return 1; }
   exec {fd}>"$WASPFLOW_LOCKS_DIR/receipts.lock" || { err "receipt: cannot open lock"; return 1; }
   flock -x "$fd" || { exec {fd}>&-; err "receipt: cannot lock"; return 1; }
-  # A lane row for this lane_uuid already landed (a prior partial finalize whose
+  # A lane row for this lane_uuid and generation already landed (a prior partial finalize whose
   # marker never committed) → do NOT append a second. fromjson? tolerates a
   # malformed/torn line so a corrupt ledger cannot hide the existing row (F2).
-  if [[ "$kind" == lane && -n "$lane_uuid" && -f "$WASPFLOW_HOME/receipts.jsonl" ]] \
-     && jq -e --arg u "$lane_uuid" -R \
-        'fromjson? // empty | select(.receipt_kind == "lane" and .lane_uuid == $u)' \
-        "$WASPFLOW_HOME/receipts.jsonl" >/dev/null 2>&1; then
-    flock -u "$fd" || true; exec {fd}>&-; return 0
+  if [[ "$kind" == lane && -n "$lane_uuid" && "$generation" =~ ^[0-9]+$ && -f "$WASPFLOW_HOME/receipts.jsonl" ]]; then
+    existing="$(jq -c --arg u "$lane_uuid" --argjson g "$generation" -R \
+      'fromjson? // empty | select(.receipt_kind == "lane" and .lane_uuid == $u and (.generation // 0) == $g)' \
+      "$WASPFLOW_HOME/receipts.jsonl" 2>/dev/null | tail -1)"
+    if [[ -n "$existing" ]]; then
+      flock -u "$fd" || true; exec {fd}>&-
+      printf '%s\n' "$existing"
+      return 10
+    fi
   fi
   _receipts_heal_tail
   if ! printf '%s\n' "$receipt" >>"$WASPFLOW_HOME/receipts.jsonl"; then
@@ -747,7 +752,7 @@ artifacts_emit_receipt_v1() {
   # derive their reap-closing segment from durable lane state so that legacy
   # lanes retain segment:null while escalated lanes keep their last-arm
   # attribution.
-  local lane="$1" result="$2" segment_json="${3:-}" dir provider billing quota version harness receipt reasons
+  local lane="$1" result="$2" segment_json="${3:-}" dir provider billing quota version harness receipt reasons generation
   local receipt_kind="lane" segment_index="" emitted_segment="" wall_start="" history=""
   local escalated_lane=false
   if [[ -n "$segment_json" ]]; then
@@ -760,6 +765,8 @@ artifacts_emit_receipt_v1() {
     wall_start="$(lane_get "$lane" segment_started_epoch)"
   else
     [[ "$(lane_get "$lane" receipt_emitted)" == true ]] && return 0
+    generation="$(lane_get "$lane" turn_generation)"
+    [[ "$generation" =~ ^[0-9]+$ ]] || generation=0
     segment_index="$(lane_get "$lane" segment_index)"
     history="$(lane_get "$lane" arm_history)"
     if [[ "$segment_index" =~ ^[0-9]+$ && "$segment_index" -gt 0 ]]; then
@@ -806,7 +813,7 @@ artifacts_emit_receipt_v1() {
   escalation_path="$(lane_get "$lane" escalation_path)"
   jq -e 'type == "array"' >/dev/null <<<"$escalation_path" 2>/dev/null || escalation_path='[]'
   receipt="$(jq -cn \
-    --arg receipt_id "$(new_uuid)" --arg lane "$lane" --arg lane_uuid "$(lane_get "$lane" lane_uuid)" --arg version "$version" \
+    --arg receipt_id "$(new_uuid)" --arg lane "$lane" --arg lane_uuid "$(lane_get "$lane" lane_uuid)" --arg version "$version" --argjson generation "${generation:-0}" \
     --arg op "$(lane_get "$lane" op)" --arg task_family "$(lane_get "$lane" task_family)" --arg constraint_family "$(lane_get "$lane" constraint_family)" \
     --arg policy_version "$(lane_get "$lane" policy_version)" --arg catalog_ref "$(lane_get "$lane" catalog_ref)" \
     --arg provider "$provider" --arg surface "$(lane_get "$lane" surface)" --arg model "$(lane_get "$lane" model_requested)" --arg effort "$(lane_get "$lane" effort_requested)" --arg mode "$(lane_get "$lane" op_mode)" \
@@ -823,7 +830,7 @@ artifacts_emit_receipt_v1() {
       def epoch_or_null: if . == "" then null else tonumber? end;
       ($spawn_epoch | epoch_or_null) as $spawn |
       ($wall_start | epoch_or_null) as $segment_start |
-      {schema_version:1,receipt_kind:$receipt_kind,receipt_id:$receipt_id,lane:$lane,lane_uuid:($lane_uuid|nullable),waspflow_version:$version,segment:$segment,
+      {schema_version:1,receipt_kind:$receipt_kind,receipt_id:$receipt_id,lane:$lane,lane_uuid:($lane_uuid|nullable),generation:(if $receipt_kind == "lane" then $generation else null end),waspflow_version:$version,segment:$segment,
        op:$op,task_family:($task_family|nullable),constraint_family:($constraint_family|nullable),policy_version:($policy_version|nullable),catalog_ref:($catalog_ref|nullable),
        arm_requested:{schema_version:1,provider:$provider,surface:(if $surface == "" then "tui" else $surface end),model:$model,effort:$effort,mode:(if $mode == "" then "standard" else $mode end),billing_path:$billing,endpoint_profile:(if $endpoint_profile == "" then "default" else $endpoint_profile end),raw_provider_args:($raw_provider_args == "true"),auth_principal:($auth_principal|nullable)},
        arm_attestation:{runtime_settings_state:(if $runtime_state == "" then "unknown" else $runtime_state end),observed_model:($observed_model|nullable),observed_effort:($observed_effort|nullable)},
@@ -844,13 +851,20 @@ artifacts_emit_receipt_v1() {
       receipt="$existing_receipt"
     fi
   else
-    _receipts_append "$receipt" || return 1
+    local append_rc=0 existing_receipt=""
+    existing_receipt="$(_receipts_append "$receipt")" || append_rc=$?
+    [[ "$append_rc" -eq 0 || "$append_rc" -eq 10 ]] || return "$append_rc"
+    if [[ "$append_rc" -eq 10 ]]; then
+      jq -e 'type == "object"' >/dev/null <<<"$existing_receipt" 2>/dev/null \
+        || { err "receipt: durable lane row could not be repaired"; return 1; }
+      receipt="$existing_receipt"
+    fi
   fi
   printf '%s\n' "$receipt" >"$dir/receipt.json" || { err "receipt: cannot write lane copy"; return 1; }
   if [[ "$receipt_kind" == lane_segment ]]; then
     lane_set "$lane" receipt_emitted_segment "$segment_index" segment_receipt_id "$(jq -r '.receipt_id' <<<"$receipt")"
   else
-    lane_set "$lane" receipt_emitted "true" receipt_id "$(jq -r '.receipt_id' <<<"$receipt")"
+    lane_set "$lane" receipt_emitted "true" receipt_emitted_generation "$generation" receipt_id "$(jq -r '.receipt_id' <<<"$receipt")"
   fi
 }
 

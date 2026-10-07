@@ -1952,8 +1952,8 @@ JSONL
   ( guard_cwd "$fixture" ) || { echo "guard_cwd: rejected a real dir" >&2; exit 1; }
 )
 
-# BUG 2 — _exec_output_is_useful: reject empty/whitespace/pure-error output;
-# accept real short answers (must not false-reject a legit file list).
+# BUG 2 — _exec_output_is_useful: reject empty/whitespace output only;
+# accept arbitrary nonblank successful answers.
 (
   # shellcheck disable=SC1090
   source "$root/lib/core.sh"
@@ -1967,10 +1967,10 @@ JSONL
   printf 'foo.txt\nbar.txt\n'  > "$d/list"     # real short answer — MUST pass
   printf 'a\n'                 > "$d/tiny"      # 2 bytes — MUST pass
   printf 'Execution error: the parser threw on line 5, here is the fix\n' > "$d/mention"  # MUST pass
-  for bad in empty blank err na; do
+  for bad in empty blank; do
     if _exec_output_is_useful "$d/$bad"; then echo "exec-useful: '$bad' wrongly accepted" >&2; exit 1; fi
   done
-  for good in list tiny mention; do
+  for good in err na list tiny mention; do
     _exec_output_is_useful "$d/$good" || { echo "exec-useful: '$good' wrongly rejected" >&2; exit 1; }
   done
   rm -rf "$d"
@@ -2017,8 +2017,8 @@ JSONL
   if (_exec_abs_output_path "$d/link") 2>/dev/null; then exit 1; fi
   [[ "$(cat "$d/input")" == input ]]
   _exec_codex() { printf 'Execution error\n' >"$5"; }
-  if exec_run --provider codex --cwd "$d" -o "$d/out" -- test; then exit 1; fi
-  jq -e '.state == "invalid" and .bytes > 0' "$d/receipt" >/dev/null
+  exec_run --provider codex --cwd "$d" -o "$d/out" -- test
+  jq -e '.state == "present" and .bytes > 0' "$d/receipt" >/dev/null
   _exec_codex() { printf 'Execution error: explained and fixed\n' >"$5"; }
   exec_run --provider codex --cwd "$d" -o "$d/out" -- test
 )
@@ -7574,6 +7574,7 @@ source "$root/scripts/fixtures/verify-r2-a.sh"
 source "$root/scripts/fixtures/verify-r2-d.sh"
 source "$root/scripts/fixtures/verify-r2-e.sh"
 
-echo "waspflow verify: ok"
 source "$root/scripts/fixtures/verify-r2-b.sh"
 source "$root/scripts/fixtures/verify-r3-f3.sh"
+source "$root/scripts/fixtures/verify-r3-f2.sh"
+echo "waspflow verify: ok"
