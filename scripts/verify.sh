@@ -5690,15 +5690,16 @@ PROV
   source "$esclib/escalation.sh"
 
   make_escalation_lane() {
-    local lane="$1" old_window old_session old_pid now fingerprint fork billing
+    local lane="$1" old_window old_session old_pid now fingerprint fork billing lane_uuid
     now="$(date +%s)"
     fingerprint="$(artifacts_workspace_fingerprint "$escwork")"
     fork="$(git -C "$escwork" rev-parse HEAD)"
     billing="$(billing_path_v1 codex default false)"
+    lane_uuid="$(new_uuid)"
     tmux has-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || tmux new-session -d -s "$WASPFLOW_TMUX_SESSION" -n _escalation
     old_window="$(tmux new-window -d -P -F '#{window_id}' -t "$WASPFLOW_TMUX_SESSION" -n "old-$lane" 'exec sleep 120')"
     IFS='|' read -r old_session _ old_pid < <(tmux display-message -p -t "$old_window" '#{session_name}|#{window_id}|#{pane_pid}')
-    lane_set "$lane" lane_uuid "$lane-uuid" provider codex model old model_requested old model_passed old effort medium effort_requested medium effort_passed medium op_mode standard endpoint_profile default raw_provider_args false billing_path "$billing" auth_principal "" model_validation_state available model_validation_source live_query model_validation_scope default model_validation_at "" selection_quota_observation '{"schema_version":1,"state":"absent","observation":null,"reason":"test"}' selection_quota_filtered false status live session_id "$lane-old-session" rollout "" tmux_session "$old_session" tmux_window "$old_window" tmux_pane_pid "$old_pid" cwd "$escwork" origin_cwd "$escwork" verify_fork_point "$fork" spawn_epoch "$now" segment_started_epoch "$((now - 5))" segment_index 0 receipt_emitted false receipt_emitted_segment -1 arm_generation 3 arm_history '[]' escalation_path '[]' escalations_total 0 consecutive_failed_segments 0 segment_entered_via_escalation false ladder_cursor "" pending_transition "" escalation_error "" prompt "Repair the failing task without weakening its tests." verify_command false verify_timeout 5 verify_state failed verify_failure_class task verify_runs '[{"kind":"checkpoint","at":1,"state":"failed","failure_class":"task"}]' verify_checkpoint_epoch "$now" verify_checkpoint_fingerprint "$fingerprint" verify_epoch "$now" verify_exit_code 1 verify_test_files_changed false baseline_oracle_ran true baseline_oracle_state passed baseline_oracle_reason "" result "" runtime_settings_state unknown runtime_refresh_state pending
+    lane_set "$lane" lane_uuid "$lane_uuid" provider codex model old model_requested old model_passed old effort medium effort_requested medium effort_passed medium op_mode standard endpoint_profile default raw_provider_args false billing_path "$billing" auth_principal "" model_validation_state available model_validation_source live_query model_validation_scope default model_validation_at "" selection_quota_observation '{"schema_version":1,"state":"absent","observation":null,"reason":"test"}' selection_quota_filtered false status live session_id "$lane-old-session" rollout "" tmux_session "$old_session" tmux_window "$old_window" tmux_pane_pid "$old_pid" cwd "$escwork" origin_cwd "$escwork" verify_fork_point "$fork" spawn_epoch "$now" segment_started_epoch "$((now - 5))" segment_index 0 receipt_emitted false receipt_emitted_segment -1 arm_generation 3 arm_history '[]' escalation_path '[]' escalations_total 0 consecutive_failed_segments 0 segment_entered_via_escalation false ladder_cursor "" pending_transition "" escalation_error "" prompt "Repair the failing task without weakening its tests." verify_command false verify_timeout 5 verify_state failed verify_failure_class task verify_runs '[{"kind":"checkpoint","at":1,"state":"failed","failure_class":"task"}]' verify_checkpoint_epoch "$now" verify_checkpoint_fingerprint "$fingerprint" verify_epoch "$now" verify_exit_code 1 verify_test_files_changed false baseline_oracle_ran true baseline_oracle_state passed baseline_oracle_reason "" result "" runtime_settings_state unknown runtime_refresh_state pending
     printf 'verify head\n' >"$eschome/lanes/$lane/verify-stdout.txt"
     printf 'verify tail\n' >"$eschome/lanes/$lane/verify-stderr.txt"
   }
@@ -5764,14 +5765,14 @@ EOF
     [[ "$rc" -eq 2 ]] || { cat "$eschome/scope-delayed-reap.err" >&2; echo "escalate scope delay: reap expected rc2, got $rc" >&2; exit 1; }
     rm -rf "$escalation_delaybin"
   fi
-  jq -e 'select(.receipt_kind == "lane_segment" and .lane_uuid == "esc-success-uuid") | .segment.index == 0 and .segment.closed_by == "escalation" and .segment.boundary == "none" and .verify.failure_class == "task"' "$eschome/receipts.jsonl" >/dev/null
+  jq -e --arg uuid "$(lane_get esc-success lane_uuid)" 'select(.receipt_kind == "lane_segment" and .lane_uuid == $uuid) | .segment.index == 0 and .segment.closed_by == "escalation" and .segment.boundary == "none" and .verify.failure_class == "task"' "$eschome/receipts.jsonl" >/dev/null
   grep -qF 'UNTRUSTED VERIFY OUTPUT' "$eschome/lanes/esc-success/state.json"
   grep -qF 'Do not weaken, skip, or edit tests to make verification pass.' "$eschome/lanes/esc-success/state.json"
   old_window="$(jq -r .tmux_window "$eschome/lanes/esc-success/state.json")"
   [[ "$old_window" != @* ]] && { echo "escalate success: provisional window was not adopted" >&2; exit 1; }
   set +e; "$root/bin/waspflow" reap esc-success --no-archive >/dev/null; rc=$?; set -e
   [[ "$rc" -eq 2 ]] || { echo "escalate final receipt: expected failing-oracle reap rc2, got $rc" >&2; exit 1; }
-  jq -s 'map(select(.lane_uuid == "esc-success-uuid" and .receipt_kind == "lane")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
+  jq -s --arg uuid "$(lane_get esc-success lane_uuid)" 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
   last_segment_index="$(jq -r '.segment_index | tonumber' "$eschome/lanes/esc-success/state.json")"
   jq -e --argjson last_segment_index "$last_segment_index" '.receipt_kind == "lane" and .segment == {index:$last_segment_index,closed_by:"reap"} and (.escalation_path | length == 1) and .escalation_path[0].to_arm.model == "target"' "$eschome/lanes/esc-success/receipt.json" >/dev/null
 
@@ -5830,7 +5831,7 @@ FAIL
     || { echo "F5: prepared-phase failure left an orphaned pending_transition" >&2; exit 1; }
   lane_set esc-failure fake_launch_fail no
   run_escalate esc-failure --resume-transition >/dev/null
-  jq -s 'map(select(.lane_uuid == "esc-failure-uuid" and .receipt_kind == "lane_segment")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
+  jq -s --arg uuid "$(lane_get esc-failure lane_uuid)" 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane_segment")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
 
   # Crash recovery is driven solely by the persisted phase. The receipt is
   # exactly once from both prepared and receipt_committed; a provisional launch
@@ -5841,14 +5842,14 @@ FAIL
     set +e; WASPFLOW_ESCALATION_TEST_CRASH_AFTER="$phase" run_escalate "$lane" --to codex/target/high >/dev/null 2>&1; rc=$?; set -e
     [[ "$rc" -eq 99 && "$(jq -r '(.pending_transition | fromjson).phase' "$eschome/lanes/$lane/state.json")" == "$phase" ]] || { echo "escalate crash $phase: state was not durable" >&2; exit 1; }
     run_escalate "$lane" --resume-transition >/dev/null
-    jq -s --arg uuid "$lane-uuid" 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane_segment")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
+    jq -s --arg uuid "$(lane_get "$lane" lane_uuid)" 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane_segment")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
   done
   make_escalation_lane esc-crash-receipt-appended
   set +e; WASPFLOW_ESCALATION_TEST_CRASH_AFTER=receipt_appended run_escalate esc-crash-receipt-appended --to codex/target/high >/dev/null 2>&1; rc=$?; set -e
   [[ "$rc" -eq 99 && "$(jq -r '(.pending_transition | fromjson).phase' "$eschome/lanes/esc-crash-receipt-appended/state.json")" == prepared ]] || { echo "escalate receipt-appended crash: durable phase mismatch" >&2; exit 1; }
-  durable_receipt_id="$(jq -r 'select(.lane_uuid == "esc-crash-receipt-appended-uuid" and .receipt_kind == "lane_segment") | .receipt_id' "$eschome/receipts.jsonl")"
+  durable_receipt_id="$(jq -r --arg uuid "$(lane_get esc-crash-receipt-appended lane_uuid)" 'select(.lane_uuid == $uuid and .receipt_kind == "lane_segment") | .receipt_id' "$eschome/receipts.jsonl")"
   run_escalate esc-crash-receipt-appended --resume-transition >/dev/null
-  jq -s --arg uuid esc-crash-receipt-appended-uuid 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane_segment")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
+  jq -s --arg uuid "$(lane_get esc-crash-receipt-appended lane_uuid)" 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane_segment")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
   jq -e --arg id "$durable_receipt_id" '.segment_receipt_id == $id' "$eschome/lanes/esc-crash-receipt-appended/state.json" >/dev/null
 
   # Qwen rejects effort-bearing escalation targets before mutation, while a
@@ -6027,7 +6028,7 @@ JSON
     printf '%s\n' '{"type":"session_meta"}' >"$eschome/$1-rollout.jsonl"
     lane_set "$1" fake_session_log "$eschome/$1-rollout.jsonl" verify_runs '[]' verify_state passed verify_failure_class ""
   }
-  segment_rows() { jq -s --arg uuid "$1-uuid" 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane_segment"))' "$eschome/receipts.jsonl"; }
+  segment_rows() { jq -s --arg uuid "$(lane_get "$1" lane_uuid)" 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane_segment"))' "$eschome/receipts.jsonl"; }
   compact_rollout() { printf '{"timestamp":"%s","type":"compacted","payload":{"message":""}}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.500Z)" >>"$eschome/$1-rollout.jsonl"; }
 
   make_deferred_lane dfs-compact
