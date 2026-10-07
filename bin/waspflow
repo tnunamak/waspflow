@@ -968,6 +968,7 @@ cmd_close() {
       tmux_kill_owned_lane_window "$lane" || die "close: could not stop owned worker window"
     fi
     tmux_kill_owned_lane_scopes "$lane"
+    tmux_kill_owned_lane_detached_sessions "$lane"
     lane_set "$lane" close_stop_epoch "$(date +%s)" close_stop_state stop-requested
     log "close: lane '$lane' worker stop requested; files retained (inspect scope receipts if present)"
   else
@@ -1850,6 +1851,10 @@ _reap_remaining_resources() {
     state="$(timeout 5 systemctl --user show "$unit" -p ActiveState --value 2>/dev/null)" || state=unknown
     case "$state" in inactive|failed) ;; *) remaining+=("scope:$unit:$state") ;; esac
   done < <(tmux_lane_scope_receipts "$lane")
+  while IFS= read -r receipt; do
+    tmux_detached_session_receipt_live "$receipt" || continue
+    remaining+=("process-group:$(jq -r .pgid <<<"$receipt")")
+  done < <(tmux_lane_detached_session_receipts "$lane")
   wt="$(lane_get "$lane" worktree)"
   if [[ -n "$wt" && -e "$wt" ]]; then remaining+=("worktree:$wt"); fi
   while IFS= read -r resource; do
@@ -1917,6 +1922,7 @@ _reap_cleanup() {
     timeout 5 systemctl --user kill --kill-whom=all --signal=SIGKILL "$unit" >/dev/null 2>&1 || true
     timeout 5 systemctl --user stop "$unit" >/dev/null 2>&1 || true
   done < <(tmux_lane_scope_receipts "$lane")
+  tmux_kill_owned_lane_detached_sessions "$lane"
   if [[ "$no_archive" != 1 ]] && ! fanin_bundle_lane "$lane"; then
     errors="$(jq -c '. + ["branch-archive"]' <<<"$errors")"; archive_ok=0
   fi

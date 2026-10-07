@@ -829,6 +829,60 @@ tmux_record_lane_cgroup_fallback() {
   fi
 }
 
+# `setsid` detaches login-shell hydration from tmux when user scopes are
+# unavailable. Persist a process-group receipt so cleanup can still stop it.
+# PID start ticks make PID reuse fail closed.
+tmux_record_lane_detached_session() {
+  local lane="$1" execution="$2" pid="$3" pgid="$4" sid="$5" ticks="$6" dir tmp
+  [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ticks" =~ ^[0-9]+$ ]] || return 1
+  dir="$(lane_dir "$lane")"; mkdir -p "$dir"
+  tmp="$(mktemp "$dir/.state.XXXXXX")" || return 1
+  if jq --arg execution "$execution" --arg pid "$pid" --arg pgid "$pgid" --arg sid "$sid" --arg ticks "$ticks" '
+      .detached_session_receipts = ((.detached_session_receipts // []) | if type == "array" then . else [] end
+        | if any(.[]; .pid == $pid and .start_ticks == $ticks) then .
+          else . + [{execution:$execution,pid:$pid,pgid:$pgid,sid:$sid,start_ticks:$ticks}] end)
+    ' "$(lane_state_file "$lane")" >"$tmp" 2>/dev/null; then
+    mv "$tmp" "$(lane_state_file "$lane")"
+  else
+    rm -f "$tmp"; return 1
+  fi
+}
+
+tmux_lane_detached_session_receipts() {
+  local lane="$1" sf; sf="$(lane_state_file "$lane")"; [[ -f "$sf" ]] || return 0
+  jq -c '(.detached_session_receipts // []) | if type == "array" then .[] else empty end' "$sf" 2>/dev/null || true
+}
+
+tmux_detached_session_receipt_live() {
+  local receipt="$1" pid pgid sid ticks actual got_pgid got_sid
+  pid="$(jq -r '.pid // empty' <<<"$receipt")"; pgid="$(jq -r '.pgid // empty' <<<"$receipt")"
+  sid="$(jq -r '.sid // empty' <<<"$receipt")"; ticks="$(jq -r '.start_ticks // empty' <<<"$receipt")"
+  [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ticks" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  actual="$(process_start_ticks "$pid" || true)"; [[ "$actual" == "$ticks" ]] || return 1
+  read -r got_pgid got_sid < <(ps -o pgid= -o sid= -p "$pid" 2>/dev/null)
+  [[ "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]]
+}
+
+tmux_kill_detached_session_receipt_if_owned() {
+  local receipt="$1" pgid
+  tmux_detached_session_receipt_live "$receipt" || return 0
+  pgid="$(jq -r .pgid <<<"$receipt")"
+  kill -- "-$pgid" 2>/dev/null || true
+  for _ in 1 2 3 4 5; do
+    sleep 0.1
+    tmux_detached_session_receipt_live "$receipt" || return 0
+  done
+  kill -KILL -- "-$pgid" 2>/dev/null || true
+}
+
+tmux_kill_owned_lane_detached_sessions() {
+  local lane="$1" receipt
+  while IFS= read -r receipt; do
+    [[ -n "$receipt" ]] && tmux_kill_detached_session_receipt_if_owned "$receipt"
+  done < <(tmux_lane_detached_session_receipts "$lane")
+}
+
 tmux_lane_scope_start_marker() {
   local lane="$1" unit="$2"
   printf '%s/.scope-started-%s\n' "$(lane_dir "$lane")" "$unit"
@@ -1110,7 +1164,9 @@ tmux_lane_provider_identity() {
 # Bound only login-shell startup, never the provider's task. The watchdog
 # watches readiness AFTER profile hydration and cleans only owned processes.
 tmux_lane_login_shell() {
-  local lane="$1" command_text="$2" ready watchdog child rc=0 seconds ticks provider identity spawner
+  local lane="$1" execution="${2:-pane}" command_text="${3:-}" ready watchdog child rc=0 seconds ticks provider identity spawner detached=0 pgid sid child_ticks
+  # Keep the historical two-argument helper call shape for direct callers.
+  if [[ -z "$command_text" ]]; then command_text="$execution"; execution=pane; fi
   provider="$(lane_get "$lane" provider)"
   case "$provider" in antigravity) provider=agy ;; deepseek) provider=dsh ;; esac
   spawner="$(command -v "$provider" || true)"
