@@ -75,10 +75,8 @@
   fi
   [[ "$(cat "$r2b/old.out")" == OLD ]]
   _exec_codex() { printf 'Error: provider unavailable' >"$5"; }
-  if exec_run --provider codex --cwd "$r2b" -o "$r2b/old.out" -- prompt; then
-    echo 'r2-b exec: provider diagnostic succeeded' >&2; exit 1
-  fi
-  [[ "$(cat "$r2b/old.out")" == OLD ]]
+  exec_run --provider codex --cwd "$r2b" -o "$r2b/old.out" -- prompt
+  [[ "$(cat "$r2b/old.out")" == 'Error: provider unavailable' ]]
   _exec_codex() { printf 'Error: missing configuration\nFix: set PROJECT_ROOT.' >"$5"; }
   exec_run --provider codex --cwd "$r2b" -o "$r2b/explained-error.out" -- prompt
   grep -Fq 'Fix: set PROJECT_ROOT.' "$r2b/explained-error.out"

@@ -85,10 +85,8 @@
   [[ "$(cat "$s2/out")" == OLD ]]
   jq -e '.state == "invalid" or .state == "missing"' "$s2/exec-receipt" >/dev/null
   _exec_codex() { printf 'Permission denied\n' >"$5"; }
-  if exec_run --provider codex --cwd "$s2" -o "$s2/out" -- prompt; then
-    echo 's2 exec: denial output accepted' >&2; exit 1
-  fi
-  [[ "$(cat "$s2/out")" == OLD ]]
+  exec_run --provider codex --cwd "$s2" -o "$s2/out" -- prompt
+  [[ "$(cat "$s2/out")" == 'Permission denied' ]]
   _exec_codex() { printf NEW >"$5"; }
   exec_run --provider codex --cwd "$s2" -o "$s2/out" -- prompt
   [[ "$(cat "$s2/out")" == NEW ]]

@@ -152,8 +152,8 @@ exec_run() {
 
   [[ "$rc" -ne 0 ]] && result=failed
 
-  # A provider can exit 0 yet write a useless report (empty, whitespace-only, or
-  # a body that is just an error string). Returning success on that is a silent
+  # A provider can exit 0 yet write no answer at all (empty or whitespace-only).
+  # Returning success on that is a silent
   # re-run — the exact waste the product sells against. Validate BEFORE success.
   if [[ "$rc" -eq 0 ]] && ! _exec_output_is_useful "$provider_output_path"; then
     err "exec: $provider exited 0 but produced no usable output (empty/placeholder); treating as failure"
@@ -212,6 +212,7 @@ exec_run() {
 
   if [[ "$should_cat" -eq 1 ]]; then
     cat "$output_path"
+    [[ "$(tail -c1 "$output_path" 2>/dev/null)" == "" ]] || printf '\n'
     rm -f "$output_path"
   fi
 }
@@ -267,17 +268,9 @@ _exec_output_is_useful() {
   # Strip leading/trailing whitespace (incl. blank lines); empty after strip = useless.
   stripped="$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$path" | sed '/^$/d')"
   [[ -n "$stripped" ]] || return 1
-  # Reject only error syntax that is unambiguously provider diagnostics. Exact
-  # words such as `null` or `denied` can be valid machine-readable results.
-  local low; low="$(printf '%s' "$stripped" | tr '[:upper:]' '[:lower:]')"
-  if [[ "$stripped" != *$'\n'* ]]; then
-    case "$low" in
-      "execution error" | "provider error" | "no response" | "no output" | "(no output)" | "n/a" \
-      | "permission denied" | "access denied" | "request denied" | "operation denied" | error:\ *)
-        return 1
-        ;;
-    esac
-  fi
+  # This generic adapter has no structured provider-error channel. Do not
+  # reserve answer text: classifications such as `N/A`, `no response`,
+  # `permission denied`, and `Error: ...` are valid when the provider exits 0.
   return 0
 }
 
