@@ -117,10 +117,12 @@ reconcile_lane_json() {
   # Derived lifecycle is stronger evidence than historical pane metadata. A
   # completed reap may deliberately remove its cwd, and a live scope may keep
   # descendants running after the pane shell has gone away.
-  if [[ "$lifecycle" == reaped || "$record_status" == parked ]]; then
+  if [[ "$lifecycle" == reaped ]]; then
     next_action="inspect durable receipt"
   elif [[ "$lifecycle" == live ]]; then
     classification="live"; next_action="observe or use normal wait/revise controls"
+  elif [[ "$record_status" == parked ]]; then
+    classification="parked"; next_action="inspect durable receipt"
   elif [[ "$window" == true ]]; then classification="live"; next_action="observe or use normal wait/revise controls"
   elif [[ -n "$cwd" && ! -d "$cwd" ]]; then classification="unknown"; next_action="recorded working directory is missing; preserve and inspect"
   elif [[ "$lifecycle" == interrupted ]]; then next_action="inspect before explicit recovery or adoption"

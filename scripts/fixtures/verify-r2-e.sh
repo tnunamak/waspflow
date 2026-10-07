@@ -19,6 +19,11 @@
   reconcile_lane_json reaped '[]' true | jq -e '.status == "reaped"' >/dev/null
   reconcile_lane_json parked '[]' true | jq -e '.status == "parked"' >/dev/null
   reconcile_lane_json scoped '["waspflow-r2-e.scope"]' true | jq -e '.status == "live"' >/dev/null
+  lane_set parked-scoped provider fake status parked cwd "$fixture/removed" tmux_pane_pid 999999 tmux_pane_pid_start_time 1
+  parked_scoped_state="$(lane_state_file parked-scoped)"
+  jq '.cgroup_scope_receipts=[{unit:"waspflow-r2-e.scope",invocation_id:"fixture"}]' "$parked_scoped_state" >"$parked_scoped_state.tmp"
+  mv "$parked_scoped_state.tmp" "$parked_scoped_state"
+  reconcile_lane_json parked-scoped '["waspflow-r2-e.scope"]' true | jq -e '.status == "live"' >/dev/null
   mkdir -p "$fixture/parked-cwd"
   lane_set parked-no-scope provider fake status parked cwd "$fixture/parked-cwd" tmux_pane_pid 999999 tmux_pane_pid_start_time 1
   reconcile_lane_json parked-no-scope '[]' false | jq -e '.status == "parked"' >/dev/null
