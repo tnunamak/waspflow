@@ -38,4 +38,17 @@ EOF
   tmux_kill_owned_lane_detached_sessions descendants
   [[ "$(tmux_detached_session_receipt_group_state "$receipt" || true)" == gone ]]
 
+  # B3: detached-session receipt appends take the same state lock as lane_set,
+  # so no whole-file update can overtake a concurrent lifecycle update.
+  lane_set locked provider fake cwd "$r3f1" durable_field kept
+  lock_file="$(lane_dir locked)/.state.lock"
+  exec 8>"$lock_file"
+  flock 8
+  ( tmux_record_lane_detached_session locked pane "$$" "$(ps -o pgid= -p "$$" | tr -d ' ')" "$(ps -o sid= -p "$$" | tr -d ' ')" "$(process_start_ticks "$$")"; touch "$r3f1/receipt-done" ) &
+  receipt_writer=$!
+  sleep 0.1
+  [[ ! -e "$r3f1/receipt-done" ]]
+  flock -u 8
+  wait "$receipt_writer"
+  [[ "$(lane_get locked durable_field)" == kept && -n "$(tmux_lane_detached_session_receipts locked)" ]]
 )

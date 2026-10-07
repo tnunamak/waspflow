@@ -832,19 +832,29 @@ tmux_record_lane_cgroup_fallback() {
 # `setsid` detaches login-shell hydration from tmux when user scopes are
 # unavailable. Persist a process-group receipt so cleanup can still stop it.
 # PID start ticks make PID reuse fail closed.
-tmux_record_lane_detached_session() {
-  local lane="$1" execution="$2" pid="$3" pgid="$4" sid="$5" ticks="$6" dir tmp
+_lane_detached_session_receipt_append_locked() {
+  local dir="$1" execution="$2" pid="$3" pgid="$4" sid="$5" ticks="$6" sf="$dir/state.json" tmp
   [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ticks" =~ ^[0-9]+$ ]] || return 1
-  dir="$(lane_dir "$lane")"; mkdir -p "$dir"
   tmp="$(mktemp "$dir/.state.XXXXXX")" || return 1
   if jq --arg execution "$execution" --arg pid "$pid" --arg pgid "$pgid" --arg sid "$sid" --arg ticks "$ticks" '
       .detached_session_receipts = ((.detached_session_receipts // []) | if type == "array" then . else [] end
         | if any(.[]; .pid == $pid and .start_ticks == $ticks) then .
           else . + [{execution:$execution,pid:$pid,pgid:$pgid,sid:$sid,start_ticks:$ticks}] end)
-    ' "$(lane_state_file "$lane")" >"$tmp" 2>/dev/null; then
-    mv "$tmp" "$(lane_state_file "$lane")"
+      | .updated_at = (now | floor | tostring)
+    ' "$sf" >"$tmp" 2>/dev/null; then
+    mv "$tmp" "$sf"
   else
     rm -f "$tmp"; return 1
+  fi
+}
+
+tmux_record_lane_detached_session() {
+  local lane="$1" execution="$2" pid="$3" pgid="$4" sid="$5" ticks="$6" dir
+  dir="$(lane_dir "$lane")"; mkdir -p "$dir" || return 1
+  if command -v flock >/dev/null 2>&1; then
+    ( flock 9; _lane_detached_session_receipt_append_locked "$dir" "$execution" "$pid" "$pgid" "$sid" "$ticks" ) 9>"$dir/.state.lock"
+  else
+    _lane_detached_session_receipt_append_locked "$dir" "$execution" "$pid" "$pgid" "$sid" "$ticks"
   fi
 }
 
