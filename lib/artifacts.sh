@@ -12,7 +12,7 @@
 #   These answer "what did this agent change?" — the cheapest accountability.
 #
 # What it adds ONLY when you pass `--report <path>` to spawn (opt-in deliverable):
-#   - On idle, verify the report exists, is substantial (>= REPORT_MIN_BYTES),
+#   - On idle, verify the report exists, is non-empty,
 #     and for new lanes was created or changed after spawn.
 #   - If missing, run ONE recovery pass: resume with workspace-write and, only
 #     when required, the normalized external report parent; reconstruct the
@@ -31,8 +31,6 @@
 # The lane's `result` field (in state.json) is the single source of truth a
 # caller / `wait` keys on. Without a report or verify contract, result is
 # succeeded once the provider reports idle (the agent finished its turn cleanly).
-
-WASPFLOW_REPORT_MIN_BYTES="$(numeric_knob WASPFLOW_REPORT_MIN_BYTES 200)"
 
 # shellcheck source=/dev/null
 source "$WASPFLOW_LIB/turn-state.sh"
@@ -154,7 +152,7 @@ artifacts_report_observation() {
       exists=true
       bytes="$(wc -c <"$report" 2>/dev/null)" || bytes=0
       state=present
-      [[ "$bytes" -ge "$WASPFLOW_REPORT_MIN_BYTES" ]] || state=insubstantial
+      [[ "$bytes" -gt 0 ]] || state=empty
       if [[ "$state" == present && "$(lane_get "$lane" report_contract_version)" == 2 ]]; then
         before="$(lane_get "$lane" report_before_signature)"
         [[ -n "$before" && "$before" != "$(artifacts_report_signature "$report")" ]] || state=unchanged
@@ -172,8 +170,8 @@ artifacts_report_present() {
   [[ -n "$report" ]] || return 0   # no contract → vacuously satisfied
   [[ -f "$report" ]] || { lane_set "$lane" report_state "absent"; return 1; }
   sz="$(wc -c <"$report" 2>/dev/null | tr -d ' ')"
-  [[ -n "$sz" && "$sz" -ge "$WASPFLOW_REPORT_MIN_BYTES" ]] || {
-    lane_set "$lane" report_state "insubstantial"
+  [[ -n "$sz" && "$sz" -gt 0 ]] || {
+    lane_set "$lane" report_state "empty"
     return 1
   }
   if [[ "$(lane_get "$lane" report_contract_version)" == "2" ]]; then
@@ -288,16 +286,25 @@ artifacts_finalize() {
     echo "succeeded"; return 0
   fi
 
-  # Report missing → one recovery pass (unless recovery disabled).
-  if [[ "$cleanup_only" == 1 || "${WASPFLOW_RECOVERY_POLICY:-original}" == disabled || "$(lane_get "$lane" no_recovery)" == "true" ]]; then
-    local report_failure_state; report_failure_state="$(lane_get "$lane" report_state)"
+  local report_failure_state; report_failure_state="$(lane_get "$lane" report_state)"
+  # A lane whose initial task was never confirmed cannot reconstruct a report:
+  # there is no provider turn or trustworthy session evidence to resume.
+  if [[ "$(lane_get "$lane" spawn_submitted)" == false || "$(lane_get "$lane" status)" == spawn_failed ]]; then
     turn_state_finish_generation "$lane" report_missing
     lane_set "$lane" report_state "${report_failure_state:-absent}"
-    warn "lane '$lane': required report missing and recovery disabled ($report)"
+    warn "lane '$lane': required report is missing because its task was never confirmed submitted; recovery was not attempted ($report)"
     echo "report_missing"; return 0
   fi
 
-  warn "lane '$lane': required report missing or unchanged at the exact contracted path ($report) — attempting one recovery pass"
+  # Report absent or unchanged → one recovery pass (unless recovery is disabled).
+  if [[ "$cleanup_only" == 1 || "${WASPFLOW_RECOVERY_POLICY:-original}" == disabled || "$(lane_get "$lane" no_recovery)" == "true" ]]; then
+    turn_state_finish_generation "$lane" report_missing
+    lane_set "$lane" report_state "${report_failure_state:-absent}"
+    warn "lane '$lane': required report is ${report_failure_state:-absent} and recovery is disabled ($report)"
+    echo "report_missing"; return 0
+  fi
+
+  warn "lane '$lane': required report is ${report_failure_state:-absent} at the exact contracted path — attempting one recovery pass ($report)"
   # Recovery MUST use the provider's headless resume path, not in-pane steering:
   # the recovery prompt is multi-line and a TUI send-keys mangles it. Kill the
   # live window first (the worktree stays — recovery needs it to read the diff

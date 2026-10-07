@@ -147,7 +147,7 @@ waspflow reap audit
 The report path is normalized against the worker's effective cwd and included
 literally in the initial provider prompt. Ordinary `revise` messages and the
 one recovery pass reassert that same exact path, so workers do not need to infer
-a filename. On `reap`, waspflow checks that this exact file is substantial and,
+a filename. On `reap`, waspflow checks that this exact file is non-empty and,
 for new lanes, was created or changed after spawn. If it is missing or unchanged,
 waspflow runs one recovery pass by resuming the session and asking the worker to
 write that exact path from the transcript and diff. If it is still missing,

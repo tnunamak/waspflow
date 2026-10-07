@@ -1119,7 +1119,7 @@ cmd_status() {
   case "$lifecycle" in
     idle|exited|parked)
       case "$(jq -r '.report_current_state' <<<"$report_observation")" in
-        absent|insubstantial|unchanged) warn "status: lane '$lane' has no current substantial report; no recovery was invoked" ;;
+        absent|empty|unchanged) warn "status: lane '$lane' has no current report that satisfies its contract; no recovery was invoked" ;;
       esac ;;
   esac
   jq --argjson report_observation "$report_observation" --arg lifecycle "$lifecycle" --argjson deferred "$deferred" --argjson headless_alive "$headless_alive" '

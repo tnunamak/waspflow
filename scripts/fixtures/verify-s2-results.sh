@@ -29,6 +29,21 @@
   [[ ! -e "$s2/provider-called" ]]
   unset -f _artifacts_recover
 
+  # A small but non-empty report is the lane's output, not recovery input.
+  printf hi >"$s2/small-report"
+  lane_set small provider codex cwd "$s2" git_tracked false result "" report "$s2/small-report"
+  _artifacts_recover() { touch "$s2/small-recovery-called"; }
+  [[ "$(artifacts_finalize small codex)" == succeeded ]]
+  [[ "$(cat "$s2/small-report")" == hi && ! -e "$s2/small-recovery-called" ]]
+  unset -f _artifacts_recover
+
+  # A task that was never submitted has no session evidence to recover from.
+  lane_set never-submitted provider codex status spawn_failed spawn_submitted false cwd "$s2" git_tracked false result "" report "$s2/no-report"
+  _artifacts_recover() { touch "$s2/never-submitted-recovery-called"; }
+  [[ "$(artifacts_finalize never-submitted codex)" == report_missing ]]
+  [[ ! -e "$s2/never-submitted-recovery-called" ]]
+  unset -f _artifacts_recover
+
   # A failed baseline does not erase a candidate's additional failure output.
   mkdir "$s2/repo" "$s2/worktrees"
   git -C "$s2/repo" init -q
