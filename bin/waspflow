@@ -1398,19 +1398,30 @@ cmd_wait() {
       last_change="$now"
     elif [[ "$cur_size" != "$last_size" ]]; then
       last_size="$cur_size"; last_change="$now"      # activity → reset the stall clock
-    elif [[ $(( now - last_change )) -ge "$stall_secs" ]]; then
-      local pane hint=""
-      pane="$(tmux capture-pane -p -t "$(tmux_window_target "$lane")" -S -40 2>/dev/null | strip_ansi)"
-      hint="$(wf_pane_looks_blocked "$pane" || true)"   # optional: names a likely prompt shape
-      lane_set "$lane" wait_state "stalled" stalled_after "$stall_secs" \
-        blocked_hint "${hint:-unknown (no output; could be a prompt, a hang, or a slow tool)}"
-      warn "wait: lane '$lane' STALLED — no output for ${stall_secs}s and turn not ended${hint:+ (looks like: $hint)}"
-      warn "  the worker may be waiting on an interactive prompt (e.g. a quota/model-downgrade"
-      warn "  offer or a security check) or genuinely hung. waspflow never auto-answers. Inspect:"
-      warn "    waspflow peek $lane            # see exactly what it's waiting on"
-      warn "    waspflow revise $lane -- \"<answer>\"   # answer a prompt (e.g. 1 / yes / no) — YOUR call"
-      warn "  or raise --interval/WASPFLOW_STALL_SECONDS if this turn is just slow."
-      return 4
+    else
+      # Providers can prove work is still active even while their pane and
+      # transcript are quiet. Claude, for example, exposes its background-shell
+      # footer through rc 2. That evidence vetoes the prompt/hang heuristic but
+      # not wait's ordinary timeout below.
+      local provider_idle_rc=0
+      "${provider}_is_idle" "$lane" || provider_idle_rc=$?
+      if [[ "$provider_idle_rc" -eq 2 ]]; then
+        last_change="$now"
+        lane_set "$lane" wait_state active blocked_hint "provider reports active work"
+      elif [[ $(( now - last_change )) -ge "$stall_secs" ]]; then
+        local pane hint=""
+        pane="$(tmux capture-pane -p -t "$(tmux_window_target "$lane")" -S -40 2>/dev/null | strip_ansi)"
+        hint="$(wf_pane_looks_blocked "$pane" || true)"   # optional: names a likely prompt shape
+        lane_set "$lane" wait_state "stalled" stalled_after "$stall_secs" \
+          blocked_hint "${hint:-unknown (no output; could be a prompt, a hang, or a slow tool)}"
+        warn "wait: lane '$lane' STALLED — no output for ${stall_secs}s and turn not ended${hint:+ (looks like: $hint)}"
+        warn "  the worker may be waiting on an interactive prompt (e.g. a quota/model-downgrade"
+        warn "  offer or a security check) or genuinely hung. waspflow never auto-answers. Inspect:"
+        warn "    waspflow peek $lane            # see exactly what it's waiting on"
+        warn "    waspflow revise $lane -- \"<answer>\"   # answer a prompt (e.g. 1 / yes / no) — YOUR call"
+        warn "  or raise --interval/WASPFLOW_STALL_SECONDS if this turn is just slow."
+        return 4
+      fi
     fi
     if [[ "$now" -ge "$deadline" ]]; then
       warn "wait: TIMEOUT after ${timeout}s (lane '$lane' never went idle)"

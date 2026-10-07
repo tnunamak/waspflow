@@ -89,4 +89,38 @@
   grok_is_idle b11 || { echo 'r3-f3 B11: Grok rejected a valid terminal snapshot' >&2; exit 1; }
   [[ "$(wc -c <"$jq_calls")" == 1 ]] \
     || { echo 'r3-f3 B11: Grok reopened its events after validation' >&2; exit 1; }
+
+  # MEDIUM-1: known provider-active work suppresses the generic quiet-pane
+  # stall heuristic, but wait still times out normally and never suggests an
+  # interactive answer for that healthy background shell.
+  active_socket="wf-r3-f3-$$"; active_session="r3-f3-active"
+  tmux -L "$active_socket" new-session -d -s "$active_session" -n active \
+    "printf '1 shell still running\\n'; exec sleep 10"
+  trap 'tmux -L "$active_socket" kill-session -t "$active_session" 2>/dev/null || true; rm -rf "$fixture"' EXIT
+  active_window="$(tmux -L "$active_socket" display-message -p -t "$active_session:active" '#{window_id}')"
+  active_pid="$(tmux -L "$active_socket" display-message -p -t "$active_window" '#{pane_pid}')"
+  active_uuid=11111111-2222-3333-4444-555555555556
+  active_home="$(cd "$WASPFLOW_HOME" && pwd -P)"
+  tmux -L "$active_socket" set-option -w -t "$active_window" @waspflow_home "$active_home"
+  tmux -L "$active_socket" set-option -w -t "$active_window" @waspflow_lane_uuid "$active_uuid"
+  lane_set active provider claude status live session_id active-session cwd "$fixture/cwd" \
+    lane_uuid "$active_uuid" tmux_session "$active_session" tmux_window "$active_window" tmux_pane_pid "$active_pid"
+  mkdir -p "$fixture/projects/project"
+  printf '%s\n' '{"type":"assistant","message":{"stop_reason":"end_turn"}}' \
+    >"$fixture/projects/project/active-session.jsonl"
+  : >"$(lane_transcript active)"
+  if CLAUDE_PROJECTS_DIR="$fixture/projects" WASPFLOW_TMUX_SOCKET="$active_socket" \
+      WASPFLOW_TMUX_SESSION="$active_session" WASPFLOW_STALL_SECONDS=1 \
+      "$root/bin/waspflow" wait active --timeout 3 --interval 1 >"$fixture/active-wait.out" 2>&1; then
+    echo 'r3-f3 MEDIUM-1: wait unexpectedly succeeded while background shell ran' >&2; exit 1
+  else
+    active_wait_rc=$?
+  fi
+  [[ "$active_wait_rc" == 1 ]] \
+    || { echo "r3-f3 MEDIUM-1: active shell returned rc $active_wait_rc, expected timeout" >&2; exit 1; }
+  [[ "$(lane_get active wait_state)" == active ]] \
+    || { echo 'r3-f3 MEDIUM-1: wait did not record provider-active evidence' >&2; exit 1; }
+  ! grep -q 'STALLED\|answer a prompt' "$fixture/active-wait.out" \
+    || { echo 'r3-f3 MEDIUM-1: active shell received stalled/prompt advice' >&2; exit 1; }
+  tmux -L "$active_socket" kill-session -t "$active_session" 2>/dev/null || true
 )
