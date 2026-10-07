@@ -55,6 +55,8 @@
     echo 'r3-f4: an unknown model-shaped Claude id was accepted' >&2; exit 1
   fi
   escalate_select_target r3-f4-claude claude/claude-haiku-4-5/low false false
+  escalate_select_target r3-f4-claude claude/claude-opus-4-7/low false false
+  escalate_select_target r3-f4-claude claude/claude-opus-4-7-20260228/low false false
   escalate_select_target r3-f4-claude claude/sonnet/low false false
 )
 
