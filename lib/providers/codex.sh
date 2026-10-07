@@ -1055,21 +1055,21 @@ _codex_current_turn_state() {
   [[ -f "$rollout" ]] || return 1
   jq -nce '
     reduce inputs as $row
-      ({turn:"", outcome:"pending", tools:{}, completed:0};
-       if $row.type == "turn_context" then .turn="" | .outcome="pending"
+      ({turn:"", started:false, outcome:"pending", tools:{}, completed:0};
+       if $row.type == "turn_context" then .turn="" | .started=false | .outcome="pending"
        elif $row.type == "event_msg" then
          $row.payload as $p |
-         if $p.type == "task_started" then .turn=($p.turn_id // "") | .outcome="pending"
-         elif $p.type == "user_message" then .turn="" | .outcome="pending"
+         if $p.type == "task_started" then .turn=($p.turn_id // "") | .started=true | .outcome="pending"
+         elif $p.type == "user_message" then .turn="" | .started=false | .outcome="pending"
          elif $p.type == "exec_command_begin" then
            .tools[($p.call_id // "unknown")]=true | .outcome="pending"
          elif $p.type == "exec_command_end" then del(.tools[($p.call_id // "unknown")])
          elif $p.type == "task_complete" then
            if .outcome == "aborted" then .
-           elif .turn != "" and ($p.turn_id // "") == .turn then .outcome="complete" | .completed += 1
+           elif .started and ((.turn == "" and ($p.turn_id // "") == "") or ($p.turn_id // "") == .turn) then .outcome="complete" | .completed += 1
            else . end
          elif $p.type == "turn_aborted" then
-           if .turn != "" and ($p.turn_id // "") == .turn then .outcome="aborted" else . end
+           if .started and ((.turn == "" and ($p.turn_id // "") == "") or ($p.turn_id // "") == .turn) then .outcome="aborted" else . end
          else . end
        else . end)
   ' "$rollout"

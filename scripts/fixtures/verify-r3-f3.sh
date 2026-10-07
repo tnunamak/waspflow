@@ -24,6 +24,11 @@
   fi
   [[ "$(codex_turn_mark b5)" == 1 ]] \
     || { echo 'r3-f3 B5: late old Codex completion advanced the turn mark' >&2; exit 1; }
+  printf '%s\n' \
+    '{"type":"event_msg","payload":{"type":"task_started"}}' \
+    '{"type":"event_msg","payload":{"type":"task_complete"}}' >"$rollout"
+  codex_is_idle b5 \
+    || { echo 'r3-f3 B5: valid no-ID Codex start/complete pair was rejected' >&2; exit 1; }
 
   # B8: Codex can serialize task_started before its matching user event. That
   # ordering is still a confirmed submission when both records name one turn.
