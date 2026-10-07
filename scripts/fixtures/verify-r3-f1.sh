@@ -75,4 +75,22 @@ EOF
   _artifacts_recover() { touch "$r3f1/unexpected-recovery"; }
   [[ "$(artifacts_finalize recovery fake)" == report_missing && ! -e "$r3f1/unexpected-recovery" ]]
   [[ "$(lane_get recovery recovery_reason)" == detached-process-retirement-uncertain ]]
+
+  # B10: doctor treats an unavailable remote version probe as an advisory WARN.
+  mkdir -p "$r3f1/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$r3f1/bin/codex"
+  cat >"$r3f1/bin/git" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'rev-parse --is-inside-work-tree'*) printf 'true\n' ;;
+  *'describe --tags'*) printf 'v0.0.0\n' ;;
+  *'rev-list --count'*) printf '0\n' ;;
+  *'ls-remote --tags --refs origin'*) exit 1 ;;
+  *) command git "$@" ;;
+esac
+EOF
+  chmod +x "$r3f1/bin/codex" "$r3f1/bin/git"
+  doctor_output="$(PATH="$r3f1/bin:$PATH" "$root/bin/waspflow" doctor)"
+  grep -q 'WARN release version: latest tag unavailable' <<<"$doctor_output"
+  grep -q -- '-> ready' <<<"$doctor_output"
 )

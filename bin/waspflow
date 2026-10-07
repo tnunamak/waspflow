@@ -2189,7 +2189,10 @@ cmd_doctor() {
     if [[ -n "$installed" && "$distance" =~ ^[1-9][0-9]*$ ]]; then installed="$installed+$distance commits"; fi
     latest="${WASPFLOW_DOCTOR_LATEST_TAG:-}"
     if [[ -z "$latest" ]] && command -v timeout >/dev/null 2>&1; then
-      latest="$(timeout 5 git -C "$WASPFLOW_ROOT" ls-remote --tags --refs origin 'v[0-9]*' 2>/dev/null | awk -F/ '{print $NF}' | sort -V | tail -1)"
+      # Release discovery is advisory.  In offline clones, a missing origin or
+      # timeout must produce the documented warning, never abort doctor under
+      # strict pipefail handling.
+      latest="$(timeout 5 git -C "$WASPFLOW_ROOT" ls-remote --tags --refs origin 'v[0-9]*' 2>/dev/null | awk -F/ '{print $NF}' | sort -V | tail -1 || true)"
     fi
     if [[ -z "$latest" ]]; then echo "WARN release version: latest tag unavailable"
     elif [[ "$installed" == "$latest" ]]; then echo "PASS release version: $installed (latest $latest)"
