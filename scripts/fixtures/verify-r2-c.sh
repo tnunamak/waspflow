@@ -42,6 +42,9 @@
               jq -cn '{type:"event_msg",payload:{type:"task_started",turn_id:"U"}}' >>"$rollout"
               jq -cn '{type:"event_msg",payload:{type:"task_complete",turn_id:"U"}}' >>"$rollout"
               ;;
+            bare-start)
+              jq -cn '{type:"event_msg",payload:{type:"task_started"}}' >>"$rollout"
+              ;;
             message-seen)
               jq -cn --arg message 'revise message' '{type:"event_msg",payload:{type:"user_message",message:$message,turn_id:"U"}}' >>"$rollout"
               ;;
@@ -57,6 +60,15 @@
   reset_lane; fixture_pane='› Ask Codex to do anything'; event_case=other-message
   if codex_revise revise 'revise message' >/dev/null 2>&1; then
     echo 'r2-c #8: unrelated user_message confirmed this revise' >&2
+    exit 1
+  fi
+  [[ "$(lane_get revise revise_submission_state)" == unconfirmed-no-task-started ]]
+
+  # #8: a bare task_started cannot confirm the requested revision. It may
+  # belong to another queued turn whose user_message is outside this suffix.
+  reset_lane; fixture_pane='› Ask Codex to do anything'; event_case=bare-start
+  if codex_revise revise 'revise message' >/dev/null 2>&1; then
+    echo 'r2-c #8: bare task_started confirmed this revise' >&2
     exit 1
   fi
   [[ "$(lane_get revise revise_submission_state)" == unconfirmed-no-task-started ]]

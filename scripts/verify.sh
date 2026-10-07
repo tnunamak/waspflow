@@ -2568,7 +2568,11 @@ JSONL
           ;;
         started)
           if [[ "$enter_count" -eq 1 ]]; then
-            printf '%s\n' '{"type":"event_msg","payload":{"type":"task_started"}}' >>"$revise_rollout"
+            # A bare task_started may be another queued turn. The requested
+            # revise is confirmed only by its exact message and same turn ID.
+            printf '%s\n' \
+              '{"type":"event_msg","payload":{"type":"task_started","turn_id":"revise-turn"}}' \
+              '{"type":"event_msg","payload":{"type":"user_message","turn_id":"revise-turn","message":"retry this"}}' >>"$revise_rollout"
           fi
           ;;
       esac
@@ -2606,7 +2610,8 @@ JSONL
     "$(lane_state_file codex-live-revise)" >/dev/null \
     || { echo "codex revise: queued receipt is not truthful" >&2; exit 1; }
 
-  # Only a new task_started event confirms receipt; preserve the same live path.
+  # The exact user message paired with a same-turn task_started confirms receipt,
+  # including Codex's start-before-user ordering.
   reset_revise_rollout; enter_count=0; revise_event=started
   codex_revise codex-live-revise "retry this"
   jq -e '.revise_submitted == "true" and .revise_submission_state == "confirmed-task-started" and .revise_submission_error == "" and .revise_task_started_mark == "1"' \

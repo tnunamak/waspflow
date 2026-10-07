@@ -1184,7 +1184,6 @@ _codex_revise_submission_state() {
        else . end)
     | if .confirmed then "confirmed"
       elif .saw_message then "message-seen"
-      elif ((.saw_user_message | not) and .started > 0) then "confirmed"
       else "not-seen"
       end
   ' 2>/dev/null
