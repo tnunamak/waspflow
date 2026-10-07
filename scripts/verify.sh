@@ -7484,4 +7484,6 @@ EOF
   [[ ! -e "$WASPFLOW_LOCKS_DIR/busy.lock.owner" ]]
 )
 
+# S2 generation-specific result and exec-output fixtures.
+source "$root/scripts/fixtures/verify-s2-results.sh"
 echo "waspflow verify: ok"

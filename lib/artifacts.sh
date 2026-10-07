@@ -34,6 +34,9 @@
 
 WASPFLOW_REPORT_MIN_BYTES="$(numeric_knob WASPFLOW_REPORT_MIN_BYTES 200)"
 
+# shellcheck source=/dev/null
+source "$WASPFLOW_LIB/turn-state.sh"
+
 # Normalize the path once at the command boundary. Providers receive this exact
 # value in their prompt and reap checks this same value; no adapter should have
 # to reinterpret a user-supplied report name.
@@ -184,6 +187,29 @@ artifacts_report_present() {
   return 0
 }
 
+# An accepted revision starts a fresh deliverable generation. The prior result
+# is retained as an append-only historical record rather than reused here.
+artifacts_begin_turn_generation() {
+  local lane="$1" report signature=missing
+  report="$(lane_get "$lane" report)"
+  [[ -z "$report" ]] || signature="$(artifacts_report_signature "$report")"
+  turn_state_begin_generation "$lane" "$signature"
+}
+
+# A terminal provider failure is not success merely because no report is
+# required. Keep provider-specific receipt parsing at this narrow seam.
+artifacts_provider_terminal_outcome() {
+  local lane="$1" provider="$2" receipt outcome
+  case "$provider" in
+    antigravity)
+      receipt="$(_antigravity_receipt_file "$lane")"
+      outcome="$(tail -n 1 "$receipt" 2>/dev/null | jq -r 'select(.phase == "completion") | .outcome // empty' 2>/dev/null || true)"
+      case "$outcome" in succeeded|failed) printf '%s\n' "$outcome" ;; *) printf 'unknown\n' ;; esac
+      ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
 # Finalize a lane once it is idle: capture the diff, enforce the report contract
 # (with one recovery pass), and stamp an honest `result`. Echoes the result.
 # Idempotent: if already finalized to a terminal result, returns it unchanged.
@@ -233,29 +259,40 @@ artifacts_finalize() {
   case "$outcome" in
     abandoned|superseded)
       artifacts_capture_after "$lane"
-      lane_set "$lane" result "abandoned"
+      turn_state_finish_generation "$lane" abandoned
       echo "abandoned"; return 0
       ;;
   esac
 
   artifacts_capture_after "$lane"
 
+  local provider_outcome
+  provider_outcome="$(artifacts_provider_terminal_outcome "$lane" "$provider")"
+  if [[ "$provider_outcome" == failed ]]; then
+    turn_state_finish_generation "$lane" failed
+    lane_set "$lane" provider_terminal_outcome failed
+    err "lane '$lane': provider reported a failed terminal turn — result=failed"
+    echo "failed"; return 0
+  fi
+
   report="$(lane_get "$lane" report)"
   if [[ -z "$report" ]]; then
     # No deliverable contract — finishing the turn cleanly IS success.
-    lane_set "$lane" result "succeeded"
+    turn_state_finish_generation "$lane" succeeded
     echo "succeeded"; return 0
   fi
 
   if artifacts_report_present "$lane"; then
-    lane_set "$lane" result "succeeded" report_state "present"
+    turn_state_finish_generation "$lane" succeeded
+    lane_set "$lane" report_state "present"
     echo "succeeded"; return 0
   fi
 
   # Report missing → one recovery pass (unless recovery disabled).
   if [[ "$cleanup_only" == 1 || "${WASPFLOW_RECOVERY_POLICY:-original}" == disabled || "$(lane_get "$lane" no_recovery)" == "true" ]]; then
     local report_failure_state; report_failure_state="$(lane_get "$lane" report_state)"
-    lane_set "$lane" result "report_missing" report_state "${report_failure_state:-absent}"
+    turn_state_finish_generation "$lane" report_missing
+    lane_set "$lane" report_state "${report_failure_state:-absent}"
     warn "lane '$lane': required report missing and recovery disabled ($report)"
     echo "report_missing"; return 0
   fi
@@ -282,13 +319,15 @@ artifacts_finalize() {
   _artifacts_recover "$lane" "$provider" "$report"
 
   if artifacts_report_present "$lane"; then
-    lane_set "$lane" result "recovered" report_state "recovered"
+    turn_state_finish_generation "$lane" recovered
+    lane_set "$lane" report_state "recovered"
     warn "lane '$lane': report reconstructed by recovery pass"
     echo "recovered"; return 0
   fi
 
   local report_failure_state; report_failure_state="$(lane_get "$lane" report_state)"
-  lane_set "$lane" result "failed" report_state "${report_failure_state:-absent}"
+  turn_state_finish_generation "$lane" failed
+  lane_set "$lane" report_state "${report_failure_state:-absent}"
   err "lane '$lane': report still missing after recovery — result=failed"
   echo "failed"; return 0
 }
@@ -470,7 +509,7 @@ artifacts_run_verify_checkpoint() {
 # receipts; every cleanup path removes the detached worktree.
 artifacts_classify_pre_existing() {
   local lane="$1" fork repo_root tmp verify_command prepare_command timeout rc state="inconclusive"
-  local recorded_root baseline_template WASPFLOW_WORKTREE_ROOT="${WASPFLOW_WORKTREE_ROOT:-}"
+  local recorded_root baseline_template baseline_signature candidate_signature WASPFLOW_WORKTREE_ROOT="${WASPFLOW_WORKTREE_ROOT:-}"
   recorded_root="$(lane_get "$lane" worktree_root)"; [[ -z "$recorded_root" ]] || WASPFLOW_WORKTREE_ROOT="$recorded_root"
   [[ "$(lane_get "$lane" verify_failure_class)" == task ]] || return 0
   fork="$(lane_get "$lane" verify_fork_point)"
@@ -497,18 +536,31 @@ artifacts_classify_pre_existing() {
       set +e; timeout "$timeout" bash -c "cd $(printf '%q' "$tmp") && $prepare_command" >/dev/null 2>&1; rc=$?; set -e
       [[ "$rc" -eq 0 ]] || { printf 'inconclusive\n'; exit 0; }
     fi
-    set +e; timeout "$timeout" bash -c "cd $(printf '%q' "$tmp") && $verify_command" >/dev/null 2>&1; rc=$?; set -e
-    case "$rc" in 0) printf 'passed\n' ;; 124|126|127) printf 'inconclusive\n' ;; *) printf 'failed\n' ;; esac
+    set +e; timeout "$timeout" bash -c "cd $(printf '%q' "$tmp") && $verify_command" >"$tmp/.waspflow-baseline-stdout" 2>"$tmp/.waspflow-baseline-stderr"; rc=$?; set -e
+    case "$rc" in
+      0) printf 'passed\n' ;;
+      124|126|127) printf 'inconclusive\n' ;;
+      *) cat "$tmp/.waspflow-baseline-stdout" "$tmp/.waspflow-baseline-stderr" | cksum | awk '{print "failed:" $1 ":" $2}' ;;
+    esac
   )"
+  if [[ "$state" == failed:* ]]; then
+    baseline_signature="${state#failed:}"
+    state=failed
+  fi
   lane_set "$lane" baseline_oracle_ran "true" baseline_oracle_state "$state" baseline_oracle_reason ""
   if [[ "$state" == failed ]]; then
-    lane_set "$lane" verify_failure_class "pre_existing"
-    local runs; runs="$(lane_get "$lane" verify_runs)"
-    [[ -n "$runs" ]] && lane_set "$lane" verify_runs "$(jq -c 'if length > 0 then .[-1].failure_class = "pre_existing" else . end' <<<"$runs")"
-    local result_file="$(lane_dir "$lane")/verify-result.json" result_tmp
-    if [[ -f "$result_file" ]]; then
-      result_tmp="${result_file}.tmp.$$"
-      jq '.failure_class = "pre_existing"' "$result_file" >"$result_tmp" && mv "$result_tmp" "$result_file"
+    candidate_signature="$(cat "$(lane_dir "$lane")/verify-stdout.txt" "$(lane_dir "$lane")/verify-stderr.txt" 2>/dev/null | cksum | awk '{print $1 ":" $2}')"
+    if [[ -n "$candidate_signature" && "$candidate_signature" == "$baseline_signature" ]]; then
+      lane_set "$lane" verify_failure_class "pre_existing" baseline_oracle_reason "matching-failure-output"
+      local runs; runs="$(lane_get "$lane" verify_runs)"
+      [[ -n "$runs" ]] && lane_set "$lane" verify_runs "$(jq -c 'if length > 0 then .[-1].failure_class = "pre_existing" else . end' <<<"$runs")"
+      local result_file="$(lane_dir "$lane")/verify-result.json" result_tmp
+      if [[ -f "$result_file" ]]; then
+        result_tmp="${result_file}.tmp.$$"
+        jq '.failure_class = "pre_existing"' "$result_file" >"$result_tmp" && mv "$result_tmp" "$result_file"
+      fi
+    else
+      lane_set "$lane" baseline_oracle_reason "failure-set-not-compared"
     fi
   fi
 }
@@ -544,17 +596,17 @@ artifacts_verify() {
   fi
   case "$verify_state" in
     passed)
-      lane_set "$lane" result "verified"
+      turn_state_finish_generation "$lane" verified
       echo "verified"
       return 0
       ;;
     failed|timeout|infra)
-      lane_set "$lane" result "verify_failed"
+      turn_state_finish_generation "$lane" verify_failed
       echo "verify_failed"
       return 0
       ;;
     *)
-      lane_set "$lane" result "verify_failed"
+      turn_state_finish_generation "$lane" verify_failed
       echo "verify_failed"
       return 0
       ;;

@@ -122,27 +122,31 @@ exec_run() {
   mcp_policy_load_json "$MCP_ARGV_JSON" "$MCP_ENV_JSON" "exec $provider"
   [[ -n "$MCP_WARNING" ]] && warn "$MCP_WARNING"
 
-  local output_path should_cat=0
+  local output_path provider_output_path should_cat=0 staged_output=""
   if [[ -n "$out_file" ]]; then
     output_path="$(_exec_abs_output_path "$out_file")" || return 1
+    staged_output="$(mktemp "$(dirname "$output_path")/.waspflow-output.XXXXXX")" || return 1
+    provider_output_path="$staged_output"
   else
     output_path="$(mktemp)" || return 1
+    provider_output_path="$output_path"
     should_cat=1
   fi
 
   if ! _exec_access_preflight "$provider" "$cwd" "$output_path" "${needs_paths[@]}"; then
     [[ "$should_cat" -eq 0 ]] || rm -f "$output_path"
+    [[ -z "$staged_output" ]] || rm -f "$staged_output"
     return 1
   fi
   local invoked_epoch exec_id rc=0 result=succeeded
   invoked_epoch="$(date +%s)"; exec_id="$(new_uuid)"
   case "$provider" in
-    codex)  _exec_codex "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
-    claude) _exec_claude "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
-    grok)   _exec_grok "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
-    antigravity) _exec_antigravity "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
-    qwen)     _exec_qwen "$cwd" "$model" "$prompt" "$output_path" || rc=$? ;;
-    deepseek) _exec_deepseek "$cwd" "$model" "$prompt" "$output_path" || rc=$? ;;
+    codex)  _exec_codex "$cwd" "$model" "$effort" "$prompt" "$provider_output_path" || rc=$? ;;
+    claude) _exec_claude "$cwd" "$model" "$effort" "$prompt" "$provider_output_path" || rc=$? ;;
+    grok)   _exec_grok "$cwd" "$model" "$effort" "$prompt" "$provider_output_path" || rc=$? ;;
+    antigravity) _exec_antigravity "$cwd" "$model" "$effort" "$prompt" "$provider_output_path" || rc=$? ;;
+    qwen)     _exec_qwen "$cwd" "$model" "$prompt" "$provider_output_path" || rc=$? ;;
+    deepseek) _exec_deepseek "$cwd" "$model" "$prompt" "$provider_output_path" || rc=$? ;;
     *)      die "exec: unsupported provider '$provider'" ;;
   esac
 
@@ -151,24 +155,35 @@ exec_run() {
   # A provider can exit 0 yet write a useless report (empty, whitespace-only, or
   # a body that is just an error string). Returning success on that is a silent
   # re-run — the exact waste the product sells against. Validate BEFORE success.
-  if [[ "$rc" -eq 0 ]] && ! _exec_output_is_useful "$output_path"; then
+  if [[ "$rc" -eq 0 ]] && ! _exec_output_is_useful "$provider_output_path"; then
     err "exec: $provider exited 0 but produced no usable output (empty/placeholder); treating as failure"
     rc=1; result=failed
+  fi
+
+  # Providers write to a unique sibling file. Only validated output is renamed
+  # over the destination, so an exit-0/no-write cannot relabel old output as new.
+  if [[ "$rc" -eq 0 && -n "$staged_output" ]]; then
+    mv -f "$staged_output" "$output_path" || { rc=1; result=failed; }
+    staged_output=""
   fi
 
   local availability billing completed_epoch
   availability="$(jq -cn --arg p "$provider" --arg m "$model" --arg state "${MODEL_VALIDATION_STATE:-not_applicable}" --arg source "${MODEL_VALIDATION_SOURCE:-none}" --arg scope "${MODEL_VALIDATION_SCOPE:-not_applicable}" --arg at "${MODEL_VALIDATION_AT:-}" '{schema_version:1,provider:$p,model:$m,state:$state,evidence_source:$source,query_scope:$scope,observed_at:(if $at == "" then null else $at end),detail:""}')"
   billing="$(billing_path_v1 "$provider" default false)"; completed_epoch="$(date +%s)"
   local output_state=missing output_bytes=0 output_metadata
-  if [[ -f "$output_path" ]]; then
-    output_bytes="$(wc -c <"$output_path")"
+  if [[ -f "$provider_output_path" ]]; then
+    output_bytes="$(wc -c <"$provider_output_path")"
     output_state=invalid
-    _exec_output_is_useful "$output_path" && output_state=present
+    _exec_output_is_useful "$provider_output_path" && output_state=present
+  elif [[ "$rc" -eq 0 && -f "$output_path" ]]; then
+    output_bytes="$(wc -c <"$output_path")"
+    output_state=present
   fi
   output_metadata="$(jq -cn --arg state "$output_state" --argjson bytes "$output_bytes" --argjson preflight "$EXEC_PREFLIGHT_JSON" '{state:$state,bytes:$bytes,preflight:$preflight}')"
   artifacts_emit_exec_receipt_v1 "$exec_id" "$provider" "$model" "$effort" "${OP_MODE:-standard}" "$billing" "$availability" "$invoked_epoch" "$completed_epoch" "$result" "$rc" "$output_metadata" \
     || warn "exec: could not emit receipt"
   if [[ "$rc" -ne 0 ]]; then
+    [[ -z "$staged_output" ]] || rm -f "$staged_output"
     [[ "$should_cat" -eq 1 ]] && rm -f "$output_path"
     return "$rc"
   fi
@@ -239,7 +254,8 @@ _exec_output_is_useful() {
   local low; low="$(printf '%s' "$stripped" | tr '[:upper:]' '[:lower:]')"
   case "$low" in
     "execution error" | "error" | "null" | "undefined" \
-    | "no response" | "no output" | "(no output)" | "n/a" )
+    | "no response" | "no output" | "(no output)" | "n/a" \
+    | "denied" | "permission denied" | "access denied" | "request denied" | "operation denied" )
       return 1
       ;;
   esac
