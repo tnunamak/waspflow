@@ -699,6 +699,38 @@ tmux_capture_lane_ownership() {
   lane_set "$lane" tmux_session "$session" tmux_window "$window" tmux_pane_pid "$pane_pid"
 }
 
+# Explicitly adopt one legacy, untagged window. Name matching is intentionally
+# allowed only on this migration path; ordinary cleanup uses durable tags.
+tmux_adopt_legacy_lane_window() {
+  local lane="$1" matches target home uuid
+  matches="$(tmux list-windows -t "$WASPFLOW_TMUX_SESSION" -F '#{window_id}|#{window_name}|#{@waspflow_home}|#{@waspflow_lane_uuid}' 2>/dev/null | awk -F '|' -v n="$lane" '$2 == n')"
+  [[ -n "$matches" && "$(wc -l <<<"$matches")" -eq 1 ]] || return 1
+  IFS='|' read -r target _ home uuid <<<"$matches"
+  # A foreign or partially tagged window is not legacy state we may claim.
+  [[ -z "$home" && -z "$uuid" && "$target" == @* ]] || return 1
+  uuid="$(lane_get "$lane" lane_uuid)"
+  if [[ ! "$uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
+    uuid="$(new_uuid)" || return 1
+    lane_set "$lane" lane_uuid "$uuid" || return 1
+  fi
+  home="$(cd "$WASPFLOW_HOME" && pwd -P)"
+  tmux set-option -w -t "$target" @waspflow_home "$home" || return 1
+  tmux set-option -w -t "$target" @waspflow_lane_uuid "$uuid" || return 1
+  tmux_capture_lane_ownership "$lane" "$target"
+}
+
+# A recorded or same-named pane that no longer proves ownership is uncertainty,
+# not absence. Reap uses this veto before it can delete a worktree.
+tmux_lane_window_cleanup_uncertain() {
+  local lane="$1" recorded session got_session
+  tmux_named_lane_window_exists "$lane" && return 0
+  recorded="$(lane_get "$lane" tmux_window)"
+  session="$(lane_get "$lane" tmux_session)"
+  [[ "$recorded" == @* && -n "$session" ]] || return 1
+  got_session="$(tmux display-message -p -t "$recorded" '#{session_name}' 2>/dev/null || true)"
+  [[ "$got_session" == "$session" ]]
+}
+
 # ---- descendant-process ownership (cgroup scopes) -------------------------
 # tmux identifies a pane, not every descendant of the command it started. A
 # process can setsid/double-fork, outlive that pane, and still be owned by the

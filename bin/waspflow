@@ -1838,6 +1838,8 @@ _reap_remaining_resources() {
   local -a remaining=()
   if tmux_window_exists "$lane"; then
     remaining+=("tmux:$(tmux_window_target "$lane")")
+  elif tmux_lane_window_cleanup_uncertain "$lane"; then
+    remaining+=("tmux:unverified-lane-window")
   fi
   while IFS=$'\x1e' read -r unit invocation; do
     [[ "$unit" =~ ^waspflow-[A-Za-z0-9._-]+\.scope$ && "$invocation" =~ ^[A-Fa-f0-9-]+$ ]] || continue
@@ -1976,13 +1978,16 @@ _reap_one() {
 
 _reap_one_locked() {
   local lane="$1" force="$2" keep_wt="$3" no_archive="$4"
-  local headless_pid
   if [[ "$(lane_get "$lane" headless_revise_state)" == running ]]; then
-    headless_pid="$(lane_get "$lane" headless_revise_pid)"
-    if [[ "$headless_pid" =~ ^[0-9]+$ ]] && kill -0 "$headless_pid" 2>/dev/null; then
+    if lane_headless_writer_active "$lane"; then
       err "reap: lane '$lane' has an active headless revise; wait for it before cleanup"
       return 1
     fi
+  fi
+  tmux_reconcile_lane_window "$lane" || true
+  if ! tmux_window_exists "$lane" && tmux_lane_window_cleanup_uncertain "$lane"; then
+    err "reap: lane '$lane' has an unverified tmux window; refusing destructive cleanup"
+    return 1
   fi
   provenance_reconcile_lane "$lane" \
     || warn "reap: lane '$lane' provenance reconciliation failed; finalization continues with the failure recorded"
