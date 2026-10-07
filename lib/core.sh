@@ -830,16 +830,54 @@ tmux_record_lane_cgroup_fallback() {
 }
 
 # `setsid` detaches login-shell hydration from tmux when user scopes are
-# unavailable. Persist a process-group receipt so cleanup can still stop it.
-# PID start ticks make PID reuse fail closed.
-_lane_detached_session_receipt_append_locked() {
-  local dir="$1" execution="$2" pid="$3" pgid="$4" sid="$5" ticks="$6" sf="$dir/state.json" tmp
-  [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ticks" =~ ^[0-9]+$ ]] || return 1
+# unavailable. A pending journal closes the gap before the child can write its
+# post-setsid receipt. PID start ticks make PID reuse fail closed.
+_lane_pending_detached_launch_append_locked() {
+  local dir="$1" lane_uuid="$2" launch_id="$3" execution="$4" pid="$5" ticks="$6" sf="$dir/state.json" tmp
+  [[ "$lane_uuid" =~ ^[0-9A-Fa-f-]+$ && "$launch_id" =~ ^[0-9A-Fa-f-]+$ && "$pid" =~ ^[0-9]+$ && "$ticks" =~ ^[0-9]+$ ]] || return 1
   tmp="$(mktemp "$dir/.state.XXXXXX")" || return 1
-  if jq --arg execution "$execution" --arg pid "$pid" --arg pgid "$pgid" --arg sid "$sid" --arg ticks "$ticks" '
-      .detached_session_receipts = ((.detached_session_receipts // []) | if type == "array" then . else [] end
+  if jq -e --arg lane_uuid "$lane_uuid" --arg launch_id "$launch_id" --arg execution "$execution" --arg pid "$pid" --arg ticks "$ticks" '
+      select(.lane_uuid == $lane_uuid)
+      | .pending_detached_launches = ((.pending_detached_launches // []) | if type == "array" then . else [] end
+        | if any(.[]; .launch_id == $launch_id) then .
+          else . + [{lane_uuid:$lane_uuid,launch_id:$launch_id,execution:$execution,pid:$pid,start_ticks:$ticks,parent_started_at:(now | floor | tostring)}] end)
+      | .updated_at = (now | floor | tostring)
+    ' "$sf" >"$tmp" 2>/dev/null; then
+    mv "$tmp" "$sf"
+  else
+    rm -f "$tmp"; return 1
+  fi
+}
+
+tmux_record_pending_detached_launch() {
+  local lane="$1" lane_uuid="$2" launch_id="$3" execution="$4" pid="$5" ticks="$6" dir
+  dir="$(lane_dir "$lane")"; mkdir -p "$dir" || return 1
+  if command -v flock >/dev/null 2>&1; then
+    ( flock 9; _lane_pending_detached_launch_append_locked "$dir" "$lane_uuid" "$launch_id" "$execution" "$pid" "$ticks" ) 9>"$dir/.state.lock"
+  else
+    _lane_pending_detached_launch_append_locked "$dir" "$lane_uuid" "$launch_id" "$execution" "$pid" "$ticks"
+  fi
+}
+
+_lane_detached_session_receipt_append_locked() {
+  local dir="$1" execution="$2" pid="$3" pgid="$4" sid="$5" ticks="$6" lane_uuid="${7:-}" launch_id="${8:-}" sf="$dir/state.json" tmp
+  [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ticks" =~ ^[0-9]+$ ]] || return 1
+  [[ -z "$lane_uuid$launch_id" || "$lane_uuid" =~ ^[0-9A-Fa-f-]+$ && "$launch_id" =~ ^[0-9A-Fa-f-]+$ ]] || return 1
+  tmp="$(mktemp "$dir/.state.XXXXXX")" || return 1
+  if jq -e --arg execution "$execution" --arg pid "$pid" --arg pgid "$pgid" --arg sid "$sid" --arg ticks "$ticks" --arg lane_uuid "$lane_uuid" --arg launch_id "$launch_id" '
+      if $launch_id != "" then
+        select(.lane_uuid == $lane_uuid)
+        | select(((.pending_detached_launches // []) | if type == "array" then . else [] end
+            | any(.[]; .launch_id == $launch_id and .pid == $pid and .start_ticks == $ticks)))
+      else . end
+      | .detached_session_receipts = ((.detached_session_receipts // []) | if type == "array" then . else [] end
         | if any(.[]; .pid == $pid and .start_ticks == $ticks) then .
-          else . + [{execution:$execution,pid:$pid,pgid:$pgid,sid:$sid,start_ticks:$ticks}] end)
+          else . + ([{execution:$execution,pid:$pid,pgid:$pgid,sid:$sid,start_ticks:$ticks}]
+            | if $launch_id == "" then . else map(. + {lane_uuid:$lane_uuid,launch_id:$launch_id}) end) end)
+      | if $launch_id == "" then . else
+          .pending_detached_launches = ((.pending_detached_launches // []) | if type == "array" then . else [] end
+            | map(select(.launch_id != $launch_id)))
+        end
       | .updated_at = (now | floor | tostring)
     ' "$sf" >"$tmp" 2>/dev/null; then
     mv "$tmp" "$sf"
@@ -849,21 +887,26 @@ _lane_detached_session_receipt_append_locked() {
 }
 
 tmux_record_lane_detached_session() {
-  local lane="$1" execution="$2" pid="$3" pgid="$4" sid="$5" ticks="$6" dir
+  local lane="$1" execution="$2" pid="$3" pgid="$4" sid="$5" ticks="$6" lane_uuid="${7:-}" launch_id="${8:-}" dir
   # A receipt can authorize a process-group signal only when it was written by
   # the post-setsid session leader itself. Do not persist a parent-side sample.
   [[ "$pid" == "$pgid" && "$pid" == "$sid" ]] || return 1
   dir="$(lane_dir "$lane")"; mkdir -p "$dir" || return 1
   if command -v flock >/dev/null 2>&1; then
-    ( flock 9; _lane_detached_session_receipt_append_locked "$dir" "$execution" "$pid" "$pgid" "$sid" "$ticks" ) 9>"$dir/.state.lock"
+    ( flock 9; _lane_detached_session_receipt_append_locked "$dir" "$execution" "$pid" "$pgid" "$sid" "$ticks" "$lane_uuid" "$launch_id" ) 9>"$dir/.state.lock"
   else
-    _lane_detached_session_receipt_append_locked "$dir" "$execution" "$pid" "$pgid" "$sid" "$ticks"
+    _lane_detached_session_receipt_append_locked "$dir" "$execution" "$pid" "$pgid" "$sid" "$ticks" "$lane_uuid" "$launch_id"
   fi
 }
 
 tmux_lane_detached_session_receipts() {
   local lane="$1" sf; sf="$(lane_state_file "$lane")"; [[ -f "$sf" ]] || return 0
   jq -c '(.detached_session_receipts // []) | if type == "array" then .[] else empty end' "$sf" 2>/dev/null || true
+}
+
+tmux_lane_pending_detached_launches() {
+  local lane="$1" sf; sf="$(lane_state_file "$lane")"; [[ -f "$sf" ]] || return 0
+  jq -c '(.pending_detached_launches // []) | if type == "array" then .[] else empty end' "$sf" 2>/dev/null || true
 }
 
 tmux_detached_session_receipt_live() {
@@ -883,63 +926,69 @@ tmux_detached_session_receipt_live() {
 # the same strong proof.  Keep that distinction explicit: callers must retain
 # an uncertain group rather than treating a dead leader as an empty group.
 # Prints one of: live, uncertain, gone, invalid.
-tmux_detached_session_receipt_group_state() {
-  local receipt="$1" pid pgid sid ticks actual got_pgid got_sid
+tmux_detached_session_receipt_group_members() {
+  local receipt="$1" pid pgid sid ticks rows member got_pgid got_sid
   pid="$(jq -r '.pid // empty' <<<"$receipt")"; pgid="$(jq -r '.pgid // empty' <<<"$receipt")"
   sid="$(jq -r '.sid // empty' <<<"$receipt")"; ticks="$(jq -r '.start_ticks // empty' <<<"$receipt")"
-  if [[ ! "$pid" =~ ^[0-9]+$ || ! "$pgid" =~ ^[0-9]+$ || ! "$sid" =~ ^[0-9]+$ || ! "$ticks" =~ ^[0-9]+$ ]]; then
-    printf 'invalid\n'; return 2
-  fi
-  if [[ "$pid" != "$pgid" || "$pid" != "$sid" ]]; then
-    printf 'invalid\n'; return 2
-  fi
-  if ! ps -eo pgid=,sid= 2>/dev/null | awk -v pgid="$pgid" -v sid="$sid" '$1 == pgid && $2 == sid { found=1 } END { exit !found }'; then
-    printf 'gone\n'; return 1
-  fi
-  if kill -0 "$pid" 2>/dev/null; then
-    actual="$(process_start_ticks "$pid" || true)"
-    read -r got_pgid got_sid < <(ps -o pgid= -o sid= -p "$pid" 2>/dev/null)
-    if [[ "$actual" == "$ticks" && "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]]; then
-      printf 'live\n'; return 0
-    fi
+  [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ticks" =~ ^[0-9]+$ ]] || return 2
+  [[ "$pid" == "$pgid" && "$pid" == "$sid" ]] || return 2
+  rows="$(ps -eo pid=,pgid=,sid= 2>/dev/null)" || return 1
+  while read -r member got_pgid got_sid; do
+    [[ "$member" =~ ^[0-9]+$ && "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]] || continue
+    ticks="$(process_start_ticks "$member")" || {
+      # A member can exit after a successful group census. That is a safe
+      # disappearance, not an observation failure; a still-present unreadable
+      # proc entry remains uncertain and blocks retirement.
+      [[ ! -e "/proc/$member" ]] && continue
+      return 1
+    }
+    [[ "$ticks" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\t%s\n' "$member" "$ticks"
+  done <<<"$rows"
+}
+
+tmux_detached_session_receipt_member_matches() {
+  local receipt="$1" member="$2" expected_ticks="$3" pgid sid actual got_pgid got_sid
+  pgid="$(jq -r '.pgid // empty' <<<"$receipt")"; sid="$(jq -r '.sid // empty' <<<"$receipt")"
+  [[ "$member" =~ ^[0-9]+$ && "$expected_ticks" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$member" 2>/dev/null || return 1
+  actual="$(process_start_ticks "$member" || true)"
+  [[ "$actual" == "$expected_ticks" ]] || return 1
+  read -r got_pgid got_sid < <(ps -o pgid= -o sid= -p "$member" 2>/dev/null)
+  [[ "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]]
+}
+
+tmux_detached_session_receipt_original_members_alive() {
+  local receipt="$1" members="$2" member ticks
+  while IFS=$'\t' read -r member ticks; do
+    [[ -n "$member" ]] || continue
+    tmux_detached_session_receipt_member_matches "$receipt" "$member" "$ticks" && return 0
+  done <<<"$members"
+  return 1
+}
+
+tmux_detached_session_receipt_group_state() {
+  local receipt="$1" pid ticks members
+  pid="$(jq -r '.pid // empty' <<<"$receipt")"; ticks="$(jq -r '.start_ticks // empty' <<<"$receipt")"
+  members="$(tmux_detached_session_receipt_group_members "$receipt")" || { printf 'uncertain\n'; return 2; }
+  [[ -n "$members" ]] || { printf 'gone\n'; return 1; }
+  if tmux_detached_session_receipt_member_matches "$receipt" "$pid" "$ticks"; then
+    printf 'live\n'; return 0
   fi
   printf 'uncertain\n'; return 2
 }
 
-tmux_detached_session_receipt_target_is_safe() {
-  local lane="$1" receipt="$2" pgid sid self_pgid self_sid pane_pid pane_pgid pane_sid
-  pgid="$(jq -r '.pgid // empty' <<<"$receipt")"; sid="$(jq -r '.sid // empty' <<<"$receipt")"
-  [[ "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ ]] || return 1
-  read -r self_pgid self_sid < <(ps -o pgid= -o sid= -p "$$" 2>/dev/null)
-  [[ "$self_pgid" =~ ^[0-9]+$ && "$self_sid" =~ ^[0-9]+$ ]] || return 1
-  # A corrupt/stale receipt must never target this cleanup shell's own process
-  # group or session. A group signal here could otherwise kill the caller.
-  [[ "$pgid" != "$self_pgid" && "$sid" != "$self_sid" ]] || return 1
-  pane_pid="$(lane_get "$lane" tmux_pane_pid)"
-  if [[ "$pane_pid" =~ ^[0-9]+$ ]] && kill -0 "$pane_pid" 2>/dev/null; then
-    read -r pane_pgid pane_sid < <(ps -o pgid= -o sid= -p "$pane_pid" 2>/dev/null)
-    [[ "$pane_pgid" =~ ^[0-9]+$ && "$pane_sid" =~ ^[0-9]+$ ]] || return 1
-    [[ "$pgid" != "$pane_pgid" && "$sid" != "$pane_sid" ]] || return 1
-  fi
-}
-
-tmux_detached_session_receipt_group_survived_term() {
-  local receipt="$1" pid pgid sid
-  pid="$(jq -r '.pid // empty' <<<"$receipt")"; pgid="$(jq -r '.pgid // empty' <<<"$receipt")"
-  sid="$(jq -r '.sid // empty' <<<"$receipt")"
-  [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ ]] || return 1
-  [[ "$pid" == "$pgid" && "$pid" == "$sid" ]] || return 1
-  # This is valid only after this function proved the leader live immediately
-  # before TERM. If the leader then exits while its PGID/SID still has members,
-  # that group ID cannot have been reused; it remains safe to complete the
-  # bounded retirement for its TERM-resistant descendants.
-  ! kill -0 "$pid" 2>/dev/null || return 1
-  ps -eo pgid=,sid= 2>/dev/null | awk -v pgid="$pgid" -v sid="$sid" '$1 == pgid && $2 == sid { found=1 } END { exit !found }'
+tmux_detached_session_receipt_signal_members() {
+  local receipt="$1" signal="$2" members="$3" member ticks
+  while IFS=$'\t' read -r member ticks; do
+    [[ -n "$member" ]] || continue
+    tmux_detached_session_receipt_member_matches "$receipt" "$member" "$ticks" || continue
+    kill "-$signal" "$member" 2>/dev/null || true
+  done <<<"$members"
 }
 
 tmux_kill_detached_session_receipt_if_owned() {
-  local lane="$1" receipt="$2" pgid state _
-  pgid="$(jq -r .pgid <<<"$receipt")"
+  local lane="$1" receipt="$2" state members original_members _
   state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
   case "$state" in
     gone) return 0 ;;
@@ -949,37 +998,77 @@ tmux_kill_detached_session_receipt_if_owned() {
       return 1
       ;;
   esac
-  tmux_detached_session_receipt_target_is_safe "$lane" "$receipt" || {
-    warn "detached execution remains unretired: receipt could target this caller or pane; inspect lane '$lane'"
+  # Snapshot concrete process identities before any signal. A numeric PGID is
+  # recyclable once its leader exits, so retirement only targets a member whose
+  # PID and start ticks still match this owned session.
+  original_members="$(tmux_detached_session_receipt_group_members "$receipt")" || {
+    warn "detached execution remains unretired: process enumeration failed; inspect lane '$lane' before cleanup"
     return 1
   }
-  # Revalidate immediately before every group signal. The leader's PID can
-  # exit or be reused while cleanup is deciding what to do.
-  [[ "$(tmux_detached_session_receipt_group_state "$receipt" || true)" == live ]] || return 1
-  kill -TERM -- "-$pgid" 2>/dev/null || true
+  [[ -n "$original_members" ]] || return 0
+  tmux_detached_session_receipt_signal_members "$receipt" TERM "$original_members"
   for _ in 1 2 3 4 5; do
     sleep 0.1
-    state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
-    [[ "$state" == gone ]] && return 0
+    members="$(tmux_detached_session_receipt_group_members "$receipt")" || {
+      warn "detached execution remains unretired: process enumeration failed; inspect lane '$lane' before cleanup"
+      return 1
+    }
+    [[ -n "$members" ]] || return 0
+    if ! tmux_detached_session_receipt_original_members_alive "$receipt" "$original_members"; then
+      warn "detached execution remains unretired: original members exited while group members remain; inspect lane '$lane' before cleanup"
+      return 1
+    fi
+    tmux_detached_session_receipt_signal_members "$receipt" TERM "$members"
   done
-  state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
-  [[ "$state" == live ]] || tmux_detached_session_receipt_group_survived_term "$receipt" || {
-    warn "detached execution remains unretired after TERM: leader/group identity is no longer provable; inspect lane '$lane'"
+  members="$(tmux_detached_session_receipt_group_members "$receipt")" || {
+    warn "detached execution remains unretired: process enumeration failed; inspect lane '$lane' before cleanup"
     return 1
   }
-  tmux_detached_session_receipt_target_is_safe "$lane" "$receipt" || return 1
-  kill -KILL -- "-$pgid" 2>/dev/null || true
+  [[ -n "$members" ]] || return 0
+  if ! tmux_detached_session_receipt_original_members_alive "$receipt" "$original_members"; then
+    warn "detached execution remains unretired after TERM: original members exited while group members remain; inspect lane '$lane' before cleanup"
+    return 1
+  fi
+  tmux_detached_session_receipt_signal_members "$receipt" KILL "$members"
   for _ in 1 2 3 4 5; do
     sleep 0.1
-    state="$(tmux_detached_session_receipt_group_state "$receipt" || true)"
-    [[ "$state" == gone ]] && return 0
+    members="$(tmux_detached_session_receipt_group_members "$receipt")" || {
+      warn "detached execution remains unretired: process enumeration failed; inspect lane '$lane' before cleanup"
+      return 1
+    }
+    [[ -z "$members" ]] && return 0
   done
   warn "detached execution remains unretired after TERM/KILL; inspect lane '$lane' before cleanup"
   return 1
 }
 
+tmux_kill_pending_detached_launch_if_owned() {
+  local lane="$1" pending="$2" lane_uuid launch_id pid ticks actual
+  lane_uuid="$(jq -r '.lane_uuid // empty' <<<"$pending")"
+  launch_id="$(jq -r '.launch_id // empty' <<<"$pending")"
+  pid="$(jq -r '.pid // empty' <<<"$pending")"
+  ticks="$(jq -r '.start_ticks // empty' <<<"$pending")"
+  if [[ "$lane_uuid" != "$(lane_get "$lane" lane_uuid)" || ! "$launch_id" =~ ^[0-9A-Fa-f-]+$ || ! "$pid" =~ ^[0-9]+$ || ! "$ticks" =~ ^[0-9]+$ ]]; then
+    warn "detached launch remains unretired: pending journal identity is invalid; inspect lane '$lane' before cleanup"
+    return 1
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    actual="$(process_start_ticks "$pid" || true)"
+    if [[ "$actual" == "$ticks" ]]; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  fi
+  # A pending launch has not proven that its direct child became the recorded
+  # session leader. Never infer that its descendants are gone from one PID.
+  warn "detached launch remains unretired: pending launch '$launch_id' is uncertain; inspect lane '$lane' before cleanup"
+  return 1
+}
+
 tmux_kill_owned_lane_detached_sessions() {
-  local lane="$1" receipt rc=0
+  local lane="$1" receipt pending rc=0
+  while IFS= read -r pending; do
+    [[ -z "$pending" ]] || tmux_kill_pending_detached_launch_if_owned "$lane" "$pending" || rc=1
+  done < <(tmux_lane_pending_detached_launches "$lane")
   while IFS= read -r receipt; do
     [[ -z "$receipt" ]] || tmux_kill_detached_session_receipt_if_owned "$lane" "$receipt" || rc=1
   done < <(tmux_lane_detached_session_receipts "$lane")
@@ -989,7 +1078,13 @@ tmux_kill_owned_lane_detached_sessions() {
 # Escalation launches the new arm before retiring the old one.  Preserve the
 # freshly-provisioned execution while retiring every older detached group.
 tmux_kill_owned_lane_detached_sessions_except_execution() {
-  local lane="$1" keep_execution="$2" receipt execution rc=0
+  local lane="$1" keep_execution="$2" receipt pending execution rc=0
+  while IFS= read -r pending; do
+    [[ -n "$pending" ]] || continue
+    execution="$(jq -r '.execution // empty' <<<"$pending")"
+    [[ "$execution" == "$keep_execution" ]] && continue
+    tmux_kill_pending_detached_launch_if_owned "$lane" "$pending" || rc=1
+  done < <(tmux_lane_pending_detached_launches "$lane")
   while IFS= read -r receipt; do
     [[ -n "$receipt" ]] || continue
     execution="$(jq -r '.execution // empty' <<<"$receipt")"
@@ -1257,7 +1352,7 @@ tmux_lane_provider_identity() {
 # Bound only login-shell startup, never the provider's task. The watchdog
 # watches readiness AFTER profile hydration and cleans only owned processes.
 tmux_lane_login_shell() {
-  local lane="$1" execution="${2:-pane}" command_text="${3:-}" ready watchdog child rc=0 seconds ticks provider identity spawner detached=0 receipt_command
+  local lane="$1" execution="${2:-pane}" command_text="${3:-}" ready watchdog child rc=0 seconds ticks provider identity spawner detached=0 receipt_command lane_uuid launch_id gate child_ticks
   # Keep the historical two-argument helper call shape for direct callers.
   if [[ -z "$command_text" ]]; then command_text="$execution"; execution=pane; fi
   provider="$(lane_get "$lane" provider)"
@@ -1271,19 +1366,34 @@ tmux_lane_login_shell() {
   [[ -n "$command_text" ]] || return 2
   receipt_command="printf ready >$(printf '%q' "$ready")"
   if command -v setsid >/dev/null 2>&1; then
-    # This runs inside the process created by setsid, after it becomes a new
-    # session leader. The parent must never sample `$!` before setsid completes.
-    receipt_command="( source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_record_lane_detached_session $(printf '%q' "$lane") $(printf '%q' "$execution") \"\$\$\" \"\$(ps -o pgid= -p \"\$\$\" | tr -d ' ')\" \"\$(ps -o sid= -p \"\$\$\" | tr -d ' ')\" \"\$(process_start_ticks \"\$\$\")\" ) || exit 125; printf ready >$(printf '%q' "$ready")"
+    lane_uuid="$(lane_get "$lane" lane_uuid)"
+    if [[ ! "$lane_uuid" =~ ^[0-9A-Fa-f-]+$ ]]; then
+      lane_uuid="$(new_uuid)" && lane_set "$lane" lane_uuid "$lane_uuid" || return 1
+    fi
+    launch_id="$(new_uuid)" || return 1
+    gate="$(mktemp -u "$(lane_dir "$lane")/.pending-detached-gate.XXXXXX")" || return 1
+    # The wrapper waits behind the durable journal. Its PID remains the same
+    # across exec+setsid unless setsid forks; that exceptional case fails the
+    # pending-to-receipt CAS and cannot run the provider command.
+    receipt_command="( source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_record_lane_detached_session $(printf '%q' "$lane") $(printf '%q' "$execution") \"\$\$\" \"\$(ps -o pgid= -p \"\$\$\" | tr -d ' ')\" \"\$(ps -o sid= -p \"\$\$\" | tr -d ' ')\" \"\$(process_start_ticks \"\$\$\")\" $(printf '%q' "$lane_uuid") $(printf '%q' "$launch_id") ) || exit 125; printf ready >$(printf '%q' "$ready")"
     detached=1
   fi
   local -a login_shell=(bash -lc "$receipt_command; bash -c $(printf '%q' "$identity") -- $(printf '%q' "$lane") \"\$(command -v $(printf '%q' "$provider") || true)\" \"\$(type -t $(printf '%q' "$provider") || true)\" $(printf '%q' "$spawner"); $command_text")
-  if [[ "$detached" -eq 1 ]]; then login_shell=(setsid "${login_shell[@]}"); fi
+  if [[ "$detached" -eq 1 ]]; then login_shell=(bash -c 'while [[ ! -f "$1" ]]; do sleep 0.01; done; shift; exec setsid "$@"' -- "$gate" "${login_shell[@]}"); fi
   if ( : </dev/tty ) 2>/dev/null; then
     "${login_shell[@]}" </dev/tty &
   else
     "${login_shell[@]}" </dev/null &
   fi
   child=$!
+  if [[ "$detached" -eq 1 ]]; then
+    child_ticks="$(process_start_ticks "$child" || true)"
+    if ! tmux_record_pending_detached_launch "$lane" "$lane_uuid" "$launch_id" "$execution" "$child" "$child_ticks"; then
+      kill -TERM "$child" 2>/dev/null || true
+      return 1
+    fi
+    : >"$gate"
+  fi
   (
     local i
     for ((i=0; i<ticks; i++)); do
@@ -1308,6 +1418,7 @@ tmux_lane_login_shell() {
   watchdog=$!
   wait "$child" || rc=$?
   kill "$watchdog" 2>/dev/null || true
+  [[ "$detached" -eq 0 ]] || rm -f "$gate"
   wait "$watchdog" 2>/dev/null || true
   rm -f "$ready"
   return "$rc"

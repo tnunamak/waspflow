@@ -76,7 +76,10 @@ EOF
   printf 'report\n' >"$dirty_wt/report.txt"
   worktree_preserve_report_for_cleanup "$dirty_wt" "$dirty_wt/report.txt" "$r3f1/reaped-report-dirty" >/dev/null
   printf 'real user change\n' >"$dirty_wt/other.txt"
-  ! worktree_remove report-dirty "$dirty_wt" "$report_repo" 0
+  if worktree_remove report-dirty "$dirty_wt" "$report_repo" 0; then
+    echo 'verify: unexpected success at scripts/fixtures/verify-r3-f1.sh:79' >&2
+    exit 1
+  fi
   [[ -d "$dirty_wt" ]]
 
   # B2: retirement can exclude the freshly-provisioned escalation group while

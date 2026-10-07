@@ -108,6 +108,8 @@ The default state directory holds prompts and transcripts. Treat it as sensitive
 
 ## Verify
 
+The test suite requires Bash 4 or later and ripgrep (`rg`). Run it with:
+
 ```bash
 scripts/verify.sh
 ```

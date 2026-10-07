@@ -47,12 +47,21 @@ tmux_capture_lane_ownership lane "$window"
 # A missing tag, a foreign tag, and a wrong recorded session have no authority
 # to steer or clean up a same-named pane.
 tmux set-option -wu -t "$window" @waspflow_home
-! tmux_owned_lane_window_target lane >/dev/null
+if tmux_owned_lane_window_target lane >/dev/null; then
+  echo 'verify: unexpected success at scripts/fixtures/verify-s6-runtime.sh:50' >&2
+  exit 1
+fi
 tmux set-option -w -t "$window" @waspflow_home "$fixture/foreign"
-! tmux_owned_lane_window_target lane >/dev/null
+if tmux_owned_lane_window_target lane >/dev/null; then
+  echo 'verify: unexpected success at scripts/fixtures/verify-s6-runtime.sh:52' >&2
+  exit 1
+fi
 tmux set-option -w -t "$window" @waspflow_home "$(cd "$WASPFLOW_HOME" && pwd -P)"
 lane_set lane tmux_session unrelated
-! tmux_owned_lane_window_target lane >/dev/null
+if tmux_owned_lane_window_target lane >/dev/null; then
+  echo 'verify: unexpected success at scripts/fixtures/verify-s6-runtime.sh:55' >&2
+  exit 1
+fi
 lane_set lane tmux_session waspflow
 
 # Restoration accepts only one same-cwd candidate with both durable tags.
@@ -67,7 +76,10 @@ tmux_reconcile_lane_window lane
 tmux set-option -wu -t "$restored" @waspflow_lane_uuid
 tmux kill-window -t "$restored"
 untagged="$(tmux new-window -d -P -F '#{window_id}' -t waspflow:1 -n lane "cd $(printf '%q' "$fixture/cwd"); exec sleep 30")"
-! tmux_reconcile_lane_window lane
+if tmux_reconcile_lane_window lane; then
+  echo 'verify: unexpected success at scripts/fixtures/verify-s6-runtime.sh:70' >&2
+  exit 1
+fi
 tmux kill-window -t "$untagged"
 
 # A lane session gets the conservative cap; an unrelated session remains alone.
@@ -100,10 +112,16 @@ lane_set headless cwd "$repo" status parked headless_revise_pid "$writer" \
 warn_shared_checkout_lanes "$repo" 2>"$fixture/conflict"
 grep -q "lane 'headless' is also live" "$fixture/conflict"
 kill "$writer"; wait "$writer" 2>/dev/null || true
-! lane_headless_writer_active headless
+if lane_headless_writer_active headless; then
+  echo 'verify: unexpected success at scripts/fixtures/verify-s6-runtime.sh:103' >&2
+  exit 1
+fi
 sleep 30 & reused=$!
 lane_set headless headless_revise_pid "$reused" headless_revise_pid_start_ticks 0
-! lane_headless_writer_active headless
+if lane_headless_writer_active headless; then
+  echo 'verify: unexpected success at scripts/fixtures/verify-s6-runtime.sh:106' >&2
+  exit 1
+fi
 kill "$reused"; wait "$reused" 2>/dev/null || true
 
 # The hydration watchdog is startup-only: a hung login shell becomes durable
