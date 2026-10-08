@@ -68,8 +68,8 @@ EOF
   # consumers, and a retry after lease expiry remains possible.
   first="$(reconcile_event_emit live 1 completion)"; second="$(reconcile_event_emit live 2 completion)"
   [[ "$first" != "$second" ]]
-  reconcile_event_claim "$first" consumer-a 1 | jq -e '.ok == true' >/dev/null
-  reconcile_event_claim "$first" consumer-b 1 | jq -e '.ok == false and .reason == "claimed"' >/dev/null
+  reconcile_event_claim "$first" consumer-a 60 | jq -e '.ok == true' >/dev/null
+  reconcile_event_claim "$first" consumer-b 60 | jq -e '.ok == false and .reason == "claimed"' >/dev/null
   # A one-second sleep races the integer-second lease boundary. Expire the
   # fixture claim explicitly so the next assertion is deterministic.
   claims_file="$(reconcile_event_claims)"
