@@ -2,27 +2,16 @@
 
 Status: implemented (`escalate --defer`)
 Created: 2026-09-25
-Related: `docs/design/ESCALATION_V1.md` (the transition this reuses),
-`docs/warm-worker-restart.md` (why a resumed session is a transcript replay).
+Related: [warm worker restart](warm-worker-restart.md) (why a resumed session is a transcript replay).
 
 ## Why
 
 A resumed or switched session replays its transcript. If the model or effort
 changes, the provider prompt cache does not match, so the next call re-reads the
-whole transcript uncached. Local Claude Code logs (30 days, 2,059 sessions) show:
-
-| First call after | Median cache hit | Median uncached tokens | n |
-|---|---|---|---|
-| a mid-session model switch | 2% | 520K | 34 |
-| a compaction | 27% | 45K | 53 |
-| an idle gap of 5-60 min | 99.8% | — | 4,530 |
-| an idle gap over 60 min | 3% | — | 357 |
-
-A switch right after a compaction re-reads about 12x less. After more than 60
-idle minutes (the 1-hour cache TTL), the cache is gone anyway, so the switch
-costs nothing extra. Source: `ai/research/model-routing/mid-session-model-switches-rewrite-about-12x-more-uncached-prompt-than-switching-right-after-compaction-so-defer-switches-to-cold-cache-boundaries.md`
-in the dotfiles repo. Devin Fusion times model switches to compaction boundaries
-for the same reason.
+whole transcript uncached. Observed provider-cache behavior suggests that a switch
+soon after compaction can require less re-reading, while a sufficiently long idle
+gap may expire the cache. Treat this as a cost heuristic, not a guaranteed provider
+contract.
 
 ## Switch now or defer
 

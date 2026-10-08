@@ -84,7 +84,10 @@ done
       echo "Claude receipt: $mode falsely confirmed" >&2; exit 1
     fi
     [[ "$(lane_get receipt claude_submission_state)" == unconfirmed && "$(wc -l <"$fixture/enters")" == 5 ]]
-    ! grep -q 'No such file\|ambiguous redirect' "$fixture/errors"
+    if grep -q 'No such file\|ambiguous redirect' "$fixture/errors"; then
+      echo 'verify: unexpected success at scripts/verify.sh:87' >&2
+      exit 1
+    fi
   done
   rm -f "$log_file"; : >"$fixture/enters"; mode=delayed
   claude_revise receipt "requested update" 2>"$fixture/errors"
@@ -94,10 +97,16 @@ done
   _claude_pane() { echo ""; }
   WASPFLOW_SUBMIT_ATTEMPTS=1
   rm -f "$log_file"
-  ! _claude_verify_started receipt @fixture "prompt" session nonce
+  if _claude_verify_started receipt @fixture "prompt" session nonce; then
+    echo 'verify: unexpected success at scripts/verify.sh:97' >&2
+    exit 1
+  fi
   [[ "$WASPFLOW_PROVIDER_LAUNCH_ERROR" == session-log-unavailable ]]
   printf '%s\n' '{"type":"assistant","message":{"content":"nonce"}}' >"$log_file"
-  ! _claude_verify_started receipt @fixture "prompt" session nonce
+  if _claude_verify_started receipt @fixture "prompt" session nonce; then
+    echo 'verify: unexpected success at scripts/verify.sh:100' >&2
+    exit 1
+  fi
   [[ "$WASPFLOW_PROVIDER_LAUNCH_ERROR" == receipt-timeout ]]
   printf '%s\n' '{"type":"user","message":{"content":"nonce"}}' >>"$log_file"
   _claude_verify_started receipt @fixture "prompt" session nonce
@@ -116,10 +125,19 @@ done
   printf '@1|shared|%s|uuid-a\n' "$WASPFLOW_HOME" >"$fixture/windows"
   [[ "$(tmux_window_target shared)" == @1 ]]
   printf '@2|shared|%s|uuid-b\n' "$fixture/other" >>"$fixture/windows"
-  ! tmux_window_target shared >/dev/null 2>&1
-  ! tmux_window_exists shared
+  if tmux_window_target shared >/dev/null 2>&1; then
+    echo 'verify: unexpected success at scripts/verify.sh:119' >&2
+    exit 1
+  fi
+  if tmux_window_exists shared; then
+    echo 'verify: unexpected success at scripts/verify.sh:120' >&2
+    exit 1
+  fi
   tail -1 "$fixture/windows" >"$fixture/foreign"; mv "$fixture/foreign" "$fixture/windows"
-  ! tmux_window_target shared >"$fixture/result" 2>"$fixture/error"
+  if tmux_window_target shared >"$fixture/result" 2>"$fixture/error"; then
+    echo 'verify: unexpected success at scripts/verify.sh:122' >&2
+    exit 1
+  fi
   grep -q 'foreign home' "$fixture/error"
   [[ "$(cat "$fixture/result")" == '!waspflow-unresolved!' ]]
 )
@@ -238,9 +256,15 @@ grep -q '`flock`' "$root/docs/prerequisites.md"
 # Lane provenance: --op spawn records policy_version + catalog_ref
 grep -Eq 'policy_version' "$root/bin/waspflow"
 grep -Eq 'catalog_ref' "$root/bin/waspflow"
-# The disallowed three-value group is a literal source fragment, not an ERE.
-! grep -Fq 'high|xhigh|max' "$root/lib/providers/codex.sh"
-! grep -Fq 'high|xhigh|max' "$root/lib/exec.sh"
+# Reject only a standalone three-value group; the valid list also contains ultra.
+if grep -Eq '(^|[^|[:alnum:]_])high\|xhigh\|max([^|[:alnum:]_]|$)' "$root/lib/providers/codex.sh"; then
+  echo 'verify: unexpected success at scripts/verify.sh:260' >&2
+  exit 1
+fi
+if grep -Eq '(^|[^|[:alnum:]_])high\|xhigh\|max([^|[:alnum:]_]|$)' "$root/lib/exec.sh"; then
+  echo 'verify: unexpected success at scripts/verify.sh:264' >&2
+  exit 1
+fi
 
 # Claude folder-trust gate. Two independent bugs made an untrusted --cwd fatal:
 # the pane text is strip_ansi'd so its padding collapses ("Yes,Itrustthisfolder"),
@@ -1321,7 +1345,10 @@ grep -q 'qwen' "$root/lib/core.sh"
 # must probe the binary that actually exists.
 grep -q 'command -v dsh' <<<"$demo_body"
 grep -q 'provider="deepseek"' <<<"$demo_body"
-! grep -q 'command -v deepseek' <<<"$demo_body"
+if grep -q 'command -v deepseek' <<<"$demo_body"; then
+  echo 'verify: unexpected success at scripts/verify.sh:1324' >&2
+  exit 1
+fi
 grep -q 'deepseek' "$root/lib/core.sh"
 
 set +e
@@ -1896,8 +1923,9 @@ JSONL
 )
 
 # Pin: the ambiguous cwd-only fallback must not exist in the shipped adapter.
-! grep -q '_codex_find_rollout_for_cwd' "$root/lib/providers/codex.sh" \
-  || { echo "codex: ambiguous cwd-only rollout fallback regressed back in" >&2; exit 1; }
+if grep -q '_codex_find_rollout_for_cwd' "$root/lib/providers/codex.sh"; then
+  echo "codex: ambiguous cwd-only rollout fallback regressed back in" >&2; exit 1
+fi
 grep -q 'FAILS' "$root/lib/providers/codex.sh" || { echo "codex: fail-closed discovery comment missing" >&2; exit 1; }
 
 # Grok idle/resumable: last turn_* event is turn_ended (MCP noise after is fine).
@@ -1952,8 +1980,8 @@ JSONL
   ( guard_cwd "$fixture" ) || { echo "guard_cwd: rejected a real dir" >&2; exit 1; }
 )
 
-# BUG 2 — _exec_output_is_useful: reject empty/whitespace/pure-error output;
-# accept real short answers (must not false-reject a legit file list).
+# BUG 2 — _exec_output_is_useful: reject empty/whitespace output only;
+# accept arbitrary nonblank successful answers.
 (
   # shellcheck disable=SC1090
   source "$root/lib/core.sh"
@@ -1967,10 +1995,10 @@ JSONL
   printf 'foo.txt\nbar.txt\n'  > "$d/list"     # real short answer — MUST pass
   printf 'a\n'                 > "$d/tiny"      # 2 bytes — MUST pass
   printf 'Execution error: the parser threw on line 5, here is the fix\n' > "$d/mention"  # MUST pass
-  for bad in empty blank err na; do
+  for bad in empty blank; do
     if _exec_output_is_useful "$d/$bad"; then echo "exec-useful: '$bad' wrongly accepted" >&2; exit 1; fi
   done
-  for good in list tiny mention; do
+  for good in err na list tiny mention; do
     _exec_output_is_useful "$d/$good" || { echo "exec-useful: '$good' wrongly rejected" >&2; exit 1; }
   done
   rm -rf "$d"
@@ -2017,8 +2045,8 @@ JSONL
   if (_exec_abs_output_path "$d/link") 2>/dev/null; then exit 1; fi
   [[ "$(cat "$d/input")" == input ]]
   _exec_codex() { printf 'Execution error\n' >"$5"; }
-  if exec_run --provider codex --cwd "$d" -o "$d/out" -- test; then exit 1; fi
-  jq -e '.state == "invalid" and .bytes > 0' "$d/receipt" >/dev/null
+  exec_run --provider codex --cwd "$d" -o "$d/out" -- test
+  jq -e '.state == "present" and .bytes > 0' "$d/receipt" >/dev/null
   _exec_codex() { printf 'Execution error: explained and fixed\n' >"$5"; }
   exec_run --provider codex --cwd "$d" -o "$d/out" -- test
 )
@@ -2082,7 +2110,7 @@ JSONL
   # Case B: a FRESH child mid-turn (last event not end_turn) -> NOT idle (rc 2).
   child="$slug/$sid/subagents/agent-11111111.jsonl"
   printf '%s\n' '{"isSidechain":true,"type":"assistant","message":{"stop_reason":"tool_use"}}' > "$child"
-  # (freshly written -> mtime is now; within CLAUDE_SUBAGENT_ACTIVE_SECS)
+  # Fresh unfinished children must block settlement too.
   set +e; claude_is_idle claude-idle; rc=$?; set -e
   [[ "$rc" -eq 2 ]] || { echo "claude_is_idle: expected rc=2 (children active), got $rc" >&2; exit 1; }
 
@@ -2090,10 +2118,11 @@ JSONL
   printf '%s\n' '{"isSidechain":true,"type":"assistant","message":{"stop_reason":"end_turn"}}' > "$child"
   claude_is_idle claude-idle || { echo "claude_is_idle: expected idle after child end_turn" >&2; exit 1; }
 
-  # Case D: a mid-turn child that has gone COLD (mtime old) -> treated as done -> idle.
+  # Case D: a quiet unfinished child remains unsafe: age is not completion evidence.
   printf '%s\n' '{"isSidechain":true,"type":"assistant","message":{"stop_reason":"tool_use"}}' > "$child"
   touch -d '1 hour ago' "$child" 2>/dev/null || touch -t 202001010000 "$child"
-  claude_is_idle claude-idle || { echo "claude_is_idle: cold mid-turn child should not block idle" >&2; exit 1; }
+  set +e; claude_is_idle claude-idle; rc=$?; set -e
+  [[ "$rc" -eq 2 ]] || { echo "claude_is_idle: cold mid-turn child must block idle, got $rc" >&2; exit 1; }
 
   # Case E: parent itself NOT done (no end_turn) -> not idle (rc 1) regardless of children.
   printf '%s\n' '{"type":"assistant","message":{"stop_reason":"tool_use"}}' > "$slug/$sid.jsonl"
@@ -2557,6 +2586,7 @@ JSONL
   enter_count=0
   revise_event=""
   tmux() {
+    [[ "$1" == capture-pane ]] && { printf '› Ask Codex to do anything\n'; return 0; }
     local last="${!#}"
     if [[ "$last" == Enter ]]; then
       ((++enter_count))
@@ -2566,7 +2596,11 @@ JSONL
           ;;
         started)
           if [[ "$enter_count" -eq 1 ]]; then
-            printf '%s\n' '{"type":"event_msg","payload":{"type":"task_started"}}' >>"$revise_rollout"
+            # A bare task_started may be another queued turn. The requested
+            # revise is confirmed only by its exact message and same turn ID.
+            printf '%s\n' \
+              '{"type":"event_msg","payload":{"type":"task_started","turn_id":"revise-turn"}}' \
+              '{"type":"event_msg","payload":{"type":"user_message","turn_id":"revise-turn","message":"retry this"}}' >>"$revise_rollout"
           fi
           ;;
       esac
@@ -2604,7 +2638,8 @@ JSONL
     "$(lane_state_file codex-live-revise)" >/dev/null \
     || { echo "codex revise: queued receipt is not truthful" >&2; exit 1; }
 
-  # Only a new task_started event confirms receipt; preserve the same live path.
+  # The exact user message paired with a same-turn task_started confirms receipt,
+  # including Codex's start-before-user ordering.
   reset_revise_rollout; enter_count=0; revise_event=started
   codex_revise codex-live-revise "retry this"
   jq -e '.revise_submitted == "true" and .revise_submission_state == "confirmed-task-started" and .revise_submission_error == "" and .revise_task_started_mark == "1"' \
@@ -2614,7 +2649,7 @@ JSONL
 )
 
 # Fan-in ledger — `close` sets outcome + requires provenance; `captured` reports
-# CAPTURED/UNIQUE/PARTIAL by CONTENT. Both are trust-critical for fleet cleanup
+# CAPTURED/UNKNOWN by exact content evidence. Both are trust-critical for fleet cleanup
 # yet had no behavioral coverage. Deterministic, no agent needed.
 (
   export WASPFLOW_HOME="$state_home"
@@ -2640,7 +2675,7 @@ JSONL
   if fanin_outcome_matches fi-close "harvested"; then echo "close: filter should NOT match harvested now" >&2; exit 1; fi
 
   # captured: build a real git repo, a lane branch that adds a file+symbol, and
-  # three refs — one WITH the work (CAPTURED), one WITHOUT (UNIQUE).
+  # three refs — one WITH the work (CAPTURED), one without exact evidence (UNKNOWN).
   crepo="$(mktemp -d "$scratch/waspflow-captured-XXXXXX")"
   git -C "$crepo" init -q
   git -C "$crepo" config user.email t@e.invalid; git -C "$crepo" config user.name T
@@ -2663,7 +2698,7 @@ JSONL
   verdict_cap="$(fanin_captured fi-cap integrated 2>/dev/null)"
   [[ "$verdict_cap" == "CAPTURED" ]] || { echo "captured: expected CAPTURED vs integrated, got '$verdict_cap'" >&2; exit 1; }
   verdict_uniq="$(fanin_captured fi-cap main 2>/dev/null)"
-  [[ "$verdict_uniq" == "UNIQUE" ]] || { echo "captured: expected UNIQUE vs fork point, got '$verdict_uniq'" >&2; exit 1; }
+  [[ "$verdict_uniq" == "UNKNOWN" ]] || { echo "captured: expected UNKNOWN without exact evidence vs fork point, got '$verdict_uniq'" >&2; exit 1; }
   rm -rf "$crepo"
 )
 
@@ -2826,7 +2861,8 @@ PROV
 
   # The chosen headless revise writes headless_revise_state, not the dot
   # patch's synthetic revise_submission_state used by the fixture above.
-  lane_set barlane headless_revise_state running headless_revise_pid "$$"
+  lane_set barlane headless_revise_state running headless_revise_pid "$$" \
+    headless_revise_pid_start_ticks "$(process_start_ticks "$$")"
   set +e; run_wait 1 >/dev/null 2>&1; rc=$?; set -e
   [[ "$rc" -eq 1 ]] || { echo "wait: chosen running headless receipt reused old idle" >&2; exit 1; }
   lane_set barlane headless_revise_state timeout
@@ -2835,7 +2871,8 @@ PROV
   lane_set barlane headless_revise_state running headless_revise_pid 999999
   set +e; run_wait 5 >/dev/null 2>&1; rc=$?; set -e
   [[ "$rc" -eq 3 ]] || { echo "wait: dead headless pid did not interrupt wait" >&2; exit 1; }
-  lane_set barlane headless_revise_state running headless_revise_pid "$$"
+  lane_set barlane headless_revise_state running headless_revise_pid "$$" \
+    headless_revise_pid_start_ticks "$(process_start_ticks "$$")"
   (
     sleep 1
     printf 'headless deliverable\n' >"$ctl/headless-deliverable"
@@ -2891,7 +2928,9 @@ grep -q 'turn_mark' "$root/lib/core.sh" || { echo "core: turn_mark not in provid
 # the user's interactive profile, which was nondeterministic under load and flakily
 # failed passing verify commands. Guard against regressing to -lc.
 grep -q 'bash -c "\$command"' "$root/lib/artifacts.sh" || { echo "artifacts: verify must use bash -c (non-login), not -lc" >&2; exit 1; }
-! grep -q 'bash -lc "\$command"' "$root/lib/artifacts.sh" || { echo "artifacts: verify regressed to login shell (-lc)" >&2; exit 1; }
+if grep -q 'bash -lc "\$command"' "$root/lib/artifacts.sh"; then
+  echo "artifacts: verify regressed to login shell (-lc)" >&2; exit 1
+fi
 # Pin: cmd_spawn ends with an explicit success so a contract-less spawn does not
 # exit nonzero (which trained callers to ignore spawn's exit code, hiding real fails).
 grep -q 'spawn_submitted' "$root/bin/waspflow" || { echo "spawn: submission-confirmation (spawn_submitted) missing" >&2; exit 1; }
@@ -3335,7 +3374,10 @@ grep -q 'corrupted state.json' "$root/bin/waspflow" || { echo "status: corrupt-j
   tmux new-window -d -t "$WASPFLOW_TMUX_SESSION" -n stalled \
     "bash -c 'printf \"some generic output with no prompt words at all\n\"; exec cat'" 2>/dev/null
   mkdir -p "$state_home/lanes/stalled"
-  echo '{"provider":"claude","status":"live","session_id":"no-such","cwd":"/tmp"}' > "$state_home/lanes/stalled/state.json"
+  stall_uuid="$(uuidgen)"
+  tmux set-option -w -t "$WASPFLOW_TMUX_SESSION:stalled" @waspflow_home "$(cd "$state_home" && pwd -P)"
+  tmux set-option -w -t "$WASPFLOW_TMUX_SESSION:stalled" @waspflow_lane_uuid "$stall_uuid"
+  echo '{"provider":"claude","status":"live","session_id":"no-such","cwd":"/tmp","lane_uuid":"'"$stall_uuid"'"}' > "$state_home/lanes/stalled/state.json"
   : > "$state_home/lanes/stalled/transcript.log"
   set +e
   t0="$(date +%s)"
@@ -3594,7 +3636,7 @@ CLAUDE
   set -e
   [[ "$ceiling_rc" -ne 0 && "$ceiling_err" == *'background-task wait ceiling'* \
     && "$ceiling_err" == *'CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0'* \
-    && "$(cat "$ceiling_out")" == *'partial worker output'* ]] \
+    && "$(cat "$ceiling_out.partial")" == *'partial worker output'* ]] \
     || { echo "claude exec: background ceiling was reported as success or output was lost" >&2; exit 1; }
 
   ceiling_out="$claude_ceiling_home/stderr-partial.out"
@@ -3617,7 +3659,7 @@ CLAUDE
   set -e
   ceiling_err="$(cat "$ceiling_log")"
   [[ "$ceiling_rc" -ne 0 && "$ceiling_err" == *'CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0'* \
-    && "$(cat "$ceiling_out")" == *'partial worker output'* ]] \
+    && "$(cat "$ceiling_out.partial")" == *'partial worker output'* ]] \
     || { echo "claude exec: stderr background ceiling was not detected" >&2; exit 1; }
 
   ceiling_out="$claude_ceiling_home/quoted.out"
@@ -3994,7 +4036,7 @@ PROV
   # not a hand-written replacement state file: both receipts must survive and
   # have independent identities.
   WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
-    "$root/bin/waspflow" reap mcp-state --no-archive >/dev/null
+    "$root/bin/waspflow" reap mcp-state --no-archive --force >/dev/null
   [[ "$(wc -l <"$mcphome/receipts.jsonl")" -eq 1 ]] \
     || { echo "receipt reuse: first lane life did not append exactly one receipt" >&2; exit 1; }
   first_receipt_id="$(jq -r '.receipt_id' "$mcphome/receipts.jsonl")"
@@ -4007,7 +4049,7 @@ PROV
     "$mcphome/lanes/mcp-state/state.json" >/dev/null \
     || { echo "receipt reuse: spawn retained schema lifecycle state" >&2; exit 1; }
   WASPFLOW_LIB="$mcplib" WASPFLOW_HOME="$mcphome" WASPFLOW_TMUX_SESSION="wf-mcp-$$" \
-    "$root/bin/waspflow" reap mcp-state --no-archive >/dev/null
+    "$root/bin/waspflow" reap mcp-state --no-archive --force >/dev/null
   [[ "$(wc -l <"$mcphome/receipts.jsonl")" -eq 2 ]] \
     || { echo "receipt reuse: second lane life did not append a second receipt" >&2; exit 1; }
   jq -s --arg first_receipt_id "$first_receipt_id" --arg first_lane_uuid "$first_lane_uuid" '
@@ -4057,9 +4099,10 @@ PROV
 # deliberately exclude historical incident/confidence records from this check. For the
 # bundled policy pack only operating-points.json routes; its README changelog and
 # pack.json description are history and stay byte-identical to the released pack.
-! rg -n 'gpt-5\.5|gpt-5\.4-mini' \
-  "$root/data/model-choice-policy/operating-points.json" "$root/scripts/live-soak.sh" "$root/docs/operating-points.md" "$root/README.md" "$root/skill/SKILL.md" \
-  || { echo "active model guidance still references an old Codex model" >&2; exit 1; }
+if rg -n 'gpt-5\.5|gpt-5\.4-mini' \
+  "$root/data/model-choice-policy/operating-points.json" "$root/scripts/live-soak.sh" "$root/docs/operating-points.md" "$root/README.md" "$root/skill/SKILL.md"; then
+  echo "active model guidance still references an old Codex model" >&2; exit 1
+fi
 
 # Thin bundle-before-reap (2026-07-10): archive only the lane's OWN commits
 # (fork-point..tip), not full branch history — the dominant cost of batch reap on a
@@ -4281,6 +4324,12 @@ PROV
       --arg idle "$idle" --arg resumable "$resumable" --arg spawned "$spawned" \
       '{provider:"life",status:"live",cwd:$cwd,origin_cwd:$cwd,transcript:$t,session_id:"life-session",terminal_idle:$idle,resumable:$resumable,turn_mark:"1",spawn_epoch:$spawned,tmux_session:$session,tmux_window:$window,tmux_pane_pid:$pid}' \
       >"$lifehome/lanes/$lane/state.json"
+    # Ownership tags: cleanup only closes windows it can prove it owns.
+    life_uuid="$(uuidgen)"
+    tmux set-option -w -t "$target" @waspflow_home "$(cd "$lifehome" && pwd -P)"
+    tmux set-option -w -t "$target" @waspflow_lane_uuid "$life_uuid"
+    jq --arg u "$life_uuid" '. + {lane_uuid:$u}' "$lifehome/lanes/$lane/state.json" >"$lifehome/lanes/$lane/state.tag" \
+      && mv "$lifehome/lanes/$lane/state.tag" "$lifehome/lanes/$lane/state.json"
   }
 
   now="$(date +%s)"
@@ -4357,6 +4406,11 @@ PROV
     || { echo "park/revise: lifecycle operation lock did not close the idle-proof race (${elapsed_ms}ms)" >&2; exit 1; }
 
   make_life_lane park-legacy yes yes "$fixture" "$((now - 1000))"
+  # This is an actual pre-tag legacy pane, not a modern tagged pane whose
+  # state receipt was merely lost. The latter remains unsafe to adopt.
+  park_legacy_window="$(jq -r .tmux_window "$lifehome/lanes/park-legacy/state.json")"
+  tmux set-option -wu -t "$park_legacy_window" @waspflow_home
+  tmux set-option -wu -t "$park_legacy_window" @waspflow_lane_uuid
   jq 'del(.tmux_session,.tmux_window,.tmux_pane_pid)' \
     "$lifehome/lanes/park-legacy/state.json" >"$lifehome/lanes/park-legacy/state.next"
   mv "$lifehome/lanes/park-legacy/state.next" "$lifehome/lanes/park-legacy/state.json"
@@ -4370,6 +4424,9 @@ PROV
   make_life_lane gc-good yes yes "$fixture" "$((now - 1000))"
   make_life_lane gc-other yes yes "$lifeother" "$((now - 1000))"
   make_life_lane gc-legacy yes yes "$fixture" "$((now - 1000))"
+  gc_legacy_window="$(jq -r .tmux_window "$lifehome/lanes/gc-legacy/state.json")"
+  tmux set-option -wu -t "$gc_legacy_window" @waspflow_home
+  tmux set-option -wu -t "$gc_legacy_window" @waspflow_lane_uuid
   jq 'del(.tmux_session,.tmux_window,.tmux_pane_pid)' \
     "$lifehome/lanes/gc-legacy/state.json" >"$lifehome/lanes/gc-legacy/state.next"
   mv "$lifehome/lanes/gc-legacy/state.next" "$lifehome/lanes/gc-legacy/state.json"
@@ -4676,12 +4733,18 @@ PROV
   receiptfailbin="$(mktemp -d "$scratch/waspflow-scope-receiptfail-XXXXXX")"
   cat >"$receiptfailbin/jq" <<'FAILJQ'
 #!/usr/bin/env bash
+# The launcher records its headless PID before the scope starts. Fail only the
+# receipt append inside the scope, not unrelated state writes that precede it.
+for arg in "$@"; do
+  [[ "$arg" == *cgroup_scope_receipts* ]] || continue
 marker="$(compgen -G "$WASPFLOW_HOME/lanes/receipt-failure/.scope-started-waspflow-receipt-failure-*.scope" | head -n 1 || true)"
 [[ -n "$marker" ]] && printf marker-observed >"$WASPFLOW_HOME/receipt-failure-marker-observed"
 run_dir="$(compgen -G "$WASPFLOW_HOME/lanes/receipt-failure/.scope-run.*" | head -n 1 || true)"
 [[ -n "$run_dir" && ! -e "$run_dir/stdout" && ! -e "$run_dir/stderr" ]] \
   && printf captures-absent >"$WASPFLOW_HOME/receipt-failure-captures-absent"
 exit 1
+done
+PATH="${PATH#*:}" exec jq "$@"
 FAILJQ
   chmod +x "$receiptfailbin/jq"
   receipt_provider_marker="$scopework/receipt-provider-ran"
@@ -4765,11 +4828,11 @@ fi
   export WASPFLOW_HOME="$nosystemd_home"
   # shellcheck disable=SC1090
   source "$root/lib/core.sh"
-  tmux_cgroup_scope_available() { return 1; }
+  tmux_cgroup_scope_unavailable_reason() { printf 'fixture-unavailable\n'; return 0; }
   lane_set no-systemd status live cwd "$nosystemd_cwd"
   tmux_run_owned_lane_command no-systemd "$nosystemd_cwd" headless-revise -- bash -c 'printf fallback > ran'
   [[ -f "$nosystemd_cwd/ran" ]] \
-    && jq -e '(.cgroup_scope_receipts // []) == [] and .cgroup_fallbacks[-1].reason == "scope-unavailable"' \
+    && jq -e '(.cgroup_scope_receipts // []) == [] and .cgroup_fallbacks[-1].reason == "scope-unavailable:fixture-unavailable"' \
       "$nosystemd_home/lanes/no-systemd/state.json" >/dev/null \
     || { echo "scope: no-systemd fallback was not truthful/executable" >&2; exit 1; }
   rm -rf "$nosystemd_home" "$nosystemd_cwd"
@@ -5011,9 +5074,10 @@ JQ
 sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/verify.sh" \
   | rg -q 'parity_tmux\(\).*real_tmux.*-L.*WASPFLOW_TMUX_SOCKET' \
   || { echo "batch parity: bare tmux invocation regressed" >&2; exit 1; }
-! sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/verify.sh" \
-  | rg -q '^[[:space:]]*tmux[[:space:]]+(new-|display-|kill-)' \
-  || { echo "batch parity: direct tmux lifecycle invocation regressed" >&2; exit 1; }
+if sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/verify.sh" \
+  | rg -q '^[[:space:]]*tmux[[:space:]]+(new-|display-|kill-)'; then
+  echo "batch parity: direct tmux lifecycle invocation regressed" >&2; exit 1
+fi
 
 # Structured observation: all providers normalize only lifecycle facts, never
 # raw message/tool content. These fixtures also prove malformed/truncated and
@@ -5320,7 +5384,10 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   cp "$WASPFLOW_HOME/receipts.jsonl" "$att_home/sumhome/receipts.jsonl"
   printf '%s\n' 'this is not json {' >>"$att_home/sumhome/receipts.jsonl"
   summary_out="$(WASPFLOW_HOME="$att_home/sumhome" "$root/bin/waspflow" receipts summary --json)"
-  ! "$root/bin/waspflow" receipts summary --bogus >/dev/null 2>&1
+  if "$root/bin/waspflow" receipts summary --bogus >/dev/null 2>&1; then
+    echo 'verify: unexpected success at scripts/verify.sh:5355' >&2
+    exit 1
+  fi
   jq -e '.lanes >= 2 and (.by_arm | type == "array") and (.eligible | type == "number") and (.top_ineligibility | type == "array")' <<<"$summary_out" >/dev/null
 
   lane_set segment-repair provider grok status live result succeeded lane_uuid segment-repair-uuid segment_index 0 receipt_emitted false receipt_emitted_segment -1
@@ -5411,7 +5478,10 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
   export CLAUDE_PROJECTS_DIR="$resume_home/claude-projects"
   mkdir -p "$CLAUDE_PROJECTS_DIR/p"
   printf '%s\n' '{"type":"user","message":{"content":"escalation prompt without the transition nonce"}}' >"$CLAUDE_PROJECTS_DIR/p/claude-session.jsonl"
-  ! WASPFLOW_SUBMIT_ATTEMPTS=1 _claude_verify_started resume-claude @resume 'escalation prompt transition-nonce' claude-session transition-nonce
+  if WASPFLOW_SUBMIT_ATTEMPTS=1 _claude_verify_started resume-claude @resume 'escalation prompt transition-nonce' claude-session transition-nonce; then
+    echo 'verify: unexpected success at scripts/verify.sh:5446' >&2
+    exit 1
+  fi
   printf '%s\n' '{"type":"user","message":{"content":"escalation prompt transition-nonce"}}' >>"$CLAUDE_PROJECTS_DIR/p/claude-session.jsonl"
   lane_set resume-claude cwd "$fixture" session_id claude-session pending_transition '{"to_arm":{"provider":"claude","model":"claude-new","effort":"high"},"submission_nonce":"transition-nonce","provisional_session":{"session_id":"claude-session","ownership":{"tmux_session":"test","tmux_window":"@resume","tmux_pane_pid":"1"}}}'
   claude_resume_with_arm resume-claude 'escalation prompt transition-nonce' false
@@ -5461,7 +5531,7 @@ sed -n '/waspflow-batch-parity-home/,/Structured observation/p' "$root/scripts/v
     local n
     n=$(( $(cat "$grok_calls") + 1 ))
     printf '%s\n' "$n" >"$grok_calls"
-    [[ "$n" -eq 2 ]] && printf '{"type":"turn_started"}\n' >>"$grok_events"
+    [[ "$n" -eq 2 ]] && printf '{"type":"turn_started","prompt":"prompt"}\n' >>"$grok_events"
     printf '%s\n' "$grok_events"
   }
   lane_set resume-grok cwd "$fixture" session_id grok-session pending_transition '{"to_arm":{"provider":"grok","model":"grok-new","effort":"high"},"provisional_session":{"session_id":"grok-session","ownership":{"tmux_session":"test","tmux_window":"@resume","tmux_pane_pid":"1"}}}'
@@ -5674,15 +5744,18 @@ PROV
   source "$esclib/escalation.sh"
 
   make_escalation_lane() {
-    local lane="$1" old_window old_session old_pid now fingerprint fork billing
+    local lane="$1" old_window old_session old_pid now fingerprint fork billing lane_uuid
     now="$(date +%s)"
     fingerprint="$(artifacts_workspace_fingerprint "$escwork")"
     fork="$(git -C "$escwork" rev-parse HEAD)"
     billing="$(billing_path_v1 codex default false)"
+    lane_uuid="$(new_uuid)"
     tmux has-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || tmux new-session -d -s "$WASPFLOW_TMUX_SESSION" -n _escalation
     old_window="$(tmux new-window -d -P -F '#{window_id}' -t "$WASPFLOW_TMUX_SESSION" -n "old-$lane" 'exec sleep 120')"
     IFS='|' read -r old_session _ old_pid < <(tmux display-message -p -t "$old_window" '#{session_name}|#{window_id}|#{pane_pid}')
-    lane_set "$lane" lane_uuid "$lane-uuid" provider codex model old model_requested old model_passed old effort medium effort_requested medium effort_passed medium op_mode standard endpoint_profile default raw_provider_args false billing_path "$billing" auth_principal "" model_validation_state available model_validation_source live_query model_validation_scope default model_validation_at "" selection_quota_observation '{"schema_version":1,"state":"absent","observation":null,"reason":"test"}' selection_quota_filtered false status live session_id "$lane-old-session" rollout "" tmux_session "$old_session" tmux_window "$old_window" tmux_pane_pid "$old_pid" cwd "$escwork" origin_cwd "$escwork" worktree "$escwork" verify_fork_point "$fork" spawn_epoch "$now" segment_started_epoch "$((now - 5))" segment_index 0 receipt_emitted false receipt_emitted_segment -1 arm_generation 3 arm_history '[]' escalation_path '[]' escalations_total 0 consecutive_failed_segments 0 segment_entered_via_escalation false ladder_cursor "" pending_transition "" escalation_error "" prompt "Repair the failing task without weakening its tests." verify_command false verify_timeout 5 verify_state failed verify_failure_class task verify_runs '[{"kind":"checkpoint","at":1,"state":"failed","failure_class":"task"}]' verify_checkpoint_epoch "$now" verify_checkpoint_fingerprint "$fingerprint" verify_epoch "$now" verify_exit_code 1 verify_test_files_changed false baseline_oracle_ran true baseline_oracle_state passed baseline_oracle_reason "" result "" runtime_settings_state unknown runtime_refresh_state pending
+    tmux set-option -w -t "$old_window" @waspflow_home "$(cd "$eschome" && pwd -P)"
+    tmux set-option -w -t "$old_window" @waspflow_lane_uuid "$lane_uuid"
+    lane_set "$lane" lane_uuid "$lane_uuid" provider codex model old model_requested old model_passed old effort medium effort_requested medium effort_passed medium op_mode standard endpoint_profile default raw_provider_args false billing_path "$billing" auth_principal "" model_validation_state available model_validation_source live_query model_validation_scope default model_validation_at "" selection_quota_observation '{"schema_version":1,"state":"absent","observation":null,"reason":"test"}' selection_quota_filtered false status live session_id "$lane-old-session" rollout "" tmux_session "$old_session" tmux_window "$old_window" tmux_pane_pid "$old_pid" cwd "$escwork" origin_cwd "$escwork" verify_fork_point "$fork" spawn_epoch "$now" segment_started_epoch "$((now - 5))" segment_index 0 receipt_emitted false receipt_emitted_segment -1 arm_generation 3 arm_history '[]' escalation_path '[]' escalations_total 0 consecutive_failed_segments 0 segment_entered_via_escalation false ladder_cursor "" pending_transition "" escalation_error "" prompt "Repair the failing task without weakening its tests." verify_command false verify_timeout 5 verify_state failed verify_failure_class task verify_runs '[{"kind":"checkpoint","at":1,"state":"failed","failure_class":"task"}]' verify_checkpoint_epoch "$now" verify_checkpoint_fingerprint "$fingerprint" verify_epoch "$now" verify_exit_code 1 verify_test_files_changed false baseline_oracle_ran true baseline_oracle_state passed baseline_oracle_reason "" result "" runtime_settings_state unknown runtime_refresh_state pending
     printf 'verify head\n' >"$eschome/lanes/$lane/verify-stdout.txt"
     printf 'verify tail\n' >"$eschome/lanes/$lane/verify-stderr.txt"
   }
@@ -5748,14 +5821,14 @@ EOF
     [[ "$rc" -eq 2 ]] || { cat "$eschome/scope-delayed-reap.err" >&2; echo "escalate scope delay: reap expected rc2, got $rc" >&2; exit 1; }
     rm -rf "$escalation_delaybin"
   fi
-  jq -e 'select(.receipt_kind == "lane_segment" and .lane_uuid == "esc-success-uuid") | .segment.index == 0 and .segment.closed_by == "escalation" and .segment.boundary == "none" and .verify.failure_class == "task"' "$eschome/receipts.jsonl" >/dev/null
+  jq -e --arg uuid "$(lane_get esc-success lane_uuid)" 'select(.receipt_kind == "lane_segment" and .lane_uuid == $uuid) | .segment.index == 0 and .segment.closed_by == "escalation" and .segment.boundary == "none" and .verify.failure_class == "task"' "$eschome/receipts.jsonl" >/dev/null
   grep -qF 'UNTRUSTED VERIFY OUTPUT' "$eschome/lanes/esc-success/state.json"
   grep -qF 'Do not weaken, skip, or edit tests to make verification pass.' "$eschome/lanes/esc-success/state.json"
   old_window="$(jq -r .tmux_window "$eschome/lanes/esc-success/state.json")"
   [[ "$old_window" != @* ]] && { echo "escalate success: provisional window was not adopted" >&2; exit 1; }
   set +e; "$root/bin/waspflow" reap esc-success --no-archive >/dev/null; rc=$?; set -e
   [[ "$rc" -eq 2 ]] || { echo "escalate final receipt: expected failing-oracle reap rc2, got $rc" >&2; exit 1; }
-  jq -s 'map(select(.lane_uuid == "esc-success-uuid" and .receipt_kind == "lane")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
+  jq -s --arg uuid "$(lane_get esc-success lane_uuid)" 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
   last_segment_index="$(jq -r '.segment_index | tonumber' "$eschome/lanes/esc-success/state.json")"
   jq -e --argjson last_segment_index "$last_segment_index" '.receipt_kind == "lane" and .segment == {index:$last_segment_index,closed_by:"reap"} and (.escalation_path | length == 1) and .escalation_path[0].to_arm.model == "target"' "$eschome/lanes/esc-success/receipt.json" >/dev/null
 
@@ -5814,7 +5887,7 @@ FAIL
     || { echo "F5: prepared-phase failure left an orphaned pending_transition" >&2; exit 1; }
   lane_set esc-failure fake_launch_fail no
   run_escalate esc-failure --resume-transition >/dev/null
-  jq -s 'map(select(.lane_uuid == "esc-failure-uuid" and .receipt_kind == "lane_segment")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
+  jq -s --arg uuid "$(lane_get esc-failure lane_uuid)" 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane_segment")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
 
   # Crash recovery is driven solely by the persisted phase. The receipt is
   # exactly once from both prepared and receipt_committed; a provisional launch
@@ -5825,14 +5898,14 @@ FAIL
     set +e; WASPFLOW_ESCALATION_TEST_CRASH_AFTER="$phase" run_escalate "$lane" --to codex/target/high >/dev/null 2>&1; rc=$?; set -e
     [[ "$rc" -eq 99 && "$(jq -r '(.pending_transition | fromjson).phase' "$eschome/lanes/$lane/state.json")" == "$phase" ]] || { echo "escalate crash $phase: state was not durable" >&2; exit 1; }
     run_escalate "$lane" --resume-transition >/dev/null
-    jq -s --arg uuid "$lane-uuid" 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane_segment")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
+    jq -s --arg uuid "$(lane_get "$lane" lane_uuid)" 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane_segment")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
   done
   make_escalation_lane esc-crash-receipt-appended
   set +e; WASPFLOW_ESCALATION_TEST_CRASH_AFTER=receipt_appended run_escalate esc-crash-receipt-appended --to codex/target/high >/dev/null 2>&1; rc=$?; set -e
   [[ "$rc" -eq 99 && "$(jq -r '(.pending_transition | fromjson).phase' "$eschome/lanes/esc-crash-receipt-appended/state.json")" == prepared ]] || { echo "escalate receipt-appended crash: durable phase mismatch" >&2; exit 1; }
-  durable_receipt_id="$(jq -r 'select(.lane_uuid == "esc-crash-receipt-appended-uuid" and .receipt_kind == "lane_segment") | .receipt_id' "$eschome/receipts.jsonl")"
+  durable_receipt_id="$(jq -r --arg uuid "$(lane_get esc-crash-receipt-appended lane_uuid)" 'select(.lane_uuid == $uuid and .receipt_kind == "lane_segment") | .receipt_id' "$eschome/receipts.jsonl")"
   run_escalate esc-crash-receipt-appended --resume-transition >/dev/null
-  jq -s --arg uuid esc-crash-receipt-appended-uuid 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane_segment")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
+  jq -s --arg uuid "$(lane_get esc-crash-receipt-appended lane_uuid)" 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane_segment")) | length == 1' "$eschome/receipts.jsonl" | grep -qx true
   jq -e --arg id "$durable_receipt_id" '.segment_receipt_id == $id' "$eschome/lanes/esc-crash-receipt-appended/state.json" >/dev/null
 
   # Qwen rejects effort-bearing escalation targets before mutation, while a
@@ -5904,9 +5977,19 @@ FAIL
   grep -Fq 'waspflow escalate esc-committed-reap --resume-transition' "$eschome/committed-reap.out" && grep -Fq 'waspflow escalate esc-committed-reap --abort-transition' "$eschome/committed-reap.out" \
     || { echo "escalate committed reap: recovery escapes missing" >&2; exit 1; }
   lane_set esc-cas arm_generation 9 session_id current runtime_refresh_state pending
-  ! lane_update_if esc-cas 8 current runtime_refresh_state stale
+  if lane_update_if esc-cas 8 current runtime_refresh_state stale; then
+    echo 'verify: unexpected success at scripts/verify.sh:5942' >&2
+    exit 1
+  fi
   [[ "$(lane_get esc-cas runtime_refresh_state)" == pending ]] || { echo "escalate CAS: stale generation overwrote runtime state" >&2; exit 1; }
   make_escalation_lane esc-poison
+  # --reset-tree is valid only for a real isolated worktree. Keep the shared
+  # synthetic lanes non-isolated, then make this one case own a secondary
+  # checkout so its destructive reset assertion stays meaningful.
+  poison_worktree="$(mktemp -d "$scratch/waspflow-escalation-poison-worktree-XXXXXX")"
+  rmdir "$poison_worktree"
+  git -C "$escwork" worktree add -q -b waspflow/esc-poison "$poison_worktree"
+  lane_set esc-poison cwd "$poison_worktree" worktree "$poison_worktree" repo_root "$escwork" verify_fork_point "$(git -C "$poison_worktree" rev-parse HEAD)"
   lane_set esc-poison consecutive_failed_segments 2
   set +e; poison_json="$(run_escalate esc-poison --to codex/target/high --force --json 2>/dev/null)"; rc=$?; set -e
   [[ "$rc" -eq 1 ]] || { echo "escalate poison: expected rc1" >&2; exit 1; }
@@ -5916,11 +5999,12 @@ FAIL
   lane_set esc-poison consecutive_failed_segments 2
   lane_set esc-poison verify_state passed
   printf '%s\n' '{}' >"$eschome/lanes/esc-poison/verify-result.json"
-  _artifacts_record_verify_checkpoint esc-poison none false "$(artifacts_workspace_fingerprint "$escwork")" checkpoint
+  _artifacts_record_verify_checkpoint esc-poison none false "$(artifacts_workspace_fingerprint "$poison_worktree")" checkpoint
   [[ "$(lane_get esc-poison consecutive_failed_segments)" == 0 ]] || { echo "escalate poison: green checkpoint did not reset counter" >&2; exit 1; }
-  printf 'discarded by reset\n' >"$escwork/reset-sentinel"
+  printf 'discarded by reset\n' >"$poison_worktree/reset-sentinel"
   run_escalate esc-poison --to codex/other/high --handoff --reset-tree --force >/dev/null
-  [[ ! -e "$escwork/reset-sentinel" ]] || { echo "escalate reset-tree: untracked file survived" >&2; exit 1; }
+  [[ ! -e "$poison_worktree/reset-sentinel" ]] || { echo "escalate reset-tree: untracked file survived" >&2; exit 1; }
+  git -C "$escwork" worktree remove "$poison_worktree"
   lane_set esc-bare provider codex model old effort medium op_mode standard status live cwd "$escwork" arm_generation 0 session_id bare lane_uuid esc-bare-uuid segment_index 0 verify_state "" verify_runs '[]' ladder_cursor "" pending_transition ""
   set +e; bare_json="$(run_escalate esc-bare --json 2>/dev/null)"; rc=$?; set -e
   [[ "$rc" -eq 5 ]] || { echo "escalate bare: expected selection rc5" >&2; exit 1; }
@@ -6003,7 +6087,7 @@ JSON
     printf '%s\n' '{"type":"session_meta"}' >"$eschome/$1-rollout.jsonl"
     lane_set "$1" fake_session_log "$eschome/$1-rollout.jsonl" verify_runs '[]' verify_state passed verify_failure_class ""
   }
-  segment_rows() { jq -s --arg uuid "$1-uuid" 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane_segment"))' "$eschome/receipts.jsonl"; }
+  segment_rows() { jq -s --arg uuid "$(lane_get "$1" lane_uuid)" 'map(select(.lane_uuid == $uuid and .receipt_kind == "lane_segment"))' "$eschome/receipts.jsonl"; }
   compact_rollout() { printf '{"timestamp":"%s","type":"compacted","payload":{"message":""}}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.500Z)" >>"$eschome/$1-rollout.jsonl"; }
 
   make_deferred_lane dfs-compact
@@ -6186,7 +6270,7 @@ JSON
   attached_window="$(lane_get dfs-attached tmux_window)"
   tmux select-window -t "$attached_window"
   # CI's TERM=dumb is not a usable tmux terminal, even inside script's pty.
-  TERM=xterm-256color script -qfc "tmux attach-session -t $WASPFLOW_TMUX_SESSION" /dev/null >/dev/null 2>&1 &
+  TERM=xterm-256color script -qfc "tmux -L $WASPFLOW_TMUX_SOCKET attach-session -t $WASPFLOW_TMUX_SESSION" /dev/null >/dev/null 2>&1 &
   attach_pid=$!
   for i in $(seq 1 50); do [[ "$(tmux display-message -p -t "$attached_window" '#{window_active_clients}')" -gt 0 ]] && break; sleep 0.1; done
   [[ "$(tmux display-message -p -t "$attached_window" '#{window_active_clients}')" -gt 0 ]] || { echo "deferred attached: could not attach a test client" >&2; exit 1; }
@@ -6350,6 +6434,7 @@ done
 if [[ -n "$log_file" && -z "$conversation" && "${AGY_FAIL:-0}" != 1 ]]; then
   printf 'Created conversation 123e4567-e89b-12d3-a456-426614174000\n' >"$log_file"
 fi
+[[ -z "$log_file" || "${AGY_FAIL:-0}" == 1 ]] || printf '%s\n' '{"type":"result","text":"agy test output"}' >>"$log_file"
 [[ "${AGY_FAIL:-0}" != 1 ]] || exit 9
 case " $all_args " in *" --print "*) printf 'agy test output\n' ;; *) exit 2 ;; esac
 AGY
@@ -6361,7 +6446,10 @@ AGY
   grep -Fq -- '--print deterministic prompt --model test-model --effort medium --mode accept-edits --dangerously-skip-permissions' "$agy_args"
   set +e; "$root/bin/waspflow" exec --provider antigravity --effort xhigh -o "$fixture/bad.out" -- x >/dev/null 2>&1; agy_bad_rc=$?; set -e
   [[ "$agy_bad_rc" -eq 1 ]]
-  ! antigravity_validate_model_effort gpt-test-medium low
+  if antigravity_validate_model_effort gpt-test-medium low; then
+    echo 'verify: unexpected success at scripts/verify.sh:6408' >&2
+    exit 1
+  fi
 
   agy_lifecycle=agy-lifecycle
   lane_set "$agy_lifecycle" provider antigravity status live cwd "$fixture" model test-model effort medium
@@ -6371,7 +6459,10 @@ AGY
   antigravity_is_idle "$agy_lifecycle"
   antigravity_session_resumable "$agy_lifecycle"
   [[ "$(antigravity_turn_mark "$agy_lifecycle")" -eq 1 ]]
-  ! find "$(lane_dir "$agy_lifecycle")" -maxdepth 1 -name '.agy-log.*' | grep -q .
+  if find "$(lane_dir "$agy_lifecycle")" -maxdepth 1 -name '.agy-log.*' | grep -q .; then
+    echo 'verify: unexpected success at scripts/verify.sh:6418' >&2
+    exit 1
+  fi
 
   agy_cmd="$(_antigravity_shell "$agy_lifecycle" test-model medium "$(lane_get "$agy_lifecycle" session_id)" "second turn" revise)"
   bash -c "$agy_cmd" >"$fixture/agy-revise.out"
@@ -6384,7 +6475,10 @@ AGY
   [[ "$agy_failed_rc" -eq 9 ]]
   antigravity_is_idle "$agy_failed"
   jq -e 'select(.phase=="completion" and .outcome=="failed" and .exit_code==9)' "$(_antigravity_receipt_file "$agy_failed")" >/dev/null
-  ! find "$(lane_dir "$agy_failed")" -maxdepth 1 -name '.agy-log.*' | grep -q .
+  if find "$(lane_dir "$agy_failed")" -maxdepth 1 -name '.agy-log.*' | grep -q .; then
+    echo 'verify: unexpected success at scripts/verify.sh:6431' >&2
+    exit 1
+  fi
 
   agy_lane=agy-events; lane_set "$agy_lane" provider antigravity status live cwd "$fixture"
   agy_receipt="$(_antigravity_receipt_file "$agy_lane")"
@@ -6462,7 +6556,10 @@ QWEN
   qwen_is_idle "$qwen_lifecycle"
   qwen_session_resumable "$qwen_lifecycle"
   [[ "$(qwen_turn_mark "$qwen_lifecycle")" -eq 1 ]]
-  ! find "$(lane_dir "$qwen_lifecycle")" -maxdepth 1 -name '.qwen-log.*' | grep -q .
+  if find "$(lane_dir "$qwen_lifecycle")" -maxdepth 1 -name '.qwen-log.*' | grep -q .; then
+    echo 'verify: unexpected success at scripts/verify.sh:6509' >&2
+    exit 1
+  fi
 
   qwen_cmd="$(_qwen_shell "$qwen_lifecycle" test-model "$(lane_get "$qwen_lifecycle" session_id)" "second turn" revise)"
   (cd "$fixture" && bash -c "$qwen_cmd") >"$fixture/qwen-revise.out"
@@ -6477,7 +6574,10 @@ QWEN
   [[ "$qwen_no_session_rc" -ne 0 ]]
   qwen_is_idle "$qwen_no_session"
   [[ "$(qwen_turn_mark "$qwen_no_session")" -eq 0 ]]
-  ! qwen_session_resumable "$qwen_no_session"
+  if qwen_session_resumable "$qwen_no_session"; then
+    echo 'verify: unexpected success at scripts/verify.sh:6524' >&2
+    exit 1
+  fi
   jq -e 'select(.phase=="completion" and .outcome=="no_session" and .session_id==null)' "$(_qwen_receipt_file "$qwen_no_session")" >/dev/null
 
   # Generated cleanup shell remains valid when the state path contains a quote.
@@ -6491,7 +6591,10 @@ QWEN
   bash -n <<<"$qwen_cmd"
   (cd "$fixture" && bash -c "$qwen_cmd") >"$fixture/qwen-quoted.out"
   qwen_is_idle "$qwen_quoted"
-  ! find "$(lane_dir "$qwen_quoted")" -maxdepth 1 -name '.qwen-log.*' | grep -q .
+  if find "$(lane_dir "$qwen_quoted")" -maxdepth 1 -name '.qwen-log.*' | grep -q .; then
+    echo 'verify: unexpected success at scripts/verify.sh:6538' >&2
+    exit 1
+  fi
   export WASPFLOW_HOME="$ordinary_home"
   WASPFLOW_LANES_DIR="$ordinary_lanes_dir"
 
@@ -6539,7 +6642,10 @@ QWEN
   [[ "$qwen_failed_rc" -eq 9 ]]
   qwen_is_idle "$qwen_failed"
   jq -e 'select(.phase=="completion" and .outcome=="failed" and .exit_code==9)' "$(_qwen_receipt_file "$qwen_failed")" >/dev/null
-  ! find "$(lane_dir "$qwen_failed")" -maxdepth 1 -name '.qwen-log.*' | grep -q .
+  if find "$(lane_dir "$qwen_failed")" -maxdepth 1 -name '.qwen-log.*' | grep -q .; then
+    echo 'verify: unexpected success at scripts/verify.sh:6586' >&2
+    exit 1
+  fi
 
   # A failed tee means lifecycle evidence was not persisted reliably, even if
   # Qwen itself exited zero.
@@ -6568,9 +6674,18 @@ QWEN
   unset BAILIAN_TOKEN_PLAN_API_KEY
 
   # Spawn/escalation may not persist an effort Qwen silently ignores.
-  ! qwen_validate_model_effort test-model high
-  ! qwen_resume_with_arm "$qwen_lifecycle" prompt false
-  ! qwen_confirm_escalation_submission "$qwen_lifecycle" prompt false
+  if qwen_validate_model_effort test-model high; then
+    echo 'verify: unexpected success at scripts/verify.sh:6615' >&2
+    exit 1
+  fi
+  if qwen_resume_with_arm "$qwen_lifecycle" prompt false; then
+    echo 'verify: unexpected success at scripts/verify.sh:6616' >&2
+    exit 1
+  fi
+  if qwen_confirm_escalation_submission "$qwen_lifecycle" prompt false; then
+    echo 'verify: unexpected success at scripts/verify.sh:6617' >&2
+    exit 1
+  fi
 
   # Quota mapping.
   clawmeter() { cat <<'JSON'
@@ -6751,7 +6866,10 @@ DSH
   grep -Fq -- '--profile headless --patch ' "$dsh_args"
   grep -Fq -- '-- deterministic prompt' "$dsh_args"
   # Anything resembling the old Qwen-shaped invocation is a regression.
-  ! grep -Eq -- '(^| )-p( |$)|--yolo|--output-format|--model ' "$dsh_args"
+  if grep -Eq -- '(^| )-p( |$)|--yolo|--output-format|--model ' "$dsh_args"; then
+    echo 'verify: unexpected success at scripts/verify.sh:6798' >&2
+    exit 1
+  fi
   grep -Fq 'dsh test output' "$exec_out"
 
   # Effort rejection (dsh exposes effort only through global settings.yaml).
@@ -6767,7 +6885,10 @@ DSH
   [[ "$deepseek_sid" == session-* ]]
   deepseek_is_idle "$deepseek_lifecycle"
   [[ "$(deepseek_turn_mark "$deepseek_lifecycle")" -eq 1 ]]
-  ! find "$(lane_dir "$deepseek_lifecycle")" -maxdepth 1 -name '.deepseek-log.*' | grep -q .
+  if find "$(lane_dir "$deepseek_lifecycle")" -maxdepth 1 -name '.deepseek-log.*' | grep -q .; then
+    echo 'verify: unexpected success at scripts/verify.sh:6814' >&2
+    exit 1
+  fi
   # The lane's model patch really was written, and really carries the model.
   grep -Fq 'model: deepseek-v4-pro' "$(_deepseek_patch_file "$deepseek_lifecycle")"
 
@@ -6777,7 +6898,10 @@ DSH
 
   # v0.1 cannot continue a session: every invocation mints a fresh UUID, so
   # both resumability and revise must refuse rather than silently start over.
-  ! deepseek_session_resumable "$deepseek_lifecycle"
+  if deepseek_session_resumable "$deepseek_lifecycle"; then
+    echo 'verify: unexpected success at scripts/verify.sh:6824' >&2
+    exit 1
+  fi
   set +e; deepseek_revise "$deepseek_lifecycle" "second turn" >/dev/null 2>&1; deepseek_revise_rc=$?; set -e
   [[ "$deepseek_revise_rc" -ne 0 ]]
 
@@ -6815,9 +6939,18 @@ DSH
   unset DEEPSEEK_API_KEY
 
   # Escalation hooks unsupported.
-  ! deepseek_validate_model_effort deepseek-v4-pro high
-  ! deepseek_resume_with_arm "$deepseek_lifecycle" prompt false
-  ! deepseek_confirm_escalation_submission "$deepseek_lifecycle" prompt false
+  if deepseek_validate_model_effort deepseek-v4-pro high; then
+    echo 'verify: unexpected success at scripts/verify.sh:6862' >&2
+    exit 1
+  fi
+  if deepseek_resume_with_arm "$deepseek_lifecycle" prompt false; then
+    echo 'verify: unexpected success at scripts/verify.sh:6863' >&2
+    exit 1
+  fi
+  if deepseek_confirm_escalation_submission "$deepseek_lifecycle" prompt false; then
+    echo 'verify: unexpected success at scripts/verify.sh:6864' >&2
+    exit 1
+  fi
 
   # Help/doctor.
   help_text="$("$root/bin/waspflow" --help)"
@@ -6969,20 +7102,41 @@ PROV
   sess="wf-steer-$$"
   tmux new-session -d -s "$sess" -n _h
   swf() { WASPFLOW_LIB="$sl" WASPFLOW_HOME="$sh_home" WASPFLOW_TMUX_SESSION="$sess" "$root/bin/waspflow" "$@"; }
+  state_uuid_counter=0
   mkstate() { # lane status [extra-json]
+    local lane_uuid
+    state_uuid_counter=$((state_uuid_counter + 1))
+    lane_uuid="$(printf '00000000-0000-4000-8000-%012d' "$state_uuid_counter")"
     mkdir -p "$sh_home/lanes/$1"; : >"$sh_home/lanes/$1/transcript.log"
-    jq -n --arg cwd "$sh_work" --arg st "$2" --argjson x "${3:-{\}}" '{provider:"steerp",status:$st,cwd:$cwd,session_id:"sid"} + $x' >"$sh_home/lanes/$1/state.json"
+    jq -n --arg cwd "$sh_work" --arg st "$2" --arg uuid "$lane_uuid" --argjson x "${3:-{\}}" '{provider:"steerp",status:$st,cwd:$cwd,session_id:"sid",lane_uuid:$uuid} + $x' >"$sh_home/lanes/$1/state.json"
   }
   st() { jq -r ".$2 // empty" "$sh_home/lanes/$1/state.json"; }
   stmod() { jq "$2" "$sh_home/lanes/$1/state.json" >"$sh_work/s.json" && mv "$sh_work/s.json" "$sh_home/lanes/$1/state.json"; }
   # Fresh shells (bash -c) so no function stubbed earlier in this suite leaks in.
-  own() { WASPFLOW_HOME="$sh_home" WASPFLOW_TMUX_SESSION="$sess" bash -c 'source "$1/core.sh"; tmux_capture_lane_ownership "$2" "$3:$2"' _ "$sl" "$1" "$sess"; }
+  own() {
+    WASPFLOW_HOME="$sh_home" WASPFLOW_TMUX_SESSION="$sess" bash -c '
+      source "$1/core.sh"
+      target="$(tmux display-message -p -t "$WASPFLOW_TMUX_SESSION:$2" "#{window_id}")"
+      tmux set-option -w -t "$target" @waspflow_home "$(cd "$WASPFLOW_HOME" && pwd -P)"
+      tmux set-option -w -t "$target" @waspflow_lane_uuid "$(lane_get "$2" lane_uuid)"
+      tmux set-option -w -t "$target" @waspflow_provider "$(lane_get "$2" provider)"
+      tmux set-option -w -t "$target" @waspflow_session_id "$(lane_get "$2" session_id)"
+      tmux_capture_lane_ownership "$2" "$target"
+    ' _ "$sl" "$1"
+  }
 
   # 1. Reboot-restored window: recorded id stale, one same-named window in the
   #    lane's cwd -> revise steers it live (no parallel headless resume) and the
   #    durable ownership is repaired. Ambiguity / foreign cwd fail closed.
-  tmux new-window -d -t "$sess" -n drift -c "$sh_work" 'exec sleep 120'
+  drift_window="$(tmux new-window -d -P -F '#{window_id}' -t "$sess" -n drift -c "$sh_work" 'exec tail -f /dev/null')"
   mkstate drift live "{\"tmux_session\":\"$sess\",\"tmux_window\":\"@9999\",\"tmux_pane_pid\":\"1\"}"
+  drift_uuid="$(st drift lane_uuid)"
+  tmux set-option -w -t "$drift_window" @waspflow_home "$(cd "$sh_home" && pwd -P)"
+  tmux set-option -w -t "$drift_window" @waspflow_lane_uuid "$drift_uuid"
+  tmux set-option -w -t "$drift_window" @waspflow_provider steerp
+  tmux set-option -w -t "$drift_window" @waspflow_session_id sid
+  [[ "$(tmux display-message -p -t "$drift_window" '#{pane_current_command}')" != sleep && "$(tmux display-message -p -t "$drift_window" '#{pane_current_command}')" != cat ]] \
+    || { echo "steer: restored fixture window has a non-adoptable pane command" >&2; exit 1; }
   : >"$STEER_CTL/revise.log"
   swf revise drift -- "next" >/dev/null 2>&1 || { echo "steer: drifted-window revise failed" >&2; exit 1; }
   [[ "$(<"$STEER_CTL/revise.log")" == "live:next" ]] || { echo "steer: stale window id led to a headless resume instead of live steer" >&2; exit 1; }
@@ -6995,9 +7149,15 @@ PROV
   [[ "$rc" -ne 0 && ! -s "$STEER_CTL/revise.log" && "$out" == *"identity cannot be proven"* && "$(st drift tmux_window)" == "@9999" ]] \
     || { echo "steer: duplicate same-named windows must fail closed without state change" >&2; exit 1; }
   mkstate foreign live "{\"tmux_session\":\"$sess\",\"tmux_window\":\"@9999\",\"tmux_pane_pid\":\"1\",\"cwd\":\"/\"}"
-  tmux new-window -d -t "$sess" -n foreign -c "$sh_work" 'exec sleep 120'
-  set +e; swf revise foreign -- "x" >/dev/null 2>&1; rc=$?; set -e
-  [[ "$rc" -ne 0 && "$(st foreign tmux_window)" == "@9999" ]] || { echo "steer: cwd-mismatched window must not be adopted" >&2; exit 1; }
+  foreign_window="$(tmux new-window -d -P -F '#{window_id}' -t "$sess" -n foreign -c "$sh_work" 'exec tail -f /dev/null')"
+  tmux set-option -w -t "$foreign_window" @waspflow_home "$(cd "$sh_home" && pwd -P)"
+  tmux set-option -w -t "$foreign_window" @waspflow_lane_uuid "$(st foreign lane_uuid)"
+  tmux set-option -w -t "$foreign_window" @waspflow_provider steerp
+  tmux set-option -w -t "$foreign_window" @waspflow_session_id sid
+  : >"$STEER_CTL/revise.log"
+  set +e; out="$(swf revise foreign -- "x" 2>&1)"; rc=$?; set -e
+  [[ "$rc" -ne 0 && ! -s "$STEER_CTL/revise.log" && "$out" == *"identity cannot be proven"* && "$(st foreign tmux_window)" == "@9999" ]] \
+    || { echo "steer: cwd-mismatched window must fail closed without a provider call" >&2; exit 1; }
 
   # 2. Reaped lane whose worktree is gone: fail before advertising a resume.
   mkstate gone reaped '{"cwd":"/nonexistent/waspflow-gone-worktree"}'
@@ -7007,14 +7167,14 @@ PROV
      && "$(st gone headless_revise_state)" == failed-before-submission ]] \
     || { echo "steer: missing-worktree resume did not fail early and durably" >&2; exit 1; }
 
-  # 3. Headless revise of reaped and parked lanes is visible work, then terminal.
+  # 3. A completed headless provider call starts a fresh, unverified turn.
   for kind in reaped parked; do
     mkstate "h-$kind" "$kind" '{"result":"succeeded"}'
     swf revise "h-$kind" -- "go" >/dev/null 2>&1 || { echo "steer: $kind headless revise failed" >&2; exit 1; }
     jq -e '.headless_revise_active == true and .headless_revise_state == "running" and .record_status == "'"$kind"'"' "$STEER_CTL/status-during.json" >/dev/null \
       || { echo "steer: $kind headless revise was invisible to status while running" >&2; exit 1; }
-    [[ "$(st "h-$kind" headless_revise_state)" == completed && "$(st "h-$kind" result)" == succeeded && -n "$(st "h-$kind" headless_revise_ended_epoch)" ]] \
-      || { echo "steer: $kind headless revise did not reach a terminal state" >&2; exit 1; }
+    [[ "$(st "h-$kind" headless_revise_state)" == completed && -z "$(st "h-$kind" result)" && "$(st "h-$kind" turn_state)" == running && -n "$(st "h-$kind" headless_revise_ended_epoch)" ]] \
+      || { echo "steer: $kind headless revise did not start a fresh turn" >&2; exit 1; }
   done
   set +e; swf revise h-parked -- "timeout please" >/dev/null 2>&1; rc=$?; set -e
   [[ "$rc" -eq 124 && "$(st h-parked headless_revise_state)" == timeout ]] || { echo "steer: provider timeout was not recorded/propagated" >&2; exit 1; }
@@ -7095,6 +7255,7 @@ PROV
   export WASPFLOW_HOME="$rr/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"
   source "$root/lib/artifacts.sh"
+  source "$root/lib/worktree.sh"
   source "$root/lib/fanin.sh"
   for fn in _reap_remaining_resources _reap_cleanup_record _reap_cleanup_finish _reap_cleanup _reap_one _reap_one_locked; do
     eval "$(sed -n "/^$fn()/,/^}/p" "$root/bin/waspflow")"
@@ -7119,6 +7280,7 @@ PROV
     rm -rf "$2"
     if [[ -f "$rr/interrupt" ]]; then kill -TERM "$BASHPID"; fi
   }
+  worktree_discard_inventory() { printf '%s\n' '[]'; }
   make_reap_lane() {
     lane_set "$1" provider codex status live outcome "$2" cwd "$rr" \
       git_tracked false runtime_receipt_enforced true runtime_refresh_state unknown \
@@ -7227,7 +7389,8 @@ PROV
   # A running headless revise blocks reap; after it completes, its recorded
   # scope is stopped before cleanup can be reported complete.
   make_reap_lane headless abandoned
-  lane_set headless headless_revise_state running headless_revise_pid "$$"
+  lane_set headless headless_revise_state running headless_revise_pid "$$" \
+    headless_revise_pid_start_ticks "$(process_start_ticks "$$")"
   rc=0; _reap_one_locked headless 1 0 1 || rc=$?
   [[ "$rc" == 1 && "$(lane_get headless status)" != reaped ]]
   lane_set headless headless_revise_state completed headless_revise_pid ""
@@ -7484,4 +7647,37 @@ EOF
   [[ ! -e "$WASPFLOW_LOCKS_DIR/busy.lock.owner" ]]
 )
 
+# S8 clean-install contract.
+source "$root/scripts/fixtures/verify-s8-install.sh"
+# S6: tmux/process ownership and startup-watchdog boundaries.
+source "$root/scripts/fixtures/verify-s6-runtime.sh"
+
+source "$root/scripts/fixtures/verify-s1-claude.sh" # S1 Claude safe-settle checks
+# S3 Codex adapter hardening fixtures.
+source "$root/scripts/fixtures/verify-s3-codex.sh"
+# S4: secondary provider adapters and neutral handoff.
+source "$root/scripts/fixtures/verify-s4-secondary.sh"
+
+# S2 generation-specific result and exec-output fixtures.
+source "$root/scripts/fixtures/verify-s2-results.sh"
+source "$root/scripts/fixtures/verify-s5-cleanup.sh" # S5 cleanup ownership and archive evidence
+# S7 fleet reconciliation and durable event ownership.
+source "$root/scripts/fixtures/verify-s7-fleet.sh"
+source "$root/scripts/fixtures/verify-r2-c.sh"
+# R2-A core cleanup and escalation regressions.
+source "$root/scripts/fixtures/verify-r2-a.sh"
+# r2-d provider hardening: fail closed on stale, malformed, and diagnostic evidence.
+source "$root/scripts/fixtures/verify-r2-d.sh"
+source "$root/scripts/fixtures/verify-r2-e.sh"
+
+source "$root/scripts/fixtures/verify-r2-b.sh"
+source "$root/scripts/fixtures/verify-r3-f3.sh"
+source "$root/scripts/fixtures/verify-r3-f2.sh"
+# R3-F1 lifecycle, cleanup, and offline doctor regressions.
+source "$root/scripts/fixtures/verify-r3-f1.sh"
+source "$root/scripts/fixtures/verify-r4.sh"
+
+source "$root/scripts/fixtures/verify-r3-f4.sh"
+source "$root/scripts/fixtures/verify-r6.sh"
+source "$root/scripts/fixtures/verify-r7.sh"
 echo "waspflow verify: ok"

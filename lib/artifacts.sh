@@ -12,7 +12,7 @@
 #   These answer "what did this agent change?" — the cheapest accountability.
 #
 # What it adds ONLY when you pass `--report <path>` to spawn (opt-in deliverable):
-#   - On idle, verify the report exists, is substantial (>= REPORT_MIN_BYTES),
+#   - On idle, verify the report exists, is non-empty,
 #     and for new lanes was created or changed after spawn.
 #   - If missing, run ONE recovery pass: resume with workspace-write and, only
 #     when required, the normalized external report parent; reconstruct the
@@ -32,7 +32,8 @@
 # caller / `wait` keys on. Without a report or verify contract, result is
 # succeeded once the provider reports idle (the agent finished its turn cleanly).
 
-WASPFLOW_REPORT_MIN_BYTES="$(numeric_knob WASPFLOW_REPORT_MIN_BYTES 200)"
+# shellcheck source=/dev/null
+source "$WASPFLOW_LIB/turn-state.sh"
 
 # Normalize the path once at the command boundary. Providers receive this exact
 # value in their prompt and reap checks this same value; no adapter should have
@@ -151,7 +152,7 @@ artifacts_report_observation() {
       exists=true
       bytes="$(wc -c <"$report" 2>/dev/null)" || bytes=0
       state=present
-      [[ "$bytes" -ge "$WASPFLOW_REPORT_MIN_BYTES" ]] || state=insubstantial
+      [[ "$bytes" -gt 0 ]] || state=empty
       if [[ "$state" == present && "$(lane_get "$lane" report_contract_version)" == 2 ]]; then
         before="$(lane_get "$lane" report_before_signature)"
         [[ -n "$before" && "$before" != "$(artifacts_report_signature "$report")" ]] || state=unchanged
@@ -169,8 +170,8 @@ artifacts_report_present() {
   [[ -n "$report" ]] || return 0   # no contract → vacuously satisfied
   [[ -f "$report" ]] || { lane_set "$lane" report_state "absent"; return 1; }
   sz="$(wc -c <"$report" 2>/dev/null | tr -d ' ')"
-  [[ -n "$sz" && "$sz" -ge "$WASPFLOW_REPORT_MIN_BYTES" ]] || {
-    lane_set "$lane" report_state "insubstantial"
+  [[ -n "$sz" && "$sz" -gt 0 ]] || {
+    lane_set "$lane" report_state "empty"
     return 1
   }
   if [[ "$(lane_get "$lane" report_contract_version)" == "2" ]]; then
@@ -182,6 +183,34 @@ artifacts_report_present() {
     fi
   fi
   return 0
+}
+
+# An accepted revision starts a fresh deliverable generation. The prior result
+# is retained as an append-only historical record rather than reused here.
+artifacts_begin_turn_generation() {
+  local lane="$1" report signature=missing
+  report="$(lane_get "$lane" report)"
+  [[ -z "$report" ]] || signature="$(artifacts_report_signature "$report")"
+  turn_state_begin_generation "$lane" "$signature"
+}
+
+# A terminal provider failure is not success merely because no report is
+# required. Keep provider-specific receipt parsing at this narrow seam.
+artifacts_provider_terminal_outcome() {
+  local lane="$1" provider="$2" receipt outcome
+  case "$provider" in
+    antigravity)
+      receipt="$(_antigravity_receipt_file "$lane")"
+      outcome="$(tail -n 1 "$receipt" 2>/dev/null | jq -r 'select(.phase == "completion") | .outcome // empty' 2>/dev/null || true)"
+      case "$outcome" in succeeded|failed) printf '%s\n' "$outcome" ;; *) printf 'unknown\n' ;; esac
+      ;;
+    deepseek)
+      receipt="$(_deepseek_receipt_file "$lane")"
+      outcome="$(tail -n 1 "$receipt" 2>/dev/null | jq -r 'select(.phase == "completion") | .outcome // empty' 2>/dev/null || true)"
+      case "$outcome" in succeeded) printf 'succeeded\n' ;; failed|no_session) printf 'failed\n' ;; *) printf 'unknown\n' ;; esac
+      ;;
+    *) printf 'unknown\n' ;;
+  esac
 }
 
 # Finalize a lane once it is idle: capture the diff, enforce the report contract
@@ -233,40 +262,85 @@ artifacts_finalize() {
   case "$outcome" in
     abandoned|superseded)
       artifacts_capture_after "$lane"
-      lane_set "$lane" result "abandoned"
+      turn_state_finish_generation "$lane" abandoned
       echo "abandoned"; return 0
       ;;
   esac
 
   artifacts_capture_after "$lane"
 
+  local provider_outcome
+  provider_outcome="$(artifacts_provider_terminal_outcome "$lane" "$provider")"
+  if [[ "$provider_outcome" == failed ]]; then
+    turn_state_finish_generation "$lane" failed
+    lane_set "$lane" provider_terminal_outcome failed
+    err "lane '$lane': provider reported a failed terminal turn — result=failed"
+    echo "failed"; return 0
+  fi
+
   report="$(lane_get "$lane" report)"
+  # A lane whose task was never confirmed has no clean provider turn to
+  # finalize. With no report contract, the old ordering labeled that absence a
+  # success; keep report-contract failures as report_missing below, but never
+  # fabricate a no-report success for an unsubmitted task.
+  if [[ "$(lane_get "$lane" spawn_submitted)" == false || "$(lane_get "$lane" status)" == spawn_failed ]]; then
+    if [[ -z "$report" ]]; then
+      turn_state_finish_generation "$lane" failed
+      lane_set "$lane" provider_terminal_outcome failed
+      err "lane '$lane': task was never confirmed submitted — result=failed"
+      echo "failed"; return 0
+    fi
+  fi
   if [[ -z "$report" ]]; then
     # No deliverable contract — finishing the turn cleanly IS success.
-    lane_set "$lane" result "succeeded"
+    turn_state_finish_generation "$lane" succeeded
     echo "succeeded"; return 0
   fi
 
   if artifacts_report_present "$lane"; then
-    lane_set "$lane" result "succeeded" report_state "present"
+    turn_state_finish_generation "$lane" succeeded
+    lane_set "$lane" report_state "present"
     echo "succeeded"; return 0
   fi
 
-  # Report missing → one recovery pass (unless recovery disabled).
-  if [[ "$cleanup_only" == 1 || "${WASPFLOW_RECOVERY_POLICY:-original}" == disabled || "$(lane_get "$lane" no_recovery)" == "true" ]]; then
-    local report_failure_state; report_failure_state="$(lane_get "$lane" report_state)"
-    lane_set "$lane" result "report_missing" report_state "${report_failure_state:-absent}"
-    warn "lane '$lane': required report missing and recovery disabled ($report)"
+  local report_failure_state; report_failure_state="$(lane_get "$lane" report_state)"
+  # A lane whose initial task was never confirmed cannot reconstruct a report:
+  # there is no provider turn or trustworthy session evidence to resume.
+  if [[ "$(lane_get "$lane" spawn_submitted)" == false || "$(lane_get "$lane" status)" == spawn_failed ]]; then
+    turn_state_finish_generation "$lane" report_missing
+    lane_set "$lane" report_state "${report_failure_state:-absent}"
+    warn "lane '$lane': required report is missing because its task was never confirmed submitted; recovery was not attempted ($report)"
     echo "report_missing"; return 0
   fi
 
-  warn "lane '$lane': required report missing or unchanged at the exact contracted path ($report) — attempting one recovery pass"
+  # Report absent or unchanged → one recovery pass (unless recovery is disabled).
+  if [[ "$cleanup_only" == 1 || "${WASPFLOW_RECOVERY_POLICY:-original}" == disabled || "$(lane_get "$lane" no_recovery)" == "true" ]]; then
+    turn_state_finish_generation "$lane" report_missing
+    lane_set "$lane" report_state "${report_failure_state:-absent}"
+    warn "lane '$lane': required report is ${report_failure_state:-absent} and recovery is disabled ($report)"
+    echo "report_missing"; return 0
+  fi
+
+  warn "lane '$lane': required report is ${report_failure_state:-absent} at the exact contracted path — attempting one recovery pass ($report)"
   # Recovery MUST use the provider's headless resume path, not in-pane steering:
   # the recovery prompt is multi-line and a TUI send-keys mangles it. Kill the
   # live window first (the worktree stays — recovery needs it to read the diff
   # and write the report) so the provider's revise takes the headless branch.
+  local recovery_had_window=false
   if tmux_window_exists "$lane"; then
+    recovery_had_window=true
     tmux kill-window -t "$(tmux_window_target "$lane")" 2>/dev/null || true
+  fi
+  # A missing pane does not prove its detached descendants are gone. Retire
+  # every known execution before resuming against the same checkout, and keep
+  # the lane for owner inspection on any ambiguous identity.
+  if ! tmux_kill_owned_lane_detached_sessions "$lane"; then
+    turn_state_finish_generation "$lane" report_missing
+    lane_set "$lane" report_state "${report_failure_state:-absent}" recovery_state needs-owner recovery_reason detached-process-retirement-uncertain
+    warn "lane '$lane': required report recovery was not started because a detached execution group could not be retired"
+    echo "report_missing"; return 0
+  fi
+  if [[ "$recovery_had_window" == true ]]; then
     # Wait for the session to become resumable. A just-killed interactive session
     # may not have flushed its session log yet; resuming too soon yields
     # "No conversation found". Poll the provider's resumability up to ~8s.
@@ -282,13 +356,15 @@ artifacts_finalize() {
   _artifacts_recover "$lane" "$provider" "$report"
 
   if artifacts_report_present "$lane"; then
-    lane_set "$lane" result "recovered" report_state "recovered"
+    turn_state_finish_generation "$lane" recovered
+    lane_set "$lane" report_state "recovered"
     warn "lane '$lane': report reconstructed by recovery pass"
     echo "recovered"; return 0
   fi
 
   local report_failure_state; report_failure_state="$(lane_get "$lane" report_state)"
-  lane_set "$lane" result "failed" report_state "${report_failure_state:-absent}"
+  turn_state_finish_generation "$lane" failed
+  lane_set "$lane" report_state "${report_failure_state:-absent}"
   err "lane '$lane': report still missing after recovery — result=failed"
   echo "failed"; return 0
 }
@@ -470,7 +546,7 @@ artifacts_run_verify_checkpoint() {
 # receipts; every cleanup path removes the detached worktree.
 artifacts_classify_pre_existing() {
   local lane="$1" fork repo_root tmp verify_command prepare_command timeout rc state="inconclusive"
-  local recorded_root baseline_template WASPFLOW_WORKTREE_ROOT="${WASPFLOW_WORKTREE_ROOT:-}"
+  local recorded_root baseline_template baseline_signature candidate_signature WASPFLOW_WORKTREE_ROOT="${WASPFLOW_WORKTREE_ROOT:-}"
   recorded_root="$(lane_get "$lane" worktree_root)"; [[ -z "$recorded_root" ]] || WASPFLOW_WORKTREE_ROOT="$recorded_root"
   [[ "$(lane_get "$lane" verify_failure_class)" == task ]] || return 0
   fork="$(lane_get "$lane" verify_fork_point)"
@@ -497,18 +573,31 @@ artifacts_classify_pre_existing() {
       set +e; timeout "$timeout" bash -c "cd $(printf '%q' "$tmp") && $prepare_command" >/dev/null 2>&1; rc=$?; set -e
       [[ "$rc" -eq 0 ]] || { printf 'inconclusive\n'; exit 0; }
     fi
-    set +e; timeout "$timeout" bash -c "cd $(printf '%q' "$tmp") && $verify_command" >/dev/null 2>&1; rc=$?; set -e
-    case "$rc" in 0) printf 'passed\n' ;; 124|126|127) printf 'inconclusive\n' ;; *) printf 'failed\n' ;; esac
+    set +e; timeout "$timeout" bash -c "cd $(printf '%q' "$tmp") && $verify_command" >"$tmp/.waspflow-baseline-stdout" 2>"$tmp/.waspflow-baseline-stderr"; rc=$?; set -e
+    case "$rc" in
+      0) printf 'passed\n' ;;
+      124|126|127) printf 'inconclusive\n' ;;
+      *) cat "$tmp/.waspflow-baseline-stdout" "$tmp/.waspflow-baseline-stderr" | cksum | awk '{print "failed:" $1 ":" $2}' ;;
+    esac
   )"
+  if [[ "$state" == failed:* ]]; then
+    baseline_signature="${state#failed:}"
+    state=failed
+  fi
   lane_set "$lane" baseline_oracle_ran "true" baseline_oracle_state "$state" baseline_oracle_reason ""
   if [[ "$state" == failed ]]; then
-    lane_set "$lane" verify_failure_class "pre_existing"
-    local runs; runs="$(lane_get "$lane" verify_runs)"
-    [[ -n "$runs" ]] && lane_set "$lane" verify_runs "$(jq -c 'if length > 0 then .[-1].failure_class = "pre_existing" else . end' <<<"$runs")"
-    local result_file="$(lane_dir "$lane")/verify-result.json" result_tmp
-    if [[ -f "$result_file" ]]; then
-      result_tmp="${result_file}.tmp.$$"
-      jq '.failure_class = "pre_existing"' "$result_file" >"$result_tmp" && mv "$result_tmp" "$result_file"
+    candidate_signature="$({ cat "$(lane_dir "$lane")/verify-stdout.txt" "$(lane_dir "$lane")/verify-stderr.txt" 2>/dev/null || true; } | cksum | awk '{print $1 ":" $2}')"
+    if [[ -n "$candidate_signature" && "$candidate_signature" == "$baseline_signature" ]]; then
+      lane_set "$lane" verify_failure_class "pre_existing" baseline_oracle_reason "matching-failure-output"
+      local runs; runs="$(lane_get "$lane" verify_runs)"
+      [[ -n "$runs" ]] && lane_set "$lane" verify_runs "$(jq -c 'if length > 0 then .[-1].failure_class = "pre_existing" else . end' <<<"$runs")"
+      local result_file="$(lane_dir "$lane")/verify-result.json" result_tmp
+      if [[ -f "$result_file" ]]; then
+        result_tmp="${result_file}.tmp.$$"
+        jq '.failure_class = "pre_existing"' "$result_file" >"$result_tmp" && mv "$result_tmp" "$result_file"
+      fi
+    else
+      lane_set "$lane" baseline_oracle_reason "failure-set-not-compared"
     fi
   fi
 }
@@ -544,17 +633,17 @@ artifacts_verify() {
   fi
   case "$verify_state" in
     passed)
-      lane_set "$lane" result "verified"
+      turn_state_finish_generation "$lane" verified
       echo "verified"
       return 0
       ;;
     failed|timeout|infra)
-      lane_set "$lane" result "verify_failed"
+      turn_state_finish_generation "$lane" verify_failed
       echo "verify_failed"
       return 0
       ;;
     *)
-      lane_set "$lane" result "verify_failed"
+      turn_state_finish_generation "$lane" verify_failed
       echo "verify_failed"
       return 0
       ;;
@@ -580,30 +669,35 @@ _receipts_heal_tail() {
 }
 
 # Append a final lane/exec receipt, idempotent across the append→marker crash
-# window (F1). Dedup key is (lane_uuid, receipt_kind=="lane"), NOT receipt_id:
+# window (F1). Dedup key is (lane_uuid, receipt_kind=="lane", generation), NOT receipt_id:
 # the caller (artifacts_emit_receipt_v1) mints a FRESH receipt_id on every
 # re-emit, so a receipt_id key would never match a crash-orphaned row. This
 # mirrors the segment path's (lane_uuid, index) model. exec receipts have no
 # lane_uuid — they carry a unique exec_id and are never re-emitted (one-shot),
 # so they append unconditionally.
 _receipts_append() {
-  local receipt="$1" fd kind lane_uuid
+  local receipt="$1" fd kind lane_uuid generation existing
   [[ -n "$receipt" ]] && jq -e 'type == "object"' >/dev/null <<<"$receipt" 2>/dev/null \
     || { err "receipt: generated JSON is empty or invalid"; return 1; }
   kind="$(jq -r '.receipt_kind // "lane"' <<<"$receipt")"
   lane_uuid="$(jq -r '.lane_uuid // empty' <<<"$receipt")"
+  generation="$(jq -r '.generation // 0' <<<"$receipt")"
   mkdir -p "$WASPFLOW_HOME" "$WASPFLOW_LOCKS_DIR"
   command -v flock >/dev/null 2>&1 || { err "receipt: flock is required"; return 1; }
   exec {fd}>"$WASPFLOW_LOCKS_DIR/receipts.lock" || { err "receipt: cannot open lock"; return 1; }
   flock -x "$fd" || { exec {fd}>&-; err "receipt: cannot lock"; return 1; }
-  # A lane row for this lane_uuid already landed (a prior partial finalize whose
+  # A lane row for this lane_uuid and generation already landed (a prior partial finalize whose
   # marker never committed) → do NOT append a second. fromjson? tolerates a
   # malformed/torn line so a corrupt ledger cannot hide the existing row (F2).
-  if [[ "$kind" == lane && -n "$lane_uuid" && -f "$WASPFLOW_HOME/receipts.jsonl" ]] \
-     && jq -e --arg u "$lane_uuid" -R \
-        'fromjson? // empty | select(.receipt_kind == "lane" and .lane_uuid == $u)' \
-        "$WASPFLOW_HOME/receipts.jsonl" >/dev/null 2>&1; then
-    flock -u "$fd" || true; exec {fd}>&-; return 0
+  if [[ "$kind" == lane && -n "$lane_uuid" && "$generation" =~ ^[0-9]+$ && -f "$WASPFLOW_HOME/receipts.jsonl" ]]; then
+    existing="$(jq -c --arg u "$lane_uuid" --argjson g "$generation" -R \
+      'fromjson? // empty | select(.receipt_kind == "lane" and .lane_uuid == $u and (.generation // 0) == $g)' \
+      "$WASPFLOW_HOME/receipts.jsonl" 2>/dev/null | tail -1)"
+    if [[ -n "$existing" ]]; then
+      flock -u "$fd" || true; exec {fd}>&-
+      printf '%s\n' "$existing"
+      return 10
+    fi
   fi
   _receipts_heal_tail
   if ! printf '%s\n' "$receipt" >>"$WASPFLOW_HOME/receipts.jsonl"; then
@@ -671,7 +765,7 @@ artifacts_emit_receipt_v1() {
   # derive their reap-closing segment from durable lane state so that legacy
   # lanes retain segment:null while escalated lanes keep their last-arm
   # attribution.
-  local lane="$1" result="$2" segment_json="${3:-}" dir provider billing quota version harness receipt reasons
+  local lane="$1" result="$2" segment_json="${3:-}" dir provider billing quota version harness receipt reasons generation
   local receipt_kind="lane" segment_index="" emitted_segment="" wall_start="" history=""
   local escalated_lane=false
   if [[ -n "$segment_json" ]]; then
@@ -683,7 +777,20 @@ artifacts_emit_receipt_v1() {
     [[ "$emitted_segment" =~ ^[0-9]+$ && "$emitted_segment" -ge "$segment_index" ]] && return 0
     wall_start="$(lane_get "$lane" segment_started_epoch)"
   else
-    [[ "$(lane_get "$lane" receipt_emitted)" == true ]] && return 0
+    generation="$(lane_get "$lane" turn_generation)"
+    [[ "$generation" =~ ^[0-9]+$ ]] || generation=0
+    local emitted_generation
+    emitted_generation="$(lane_get "$lane" receipt_emitted_generation)"
+    # Legacy markers predate generation attribution. They are valid only for
+    # generation zero; an old or missing marker must not suppress a new turn.
+    if [[ "$(lane_get "$lane" receipt_emitted)" == true ]]; then
+      if [[ "$emitted_generation" =~ ^[0-9]+$ && "$emitted_generation" -eq "$generation" ]]; then
+        return 0
+      fi
+      if [[ -z "$emitted_generation" && "$generation" -eq 0 ]]; then
+        return 0
+      fi
+    fi
     segment_index="$(lane_get "$lane" segment_index)"
     history="$(lane_get "$lane" arm_history)"
     if [[ "$segment_index" =~ ^[0-9]+$ && "$segment_index" -gt 0 ]]; then
@@ -730,7 +837,7 @@ artifacts_emit_receipt_v1() {
   escalation_path="$(lane_get "$lane" escalation_path)"
   jq -e 'type == "array"' >/dev/null <<<"$escalation_path" 2>/dev/null || escalation_path='[]'
   receipt="$(jq -cn \
-    --arg receipt_id "$(new_uuid)" --arg lane "$lane" --arg lane_uuid "$(lane_get "$lane" lane_uuid)" --arg version "$version" \
+    --arg receipt_id "$(new_uuid)" --arg lane "$lane" --arg lane_uuid "$(lane_get "$lane" lane_uuid)" --arg version "$version" --argjson generation "${generation:-0}" \
     --arg op "$(lane_get "$lane" op)" --arg task_family "$(lane_get "$lane" task_family)" --arg constraint_family "$(lane_get "$lane" constraint_family)" \
     --arg policy_version "$(lane_get "$lane" policy_version)" --arg catalog_ref "$(lane_get "$lane" catalog_ref)" \
     --arg provider "$provider" --arg surface "$(lane_get "$lane" surface)" --arg model "$(lane_get "$lane" model_requested)" --arg effort "$(lane_get "$lane" effort_requested)" --arg mode "$(lane_get "$lane" op_mode)" \
@@ -747,7 +854,7 @@ artifacts_emit_receipt_v1() {
       def epoch_or_null: if . == "" then null else tonumber? end;
       ($spawn_epoch | epoch_or_null) as $spawn |
       ($wall_start | epoch_or_null) as $segment_start |
-      {schema_version:1,receipt_kind:$receipt_kind,receipt_id:$receipt_id,lane:$lane,lane_uuid:($lane_uuid|nullable),waspflow_version:$version,segment:$segment,
+      {schema_version:1,receipt_kind:$receipt_kind,receipt_id:$receipt_id,lane:$lane,lane_uuid:($lane_uuid|nullable),generation:(if $receipt_kind == "lane" then $generation else null end),waspflow_version:$version,segment:$segment,
        op:$op,task_family:($task_family|nullable),constraint_family:($constraint_family|nullable),policy_version:($policy_version|nullable),catalog_ref:($catalog_ref|nullable),
        arm_requested:{schema_version:1,provider:$provider,surface:(if $surface == "" then "tui" else $surface end),model:$model,effort:$effort,mode:(if $mode == "" then "standard" else $mode end),billing_path:$billing,endpoint_profile:(if $endpoint_profile == "" then "default" else $endpoint_profile end),raw_provider_args:($raw_provider_args == "true"),auth_principal:($auth_principal|nullable)},
        arm_attestation:{runtime_settings_state:(if $runtime_state == "" then "unknown" else $runtime_state end),observed_model:($observed_model|nullable),observed_effort:($observed_effort|nullable)},
@@ -768,13 +875,20 @@ artifacts_emit_receipt_v1() {
       receipt="$existing_receipt"
     fi
   else
-    _receipts_append "$receipt" || return 1
+    local append_rc=0 existing_receipt=""
+    existing_receipt="$(_receipts_append "$receipt")" || append_rc=$?
+    [[ "$append_rc" -eq 0 || "$append_rc" -eq 10 ]] || return "$append_rc"
+    if [[ "$append_rc" -eq 10 ]]; then
+      jq -e 'type == "object"' >/dev/null <<<"$existing_receipt" 2>/dev/null \
+        || { err "receipt: durable lane row could not be repaired"; return 1; }
+      receipt="$existing_receipt"
+    fi
   fi
   printf '%s\n' "$receipt" >"$dir/receipt.json" || { err "receipt: cannot write lane copy"; return 1; }
   if [[ "$receipt_kind" == lane_segment ]]; then
     lane_set "$lane" receipt_emitted_segment "$segment_index" segment_receipt_id "$(jq -r '.receipt_id' <<<"$receipt")"
   else
-    lane_set "$lane" receipt_emitted "true" receipt_id "$(jq -r '.receipt_id' <<<"$receipt")"
+    lane_set "$lane" receipt_emitted "true" receipt_emitted_generation "$generation" receipt_id "$(jq -r '.receipt_id' <<<"$receipt")"
   fi
 }
 

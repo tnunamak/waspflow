@@ -145,9 +145,14 @@ CODEX_MODELS_CACHE="${CODEX_MODELS_CACHE:-$HOME/.codex/models_cache.json}"
 # its local cache is a fail-open fallback only. Never curate slugs here: Codex's
 # auth-scoped availability changes independently of waspflow releases.
 codex_valid_models() {
-  local source out
-  if command -v codex >/dev/null 2>&1; then
-    source="$(codex debug models 2>/dev/null || true)"
+  local source out timeout_seconds
+  timeout_seconds="$(numeric_knob WASPFLOW_CODEX_MODEL_DISCOVERY_TIMEOUT_SECONDS 2)"
+  # `codex debug models` is provider-owned state, but it can still hang while
+  # the CLI hydrates auth or waits for a backend. Model validation is advisory:
+  # use a bounded live observation when possible, then honestly fall back to
+  # the cache/unknown path rather than making a spawn wait forever.
+  if command -v codex >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    source="$(timeout "$timeout_seconds" codex debug models 2>/dev/null || true)"
     out="$(jq -r '.models[].slug // empty' <<<"$source" 2>/dev/null || true)"
     [[ -n "$out" ]] && { printf 'source=live_query\n%s\n' "$out"; return 0; }
   fi
@@ -479,13 +484,47 @@ _codex_paused_goal_prompt_visible() {
   grep -qi "Resume paused goal" <<<"$1"
 }
 
+# Codex leaves its update notice visible after an operator skips it. That banner
+# is informational once the ordinary composer is present; treating it as a
+# modal forever strands every new lane. Keep the shared conservative detector
+# for actual menus, but require a missing composer before its update result can
+# block a Codex submission.
+_codex_startup_blocker() {
+  local pane="$1" reason
+  reason="$(wf_pane_startup_menu "$pane")" || return 1
+  # The composer placeholder text rotates between Codex versions, so key on the
+  # composer marker line and on the ABSENCE of modal choices, not on its wording.
+  if [[ "$reason" == "startup update prompt" ]] \
+     && grep -qE '^[[:space:]]*(›|❯|>)([[:space:]]|$)' <<<"$pane" \
+     && ! grep -qiE 'update now|skip until next version|remind me later|^[[:space:]]*[›❯>]?[[:space:]]*[0-9]\.[[:space:]]' <<<"$pane"; then
+    return 1
+  fi
+  printf '%s\n' "$reason"
+}
+
+_codex_startup_blocked_message() {
+  local lane="$1" reason="$2"
+  case "$reason" in
+    "startup trust prompt")
+      err "codex spawn: lane '$lane' is waiting for Codex's directory-trust choice; no keys were sent"
+      err "  inspect: waspflow peek $lane"
+      err "  next: attach only if you intend to make that trust decision yourself; otherwise run 'waspflow reap $lane --force' and spawn again after trusting the directory in Codex"
+      ;;
+    *)
+      err "codex spawn: lane '$lane' is showing a $reason, so the prompt was not submitted (an injected Enter would answer the menu)"
+      err "  inspect: waspflow peek $lane"
+      err "  recover: waspflow reap $lane --force and spawn again after resolving the provider prompt"
+      ;;
+  esac
+}
+
 _codex_clear_trust_prompt() {
   local target="$1" i pane
   for i in $(seq 1 20); do
     tmux display-message -p -t "$target" >/dev/null 2>&1 || return 1
     pane="$(_codex_pane "$target")"
     _codex_paused_goal_prompt_visible "$pane" && return 0
-    wf_pane_startup_menu "$pane" >/dev/null && return 0
+    _codex_startup_blocker "$pane" >/dev/null && return 0
     if grep -qi "Do you trust" <<<"$pane"; then
       tmux send-keys -t "$target" "1"
       sleep 1
@@ -513,7 +552,7 @@ _codex_wait_composer_ready() {
     tmux display-message -p -t "$target" >/dev/null 2>&1 || return 1
     pane="$(_codex_pane "$target")"
     _codex_paused_goal_prompt_visible "$pane" && return 2
-    wf_pane_startup_menu "$pane" >/dev/null && return 0
+    _codex_startup_blocker "$pane" >/dev/null && return 0
     if ! grep -qi "Do you trust" <<<"$pane" \
        && grep -qiE "model: *gpt-|gpt-[0-9].* (medium|low|high|default) " <<<"$pane"; then
       return 0
@@ -549,9 +588,9 @@ $prompt"
   # is selected — answering blind is how a spawn becomes an unrequested upgrade.
   local startup_pane startup_reason
   startup_pane="$(tmux capture-pane -p -t "$target" 2>/dev/null || true)"
-  if [[ -n "$startup_pane" ]] && startup_reason="$(wf_pane_startup_menu "$startup_pane")"; then
+  if [[ -n "$startup_pane" ]] && startup_reason="$(_codex_startup_blocker "$startup_pane")"; then
     [[ "$provisional" == true ]] || lane_set "$lane" startup_blocker "$startup_reason" startup_pane "$startup_pane"
-    err "codex spawn: lane '$lane' is showing a $startup_reason, so the prompt was not submitted (an injected Enter would answer the menu). Resolve it, then retry: waspflow attach $lane"
+    _codex_startup_blocked_message "$lane" "$startup_reason"
     return 1
   fi
   tmux send-keys -t "$target" C-u
@@ -561,12 +600,18 @@ $prompt"
   for attempt in 1 2 3 4 5; do
     tmux display-message -p -t "$target" >/dev/null 2>&1 || return 1
     startup_pane="$(tmux capture-pane -p -t "$target" 2>/dev/null || true)"
-    if startup_reason="$(wf_pane_startup_menu "$startup_pane")"; then
+    if startup_reason="$(_codex_startup_blocker "$startup_pane")"; then
       [[ "$provisional" == true ]] || lane_set "$lane" startup_blocker "$startup_reason" startup_pane "$startup_pane"
-      err "codex spawn: $startup_reason appeared before submission; refusing to answer it"
+      _codex_startup_blocked_message "$lane" "$startup_reason"
       return 1
     fi
-    tmux send-keys -t "$target" Enter
+    # A dead pane cannot accept this retry. Stop immediately with an honest
+    # failed launch rather than spending every retry/poll interval claiming we
+    # are still trying to submit a prompt that no UI can receive.
+    tmux send-keys -t "$target" Enter || {
+      err "codex spawn: launch pane disappeared before submit attempt $attempt"
+      return 1
+    }
     # Give the turn a moment to start + write its session_meta line.
     local j
     for j in $(seq 1 6); do
@@ -795,19 +840,49 @@ _codex_find_rollout_for_submitted_prompt() {
     head -1 "$f" 2>/dev/null | jq -e 'select(.type=="session_meta") | ((.payload.source | type) == "object" and (.payload.source | has("subagent"))) | not' >/dev/null 2>&1 || continue
     # Exact text and task_started must belong to the same turn.
     jq -ne --arg full_prompt "$full_prompt" '
-      reduce inputs as $e ({started:false,matched:false,confirmed:false};
-        ($e.payload.type // $e.type) as $type |
-        if $type == "task_started" then
-          .matched = (if .started then false else .matched end) | .started = true
-        elif $type == "task_complete" or $type == "turn_aborted" then
-          .started = false | .matched = false
-        elif $type == "user_message" then
-          .matched = (($e.payload.message // "") == $full_prompt)
-        elif $e.type == "event_msg" and $type == "item_completed" and $e.payload.item.type == "UserMessage" then
-          .matched = (([$e.payload.item.content[]? | select(.type == "text") | .text] | join("")) == $full_prompt)
-        else . end |
-        .confirmed = (.confirmed or (.started and .matched))
-      ) | .confirmed' \
+      reduce inputs as $e
+        ({started_ids:[], started_legacy:0, matched_ids:[], matched_legacy:false, confirmed:false};
+         ($e.payload // {}) as $p |
+         ($p.type // $e.type // "") as $type |
+         if $type == "task_started" then
+           ($p.turn_id // $e.turn_id // "") as $id |
+           if $id == "" then
+             .started_legacy += 1 | .confirmed = (.confirmed or .matched_legacy)
+           else
+             .started_ids += [$id] | .confirmed = (.confirmed or ((.matched_ids | index($id)) != null))
+           end
+         elif $type == "user_message" then
+           if ($p.message // "") == $full_prompt then
+             ($p.turn_id // $e.turn_id // "") as $id |
+             if $id == "" then
+               .matched_legacy=true | .confirmed = (.confirmed or (.started_legacy > 0))
+             else
+               .matched_ids += [$id] | .confirmed = (.confirmed or ((.started_ids | index($id)) != null))
+             end
+           else . end
+         elif $type == "item_completed" and ($p.item.type // "") == "UserMessage" then
+           ([$p.item.content[]? | select(.type == "text") | .text] | join("")) as $text |
+           if $text == $full_prompt then
+             ($p.turn_id // $p.item.turn_id // $e.turn_id // "") as $id |
+             if $id == "" then
+               .matched_legacy=true | .confirmed = (.confirmed or (.started_legacy > 0))
+             else
+               .matched_ids += [$id] | .confirmed = (.confirmed or ((.started_ids | index($id)) != null))
+             end
+           else . end
+         elif $type == "task_complete" or $type == "turn_aborted" then
+           # Legacy records have no identity, so a terminal event closes their
+           # only possible pairing. With IDs, remove only that turn and leave a
+           # separately queued message eligible for its own later start.
+           ($p.turn_id // $e.turn_id // "") as $id |
+           if $id == "" then
+             .started_legacy=0 | .matched_legacy=false
+           else
+             .started_ids |= map(select(. != $id)) |
+             .matched_ids |= map(select(. != $id))
+           end
+         else . end)
+      | .confirmed' \
       "$f" >/dev/null 2>&1 || continue
     echo "$f"
     return 0
@@ -971,10 +1046,39 @@ codex_refresh_runtime_settings() {
   return 0
 }
 
+# Reduce the rollout to the evidence that is safe to attribute to its current
+# turn. A new user message invalidates the earlier turn immediately: an old
+# completion can arrive late, but must never make that queued newer turn idle.
+# Args: rollout; stdout: JSON state with outcome, pending tools, and completions
+_codex_current_turn_state() {
+  local rollout="$1"
+  [[ -f "$rollout" ]] || return 1
+  jq -nce '
+    reduce inputs as $row
+      ({turn:"", started:false, outcome:"pending", tools:{}, completed:0};
+       if $row.type == "turn_context" then .turn="" | .started=false | .outcome="pending"
+       elif $row.type == "event_msg" then
+         $row.payload as $p |
+         if $p.type == "task_started" then .turn=($p.turn_id // "") | .started=true | .outcome="pending"
+         elif $p.type == "user_message" then .turn="" | .started=false | .outcome="pending"
+         elif $p.type == "exec_command_begin" then
+           .tools[($p.call_id // "unknown")]=true | .outcome="pending"
+         elif $p.type == "exec_command_end" then del(.tools[($p.call_id // "unknown")])
+         elif $p.type == "task_complete" then
+           if .outcome == "aborted" then .
+           elif .started and ((.turn == "" and ($p.turn_id // "") == "") or ($p.turn_id // "") == .turn) then .outcome="complete" | .completed += 1
+           else . end
+         elif $p.type == "turn_aborted" then
+           if .started and ((.turn == "" and ($p.turn_id // "") == "") or ($p.turn_id // "") == .turn) then .outcome="aborted" else . end
+         else . end
+       else . end)
+  ' "$rollout"
+}
+
 # IDLE predicate: the current turn completed and no turn-owned exec is pending.
 # Args: lane
 codex_is_idle() {
-  local lane="$1" sid rollout last
+  local lane="$1" sid rollout state
   sid="$(_codex_discover_session_cached "$lane")"
   [[ -n "$sid" ]] || return 1
   rollout="$(lane_get "$lane" rollout)"
@@ -982,32 +1086,15 @@ codex_is_idle() {
     rollout="$(_codex_rollout_for_session "$sid" || true)"
   fi
   [[ -n "$rollout" && -f "$rollout" ]] || return 1
-  # Ordered current-turn evidence, with matching IDs when present.
-  jq -ne '
-    reduce inputs as $row
-      ({turn:"", complete:false, tools:{}};
-       if $row.type == "turn_context" then .complete=false
-       elif $row.type == "event_msg" then
-         $row.payload as $p |
-         if $p.type == "task_started" then .turn=($p.turn_id // "") | .complete=false | .tools={}
-         elif $p.type == "user_message" then .complete=false
-         elif $p.type == "exec_command_begin" then
-           .tools[($p.call_id // "unknown")]=true | .complete=false
-         elif $p.type == "exec_command_end" then del(.tools[($p.call_id // "unknown")])
-         elif $p.type == "task_complete" then
-           .complete=(.turn == "" or ($p.turn_id // "") == .turn)
-         elif $p.type == "turn_aborted" then .complete=false
-         else . end
-       else . end)
-    | .complete and (.tools | length == 0)
-  ' "$rollout" >/dev/null 2>&1
+  state="$(_codex_current_turn_state "$rollout")" || return 1
+  jq -e '.outcome == "complete" and (.tools | length == 0)' <<<"$state" >/dev/null
 }
 
 # turn_mark: count of COMPLETED turns (task_complete events) in the rollout. Like
 # claude's, this advances ONLY when a turn finishes — not on the submitted user
 # message — so the wait barrier clears exactly when the revised turn completes.
 codex_turn_mark() {
-  local lane="$1" sid rollout
+  local lane="$1" sid rollout state
   sid="$(_codex_discover_session_cached "$lane")"
   [[ -n "$sid" ]] || { echo 0; return 0; }
   rollout="$(lane_get "$lane" rollout)"
@@ -1015,7 +1102,8 @@ codex_turn_mark() {
     rollout="$(_codex_rollout_for_session "$sid" || true)"
   fi
   [[ -n "$rollout" && -f "$rollout" ]] || { echo 0; return 0; }
-  jq -rc 'select((.payload.type // .type) == "task_complete") | 1' "$rollout" 2>/dev/null | wc -l
+  state="$(_codex_current_turn_state "$rollout")" || { echo 0; return 0; }
+  jq -r '.completed' <<<"$state"
 }
 
 # Deferred-switch hooks (lib/escalation.sh). escalate_resume_launch_locked can
@@ -1051,6 +1139,111 @@ _codex_task_started_mark() {
   local rollout="$1"
   [[ -f "$rollout" ]] || { echo 0; return 0; }
   jq -rc 'select((.payload.type // .type) == "task_started") | 1' "$rollout" 2>/dev/null | wc -l
+}
+
+# Classify the live-revise delta written after its paste. An exact message
+# without a matching start proves the paste submitted, but not that the current
+# turn began, so callers must wait without pressing Enter again.
+# Args: rollout message byte_offset; stdout: confirmed|message-seen|not-seen
+_codex_revise_submission_state() {
+  local rollout="$1" message="$2" byte_offset="$3"
+  [[ -f "$rollout" && "$byte_offset" =~ ^[0-9]+$ ]] || return 1
+  tail -c "+$(( byte_offset + 1 ))" "$rollout" 2>/dev/null | jq -nre --arg message "$message" '
+    reduce inputs as $row
+      ({saw_message:false, saw_user_message:false, matched_ids:[], started_ids:[], started:0, confirmed:false};
+       ($row.payload // {}) as $p |
+       ($p.type // $row.type // "") as $type |
+       if $type == "user_message" then
+         .saw_user_message=true |
+         if ($p.message // "") == $message then
+           .saw_message=true |
+           ($p.turn_id // $row.turn_id // "") as $id |
+           if $id != "" then
+             .matched_ids += [$id] |
+             if (.started_ids | index($id)) != null then .confirmed=true else . end
+           else . end
+         else . end
+       elif $type == "item_completed" and ($p.item.type // "") == "UserMessage" then
+         .saw_user_message=true |
+         ([$p.item.content[]? | select(.type == "text") | .text] | join("")) as $text |
+         if $text == $message then
+           .saw_message=true |
+           ($p.turn_id // $p.item.turn_id // $row.turn_id // "") as $id |
+           if $id != "" then
+             .matched_ids += [$id] |
+             if (.started_ids | index($id)) != null then .confirmed=true else . end
+           else . end
+         else . end
+       elif $type == "task_started" then
+         .started += 1 |
+         ($p.turn_id // $row.turn_id // "") as $id |
+         if $id != "" then
+           .started_ids += [$id] |
+           if (.matched_ids | index($id)) != null then .confirmed=true else . end
+         else . end
+       else . end)
+    | if .confirmed then "confirmed"
+      elif .saw_message then "message-seen"
+      else "not-seen"
+      end
+  ' 2>/dev/null
+}
+
+# Refuse to type into a pane when its UI owns the keyboard. Reuse the same
+# modal detectors as spawn, and include mid-turn model-choice prompts because
+# a normal revise message must never accidentally choose a model.
+# Args: pane_text; stdout: blocker reason
+_codex_revise_input_blocker() {
+  local pane="$1" reason
+  if _codex_paused_goal_prompt_visible "$pane"; then
+    printf '%s\n' "paused-goal prompt"
+    return 0
+  fi
+  if reason="$(_codex_startup_blocker "$pane")"; then
+    printf '%s\n' "$reason"
+    return 0
+  fi
+  if reason="$(wf_pane_looks_blocked "$pane")"; then
+    printf '%s\n' "$reason"
+    return 0
+  fi
+  return 1
+}
+
+# Guard every live-revise key injection. The pane can change between attempts,
+# so this intentionally takes a fresh snapshot immediately before each key.
+# Args: lane target
+_codex_revise_pane_accepts_input() {
+  local lane="$1" target="$2" pane reason
+  pane="$(_codex_pane "$target")"
+  if [[ -z "$pane" ]]; then
+    lane_set "$lane" revise_submitted false \
+      revise_submission_state unconfirmed-pane-unreadable \
+      revise_submission_error pane-unreadable revise_task_started_mark ""
+    err "codex revise: cannot inspect pane for lane '$lane'; no keys were sent"
+    return 1
+  fi
+  if reason="$(_codex_revise_input_blocker "$pane")"; then
+    lane_set "$lane" revise_submitted false \
+      revise_submission_state unconfirmed-provider-modal \
+      revise_submission_error "$reason" revise_task_started_mark ""
+    err "codex revise: lane '$lane' is showing a $reason; no keys were sent"
+    err "  inspect: waspflow peek $lane"
+    err "  next: resolve the provider prompt yourself, then retry the revise"
+    return 1
+  fi
+  return 0
+}
+
+_codex_headless_output_is_useful() {
+  local output="$1" last
+  [[ -s "$output" ]] || return 1
+  last="$(awk 'NF { line=$0 } END { print line }' "$output" 2>/dev/null)"
+  [[ -n "$last" ]] || return 1
+  case "${last,,}" in
+    *denied*|*not.authorized*|*unauthorized*|"no response"|"no output"|"(no output)") return 1 ;;
+  esac
+  return 0
 }
 
 # Normalize an existing directory without resolving a report filename. This is
@@ -1096,7 +1289,8 @@ codex_revise() {
     # Live in-pane steer. The Enter can race pane state, so verify a NEW
     # task_started event, not merely rollout growth: a user_message can remain
     # queued in Codex's composer without a task having started.
-    local target rollout before after attempt j attempts polls
+    local target rollout before after before_bytes attempt j attempts polls submission_state
+    local message_submitted=false
     target="$(tmux_window_target "$lane")"
     # _codex_discover_session_cached already persists session_id/rollout on a
     # successful resolution, but an OLDER cached lane may still be missing
@@ -1116,8 +1310,17 @@ codex_revise() {
       return 1
     }
     before="$(_codex_task_started_mark "$rollout")"
+    before_bytes="$(wc -c <"$rollout" 2>/dev/null || echo '')"
+    [[ "$before_bytes" =~ ^[0-9]+$ ]] || {
+      lane_set "$lane" revise_submitted false revise_submission_state unconfirmed-rollout-read \
+        revise_submission_error rollout-read revise_task_started_mark ""
+      err "codex revise: cannot establish a safe rollout boundary for lane '$lane'"
+      return 1
+    }
+    _codex_revise_pane_accepts_input "$lane" "$target" || return 1
     tmux send-keys -t "$target" C-u
     sleep 0.3
+    _codex_revise_pane_accepts_input "$lane" "$target" || return 1
     tmux_paste_text "$target" "$message"
     sleep 1
     # These bounded defaults are production behavior. The env seams only let
@@ -1127,26 +1330,37 @@ codex_revise() {
     [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=5
     [[ "$polls" =~ ^[1-9][0-9]*$ ]] || polls=6
     for attempt in $(seq 1 "$attempts"); do
-      tmux send-keys -t "$target" Enter
+      if [[ "$message_submitted" != true ]]; then
+        _codex_revise_pane_accepts_input "$lane" "$target" || return 1
+        tmux send-keys -t "$target" Enter
+      fi
       for j in $(seq 1 "$polls"); do
         after="$(_codex_task_started_mark "$rollout")"
-        if [[ "$after" -gt "$before" ]]; then
-          lane_set "$lane" revise_submitted true \
-            revise_submission_state confirmed-task-started \
-            revise_submission_error "" revise_task_started_mark "$after"
-          codex_refresh_runtime_settings "$lane"
-          return 0
-        fi
+        submission_state="$(_codex_revise_submission_state "$rollout" "$message" "$before_bytes" || true)"
+        case "$submission_state" in
+          confirmed)
+            lane_set "$lane" revise_submitted true \
+              revise_submission_state confirmed-task-started \
+              revise_submission_error "" revise_task_started_mark "$after"
+            codex_refresh_runtime_settings "$lane"
+            return 0
+            ;;
+          message-seen) message_submitted=true ;;
+        esac
         sleep 1
       done
-      warn "codex revise: steer attempt $attempt didn't start a turn for lane '$lane'; retrying Enter"
+      if [[ "$message_submitted" == true ]]; then
+        warn "codex revise: the pasted message was observed for lane '$lane', but its task has not started; waiting without re-sending Enter"
+      else
+        warn "codex revise: steer attempt $attempt didn't start a turn for lane '$lane'; retrying Enter"
+      fi
     done
     lane_set "$lane" revise_submitted false \
       revise_submission_state unconfirmed-no-task-started \
       revise_submission_error no-task-started revise_task_started_mark "$before"
     # Keep the caller's completed-turn barrier intact. A human can still submit
     # the pasted message later, and wait must not mistake the prior idle for it.
-    warn "codex revise: message was not confirmed submitted for lane '$lane' (no new task_started event)"
+    warn "codex revise: message was not confirmed submitted for lane '$lane' (no new task_started event); it may still have been applied, so run 'waspflow peek $lane' before sending it again"
     return 1
   fi
 
@@ -1206,6 +1420,10 @@ codex_revise() {
     -c sandbox_mode=workspace-write -c approval_policy=never "${MCP_ARGV[@]}" -o "$tmp" \
     >/dev/null 2>&1 || resume_rc=$?
   codex_refresh_runtime_settings "$lane"
+  if [[ "$resume_rc" -eq 0 ]] && ! _codex_headless_output_is_useful "$tmp"; then
+    err "codex revise: headless resume exited 0 but produced empty, denied, or placeholder output"
+    resume_rc=1
+  fi
   if [[ -z "$out_file" ]]; then cat "$tmp"; rm -f "$tmp"; fi
   return "$resume_rc"
 }

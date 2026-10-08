@@ -2,9 +2,8 @@
 
 Status: proposal (design only — no implementation yet)
 Created: 2026-07-06
-Related: `docs/spike.md` (verified resume mechanics), `docs/lane-closeout-and-fan-in.md`
-(the bundle-before-reap artifact this reuses), `inbox/2026-07-05-advisor-lane-stateless-consult-gap.md`
-(the sibling "advisor lane" pattern — a *different* reuse shape; see "Scope" below).
+Related: [spike](spike.md) (verified resume mechanics), [lane closeout and fan-in](lane-closeout-and-fan-in.md)
+(the bundle-before-reap artifact this reuses).
 
 ## The ask
 
@@ -15,12 +14,11 @@ must re-learn the repo from zero. The resume machinery already exists (`revise` 
 resumes the provider session headlessly). The question is what DX turns that primitive into a
 trustworthy "warm restart," because the naive version is subtly dangerous.
 
-## Scope: warm WORKER restart, not the advisor lane
+## Scope: warm WORKER restart, not an advisor workflow
 
-The `2026-07-05` note describes an **advisor lane** — a long-lived reasoning agent you consult
-repeatedly, no worktree, no deliverable, detach-not-reap. That's real but *separate*: it's
-stateless-consult-made-stateful, and the machinery (spawn once, `revise` per question) already
-covers it with only docs missing.
+An advisor workflow is a long-lived reasoning agent consulted repeatedly, without a
+worktree or deliverable and with detach-not-reap lifecycle. It is separate from this
+proposal; the existing spawn-once and `revise` mechanics already cover its basics.
 
 This doc is the harder, more valuable case: a **worker** that finished, whose value is its
 built-up *codebase* context (repo structure, where things live, what it already changed), and which
@@ -181,7 +179,7 @@ State to add: **`last_seen`** (git ref, set at spawn and each `wait`/revise) —
 
 ## What this is explicitly NOT
 
-- **Not the advisor lane** (`2026-07-05`) — that's docs over existing `spawn`/`revise`; this is a
+- **Not the advisor lane** — that's docs over existing `spawn`/`revise`; this is a
   new re-grounding + worktree-rehydration surface for worker reuse.
 - **Not trajectory replay** (OpenHands-style deterministic re-execution) — a different feature.
 - **Not a claim that warm > cold** — it's a claim that the *choice* should be cheap, explicit, and

@@ -20,7 +20,11 @@ provider_event_tail() {
       ;;
     claude)
       sid="$(claude_discover_session "$lane" 2>/dev/null || true)"
-      [[ -n "$sid" ]] && source="$(find "$CLAUDE_PROJECTS_DIR" -maxdepth 2 -type f -name "${sid}.jsonl" -printf '%T@\t%p\n' 2>/dev/null | sort -rn | head -1 | cut -f2-)"
+      # A lane can use a non-default Claude profile. Resolve the path through
+      # the adapter rather than reading an optional global under nounset.
+      local projects_dir
+      projects_dir="$(_claude_projects_dir "$lane" 2>/dev/null || true)"
+      [[ -n "$sid" && -n "$projects_dir" ]] && source="$(find "$projects_dir" -maxdepth 2 -type f -name "${sid}.jsonl" -printf '%T@\t%p\n' 2>/dev/null | sort -rn | head -1 | cut -f2-)"
       source_kind="session-jsonl"
       ;;
     grok)
@@ -37,6 +41,11 @@ provider_event_tail() {
       load_provider qwen
       source="$(_qwen_receipt_file "$lane")"
       source_kind="qwen-receipt-jsonl"
+      ;;
+    deepseek)
+      load_provider deepseek
+      source="$(_deepseek_receipt_file "$lane")"
+      source_kind="deepseek-receipt-jsonl"
       ;;
     *) jq -cn --arg provider "$provider" '{provider:$provider,source:{state:"unknown-provider"},events:[]}'; return 0 ;;
   esac
@@ -108,6 +117,12 @@ provider_event_tail() {
           elif .phase == "completion" then {event_time:(.completed_epoch // ""),event_type:"turn_completed",turn_completed_mark:true}
           else empty end' <<<"$parsed")"; then rm -f "$snapshot" "$events_file"; return 1; fi
         ;;
+      deepseek)
+        if ! event="$(jq -c '
+          if .phase == "invocation" then {event_time:(.started_epoch // ""),event_type:"turn_started",turn_started_mark:true}
+          elif .phase == "completion" then {event_time:(.completed_epoch // ""),event_type:"turn_completed",turn_completed_mark:true}
+          else empty end' <<<"$parsed")"; then rm -f "$snapshot" "$events_file"; return 1; fi
+        ;;
     esac
     if [[ -n "$event" ]] && ! printf '%s\n' "$event" >>"$events_file"; then rm -f "$snapshot" "$events_file"; return 1; fi
   done <"$snapshot"
@@ -127,7 +142,7 @@ provider_event_tail() {
 # One lane's reconciliation surface.  Facts first; classification is an
 # explainable conservative interpretation, never a claim that a lane is stale.
 lane_inspection_json() {
-  local lane="$1" sf provider tail exists clients outcome report verify state classification eligibility
+  local lane="$1" sf provider tail exists clients outcome report verify state classification eligibility next_action
   sf="$(lane_state_file "$lane")"
   if ! jq empty "$sf" 2>/dev/null; then jq -cn --arg lane "$lane" '{lane:$lane,classification:"corrupt/unknown",eligibility:"preserve",reasons:["unparseable-state.json"]}'; return 0; fi
   provider="$(lane_get "$lane" provider)"
@@ -137,25 +152,29 @@ lane_inspection_json() {
   esac
   tail="$(provider_event_tail "$lane" 1)"
   exists=false; tmux_window_exists "$lane" && exists=true
-  clients="$(tmux list-clients -t "${WASPFLOW_TMUX_SESSION}:" -F '#{client_tty}' 2>/dev/null | wc -l | tr -d ' ')"
+  # A missing or unreachable session is itself a useful inspection fact; it must
+  # not make `inspect` fail before it can report that fact.
+  clients="$(tmux list-clients -t "${WASPFLOW_TMUX_SESSION}:" -F '#{client_tty}' 2>/dev/null | wc -l | tr -d ' ' || true)"
   outcome="$(lane_outcome "$lane")"; report="$(lane_get "$lane" report)"; verify="$(lane_get "$lane" verify_state)"; state="$(lane_get "$lane" status)"
   local terminal source_state wait_state; terminal="$(jq -r '.turn_state == "terminal"' <<<"$tail")"; source_state="$(jq -r '.source.state' <<<"$tail")"; wait_state="$(lane_get "$lane" wait_state)"
-  classification="corrupt/unknown"; eligibility="preserve"
+  classification="corrupt/unknown"; eligibility="preserve"; next_action="waspflow reconcile --json"
   local -a reasons=("provider-log:$source_state")
-  if [[ "$wait_state" == stalled ]]; then classification="blocked-needs-human"; eligibility="needs-human"; reasons+=("recorded-wait-stall")
-  elif [[ "$state" == live && "$exists" != true ]]; then classification="orphaned-control-plane"; eligibility="needs-human"; reasons+=("live-record-missing-owned-window")
+  if [[ "$state" == reaped ]]; then
+    classification="reaped"; eligibility="complete"; next_action="inspect durable cleanup receipt"; reasons+=("lifecycle-reaped")
+  elif [[ "$wait_state" == stalled ]]; then classification="blocked-needs-human"; eligibility="needs-human"; next_action="waspflow peek $lane; waspflow revise $lane -- \"<response>\""; reasons+=("recorded-wait-stall")
+  elif [[ "$state" == live && "$exists" != true ]]; then classification="orphaned-control-plane"; eligibility="needs-human"; next_action="waspflow reconcile --json; waspflow reconcile --adopt $lane --owner <owner-ref> --apply"; reasons+=("live-record-missing-owned-window")
   elif [[ "$source_state" != tail-window ]]; then reasons+=("provider-receipt-not-trustworthy")
   elif [[ "$outcome" =~ ^(harvested|superseded|abandoned)$ && "$terminal" == true ]] \
     && { [[ -z "$report" || -f "$report" ]] && [[ -z "$verify" || "$verify" == passed ]]; }; then
-    classification="closeout-ready"; eligibility="explicit-closeout"; reasons+=("terminal-receipt" "closeout-provenance")
-  elif [[ "$terminal" == true ]]; then classification="terminal-idle-unclosed"; eligibility="needs-human"; reasons+=("terminal-provider-receipt")
-  elif [[ "$exists" == true ]]; then classification="active-observed"; eligibility="observe"; reasons+=("owned-window-and-nonterminal-receipt")
+    classification="closeout-ready"; eligibility="explicit-closeout"; next_action="waspflow reap $lane"; reasons+=("terminal-receipt" "closeout-provenance")
+  elif [[ "$terminal" == true ]]; then classification="terminal-idle-unclosed"; eligibility="needs-human"; next_action="waspflow reap $lane"; reasons+=("terminal-provider-receipt")
+  elif [[ "$exists" == true ]]; then classification="active-observed"; eligibility="observe"; next_action="waspflow wait $lane"; reasons+=("owned-window-and-nonterminal-receipt")
   else reasons+=("insufficient-source-facts")
   fi
-  if [[ "$clients" =~ ^[0-9]+$ && "$clients" -gt 0 ]]; then
+  if [[ "$state" != reaped && "$clients" =~ ^[0-9]+$ && "$clients" -gt 0 ]]; then
     eligibility="vetoed-attached-client"
     reasons+=("attached-client-veto")
   fi
-  jq -cn --arg lane "$lane" --arg provider "$provider" --arg lifecycle "$state" --arg outcome "$outcome" --arg classification "$classification" --arg eligibility "$eligibility" --argjson window "$exists" --argjson clients "${clients:-0}" --argjson receipt "$tail" --argjson reasons "$(printf '%s\n' "${reasons[@]}" | jq -R . | jq -sc .)" \
-    '{lane:$lane,provider:$provider,lifecycle:$lifecycle,fanin_outcome:$outcome,tmux_window_exists:$window,tmux_client_count:$clients,provider_receipt:{source:$receipt.source,last_event:($receipt.events[-1] // null)},classification:$classification,eligibility:$eligibility,reasons:$reasons}'
+  jq -cn --arg lane "$lane" --arg provider "$provider" --arg lifecycle "$state" --arg outcome "$outcome" --arg classification "$classification" --arg eligibility "$eligibility" --arg next_action "$next_action" --argjson window "$exists" --argjson clients "${clients:-0}" --argjson receipt "$tail" --argjson reasons "$(printf '%s\n' "${reasons[@]}" | jq -R . | jq -sc .)" \
+    '{lane:$lane,provider:$provider,lifecycle:$lifecycle,fanin_outcome:$outcome,tmux_window_exists:$window,tmux_client_count:$clients,provider_receipt:{source:$receipt.source,last_event:($receipt.events[-1] // null)},classification:$classification,eligibility:$eligibility,next_action:$next_action,reasons:$reasons}'
 }

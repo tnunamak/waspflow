@@ -7,3 +7,7 @@
 # crash dumps
 core.*
 node_modules/
+
+# local notes, never published
+/inbox/
+/.local-archive/

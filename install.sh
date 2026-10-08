@@ -10,9 +10,6 @@ ln -sf "$root/bin/waspflow" "$bindir/waspflow"
 echo "linked $bindir/waspflow -> $root/bin/waspflow"
 
 case ":$PATH:" in
-  *":$bindir:"*) ;;
-  *) echo "note: $bindir is not on your PATH — add it to use 'waspflow' directly." ;;
+  *":$bindir:"*) printf 'next: waspflow doctor\n' ;;
+  *) printf 'next: add %q to PATH, then run: %q doctor\n' "$bindir" "$bindir/waspflow" ;;
 esac
-
-echo
-"$root/bin/waspflow" doctor || true

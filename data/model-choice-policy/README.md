@@ -11,17 +11,12 @@ contaminate pricing or benchmark evidence.
 
 | | |
 |---|---|
-| **This version** | [data-model-choice-policy-v0.1.13](https://github.com/tnunamak/minnows/releases/tag/data-model-choice-policy-v0.1.13) — published by CI on push to main |
-| **Latest** | [releases](https://github.com/tnunamak/minnows/releases?q=data-model-choice-policy&expanded=true) |
+| **This version** | `data-model-choice-policy-v0.1.13` release artifact |
+| **Latest** | Use the package's published release listing |
 | **Facts catalog** | [model-catalog](../model-catalog/) — pin is `catalog_ref` in the policy file |
 
 ```bash
 ./scripts/fetch-data-pack.sh model-choice-policy
-# or
-TAG=data-model-choice-policy-v0.1.13
-curl -fsSL -L \
-  "https://github.com/tnunamak/minnows/releases/download/${TAG}/${TAG}.tar.gz" \
-  | tar -xz
 ```
 
 ## Doctrine
@@ -50,7 +45,7 @@ allowed lanes and efforts, missed-failure cost, and constraints.
 catalog, or reports missing model/board coverage. It uses a 90-day price horizon
 and requires independent cross-model evidence for model changes. It never edits
 `operating-points.json`. See
-[SCHEMA.md](SCHEMA.md#op-requirementsjson-draft--owner-review-pending).
+[SCHEMA.md](SCHEMA.md#op-requirementsjson-draft--policy-review-pending).
 
 ```bash
 ./scripts/recommend_ops.py            # markdown table + per-op detail
@@ -84,15 +79,15 @@ Waspflow resolves from (first hit):
 ### v0.1.16 — 2026-09-30
 
 - Move `review.audit` from codex/gpt-6-astra/high to **codex/gpt-6.1-sol/high**, `ui.computer-use` from codex/gpt-6-astra/medium to **codex/gpt-6.1-sol/medium**, and `fanout.explore` from claude-opus-5-5/medium to **codex/gpt-6.1-sol/medium**. No op runs GPT-6 Astra now; it stays selectable by explicit flag.
-- This is a best guess with low or medium confidence, made on the owner's direction that Astra ($10/$50 per MTok) does not justify its price for routine work. Two blind reviews (Claude Opus 5.5 and a Codex reviewer, 2026-09-29) found the public evidence too thin to prove any of these moves: GPT-6.1 Sol has one launch-day Artificial Analysis snapshot and vendor claims, and no independent audit-recall, computer-use-at-medium or navigation evidence.
-- Why these three: Astra costs five times Sol per token, and on the vendor charts Astra medium costs more than $2 per task over GPT-6 Sol medium, more than the draft silent-failure cost. Opus 5.5 medium on `fanout.explore` costs $2.94 per task against $0.83 for Sonnet 5.5 medium on Anthropic's own curve. The reviewers' evals (seeded-defect review, bounded patches, cheap-worker tasks, computer use) are pending; they decide whether to keep these moves.
+- This is a provisional choice with low or medium confidence. Public evidence did not establish the moves: GPT-6.1 Sol has one launch-day Artificial Analysis snapshot and vendor claims, but no independent audit-recall, computer-use-at-medium, or navigation evidence.
+- Why these three: Astra costs five times Sol per token, and vendor charts put Astra medium more than $2 per task above GPT-6 Sol medium. Local evaluations (seeded-defect review, bounded patches, inexpensive-worker tasks, computer use) remain pending and should decide whether to keep these moves.
 - Unchanged: `implement.standard`, `implement.accuracy-first` and `advisor.deep` (Opus 5.5), `recover.report`, `docs.lookup` and `implement.quota-tight` (Sonnet 5.5), `grok.explore-only` (grok-4.7).
 - Catalog pin: **v0.5.10**.
 
 ### v0.1.15 — 2026-09-29
 
 - **No routing change.** Every operating point expands exactly as in v0.1.14.
-- Repins to catalog v0.5.10, which adds GPT-6.1 Sol, Xiaomi MiMo-V2.6 and launch-day board rows. GPT-6.1 Sol ($2/$10 per MTok, near-Astra by OpenAI's description) is a candidate for `review.audit` and `ui.computer-use`, which run GPT-6 Astra at $10/$50. It is not routed: independent low-effort evidence is still provisional, and the change needs owner approval.
+- Repins to catalog v0.5.10, which adds GPT-6.1 Sol, Xiaomi MiMo-V2.6 and launch-day board rows. GPT-6.1 Sol ($2/$10 per MTok, near-Astra by OpenAI's description) is a candidate for `review.audit` and `ui.computer-use`, which run GPT-6 Astra at $10/$50. It is not routed because independent low-effort evidence remains provisional.
 - Catalog pin: **v0.5.10**.
 
 ### v0.1.14 — 2026-09-29
@@ -107,21 +102,21 @@ Waspflow resolves from (first hit):
 ### v0.1.13 — 2026-09-23
 
 - **No routing change.** Every operating point expands exactly as in v0.1.12.
-- `op-requirements.json` pins `price_as_of`, so recommender output no longer depends on the run date. `review.audit`'s different-vendor constraint is marked as an owner decision pending (`constraint_decision`).
-- The recommender keeps a tied incumbent and breaks other ties by expected cost. It uses the published pass@4 to calibrate retries and re-prices promotional costs at the horizon rate. It treats independent boards without an effort label as blocking disagreements, and can take lane quota availability from clawmeter as input.
-- Three independent Claude Opus 5.5 review rounds (2026-09-23) signed off on releasing this with no routing change. The only benchmark-driven question left open is `review.audit` (Gemini 3.8 Flash vs GPT-6 Astra). It needs op-level evidence, such as a seeded-defect review oracle.
+- `op-requirements.json` pins `price_as_of`, so recommender output no longer depends on the run date. `review.audit`'s different-vendor constraint remains recorded as pending (`constraint_decision`).
+- The recommender keeps a tied incumbent and breaks other ties by expected cost. It uses the published pass@4 to calibrate retries and re-prices promotional costs at the horizon rate. It treats independent boards without an effort label as blocking disagreements, and can take lane quota availability from an optional quota monitor as input.
+- No routing change. The remaining benchmark question is `review.audit` (Gemini 3.8 Flash vs GPT-6 Astra), which needs op-level evidence such as a seeded-defect review oracle.
 - Catalog pin: **v0.5.9**.
 
 ### v0.1.12 — 2026-09-23
 
-- Move `grok.explore-only` from grok-4.6/high to **grok-4.7/medium**. On 2026-09-23 the authenticated grok CLI offers only grok-4.7, so the grok-4.6 arm could no longer be dispatched. Rule 1 picks grok-4.7 as the only newest GA model in the lane, at the default effort (medium). An independent Claude Opus 5.5 review signed this off in both rounds.
+- Move `grok.explore-only` from grok-4.6/high to **grok-4.7/medium**. A compatibility observation found grok-4.7 available while grok-4.6 was unavailable, so the older arm could no longer be dispatched. Rule 1 picks grok-4.7 as the newest GA model in the lane at the default effort (medium).
 - No other routing change. `scripts/recommend_ops.py` now ranks by expected cost per task, with evidence gates, confidence intervals, a price horizon and robustness sweeps. The review found defects that block any move it would drive: the tie-break rule, an unwired pass@k field, wall-clock price dates, and board rows with no effort recorded. They were fixed in v0.1.13.
 - Catalog pin: **v0.5.7**.
 
 ### v0.1.11 — 2026-09-22
 
 - Move `implement.standard` and `fanout.explore` from claude-sonnet-5/medium to **claude-opus-5-5/medium**. Sonnet 5 at max effort (its best) scores below Opus 5.5 at medium on every independent board, at a higher cost per task: AA Intelligence Index v4.3.2 38.2 at $5.09/task vs 51.2 at $1.34; vals.ai Terminal-Bench 4 8.1% vs 61.6% (both at max).
-- Add `op-requirements.json` (DRAFT): the owner-set inputs for each op (which benchmarks count as evidence, allowed efforts, quality bar, constraints). `scripts/recommend_ops.py` derives each op's model from it and the catalog. It also names the missing evidence wherever the data cannot decide.
+- Add `op-requirements.json` (DRAFT): policy inputs for each op (which benchmarks count as evidence, allowed efforts, quality bar, constraints). `scripts/recommend_ops.py` derives each op's model from it and the catalog. It also names the missing evidence wherever the data cannot decide.
 - Unsettled, so unchanged, with the reason in `known_gaps`:
   - `recover.report`, `docs.lookup`, `implement.quota-tight`: no independent low-effort evidence exists.
   - `review.audit`: "checker at least as strong as maker" and "different family" conflict while Opus 5.5 is the strongest maker.
@@ -146,9 +141,9 @@ Waspflow resolves from (first hit):
 
 ### v0.1.8 — 2026-09-09
 
-- Move Codex ops to GA **gpt-6-astra** per owner model policy (retire gpt-5.6-sol): `review.audit` and `implement.accuracy-first` to effort **high** (never xhigh/max by default), `ui.computer-use` to effort **medium** (mechanical/implementation-shaped work). Trigger: `waspflow doctor`'s stale-edge warning on the `preferred_over` entry below, surfaced after gpt-6-astra reached GA.
-- Retire the `gpt-5.6-luna over gpt-5.4-mini` `preferred_over` edge — it was authored rot-aware and the owner policy no longer prefers any 5.x model. No replacement edge added: the catalog's gpt-6 family has only `gpt-6-astra` as GA, no cheap-tier gpt-6 model yet, so there is nothing to prefer over gpt-5.6-luna without inventing evidence.
-- `evidence_refs` re-pointed at existing catalog rows for gpt-6-astra (`performance/openai-gpt-6-astra-launch-2026-09`, `performance/terminal-bench-4-astra-audit-2026-09`, `pricing/openai-api-2026-07`, `pricing/codex-credits-2026-07`). `evidence_confidence` held at **medium**, not raised — the model/effort swap is owner-policy + GA-status driven, not new local evidence (the cited terminal-bench-4 audit row is itself grade C / `comparable: false`).
+- Move Codex ops to GA **gpt-6-astra** (retire gpt-5.6-sol): `review.audit` and `implement.accuracy-first` to effort **high** (never xhigh/max by default), `ui.computer-use` to effort **medium** (mechanical/implementation-shaped work). Trigger: `waspflow doctor`'s stale-edge warning on the `preferred_over` entry below, surfaced after gpt-6-astra reached GA.
+- Retire the `gpt-5.6-luna over gpt-5.4-mini` `preferred_over` edge. No replacement edge was added because the catalog's gpt-6 family then had no cheaper GA tier with sufficient evidence.
+- `evidence_refs` re-pointed at existing catalog rows for gpt-6-astra. `evidence_confidence` held at **medium**, not raised, because the model/effort swap was GA-status driven rather than supported by new local evidence.
 - Catalog pin carries forward unchanged from v0.1.7: **v0.5.4**.
 
 ### v0.1.7 — 2026-09-05

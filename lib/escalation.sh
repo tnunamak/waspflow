@@ -69,9 +69,19 @@ escalate_kill_provisional() {
   done < <(jq -c '.[]' <<<"$scopes")
 }
 
+escalate_claude_model_known() {
+  # Family aliases, or claude-<family>-<major>[-<minor>][-YYYYMMDD]. Matching the
+  # shape (not a fixed list) keeps newly released models usable while still
+  # rejecting typos such as "not-a-model".
+  case "$1" in
+    opus|sonnet|haiku|fable) return 0 ;;
+  esac
+  [[ "$1" =~ ^claude-(opus|sonnet|haiku|fable)-[0-9]+(-[0-9]+)?(-[0-9]{8})?$ ]]
+}
+
 escalate_select_target() {
   # globals: ESC_ARM ESC_OP ESC_CURSOR ESC_REASON ESC_CODE
-  local lane="$1" requested="$2" ack="$3"
+  local lane="$1" requested="$2" ack="$3" force="${4:-false}"
   ESC_ARM=""; ESC_OP=""; ESC_CURSOR=""; ESC_REASON=""; ESC_CODE=0
   ops_load
   if [[ -n "$requested" ]]; then
@@ -96,6 +106,15 @@ escalate_select_target() {
     if declare -F "${provider}_validate_model_effort" >/dev/null \
        && ! "${provider}_validate_model_effort" "$model" "$effort"; then
       ESC_REASON="target $(escalate_arm_label "$ESC_ARM") has incompatible model/effort"; ESC_CODE=1; return 1
+    fi
+    # Claude exposes no enumerable catalog, so normal availability observation
+    # cannot reject a mistyped model. Keep its documented aliases and versioned
+    # family IDs available, but require both explicit override signals before
+    # attempting an unrecognised name.
+    if [[ "$provider" == claude ]] && ! escalate_claude_model_known "$model" \
+       && [[ "$force" != true || "$ack" != true ]]; then
+      ESC_REASON="target $(escalate_arm_label "$ESC_ARM") is not a known Claude model; retry only if intended with --force --ack-deprecated"
+      ESC_CODE=1; return 1
     fi
     observation="$(selection_observe_availability "$provider" "$model" default)"
     if [[ "$(jq -r .state <<<"$observation")" == unavailable ]]; then
@@ -269,7 +288,13 @@ escalate_commit_locked() {
   fi
   # A resumed deferred apply delivered the revise message it carried.
   if jq -e 'has("submission_message")' >/dev/null <<<"$transition"; then lane_set "$lane" undelivered_message ""; fi
-  tmux_kill_window_if_owned "$(jq -cn --arg tmux_session "$(jq -r '.from_tmux_session // ""' <<<"$transition")" --arg tmux_window "$(jq -r '.from_tmux_window // ""' <<<"$transition")" --arg tmux_pane_pid "$(jq -r '.from_tmux_pane_pid // ""' <<<"$transition")" '{tmux_session:$tmux_session,tmux_window:$tmux_window,tmux_pane_pid:$tmux_pane_pid}')" >/dev/null 2>&1 || true
+  tmux_kill_window_if_owned "$(jq -cn --arg tmux_session "$(jq -r '.from_tmux_session // ""' <<<"$transition")" --arg tmux_window "$(jq -r '.from_tmux_window // ""' <<<"$transition")" --arg tmux_pane_pid "$(jq -r '.from_tmux_pane_pid // ""' <<<"$transition")" --arg waspflow_home "$(jq -r '.from_waspflow_home // ""' <<<"$transition")" --arg waspflow_lane_uuid "$(jq -r '.from_waspflow_lane_uuid // ""' <<<"$transition")" '{tmux_session:$tmux_session,tmux_window:$tmux_window,tmux_pane_pid:$tmux_pane_pid,waspflow_home:$waspflow_home,waspflow_lane_uuid:$waspflow_lane_uuid}')" >/dev/null 2>&1 || true
+  if ! tmux_kill_owned_lane_detached_sessions_except_execution "$lane" "escalation:$(jq -r .id <<<"$transition")"; then
+    lane_set "$lane" old_arm_retirement_state uncertain escalation_error "old detached execution group could not be retired"
+    escalate_emit "$json" 2 "arm switched, but old detached execution retirement is uncertain; inspect before further lifecycle changes" "$from" "$to" "$((index+1))"
+    return
+  fi
+  lane_set "$lane" old_arm_retirement_state retired
   escalate_emit "$json" 0 "arm switched to $(escalate_arm_label "$to")" "$from" "$to" "$((index+1))"
 }
 
@@ -340,6 +365,19 @@ escalate_mark_confirmed_locked() {
   escalate_commit_locked "$lane" "$json"
 }
 
+# A provider capability/availability refusal cannot be repaired by repeatedly
+# resuming the same provisional launch. Offer only state-preserving commands;
+# selecting a new handoff target remains an explicit operator choice.
+escalate_launch_failure_next_steps() {
+  local lane="$1" reason="$2"
+  case "$reason" in
+    *quota*|*model*|*unavailable*|*unsupported-hook*|*unsupported*)
+      printf '%s\n' "waspflow escalate $lane --abort-transition" "waspflow status $lane"
+      ;;
+    *) printf '%s\n' "waspflow escalate $lane --resume-transition" "waspflow escalate $lane --abort-transition" ;;
+  esac
+}
+
 escalate_resume_launch_locked() {
   local lane="$1" json="$2" transition="$3" provider mode prompt fresh confirm_fn resume_fn attempted
   provider="$(jq -r .to_arm.provider <<<"$transition")"; mode="$(jq -r .mode <<<"$transition")"
@@ -368,12 +406,17 @@ escalate_resume_launch_locked() {
   resume_fn="${provider}_resume_with_arm"
   WASPFLOW_PROVISIONAL_SESSION_ID=""; WASPFLOW_PROVISIONAL_ROLLOUT=""
   WASPFLOW_PROVIDER_LAUNCH_ERROR=""
+  # The replacement may write its report before its adapter returns. Start its
+  # generation before submission so the previous report cannot satisfy it.
+  artifacts_begin_turn_generation "$lane"
   if ! "$resume_fn" "$lane" "$prompt" "$fresh"; then
     local launch_error="$provider: ${WASPFLOW_PROVIDER_LAUNCH_ERROR:-launch-or-confirmation-failed} (launch_provisioned)"
     [[ "$(lane_get "$lane" recovery_state)" != needs-owner ]] || launch_error="needs-owner: $(lane_get "$lane" recovery_reason) (provider prompt left unanswered)"
     transition="$(jq -c --arg provider "$provider" --arg reason "$launch_error" '.launch_failure={provider:$provider,stage:"launch_provisioned",reason:$reason}' <<<"$transition")"
     lane_set "$lane" status escalate_failed pending_transition "$transition" escalation_error "$launch_error"
-    escalate_emit "$json" 2 "$launch_error; old arm unchanged" "$(jq -c .from_arm <<<"$transition")" "$(jq -c .to_arm <<<"$transition")" "$(jq -r .segment_index <<<"$transition")" "waspflow escalate $lane --resume-transition" "waspflow escalate $lane --abort-transition"
+    local -a next_steps=()
+    mapfile -t next_steps < <(escalate_launch_failure_next_steps "$lane" "$launch_error")
+    escalate_emit "$json" 2 "$launch_error; old arm unchanged" "$(jq -c .from_arm <<<"$transition")" "$(jq -c .to_arm <<<"$transition")" "$(jq -r .segment_index <<<"$transition")" "${next_steps[@]}"
     return
   fi
   escalate_mark_confirmed_locked "$lane" "$json" "$transition"
@@ -445,7 +488,7 @@ escalate_locked() {
   if [[ -n "$transition" ]]; then
     to="$(jq -c .to_arm <<<"$transition")"; mode="$(jq -r .mode <<<"$transition")"
     if [[ -n "$requested" || "$handoff" == true || "$reset_tree" == true ]]; then
-      if ! escalate_select_target "$lane" "$requested" "$ack"; then escalate_emit "$json" "$ESC_CODE" "$ESC_REASON" "$from" "$to" "$index" "waspflow escalate $lane --resume-transition" "waspflow escalate $lane --abort-transition"; return; fi
+      if ! escalate_select_target "$lane" "$requested" "$ack" "$force"; then escalate_emit "$json" "$ESC_CODE" "$ESC_REASON" "$from" "$to" "$index" "waspflow escalate $lane --resume-transition" "waspflow escalate $lane --abort-transition"; return; fi
       local requested_mode=in_place; [[ "$handoff" == true || "$(jq -r .provider <<<"$ESC_ARM")" != "$(lane_get "$lane" provider)" ]] && requested_mode=handoff
       if [[ "$(jq -cS . <<<"$ESC_ARM")" != "$(jq -cS . <<<"$to")" || "$requested_mode" != "$mode" ]]; then escalate_emit "$json" 1 "a different escalation transition is pending; target is immutably bound" "$from" "$to" "$index" "waspflow escalate $lane --resume-transition" "waspflow escalate $lane --abort-transition"; return; fi
     elif [[ "$resume" != true ]]; then
@@ -457,7 +500,7 @@ escalate_locked() {
   fi
   status="$(lane_get "$lane" status)"
   if [[ "$status" != live && "$status" != exited && "$status" != parked && "$status" != escalate_failed ]]; then escalate_emit "$json" 1 "lane lifecycle status '$status' cannot escalate" "$from" null "$index"; return; fi
-  if ! escalate_select_target "$lane" "$requested" "$ack"; then escalate_emit "$json" "$ESC_CODE" "$ESC_REASON" "$from" null "$index" "waspflow ops list"; return; fi
+  if ! escalate_select_target "$lane" "$requested" "$ack" "$force"; then escalate_emit "$json" "$ESC_CODE" "$ESC_REASON" "$from" null "$index" "waspflow ops list"; return; fi
   to="$ESC_ARM"; mode=in_place; [[ "$handoff" == true || "$(jq -r .provider <<<"$to")" != "$(lane_get "$lane" provider)" ]] && mode=handoff
   if [[ "$reset_tree" == true && "$mode" != handoff ]]; then escalate_emit "$json" 1 "--reset-tree requires --handoff" "$from" "$to" "$index"; return; fi
   if [[ "$reset_tree" == true && -z "$(lane_get "$lane" worktree)" ]]; then escalate_emit "$json" 1 "--reset-tree is allowed only for isolated lanes" "$from" "$to" "$index"; return; fi
@@ -483,17 +526,15 @@ escalate_locked() {
 escalate_begin_locked() {
   local lane="$1" json="$2" to="$3" to_op="$4" to_cursor="$5" mode="$6" trigger="$7" note="$8" reset_tree="$9" boundary="${10}" message="${11:-}" index transition
   index="$(lane_get "$lane" segment_index)"; [[ "$index" =~ ^[0-9]+$ ]] || index=0
-  transition="$(jq -cn --arg id "$(new_uuid)" --argjson from "$(escalate_current_arm "$lane")" --arg from_generation "$(lane_get "$lane" arm_generation)" --arg from_session "$(lane_get "$lane" session_id)" --arg from_tmux_session "$(lane_get "$lane" tmux_session)" --arg from_tmux_window "$(lane_get "$lane" tmux_window)" --arg from_tmux_pane_pid "$(lane_get "$lane" tmux_pane_pid)" --argjson index "$index" --argjson to "$to" --arg to_op "$to_op" --arg to_cursor "$to_cursor" --arg mode "$mode" --arg trigger "$trigger" --arg note "$note" --argjson reset_tree "$reset_tree" --arg boundary "$boundary" --arg message "$message" '{id:$id,phase:"prepared",from_arm:$from,from_generation:$from_generation,from_session:$from_session,from_tmux_session:$from_tmux_session,from_tmux_window:$from_tmux_window,from_tmux_pane_pid:$from_tmux_pane_pid,segment_index:$index,to_arm:$to,to_op:$to_op,to_cursor:$to_cursor,mode:$mode,trigger:$trigger,note:$note,reset_tree:$reset_tree,boundary:$boundary,submission_marker:("WASPFLOW_LANE_MARKER:escalation:" + $id),submission_nonce:("WASPFLOW_ESCALATION_TRANSITION:" + $id)} + (if $message == "" then {} else {submission_message:$message} end)')"
+  transition="$(jq -cn --arg id "$(new_uuid)" --argjson from "$(escalate_current_arm "$lane")" --arg from_generation "$(lane_get "$lane" arm_generation)" --arg from_session "$(lane_get "$lane" session_id)" --arg from_tmux_session "$(lane_get "$lane" tmux_session)" --arg from_tmux_window "$(lane_get "$lane" tmux_window)" --arg from_tmux_pane_pid "$(lane_get "$lane" tmux_pane_pid)" --arg from_waspflow_home "$(cd "$WASPFLOW_HOME" && pwd -P)" --arg from_waspflow_lane_uuid "$(lane_get "$lane" lane_uuid)" --argjson index "$index" --argjson to "$to" --arg to_op "$to_op" --arg to_cursor "$to_cursor" --arg mode "$mode" --arg trigger "$trigger" --arg note "$note" --argjson reset_tree "$reset_tree" --arg boundary "$boundary" --arg message "$message" '{id:$id,phase:"prepared",from_arm:$from,from_generation:$from_generation,from_session:$from_session,from_tmux_session:$from_tmux_session,from_tmux_window:$from_tmux_window,from_tmux_pane_pid:$from_tmux_pane_pid,from_waspflow_home:$from_waspflow_home,from_waspflow_lane_uuid:$from_waspflow_lane_uuid,segment_index:$index,to_arm:$to,to_op:$to_op,to_cursor:$to_cursor,mode:$mode,trigger:$trigger,note:$note,reset_tree:$reset_tree,boundary:$boundary,submission_marker:("WASPFLOW_LANE_MARKER:escalation:" + $id),submission_nonce:("WASPFLOW_ESCALATION_TRANSITION:" + $id)} + (if $message == "" then {} else {submission_message:$message} end)')"
   lane_set "$lane" status escalating pending_transition "$transition" escalation_error "" deferred_switch ""
   escalate_maybe_test_crash_after_phase prepared || return $?
   escalate_run_locked "$lane" "$json"
 }
 
 # Deferred switches: decide a model/effort change now, apply it at a cold-cache
-# boundary. A mid-session switch makes the next call re-read the whole transcript
-# uncached (local Claude logs: median 520K tokens, 2% cache hit); the first call
-# after a compaction re-read ~12x less, and idle gaps past the 1-hour TTL lost the
-# cache anyway. waspflow has no daemon, so `revise` checks for a boundary before it
+# boundary. A mid-session switch can make the next call re-read the transcript
+# uncached. waspflow has no daemon, so `revise` checks for a boundary before it
 # sends and, when one holds, runs the ordinary escalation transition with the
 # revise instruction as its submission. Only in-place switches defer: a handoff
 # starts a fresh session, so it has no cache to protect and applies at once.

@@ -54,7 +54,7 @@ one() {
 }
 
 echo "=== waspflow LIVE SOAK: $PER lane(s) x 3 providers = $((PER*3)) concurrent lanes ==="
-echo "quota before:"; clawmeter status --agent --plain 2>/dev/null | grep -oE '(Claude 5h|Codex 5h|Grok 7d)\(current=[0-9]+%' | head -3
+echo "capacity monitor before:"; clawmeter status --agent --plain 2>/dev/null | grep -oE '(Claude 5h|Codex 5h|Grok 7d)\(current=[0-9]+%' | head -3
 
 pids=(); n=0
 for p in 0 1 2; do
@@ -77,6 +77,6 @@ while IFS= read -r line; do
 done < "$resfile"
 rm -f "$resfile"
 
-echo ""; echo "quota after:"; clawmeter status --agent --plain 2>/dev/null | grep -oE '(Claude 5h|Codex 5h|Grok 7d)\(current=[0-9]+%' | head -3
+echo ""; echo "capacity monitor after:"; clawmeter status --agent --plain 2>/dev/null | grep -oE '(Claude 5h|Codex 5h|Grok 7d)\(current=[0-9]+%' | head -3
 echo "=== SOAK TOTAL: pass=$pass fail=$fail ==="
 [[ "$fail" -eq 0 ]] && echo "LIVE SOAK: GREEN" || echo "LIVE SOAK: $fail FAILURES"

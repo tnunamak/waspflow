@@ -85,7 +85,7 @@ exec_run() {
   [[ -n "$provider" ]] || die "exec: --provider is required (claude|codex|grok|antigravity|qwen|deepseek; or use --op)"
   is_known_provider "$provider" || die "exec: unknown provider '$provider'"
   [[ -n "$prompt" ]] || die "exec: a task prompt is required after '--'"
-  cwd="$(cd "$cwd" && pwd)" || die "exec: --cwd does not exist"
+  cwd="$(cd "$cwd" 2>/dev/null && pwd)" || die "exec: --cwd does not exist"
   guard_cwd "$cwd"   # never run a worker with cwd '/' silently (known crash class)
   if [[ "$provider" == qwen && -n "$effort" ]]; then
     die "exec/qwen: --effort is not supported by Qwen Code"
@@ -122,53 +122,97 @@ exec_run() {
   mcp_policy_load_json "$MCP_ARGV_JSON" "$MCP_ENV_JSON" "exec $provider"
   [[ -n "$MCP_WARNING" ]] && warn "$MCP_WARNING"
 
-  local output_path should_cat=0
+  local output_path provider_output_path should_cat=0 staged_output=""
   if [[ -n "$out_file" ]]; then
     output_path="$(_exec_abs_output_path "$out_file")" || return 1
+    staged_output="$(mktemp "$(dirname "$output_path")/.waspflow-output.XXXXXX")" || return 1
+    provider_output_path="$staged_output"
   else
     output_path="$(mktemp)" || return 1
+    provider_output_path="$output_path"
     should_cat=1
   fi
 
   if ! _exec_access_preflight "$provider" "$cwd" "$output_path" "${needs_paths[@]}"; then
     [[ "$should_cat" -eq 0 ]] || rm -f "$output_path"
+    [[ -z "$staged_output" ]] || rm -f "$staged_output"
     return 1
   fi
   local invoked_epoch exec_id rc=0 result=succeeded
   invoked_epoch="$(date +%s)"; exec_id="$(new_uuid)"
   case "$provider" in
-    codex)  _exec_codex "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
-    claude) _exec_claude "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
-    grok)   _exec_grok "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
-    antigravity) _exec_antigravity "$cwd" "$model" "$effort" "$prompt" "$output_path" || rc=$? ;;
-    qwen)     _exec_qwen "$cwd" "$model" "$prompt" "$output_path" || rc=$? ;;
-    deepseek) _exec_deepseek "$cwd" "$model" "$prompt" "$output_path" || rc=$? ;;
+    codex)  _exec_codex "$cwd" "$model" "$effort" "$prompt" "$provider_output_path" || rc=$? ;;
+    claude) _exec_claude "$cwd" "$model" "$effort" "$prompt" "$provider_output_path" || rc=$? ;;
+    grok)   _exec_grok "$cwd" "$model" "$effort" "$prompt" "$provider_output_path" || rc=$? ;;
+    antigravity) _exec_antigravity "$cwd" "$model" "$effort" "$prompt" "$provider_output_path" || rc=$? ;;
+    qwen)     _exec_qwen "$cwd" "$model" "$prompt" "$provider_output_path" || rc=$? ;;
+    deepseek) _exec_deepseek "$cwd" "$model" "$prompt" "$provider_output_path" || rc=$? ;;
     *)      die "exec: unsupported provider '$provider'" ;;
   esac
 
   [[ "$rc" -ne 0 ]] && result=failed
 
-  # A provider can exit 0 yet write a useless report (empty, whitespace-only, or
-  # a body that is just an error string). Returning success on that is a silent
+  # A provider can exit 0 yet write no answer at all (empty or whitespace-only).
+  # Returning success on that is a silent
   # re-run — the exact waste the product sells against. Validate BEFORE success.
-  if [[ "$rc" -eq 0 ]] && ! _exec_output_is_useful "$output_path"; then
+  if [[ "$rc" -eq 0 ]] && ! _exec_output_is_useful "$provider_output_path"; then
     err "exec: $provider exited 0 but produced no usable output (empty/placeholder); treating as failure"
     rc=1; result=failed
+  fi
+
+  # Codex's successful headless output can omit its final line feed. Normalize
+  # the staged output before publication so both `-o FILE` and stdout mode have
+  # normal terminal/file text semantics without touching failed output.
+  if [[ "$rc" -eq 0 && "$provider" == codex && "$(tail -c1 "$provider_output_path" 2>/dev/null)" != "" ]]; then
+    printf '\n' >>"$provider_output_path"
+  fi
+
+  # Providers write to a unique sibling file. Only validated output is renamed
+  # over the destination, so an exit-0/no-write cannot relabel old output as new.
+  if [[ "$rc" -eq 0 && -n "$staged_output" ]]; then
+    if _exec_move_file_exact "$staged_output" "$output_path"; then
+      staged_output=""
+    else
+      staged_output="$EXEC_MOVE_REMAINDER"
+      provider_output_path="$staged_output"
+      rc=1; result=failed
+    fi
   fi
 
   local availability billing completed_epoch
   availability="$(jq -cn --arg p "$provider" --arg m "$model" --arg state "${MODEL_VALIDATION_STATE:-not_applicable}" --arg source "${MODEL_VALIDATION_SOURCE:-none}" --arg scope "${MODEL_VALIDATION_SCOPE:-not_applicable}" --arg at "${MODEL_VALIDATION_AT:-}" '{schema_version:1,provider:$p,model:$m,state:$state,evidence_source:$source,query_scope:$scope,observed_at:(if $at == "" then null else $at end),detail:""}')"
   billing="$(billing_path_v1 "$provider" default false)"; completed_epoch="$(date +%s)"
   local output_state=missing output_bytes=0 output_metadata
-  if [[ -f "$output_path" ]]; then
-    output_bytes="$(wc -c <"$output_path")"
+  if [[ -f "$provider_output_path" ]]; then
+    output_bytes="$(wc -c <"$provider_output_path")"
     output_state=invalid
-    _exec_output_is_useful "$output_path" && output_state=present
+    _exec_output_is_useful "$provider_output_path" && output_state=present
+  elif [[ "$rc" -eq 0 && -f "$output_path" ]]; then
+    output_bytes="$(wc -c <"$output_path")"
+    output_state=present
   fi
   output_metadata="$(jq -cn --arg state "$output_state" --argjson bytes "$output_bytes" --argjson preflight "$EXEC_PREFLIGHT_JSON" '{state:$state,bytes:$bytes,preflight:$preflight}')"
   artifacts_emit_exec_receipt_v1 "$exec_id" "$provider" "$model" "$effort" "${OP_MODE:-standard}" "$billing" "$availability" "$invoked_epoch" "$completed_epoch" "$result" "$rc" "$output_metadata" \
     || warn "exec: could not emit receipt"
   if [[ "$rc" -ne 0 ]]; then
+    if [[ -n "$staged_output" ]]; then
+      # Keep whatever the failed run wrote for diagnosis, beside (never at) the
+      # destination so a failure cannot pass as the new result.
+      if [[ -s "$staged_output" ]]; then
+        if _exec_move_file_exact "$staged_output" "$output_path.partial"; then
+          warn "exec: failed run's partial output kept at $output_path.partial"
+        else
+          staged_output="$EXEC_MOVE_REMAINDER"
+          if [[ -s "$staged_output" ]]; then
+            warn "exec: failed run's partial output retained at $staged_output"
+          else
+            rm -f "$staged_output"
+          fi
+        fi
+      else
+        rm -f "$staged_output"
+      fi
+    fi
     [[ "$should_cat" -eq 1 ]] && rm -f "$output_path"
     return "$rc"
   fi
@@ -218,32 +262,41 @@ _exec_deepseek() {
   return "$rc"
 }
 
-# Reject an output file that is too small to be real, blank once stripped, or is
-# only a known error placeholder. Conservative on purpose: the 2-byte floor and
-# whitespace check reject nothing legitimate (even a one-line "a\n" file list is
-# >2 bytes), and the denylist matches ONLY when the ENTIRE stripped body equals a
-# pure-error string — not merely contains it — so a real report that mentions
-# "Execution error" in passing still passes. Returns 0 if useful, 1 if not.
+# Reject blank output and unmistakable provider-error shapes. Output semantics
+# belong to the caller: `null`, a classification word, and a one-byte answer can
+# all be valid results. Returns 0 if useful, 1 if not.
 _exec_output_is_useful() {
   local path="$1" bytes stripped
   [[ -f "$path" ]] || return 1
-  # Byte floor: < 2 bytes cannot be a meaningful answer.
+  # An empty file cannot be an answer; a one-byte file can.
   bytes="$(wc -c <"$path" 2>/dev/null || echo 0)"
-  [[ "$bytes" -ge 2 ]] || return 1
+  [[ "$bytes" -ge 1 ]] || return 1
   # Strip leading/trailing whitespace (incl. blank lines); empty after strip = useless.
   stripped="$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$path" | sed '/^$/d')"
   [[ -n "$stripped" ]] || return 1
-  # Pure-error placeholders: reject only when the ENTIRE stripped body EXACTLY
-  # equals one of these (no globs — a real report that merely opens with "Error:"
-  # and continues must pass). Case-insensitive on the common single-word ones.
-  local low; low="$(printf '%s' "$stripped" | tr '[:upper:]' '[:lower:]')"
-  case "$low" in
-    "execution error" | "error" | "null" | "undefined" \
-    | "no response" | "no output" | "(no output)" | "n/a" )
-      return 1
-      ;;
-  esac
+  # This generic adapter has no structured provider-error channel. Do not
+  # reserve answer text: classifications such as `N/A`, `no response`,
+  # `permission denied`, and `Error: ...` are valid when the provider exits 0.
   return 0
+}
+
+# Move a staged regular file to one exact regular-file destination. `mv` treats
+# a directory target as a container, so re-check the target after moving and
+# retain the stage's actual path if a concurrent directory creation absorbed it.
+# On failure, EXEC_MOVE_REMAINDER names the provider output that remains.
+_exec_move_file_exact() {
+  local source="$1" target="$2" relocated
+  EXEC_MOVE_REMAINDER="$source"
+  [[ -f "$source" && ! -L "$source" && ! -d "$target" ]] || return 1
+  if mv -f "$source" "$target" && [[ -f "$target" && ! -L "$target" ]]; then
+    EXEC_MOVE_REMAINDER=""
+    return 0
+  fi
+  relocated="$target/$(basename "$source")"
+  if [[ -f "$relocated" && ! -L "$relocated" ]]; then
+    EXEC_MOVE_REMAINDER="$relocated"
+  fi
+  return 1
 }
 
 _exec_abs_output_path() {

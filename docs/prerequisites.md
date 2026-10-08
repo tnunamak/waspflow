@@ -1,60 +1,54 @@
 # Prerequisites
 
-Waspflow is a small shell tool around standard developer CLI programs. It does
-not install system packages for you, because package-manager choices vary by
-OS, but `waspflow doctor` tells you exactly what is missing.
+Waspflow is a shell tool. It does not install system packages because package managers differ across Linux and macOS. Run `waspflow doctor` after installation to see the exact missing dependencies.
 
-## Required
+## Required tools
 
-- `tmux` — terminal multiplexer that keeps worker panes alive after your shell
-  disconnects.
-  Docs: https://github.com/tmux/tmux/wiki
-  Install guide: https://github.com/tmux/tmux/wiki/Installing
+- Bash 4 or later — Waspflow uses Bash features that older releases do not provide.
+- GNU-compatible `find` with `-printf`, and `timeout` with `--kill-after`.
+- `tmux` — keeps lane panes alive after the launching shell disconnects.
+- `jq` — reads JSON lane state and provider events.
+- `awk`, `python3`, and `git` — used by the CLI and artifact capture.
+- `timeout` — bounds cleanup and transcript inspection.
+- `perl` — strips terminal control sequences from saved transcripts.
+- `flock` — serializes lane state transitions. It is supplied by util-linux on most Linux systems; macOS needs a compatible `flock` command.
+- `uuidgen`, or Linux `/proc/sys/kernel/random/uuid` — creates supported provider session IDs.
 
-- `jq` — JSON processor used for lane state and session-log inspection.
-  Download: https://jqlang.org/download/
+## One provider CLI
 
-- `git` — used for project detection, worktree isolation, and diff capture.
-  Downloads: https://git-scm.com/downloads
+Install at least one of these and make it available on `PATH`:
 
-- `flock` — required to serialize spawn/revise/park/reap transitions so a
-  newly-started turn cannot race cleanup. It ships with util-linux on Linux;
-  on macOS install a compatible `flock` command before using waspflow.
+| Waspflow provider | Executable |
+|---|---|
+| Claude | `claude` |
+| Codex | `codex` |
+| Grok | `grok` |
+| Antigravity | `agy` |
+| Qwen | `qwen` |
+| DeepSeek | `dsh` plus a configured headless profile |
 
-- `curl` — used by `doctor` and optional backend health checks.
-  Project: https://curl.se/
-
-- `uuidgen` or `/proc/sys/kernel/random/uuid` — used to mint Claude/Grok session
-  ids. On most Linux/macOS systems this is already installed.
-
-## At least one agent CLI
-
-- OpenAI Codex CLI.
-  Docs: https://developers.openai.com/codex/cli/features
-  Reference: https://developers.openai.com/codex/cli/reference
-
-- Claude Code.
-  Quickstart: https://code.claude.com/docs/en/quickstart
-
-- Grok Build CLI (`grok`).
-  Installs to `~/.grok/bin/grok` by default; ensure that directory is on `PATH`.
-
-- Antigravity CLI (`agy`).
-  Sign in with `agy` and use `agy models` to inspect the model IDs available to
-  the account. Antigravity uses OAuth and provider quota, not an API key.
-
-## Verify
+After `./install.sh`, add `$HOME/.local/bin` to `PATH` unless the installer printed a different directory. For example:
 
 ```bash
+export PATH="$HOME/.local/bin:$PATH"
 waspflow doctor
 ```
 
-If all required tools are present and at least one agent CLI is on `PATH`, run:
+The installer uses `WASPFLOW_INSTALL_BIN` when set, so use that printed directory instead of assuming the default.
+
+## First Codex launch
+
+Codex may show an update or trust prompt before its composer is ready. Resolve it in the tmux pane, then rerun the Waspflow command. Waspflow refuses to inject a task into that unresolved menu because it could activate its selected action.
+
+## Verify
+
+The test suite requires Bash 4 or later and ripgrep (`rg`). `rg` is a test dependency;
+it is not required to run Waspflow itself.
 
 ```bash
+waspflow doctor
 waspflow demo --provider codex
 waspflow demo --provider codex --run
 ```
 
-Swap `codex` for `claude`, `grok`, or `antigravity` if that is the agent CLI you
-have installed. Antigravity uses `agy` as its executable.
+Replace `codex` with any installed provider. Antigravity uses `agy`.

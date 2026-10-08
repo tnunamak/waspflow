@@ -1,631 +1,119 @@
 # waspflow
 
-## Status: maintenance mode
+Waspflow runs coding-agent work in durable tmux lanes. Start a worker, inspect it, steer it, wait for a terminal turn, and deliberately reap its saved artifacts.
 
-The supported workflow is `spawn`, `exec`, `wait`, steer (`revise`), `reap`,
-`gc`, and `doctor`. New features are not planned. T3 Code is the primary
-orchestrator; waspflow remains available for these local workflows. Report bugs
-in `inbox/`.
+**Status: maintenance mode — bug fixes only.** Report bugs in [GitHub Issues](https://github.com/tnunamak/waspflow/issues).
 
-<p align="center">
-  <img src="assets/waspflow-hero.webp" alt="waspflow agent workflow control room" width="100%">
-</p>
-
-Give your main agent a live workflow for managing worker agents.
-
-Waspflow is an agent-operable control loop for Claude Code, Codex, Grok, and
-Antigravity workers: spawn a worker, watch its live stream, steer it with another
-instruction, preserve the transcript and diff, and reap the lane deliberately.
-Humans can use the same CLI directly; the deeper point is that an orchestrating
-agent gets a small, durable tool surface instead of fire-and-forget subprocesses
-and loose notes.
-
-Use it when you want to:
-
-- let a main agent delegate work without losing control of the worker;
-- watch what a coding agent is doing before it finishes;
-- correct a worker mid-run;
-- run multiple workers in isolated git worktrees;
-- require a report, transcript, and diff instead of "done, trust me";
-- recover worker state after your main agent or terminal loses context.
-
-## First Run
+## Quickstart
 
 ```bash
-git clone https://github.com/tnunamak/waspflow ~/code/waspflow
-~/code/waspflow/install.sh
+git clone https://github.com/tnunamak/waspflow /path/to/waspflow
+cd /path/to/waspflow && ./install.sh
+export PATH="$HOME/.local/bin:$PATH" # or the directory printed by install.sh
 waspflow doctor
-waspflow demo --provider codex
 waspflow demo --provider codex --run
 ```
 
-Use `--provider claude`, `--provider grok`, `--provider antigravity`, or
-`--provider qwen` if that is the agent CLI you have installed. Antigravity uses
-the `agy` executable.
+Replace `codex` with an installed provider, such as `claude`, `grok`, or `antigravity` (`agy`). `install.sh` creates a symlink in `$HOME/.local/bin` unless `WASPFLOW_INSTALL_BIN` is set.
 
-## Selection gate
+## What a lane contains
 
-Selection defaults to `warn` for one release: a bare provider-default invocation
-continues but prints one suggestion to add `--accept-provider-default`. Set
-`WASPFLOW_SELECTION_GATE=enforce` to require `--op <id>`, an explicit `--model`,
-or `--accept-provider-default`; it exits 5 (`selection_required`) without
-launching anything. `--auto` selects an op fallback and requires `--op`;
-`--ack-deprecated` applies only to that selector path.
-
-## Provenance gate
-
-Parent provenance defaults to `warn` for one release: a spawn with no resolved
-parent continues, records `absent`, and prints one suggestion to add
-`--parent-ref`. Set `WASPFLOW_PROVENANCE_GATE=enforce` to refuse that spawn with
-exit 6 (`parent_required`) before it creates a lane. Use `--no-parent` only for
-an intentional top-level spawn; it records `declared_orphan` rather than
-`absent`.
-
-You need `tmux`, `jq`, `awk`, `python3`, `git`, `flock`, and provider CLIs for
-the lanes you run. `codex` and `claude` are recommended; `grok`, `agy`, `qwen`,
-and `dsh` are optional. If something is missing, `waspflow doctor` tells you
-what to install. See [docs/prerequisites.md](docs/prerequisites.md) for links.
-
-## The Loop
-
-A lane is one worker and its saved state: prompt, terminal transcript, session,
-working directory, git diff, optional report, and final result.
+A lane keeps its prompt, transcript, session details, final git capture, and state under `$WASPFLOW_HOME` (default: `${XDG_STATE_HOME:-$HOME/.local/state}/waspflow`). It is useful when a worker needs follow-up instructions or you need to recover its state after closing a terminal.
 
 ```bash
-# Start a worker from any project directory.
-waspflow spawn --provider codex --accept-provider-default --lane fixbug -- \
-  "Find and fix the off-by-one in src/pager.ts"
-
-# Wait until the worker finishes its current turn, then perform normal reap.
-# The calling harness receives the final reap result directly.
-waspflow wait fixbug --reap
-
-# Use structured provider events for orchestration observation. This never reads
-# full-screen terminal paint or exposes prompt/tool content.
-waspflow events fixbug --lines 40 --json
-
-# Inspect the pane only for UI/modal diagnosis (for example after a stalled wait).
-waspflow peek fixbug
-
-# Give it another instruction in the same session.
-waspflow revise fixbug -- "Add a regression test too."
-waspflow wait fixbug
-
-# Close the pane and finalize the lane state.
-waspflow reap fixbug
-```
-
-`reap` is cleanup, not data loss. The lane record stays under
-`$WASPFLOW_HOME` so you can inspect what happened later.
-
-## Why Not Just Run Codex Or Claude Directly?
-
-Direct CLI sessions are great for one focused conversation. Waspflow adds a
-small workflow layer when a human or orchestrating agent needs workers to be
-observable, steerable, resumable, and reviewable.
-
-| Need | Direct `codex` / `claude` | `waspflow` |
-|---|---|---|
-| Start a normal coding session | Yes | Yes |
-| Give a main agent stable worker-agent verbs | Shell out and hope | `spawn`, `wait`, `peek`, `revise`, `reap` |
-| Watch another agent while you keep working | Manual tmux setup | Built in |
-| Send a correction after launch | Same terminal only | `waspflow revise <lane>` |
-| Run several workers without file collisions | Manual worktrees | `--isolate` |
-| Keep prompt, transcript, diff, and result together | Manual bookkeeping | Automatic lane artifacts |
-| Require a written report | Prompt convention | `--report` checked on `reap` |
-| Recover after your main agent loses context | Manual reconstruction | `waspflow list/status/peek` |
-
-## Isolated Worktrees
-
-Use `--isolate` when several workers may edit the same repo:
-
-```bash
-waspflow spawn --provider claude --accept-provider-default --lane api --isolate -- "Refactor the API client"
-waspflow spawn --provider codex  --accept-provider-default --lane ui  --isolate -- "Tighten the settings page"
-
-Add `--base <ref>` to start an isolated lane from a specific commit instead of
-the current `HEAD`:
-
-waspflow spawn --provider codex --accept-provider-default --lane follow-up --isolate --base feature/previous -- "Build on the previous branch"
-```
-
-Each lane gets a git worktree on branch `waspflow/<lane>`. `reap` removes that
-worktree only if it is clean. Use `--keep-worktree` to keep it, or `--force` to
-discard it deliberately.
-
-## Require a Report
-
-Pass `--report` when the worker must leave a written result:
-
-```bash
-waspflow spawn --provider codex --accept-provider-default --lane audit --report findings.md -- \
-  "Audit auth.ts and write findings.md"
-waspflow wait audit
-waspflow reap audit
-```
-
-The report path is normalized against the worker's effective cwd and included
-literally in the initial provider prompt. Ordinary `revise` messages and the
-one recovery pass reassert that same exact path, so workers do not need to infer
-a filename. On `reap`, waspflow checks that this exact file is substantial and,
-for new lanes, was created or changed after spawn. If it is missing or unchanged,
-waspflow runs one recovery pass by resuming the session and asking the worker to
-write that exact path from the transcript and diff. If it is still missing,
-`reap` fails. You get the deliverable or a hard failure, not a false green from
-an unrelated report file.
-
-## Verify Before Reaping
-
-Use `--verify` to make a project oracle part of a lane, then run it while the
-lane is still intact:
-
-```bash
-waspflow spawn --provider codex --accept-provider-default --lane fix --isolate \
-  --prepare 'npm ci' --verify 'npm test' -- "Fix the failing test."
+waspflow spawn --provider codex --accept-provider-default --lane fix -- \
+  "Find and fix the failing test."
 waspflow wait fix
-waspflow verify fix                 # 0 = pass; 2 = fail; no tmux/worktree teardown
-# inspect or revise the still-live lane, then run verify again
-waspflow reap fix                   # reuses the checkpoint if its workspace is unchanged
+waspflow revise fix -- "Add a regression test."
+waspflow wait fix --reap
 ```
 
-`verify` writes `verify-command.txt`, stdout/stderr, and `verify-result.json`
-under the lane directory, including `failure_class` (`task`, `prepare`,
-`timeout`, `infra`, `invalid_oracle`, `pre_existing`, or `none`). A failed
-checkpoint in an isolated lane also runs the oracle in a temporary detached
-fork-point worktree, so an already-failing baseline is recorded as
-`pre_existing`. It does not change the lane's lifecycle or
-result. Reap reuses a checkpoint only when a content-sensitive Git workspace
-fingerprint (HEAD, tracked changes, and untracked files) still matches; otherwise
-it runs the contract again before cleanup. Non-Git workspaces are deliberately
-rerun.
-
-Each verify receipt also records the advisory `verify_test_files_changed` flag.
-For new isolated lanes it compares the fork point with committed and working-tree
-changes, looking for conventional `test`/`spec`/`verify` paths and paths named in
-the command. It warns but never blocks, and reports `unknown` for lanes without
-a trustworthy recorded fork point.
-
-Use `--verify-strength suite` or `--verify-strength smoke` to declare the
-oracle class in the append-only receipt; waspflow never guesses it from the
-command. Receipts live at `$WASPFLOW_HOME/receipts.jsonl` and are emitted when a
-lane is reaped.
-
-## Check the Project Before Launching More Workers
-
-`waspflow check` summarizes the project state that matters for agent work:
-
-- current git branch, dirty state, and upstream delta;
-- other git worktrees;
-- live, exited, or failed lanes for this project;
-- optional project rules from `.waspflow/config.json`.
+Use `waspflow exec` for a headless, one-shot task that does not create a lane:
 
 ```bash
-waspflow check
-waspflow check --explain
-waspflow check --no-fail
+waspflow exec --provider claude --accept-provider-default -- \
+  "Summarize the public functions in lib/core.sh."
 ```
 
-Use `--explain` when you want next steps for the risks it found.
+## Provider support matrix
 
-## For Larger Repos
+`supported` means the adapter implements the command. `partial` means it works but has an important evidence limit.
 
-Waspflow works with no project config. If your repo has local rules, generate a
-small config instead of writing wrapper scripts:
+| Provider | spawn | wait (completion detection) | revise (steer) | reap | exec |
+|---|---|---|---|---|---|
+| Claude | supported | supported | supported | supported | supported |
+| Codex | supported | partial — rollout correlation risk | supported | supported | supported |
+| Grok | supported | partial — weaker completion evidence | partial — weaker submission evidence | supported | supported |
+| Antigravity (`agy`) | partial — receipt-based submission | partial — receipt-based completion | partial — headless revise only | supported | supported |
+| Qwen | supported | supported | supported | supported | supported |
+| DeepSeek (`dsh`) | supported | supported | unsupported — start a new lane with the complete task | supported | supported |
 
-```bash
-waspflow init --profile serious-repo
-waspflow check --explain
-```
+Claude has the strongest completion detection: Waspflow waits for terminal turn events and vetoes completion while known child or background-shell work remains active. Codex correlates rollout events with the lane’s turn; very new Codex versions can still drift from that event shape. Grok and Antigravity deliberately fail closed when submission or completion evidence is insufficient.
 
-Profiles are composable:
+On first Codex use, resolve any update banner or trust prompt in the pane yourself, then run the command again. Waspflow refuses to paste into an unresolved startup menu because an Enter could select an unsafe menu item instead of submitting your task.
 
-```bash
-waspflow init --profile serious-repo --profile openspec
-waspflow init --profile serious-repo --profile live-stack-mutex
-```
+## Requirements
 
-The project supplies the facts: which files are blockers, which command checks
-matter, which mutex file protects a live system. Waspflow supplies the common
-machinery. See [docs/project-checks.md](docs/project-checks.md) for the full
-config shape.
+Required tools are Bash 4 or later, GNU-compatible `find` and `timeout`, `tmux`, `jq`, `awk`, `python3`, `git`, `flock`, and `perl`, plus `uuidgen` or Linux `/proc/sys/kernel/random/uuid`, and at least one provider CLI. For DeepSeek, also configure its `dsh` headless profile. `waspflow doctor` checks basic availability before you start; it does not establish full platform compatibility. See [prerequisites](docs/prerequisites.md) for installation notes.
 
-## Commands
+Providers map to executables as follows: `claude`, `codex`, `grok`, `antigravity` → `agy`, `qwen`, and `deepseek` → `dsh`.
 
-| Command | What it does |
+## Common commands
+
+| Command | Purpose |
 |---|---|
-| `spawn --provider <claude\|codex\|grok\|antigravity\|qwen\|deepseek> --lane <name> [opts] -- <task>` | Start a durable worker lane |
-| `exec --provider <claude\|codex\|grok\|antigravity\|qwen\|deepseek> [opts] [-o FILE] -- <task>` | Headless one-shot: run, return, leave no lane |
-| `demo --provider <claude\|codex\|grok\|antigravity\|qwen\|deepseek> [--run]` | Show or run a safe first demo |
-| `wait <lane> [--reap]` | Poll the provider log until a worker finishes; `--reap` then returns the final reap result |
-| `events <lane> [--lines N] [--json]` | Safe, normalized provider-event tail for all supported providers |
-| `inspect [<lane>] --json` | Read-only lane facts and explainable cleanup classifications |
-| `peek <lane> [--events]` | Pane/transcript capture for UI diagnosis; `--events` is the structured tail |
-| `revise <lane> -- <message>` | Send another instruction to the same session; nonzero means live submission was not confirmed |
-| `escalate <lane> [--to …] [--handoff] [--defer]` | Switch arms after a failed checkpoint; `--defer` waits for a cold-cache boundary and applies at the next `revise` ([deferred switches](docs/deferred-switch.md)); `revise` instead steers the same arm |
-| `accept-runtime <lane> --reason <text>` | Explicitly accept the current observed Codex model/effort mismatch |
-| `verify <lane> [--json]` | Run the configured prepare/verify contract without teardown (0 pass, 2 fail); failed task checkpoints propose `escalate` |
-| `reap <lane>` | Close the pane, verify outputs, and finalize state |
-| `park <lane>` | Close only a verified-idle owned tmux window; preserve the resumable lane |
-| `gc [--lane-age S] [--apply]` | Dry-run fleet selection for safely parkable old lanes; `--apply` parks them |
-| `close <lane> --status <harvested\|superseded\|abandoned>` | Record a lane's fan-in outcome (with provenance) |
-| `captured <lane> --in <ref>` | Is the lane's work already present in `<ref>`? (by content, not ancestry) |
-| `provenance backfill --report <file> [--skip <lane>]...` | Append revalidated forensic parent facts without changing lane state |
-| `ops list\|explain\|resolve <id>` | Resolve a task-shaped operating point to explicit flags |
-| `list` | List lanes |
-| `status <lane>` | Show one lane's JSON state |
-| `attach <lane>` | Attach your terminal to the worker pane |
-| `check [--explain]` | Check git/worktree/lane/project state |
-| `init --profile <name>` | Write `.waspflow/config.json` from reusable profiles |
-| `doctor` | Check local prerequisites and agent CLIs |
+| `spawn --provider … --lane NAME -- TASK` | Start a durable lane. |
+| `wait NAME [--reap]` | Poll until a terminal turn; optionally reap it. |
+| `peek NAME` | Inspect the tmux pane for diagnosis. |
+| `status NAME` / `list` | Inspect saved lane state. |
+| `revise NAME -- MESSAGE` | Send a follow-up instruction. |
+| `reap NAME` | Finalize a terminal lane. |
+| `reconcile --json` | Read-only fleet recovery inventory. |
+| `doctor` | Check dependencies and fleet warnings. |
 
-Useful `spawn` options:
+Use `--isolate` on `spawn` when workers should get separate Git worktrees. `--report PATH` requires a non-empty report before normal reaping succeeds. See `waspflow help` for the complete option reference.
 
-- `--isolate` creates a git worktree for the lane.
-- `--base <ref>` selects the starting commit for an isolated worktree.
-- `--report <path>` requires a written deliverable before `reap` succeeds.
-- `--verify <cmd>` configures an oracle; use `verify <lane>` before destructive reap.
-- `--prepare <cmd>` runs setup before that oracle; `--verify-timeout <seconds>` bounds both commands.
-- `--verify-strength <suite|smoke>` declares receipt comparability; it is never inferred.
-- `--model <id>` selects a provider model.
-- `--effort <none|minimal|low|medium|high|xhigh|max>` passes reasoning effort **exactly** where supported (never silent demotion; Antigravity supports `low`, `medium`, and `high`; Qwen Code does not support `--effort`).
-- `--mcp <auto|none|inherit>` controls worker MCP exposure. `auto` is the default and is MCP-minimal where the provider supports it; use `inherit` only when the task needs the current provider configuration.
-- `--op <id>` expands a task-shaped operating point (`waspflow ops list`); explicit flags win over expansion.
-- `--cwd <dir>` starts the worker in another directory.
-- `--parent-ref <opaque-ref>` records known parent-session provenance without resolving it.
-- `--no-parent` deliberately records this spawn as a top-level orphan.
-- `--arg <flag>` passes an extra flag to the underlying agent CLI.
+## Known limitations
 
-MCP policy by provider: Claude and Codex resolve `auto` to `none`; Grok,
-Antigravity, and Qwen resolve `auto` to `inherit` with a warning because their CLIs
-have no verified empty-MCP launch boundary. Explicit `--mcp none` fails before launch
-for those providers. Under Claude/Codex isolation, pass-through MCP config (and Codex
-config profiles) is rejected; choose `inherit` explicitly when a task needs it.
+- Lanes keep running if the spawning agent dies, but Waspflow cannot push completion into a new session. Use `waspflow list`, `status`, or `wait`; use `waspflow reconcile --json` and `doctor` to investigate uncertain or orphaned state.
+- There is no completion callback: `wait` polls provider logs.
+- Worktree isolation is **not an OS sandbox**. Lanes run provider CLIs with permissive provider modes; only run tasks you trust.
+- Waspflow uses `systemd-run --user --scope` for scope tracking when available. Without it, it warns and continues with tmux-only supervision; lifecycle state can remain unknown and cleanup has less process-tree evidence.
+- Set `WASPFLOW_TMUX_SOCKET=name` to make every Waspflow tmux call use `tmux -L name` instead of your default tmux server. Export it in every shell that manages those lanes; a new shell without it looks at the default server and will not see them.
+- `revise` on Codex can report "not confirmed submitted" even though the message was applied. Run `waspflow peek NAME` before sending it again.
+- Codex lanes use whichever `codex` the lane's login shell resolves, which can differ from the one in your current shell. If a stale copy shows an update prompt, update or remove the older install.
+- `reap` refuses a live lane that the provider does not report as idle unless you pass `--force`.
+- Legacy tmux windows without Waspflow ownership tags are not adopted automatically; explicit legacy adoption is required for parking.
+- Provider CLIs change their TUIs and event formats. Live behavior can drift; stalled waits should be diagnosed with `waspflow peek`.
+- Billing has no guarantee. Subscription versus API billing depends on the provider’s active authentication; read `waspflow doctor` before a large run.
 
-For a one-time recovery of older missing parent records, see
-[forensic parent backfill](docs/provenance-backfill.md). It uses only exact
-spawn commands recorded as submitted tool arguments; it does not infer a parent
-from transcript or command output.
+## Security and operations
 
-## Exec: Headless One-Shot Work
-
-`spawn` creates a durable lane — a tmux window, session, optional worktree, and
-state you later `reap`. That is the right shape for implementation work you steer
-and harvest. For **stateless, fire-and-return** work (an analysis, an audit, a
-one-shot transform) that shape is overkill: it leaves a lane and a branch to
-reconcile for something you only read once.
-
-`exec` is the cheap path. It runs one headless turn, blocks until it finishes,
-writes the final message to a file (or stdout), and leaves nothing behind — no
-tmux window, no worktree, no lane record, no reap.
+Use a dedicated tmux socket when you do not want Waspflow windows on your normal server:
 
 ```bash
-# Analysis to a file, blocking:
-waspflow exec --provider codex --accept-provider-default -o report.md -- "Summarize the auth flow in src/auth/."
-
-# One-shot answer to stdout:
-waspflow exec --provider claude --accept-provider-default -- "List the public functions in lib/core.sh."
-
-# Same shape for Grok:
-waspflow exec --provider grok --accept-provider-default -- "List the public functions in lib/core.sh."
+export WASPFLOW_TMUX_SOCKET=waspflow
+waspflow doctor
 ```
 
-## Antigravity
+The default state directory holds prompts and transcripts. Treat it as sensitive local data. `WASPFLOW_HOME` changes where that state is stored.
 
-Antigravity support is for headless durable lanes through the `agy` executable.
-The provider uses the OAuth account and quota pools already configured for
-`agy`; it is not an API-key billing path. List the models available to that
-account before selecting one:
+## More documentation
 
-```bash
-agy models
-```
-
-Use model IDs exactly as printed by `agy models`. Gemini models and the Claude/GPT
-pool are separate quota pools; `low`, `medium`, and `high` are the supported
-effort values. For example:
-
-```bash
-waspflow spawn --provider antigravity --model gemini-3.6-flash-low --effort low \
-  --lane gemini-review -- "Review the API changes"
-waspflow spawn --provider antigravity --model claude-sonnet-4-6 --effort medium \
-  --lane claude-review -- "Review the API changes"
-waspflow spawn --provider antigravity --model gpt-oss-120b-medium --effort medium \
-  --lane gpt-review -- "Summarize the test failures"
-```
-
-Model names vary by account and installation; replace these examples with IDs
-from `agy models`. When a model ID ends in `-low`, `-medium`, or `-high`,
-`--effort` must match that suffix. Antigravity lanes use honest MCP behavior: `--mcp auto`
-inherits provider configuration with a warning because `agy` has no verified
-MCP-disable flag; `--mcp none` fails closed. Waspflow's
-durable lane state and log polling remain the completion contract; do not infer
-provider-native completion events or runtime model/effort attestation.
-
-Options mirror `spawn` where they apply: `--model`, `--effort`, `--mcp`, `--cwd`, and
-`-o <file>` (omit `-o` to print to stdout). Because `exec` runs the same provider
-preflight as `spawn`, the billing guard below covers it too.
-
-## Qwen Code
-
-Qwen Code support uses the headless `qwen -p ... --yolo` invocation pattern.
-Each spawn or revise is a one-shot process; lifecycle truth lives in
-Waspflow-owned receipt JSONL (the antigravity pattern). Session IDs are
-assigned by Qwen (no `--session-id` flag) and discovered from the
-stream-json `session_start` event.
-
-```bash
-waspflow spawn --provider qwen --model qwen3.8-max-preview \
-  --lane qwen-review -- "Review the API changes"
-```
-
-Qwen Code does not support `--effort`; passing it is an error. Models are
-read from `~/.qwen/settings.json` (`modelProviders.openai[].id`). Auth is
-API-key based: set `BAILIAN_TOKEN_PLAN_API_KEY`, `BAILIAN_CODING_PLAN_API_KEY`,
-or `DASHSCOPE_API_KEY` in the environment. MCP policy follows the
-antigravity pattern: `auto` resolves to `inherit` with a warning; `none`
-fails before launch.
-
-## Billing Safety
-
-`waspflow doctor` reports the active auth/billing path. This is especially
-important for Claude fleets: if
-`ANTHROPIC_API_KEY` is set, headless Claude workers bill pay-as-you-go API
-rates instead of subscription/Agent-SDK credit.
-
-For that reason, `waspflow spawn --provider claude ...` refuses to launch while
-`ANTHROPIC_API_KEY` is set. Unset it to use subscription-backed Claude auth, or
-override intentionally for API billing:
-
-```bash
-WASPFLOW_ALLOW_API_BILLING=1 waspflow spawn --provider claude --accept-provider-default --lane api -- \
-  "Run the intended API-billed task"
-```
-
-For Codex, waspflow uses the read-only `codex login status` result rather than
-the presence of `OPENAI_API_KEY`. ChatGPT auth emits no Codex billing message,
-even when that variable is set. API-key auth emits a determinate API-billing
-notice. A missing, failed, timed-out, skipped, or unrecognized check emits an
-explicit unknown; it never becomes an API-billing conclusion. The check has a
-2-second hard timeout and a 15-second cache scoped to the Codex auth context.
-Set `WASPFLOW_SKIP_CODEX_AUTH_CHECK=1` only when a status probe must not run;
-waspflow will report that the billing path is unknown.
-
-Grok remains a separate environment-based advisory check.
-
-## What Waspflow Saves
-
-Every lane writes to `$WASPFLOW_HOME/lanes/<lane>/`:
-
-- `prompt.txt`
-- `transcript.log`
-- `state.json`
-- `git-status-before.txt`
-- `git-status-after.txt`
-- `git-diff.txt`
-
-Git captures are skipped, not errored, when the lane is not inside a git repo.
-
-### Provenance receipts
-
-At each confirmed launch, Waspflow appends generic `agent-provenance/v1` JSON
-events to `$WASPFLOW_HOME/provenance.jsonl` (mode `0600`). A stable local
-producer identity and lane UUID make these events safe to import idempotently
-by another local tool. The receipt records the lane and its provider-native
-worker session when known; it never records the raw task prompt.
-
-If the caller already knows its own durable session identity, pass it as an
-opaque reference. Waspflow records the assertion but does not resolve it,
-depend on any session-ledger implementation, or infer ancestry from tmux,
-processes, names, cwd, or timestamps.
-
-```bash
-waspflow spawn --parent-ref 'agent-session/v1/codex/your-session-id' \
-  --provider codex --accept-provider-default --lane parser -- "Fix the parser."
-```
-
-`WASPFLOW_PARENT_REF` supplies the same optional value for launcher-managed
-contexts. When neither explicit source exists, a valid Codex-provided
-`CODEX_THREAD_ID` or Claude Code-provided `CLAUDE_CODE_SESSION_ID` is captured
-as `codex:<id>` or `claude:<id>` with evidence class `observed_harness_env`.
-The precedence is `--parent-ref`, then `WASPFLOW_PARENT_REF`, then the validated
-Codex and Claude harness values. Waspflow also gives each worker its direct
-lane identity as `WASPFLOW_PARENT_REF=waspflow:<lane-uuid>`, so a nested spawn
-attributes to that lane rather than its grandparent. Parent references must not
-contain credentials. Missing parent evidence remains missing; Waspflow does not
-guess.
-
-`status <lane>` includes `claude_config_dir`: the value of `CLAUDE_CONFIG_DIR`
-captured at spawn, or `default`, for Claude-resume diagnostics. It is diagnostic
-state only; Waspflow does not change resume behavior or select credentials from
-this field.
-
-### Forensic provenance search roots
-
-`scripts/waspflow-provenance.py` is a read-only forensic helper. With no
-alternate root configured, its JSON is byte-identical to the original helper
-output. When it discovers an alternate root, it includes `search_coverage` so
-an unresolved result states the searched and skipped directories. A failed
-candidate scan instead reports its roots as `unscanned_roots` with the error.
-
-```bash
-python3 scripts/waspflow-provenance.py --lanes my-lane --show-search-coverage --json
-```
-
-Alternate roots are deduplicated and skipped with a reason when missing,
-unreadable, or not a directory. Claude config homes resolve to `projects` from
-`CLAUDE_CONFIG_DIR` or a lane's recorded `claude_config_dir`; Codex config homes
-resolve to `sessions` from `CODEX_HOME` or a recorded `codex_home`. The helper
-also respects the direct session-root overrides `CLAUDE_PROJECTS_DIR` and
-`CODEX_SESSIONS_DIR`.
-
-For another layout, pass a direct transcript root with `--search-root PATH`
-(repeatable), or set the path-separated
-`WASPFLOW_PROVENANCE_SEARCH_ROOTS` environment variable. Spawn evidence still
-comes only from executed command-argument fields; transcript prose and command
-output are not evidence.
-
-## How `wait` Knows a Worker Is Done
-
-Waspflow does not scrape prompt glyphs. It reads each provider's session log:
-
-- Claude Code: idle when the last assistant event has `stop_reason: "end_turn"`.
-- Codex: idle when the latest rollout event is `task_complete`.
-- Grok: idle when the last `turn_*` event in `events.jsonl` is `turn_ended`.
-
-If the pane has exited, `revise` resumes the saved session headlessly:
-
-- Claude: `claude --resume <session-id> --print "<message>"`
-- Codex: `codex exec resume <session-id> "<message>" -o <file>`
-- Grok: `grok -p "<message>" --resume <session-id> --always-approve`
-
-For Codex, a headless resume reasserts the lane's requested model and passed
-reasoning effort. Waspflow then records the structured runtime settings actually
-observed for the exact correlated session; launch intent is never overwritten.
-
-## Codex Runtime Settings Receipt
-
-`model_requested`/`model_passed` and `effort_requested`/`effort_passed` are
-immutable launch-intent receipts (legacy `model`/`effort` remain unchanged).
-Codex lanes additionally expose `runtime_model`,
-`runtime_effort`, source, timestamp, and requested-match status from typed rollout
-events only (`turn_context` and `thread_settings_applied`). Read commands show the
-last recorded receipt; lifecycle commands refresh it without reading TUI text,
-prompts, or transcripts.
-
-An explicit requested model/effort mismatch blocks normal reap with
-`result: runtime_drift` while retaining the lane and its work. After reviewing
-the evidence, an operator may explicitly accept that exact observed timestamp:
-
-```bash
-waspflow accept-runtime my-lane --reason "provider safety fallback accepted"
-waspflow reap my-lane
-```
-
-A later observed settings timestamp requires a new acceptance; Waspflow never
-silently changes the requested model or effort.
-
-## Provider-log Completion Polling
-
-For a native, backgrounded worker, use `waspflow wait <lane> --reap`. The
-calling harness blocks while `wait` polls the provider session log at its
-configured interval, and receives the normal final reap result only after the
-provider terminal oracle confirms the lane is idle. There is no waspflow daemon,
-event subscription, callback endpoint, or claimed asynchronous notification
-delivery. Process completion is pollable, but does not by itself wake or start a
-new model turn. A harness-owned background task may provide a native notification
-while its parent session remains alive; otherwise the owner must explicitly await
-or reconcile the result. Use `peek` after a nonzero `wait` result (especially rc 4
-stalled) to diagnose the exception; it is not the completion oracle.
-
-## Parking and Conservative Fleet GC
-
-`park <lane>` stops only the tmux window recorded as belonging to a currently
-live lane. It refuses active, corrupt, reaped, unresumable, or unowned lanes;
-the transcript, lane state, provider session, worktree, and artifacts remain in
-place, and `revise` can resume the provider session later.
-
-Lanes created before ownership receipts were introduced remain safe-by-default:
-parking refuses them. After checking the dry-run candidate, use
-`park <lane> --adopt-legacy` or `gc ... --adopt-legacy --apply` to explicitly
-bind the existing named window to its lane record before cleanup. Adoption still
-requires a resumable provider session and a terminal-idle oracle result.
-
-`gc` is dry-run by default. It selects live, owned lanes whose provider terminal
-oracle is idle and whose **lane age** (time since spawn), not idle duration,
-meets `--lane-age` (or `WASPFLOW_GC_LANE_AGE_SECONDS`, default 86400). Pass
-`--apply` to park the selected windows, optionally bounded by `--project DIR`.
-It never auto-reaps and never removes worktrees or artifacts. Age alone cannot
-prove that a lane's changes were inspected, captured, or safe to destroy, so
-age-based cleanup parks rather than reaps.
-
-`list --json` exposes the durable global lane index to callers. It supports
-`--project DIR`, `--lifecycle-state live,interrupted,unknown,exited,parked,reaped`,
-and `--limit N` while continuing to show corrupt records rather than silently
-dropping them. `live` is derived from a current waspflow systemd scope receipt;
-a stored `live` record with no active receipt is `interrupted`, and a lane that
-ran through the `scope-unavailable` fallback is `unknown`. `unknown` also
-preserves a missing lifecycle record or an unavailable scope query rather than
-guessing `live`. The stored transition is retained as `record_status`. The bulk
-JSON is a metadata projection and deliberately excludes prompts, commands, and
-resolved provider argv/env; use `status <lane>` for one full record.
-
-## Environment
-
-| Var | Default | Purpose |
-|---|---|---|
-| `WASPFLOW_HOME` | `~/.local/state/waspflow` | Lane state and transcripts |
-| `WASPFLOW_TMUX_SESSION` | `waspflow` | tmux session that holds worker windows |
-| `WASPFLOW_TMUX_HISTORY_LIMIT` | _(unset — inherit)_ | Scrollback lines for future waspflow windows. Unset, empty, or `0` inherits tmux's own setting (no cap). Set a number (e.g. `100000`) to bound retained scrollback during large fan-outs |
-| `WASPFLOW_LANE_PAGER` | `cat` | Pager command for provider children in new lanes; overrides inherited `PAGER` and `GIT_PAGER` for those children only |
-| `WASPFLOW_TRANSCRIPT_RAW` | empty | Set to `1` to keep new transcripts verbatim. By default waspflow strips terminal control sequences while writing readable transcripts; this does not alter existing transcripts. |
-| `WASPFLOW_PROVENANCE_GATE` | `warn` | Parent-attribution gate: `warn` or `enforce` (exit 6) |
-| `WASPFLOW_ALLOW_API_BILLING` | empty | Set to `1` to intentionally allow Claude workers while `ANTHROPIC_API_KEY` is set |
-| `WASPFLOW_CODEX_BACKEND_HEALTH_URL` | empty | Optional health check URL for proxy-routed Codex setups |
-| `WASPFLOW_CODEX_AUTH_TIMEOUT_SECONDS` | `2` | Hard limit for the read-only `codex login status` check |
-| `WASPFLOW_CODEX_AUTH_CACHE_TTL_SECONDS` | `15` | Seconds to reuse a Codex auth-mode observation in the same auth context |
-| `WASPFLOW_SKIP_CODEX_AUTH_CHECK` | empty | Set to `1` to skip the Codex status check; billing is reported as unknown |
-| `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Claude session logs |
-| `CLAUDE_CONFIG_DIR` | default | Claude credential/config home, captured in spawned lane state as `claude_config_dir` |
-| `CODEX_SESSIONS_DIR` | `~/.codex/sessions` | Codex session logs |
-| `GROK_HOME` | `~/.grok` | Grok config home (sessions under `$GROK_HOME/sessions`) |
-| `GROK_SESSIONS_DIR` | `$GROK_HOME/sessions` | Grok session directories |
-
-Lane provider children default both `PAGER` and `GIT_PAGER` to `cat`. This
-prevents commands such as `git log` from parking an unattended lane in an
-interactive pager inherited from the tmux server. It does not change the
-operator shell or tmux server, and the pane remains a real PTY for `attach`.
-
-Override precedence is explicit: `WASPFLOW_LANE_PAGER` wins, then the default
-is `cat`; inherited `PAGER` and `GIT_PAGER` never control a lane. Set
-`WASPFLOW_LANE_PAGER=less` only when an operator intentionally accepts that an
-unattended lane may wait in a pager. The override applies to provider children
-and headless lane recovery commands, not to the operator's shell.
-
-`WASPFLOW_TMUX_HISTORY_LIMIT` is applied only to the configured waspflow tmux
-session, never to tmux's global setting or another session such as `main`.
-It affects windows created after the setting is applied; it does not shrink the
-scrollback already retained by open windows.
-
-It defaults to unset (inherit) rather than to a cap. tmux has no "unlimited"
-value — a literal `0` means *no* scrollback — so opting out means removing the
-session-local override and letting tmux's own `history-limit` apply. Under a
-large fan-out, retained scrollback is a real memory cost (hundreds of panes
-each climbing toward the global ceiling), so set an explicit limit for those
-runs rather than paying it by default.
-
-## Architecture
-
-Waspflow is shell around tmux plus provider adapters:
-
-- `bin/waspflow` routes CLI commands.
-- `lib/core.sh` owns lane state, tmux helpers, and provider dispatch.
-- Provider adapters under `lib/providers/` adapt Claude, Codex, Grok, and
-  Antigravity (`agy`) to the common lane contract.
-- `lib/worktree.sh` handles git worktree isolation.
-- `lib/project.sh` implements `init` and `check`.
-- `skill/SKILL.md` teaches an orchestrating agent how to use the CLI.
-
-Adding another provider means adding `lib/providers/<name>.sh` with the provider
-contract functions.
+- [Full reference](docs/reference.md) (selection gates, worktrees, reports, environment variables, wait internals)
+- [First run](docs/first-run.md)
+- [Prerequisites](docs/prerequisites.md)
+- [Project checks](docs/project-checks.md)
+- [MCP behavior](docs/mcp.md)
 
 ## Verify
+
+The test suite requires Bash 4 or later and ripgrep (`rg`). Run it with:
 
 ```bash
 scripts/verify.sh
 ```
 
-The verify script checks shell syntax, config initialization, policy profiles,
-mutex/blocker detection, `check --explain`, successful-reaped-lane filtering,
-and demo preview output without calling a model.
-
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
-
-## Releases (CI)
-
-Pushes to `main` with conventional commits (`feat:`, `fix:`, `BREAKING CHANGE`) trigger
-[semantic-release](https://github.com/semantic-release/semantic-release): GitHub Releases + notes.
-
-- Workflow: `.github/workflows/release.yml` (after `scripts/verify.sh`)
-- Local install still tracks your clone: `git pull && ./install.sh` (also wired in `dotfiles/setup.sh`).

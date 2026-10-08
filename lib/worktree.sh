@@ -104,3 +104,32 @@ worktree_remove() {
     || { warn "git worktree remove failed for $wt_path (left in place)"; return 1; }
   return 0
 }
+
+# Preserve a report before cleanup without hiding any real user changes.  A
+# tracked report stays in place: removing it would create a new dirty change,
+# and a modified tracked file must still make normal reap refuse deletion.
+# An untracked report is copied to durable lane storage and then removed from
+# exactly its recorded path, so it cannot be the sole reason a clean worktree
+# fails the dirty-tree guard.  Prints retained or moved.
+worktree_preserve_report_for_cleanup() {
+  local wt_path="$1" report="$2" preserved="$3" relative
+  [[ "$report" == "$wt_path/"* && -f "$report" ]] || return 1
+  relative="${report#"$wt_path"/}"
+  cp -- "$report" "$preserved" || return 1
+  if git -C "$wt_path" ls-files --error-unmatch -- "$relative" >/dev/null 2>&1; then
+    printf 'retained\n'
+    return 0
+  fi
+  rm -- "$report" || return 1
+  printf 'moved\n'
+}
+
+# Inventory the exact Git-visible work which --force would discard.  This does
+# not traverse the filesystem and therefore cannot enumerate or act on ambient
+# temporary directories.
+worktree_discard_inventory() {
+  local wt_path="$1"
+  [[ -d "$wt_path" ]] || return 1
+  git -C "$wt_path" status --porcelain=v1 --untracked-files=all --ignored 2>/dev/null \
+    | jq -Rsc 'split("\n") | map(select(length > 0))'
+}

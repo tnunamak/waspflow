@@ -32,7 +32,7 @@ WASPFLOW_ROOT="${WASPFLOW_ROOT:-$(cd "$WASPFLOW_LIB/.." && pwd)}"
 # universal — the per-provider whitelist stays the real gate.
 WASPFLOW_EFFORT_TOKENS="none|minimal|low|medium|high|xhigh|max|ultra"
 
-# Generated effort unions from minnows capabilities (optional; adapters hard-fail themselves).
+# Generated effort unions from a capabilities catalog (optional; adapters hard-fail themselves).
 if [[ -f "$WASPFLOW_LIB/generated/effort-whitelists.sh" ]]; then
   # shellcheck source=/dev/null
   source "$WASPFLOW_LIB/generated/effort-whitelists.sh"
@@ -58,15 +58,27 @@ WASPFLOW_CODEX_BACKEND_HEALTH_URL="${WASPFLOW_CODEX_BACKEND_HEALTH_URL:-}"
 # default session.
 WASPFLOW_TMUX_SESSION="${WASPFLOW_TMUX_SESSION:-waspflow}"
 
+# Select a private tmux server without changing the user's ambient tmux setup.
+# Set WASPFLOW_TMUX_SOCKET to the name passed to `tmux -L` (for example,
+# `wf-test-$$`). Every waspflow tmux operation then uses that server.
+WASPFLOW_TMUX_SOCKET="${WASPFLOW_TMUX_SOCKET:-}"
+if [[ -n "$WASPFLOW_TMUX_SOCKET" ]]; then
+  tmux() { command tmux -L "$WASPFLOW_TMUX_SOCKET" "$@"; }
+fi
+
 # Limit retained history for future waspflow windows without changing the tmux
 # server or any other session. Unset, empty, and 0 all remove this session's
 # override so tmux's inherited setting applies (effectively "unlimited" — tmux
 # has no unlimited value, and a literal 0 would mean NO scrollback).
 #
-# Default is inherit, not a cap: measured scrollback on this host was ~1.3k
-# lines/pane against a 500k ceiling, so a cap costs real scrollback today while
-# only binding under heavy fan-out. Set this explicitly (e.g. 100000) when
-# running a large fleet.
+# A fresh owned lane window gets a 100000-line cap unless an operator explicitly
+# asks to inherit (empty or 0) or supplies another cap. This cannot shrink an
+# existing pane or any unrelated session.
+if [[ ${WASPFLOW_TMUX_HISTORY_LIMIT+x} ]]; then
+  WASPFLOW_TMUX_HISTORY_LIMIT_EXPLICIT=true
+else
+  WASPFLOW_TMUX_HISTORY_LIMIT_EXPLICIT=false
+fi
 WASPFLOW_TMUX_HISTORY_LIMIT="${WASPFLOW_TMUX_HISTORY_LIMIT-}"
 
 # A lane is an unattended child process even though its provider owns an
@@ -507,15 +519,41 @@ list_lanes() {
 # Warn when a non-isolated spawn would share a checkout with an owned live lane.
 # The durable lane directory is the index; inspect only each record's lifecycle
 # and cwd, and ask the existing tmux helper only for prefix-matched candidates.
+process_start_ticks() {
+  local pid="$1"
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/stat" ]] || return 1
+  awk '{print $22}' "/proc/$pid/stat" 2>/dev/null
+}
+
+# A headless revise has no pane, so it remains an active checkout writer while
+# its recorded PID still has the process-start identity captured at launch.
+# Older records lack that identity and are deliberately unknown, not live.
+lane_headless_writer_active() {
+  local lane="$1" pid expected actual
+  pid="$(lane_get "$lane" headless_revise_pid)"
+  expected="$(lane_get "$lane" headless_revise_pid_start_ticks)"
+  [[ "$pid" =~ ^[0-9]+$ && "$expected" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  actual="$(process_start_ticks "$pid" || true)"
+  [[ "$actual" == "$expected" ]]
+}
+
 warn_shared_checkout_lanes() {
-  local cwd="$1" current_root current_real lane sf other_cwd other_root other_real
+  local cwd="$1" current_root current_real lane sf other_cwd other_root other_real status
   current_root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || return 0
   current_real="$(realpath "$current_root" 2>/dev/null)" || return 0
   [[ -n "$current_real" && -d "$WASPFLOW_LANES_DIR" ]] || return 0
   while IFS=$'\t' read -r sf other_cwd; do
     [[ -n "$sf" && -n "$other_cwd" ]] || continue
     lane="$(basename "$(dirname "$sf")")"
-    tmux_window_exists "$lane" || continue
+    status="$(jq -r '.status // empty' "$sf" 2>/dev/null)"
+    if [[ "$status" == parked || "$status" == reaped ]]; then
+      lane_headless_writer_active "$lane" || continue
+    elif tmux_window_exists "$lane" || lane_headless_writer_active "$lane"; then
+      :
+    else
+      continue
+    fi
     other_root="$(git -C "$other_cwd" rev-parse --show-toplevel 2>/dev/null)" || continue
     other_real="$(realpath "$other_root" 2>/dev/null)" || continue
     [[ "$other_real" == "$current_real" ]] || continue
@@ -526,7 +564,7 @@ warn_shared_checkout_lanes() {
     find "$WASPFLOW_LANES_DIR" -mindepth 2 -maxdepth 2 -name state.json -type f -print0 2>/dev/null \
       | xargs -0 -r -n 64 jq -r --arg root "$current_root" --arg real "$current_real" '
           select(type == "object"
-            and (.status | type == "string" and length > 0 and . != "parked" and . != "reaped")
+            and (.status | type == "string" and length > 0)
             and (.cwd | type == "string")
             and (.cwd == $root or (.cwd | startswith($root + "/"))
               or .cwd == $real or (.cwd | startswith($real + "/"))))
@@ -551,7 +589,7 @@ lane_matches_project() {
 # ---- tmux helpers -----------------------------------------------------------
 # All windows live in a dedicated session so we never disturb the user's tmux.
 tmux_ensure_session() {
-  if ! tmux has-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null; then
+  if ! tmux has-session -t "=$WASPFLOW_TMUX_SESSION" 2>/dev/null; then
     # Create detached with a placeholder window we immediately leave alone. This
     # may start a tmux server that outlives the CLI: never let it inherit a held
     # lane lock (fd 9, or the claim fd of a spawn that is running this).
@@ -563,12 +601,33 @@ tmux_ensure_session() {
     fi
   fi
   if [[ -z "$WASPFLOW_TMUX_HISTORY_LIMIT" || "$WASPFLOW_TMUX_HISTORY_LIMIT" == 0 ]]; then
-    tmux set-option -u -t "$WASPFLOW_TMUX_SESSION" history-limit 2>/dev/null || true
+    tmux set-window-option -u -t "$WASPFLOW_TMUX_SESSION:" history-limit 2>/dev/null || true
     return 0
   fi
-  # history-limit is session-scoped unless -g is supplied. Keep the operator's
-  # other sessions on their inherited setting.
   tmux set-option -t "$WASPFLOW_TMUX_SESSION" history-limit "$WASPFLOW_TMUX_HISTORY_LIMIT" 2>/dev/null || true
+}
+
+# Apply the scrollback policy to the exact owned window just created. Unlike a
+# server/global option, this cannot alter an unrelated session. An unset knob
+# means the conservative default; an explicit empty value or 0 inherits.
+tmux_apply_owned_window_history_limit() {
+  local window="$1" limit="$WASPFLOW_TMUX_HISTORY_LIMIT"
+  if [[ -z "$limit" && "$WASPFLOW_TMUX_HISTORY_LIMIT_EXPLICIT" != true ]]; then
+    limit=100000
+  fi
+  [[ -n "$limit" && "$limit" != 0 ]] || return 0
+  tmux set-window-option -t "$window" history-limit "$limit" 2>/dev/null || return 1
+}
+
+# All homes that intentionally share one tmux server/session must serialize
+# session creation and window-index allocation together. The lock name derives
+# only from the configured session, so separate WASPFLOW_HOME values cannot
+# race into the same numeric window slot.
+tmux_session_allocation_lock() {
+  local runtime_dir="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}" key
+  mkdir -p "$runtime_dir" 2>/dev/null || return 1
+  key="$(printf '%s' "$WASPFLOW_TMUX_SESSION" | cksum | awk '{print $1}')"
+  printf '%s/waspflow-tmux-%s-%s.lock\n' "$runtime_dir" "${UID:-$(id -u)}" "$key"
 }
 
 # Resolve Claude's profile for a new lane. An explicit caller value wins;
@@ -604,11 +663,11 @@ tmux_window_target() {
       IFS='|' read -r window name home uuid <<<"$matches"
       expected_home="$(cd "$WASPFLOW_HOME" && pwd -P)"
       expected_uuid="$(lane_get "$1" lane_uuid)"
-      if [[ ( -z "$home" || "$home" == "$expected_home" ) && ( -z "$uuid" || "$uuid" == "$expected_uuid" ) ]]; then
+      if [[ -n "$home" && -n "$uuid" && "$home" == "$expected_home" && "$uuid" == "$expected_uuid" ]]; then
         printf '%s\n' "$window"
         return 0
       fi
-      err "tmux: lane '$1' belongs to foreign home '$home'; refusing adoption"
+      err "tmux: lane '$1' belongs to foreign home or has missing durable ownership tags; refusing adoption"
     fi
   fi
   # Callers that do not check status must never fall back to the current pane.
@@ -620,13 +679,14 @@ tmux_window_target() {
 # server-unique; the pane PID adds a cheap identity check before lifecycle code
 # kills anything. They contain no prompts, session tokens, or provider secrets.
 tmux_window_ownership_json() {
-  local target="$1" session window pane_pid
-  IFS='|' read -r session window pane_pid < <(
-    tmux display-message -p -t "$target" '#{session_name}|#{window_id}|#{pane_pid}' 2>/dev/null
+  local target="$1" session window pane_pid home uuid
+  IFS='|' read -r session window pane_pid home uuid < <(
+    tmux display-message -p -t "$target" '#{session_name}|#{window_id}|#{pane_pid}|#{@waspflow_home}|#{@waspflow_lane_uuid}' 2>/dev/null
   ) || return 1
-  [[ -n "$session" && -n "$window" && "$pane_pid" =~ ^[0-9]+$ ]] || return 1
-  jq -cn --arg session "$session" --arg window "$window" --arg pane_pid "$pane_pid" \
-    '{tmux_session:$session,tmux_window:$window,tmux_pane_pid:$pane_pid}'
+  [[ "$session" == "$WASPFLOW_TMUX_SESSION" && -n "$window" && "$pane_pid" =~ ^[0-9]+$ \
+    && "$home" == "$(cd "$WASPFLOW_HOME" && pwd -P)" && -n "$uuid" ]] || return 1
+  jq -cn --arg session "$session" --arg window "$window" --arg pane_pid "$pane_pid" --arg home "$home" --arg uuid "$uuid" \
+    '{tmux_session:$session,tmux_window:$window,tmux_pane_pid:$pane_pid,waspflow_home:$home,waspflow_lane_uuid:$uuid}'
 }
 
 tmux_capture_lane_ownership() {
@@ -637,6 +697,38 @@ tmux_capture_lane_ownership() {
   window="$(jq -r '.tmux_window' <<<"$ownership")"
   pane_pid="$(jq -r '.tmux_pane_pid' <<<"$ownership")"
   lane_set "$lane" tmux_session "$session" tmux_window "$window" tmux_pane_pid "$pane_pid"
+}
+
+# Explicitly adopt one legacy, untagged window. Name matching is intentionally
+# allowed only on this migration path; ordinary cleanup uses durable tags.
+tmux_adopt_legacy_lane_window() {
+  local lane="$1" matches target home uuid
+  matches="$(tmux list-windows -t "$WASPFLOW_TMUX_SESSION" -F '#{window_id}|#{window_name}|#{@waspflow_home}|#{@waspflow_lane_uuid}' 2>/dev/null | awk -F '|' -v n="$lane" '$2 == n')"
+  [[ -n "$matches" && "$(wc -l <<<"$matches")" -eq 1 ]] || return 1
+  IFS='|' read -r target _ home uuid <<<"$matches"
+  # A foreign or partially tagged window is not legacy state we may claim.
+  [[ -z "$home" && -z "$uuid" && "$target" == @* ]] || return 1
+  uuid="$(lane_get "$lane" lane_uuid)"
+  if [[ ! "$uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
+    uuid="$(new_uuid)" || return 1
+    lane_set "$lane" lane_uuid "$uuid" || return 1
+  fi
+  home="$(cd "$WASPFLOW_HOME" && pwd -P)"
+  tmux set-option -w -t "$target" @waspflow_home "$home" || return 1
+  tmux set-option -w -t "$target" @waspflow_lane_uuid "$uuid" || return 1
+  tmux_capture_lane_ownership "$lane" "$target"
+}
+
+# A recorded or same-named pane that no longer proves ownership is uncertainty,
+# not absence. Reap uses this veto before it can delete a worktree.
+tmux_lane_window_cleanup_uncertain() {
+  local lane="$1" recorded session got_session
+  tmux_named_lane_window_exists "$lane" && return 0
+  recorded="$(lane_get "$lane" tmux_window)"
+  session="$(lane_get "$lane" tmux_session)"
+  [[ "$recorded" == @* && -n "$session" ]] || return 1
+  got_session="$(tmux display-message -p -t "$recorded" '#{session_name}' 2>/dev/null || true)"
+  [[ "$got_session" == "$session" ]]
 }
 
 # ---- descendant-process ownership (cgroup scopes) -------------------------
@@ -650,9 +742,18 @@ tmux_capture_lane_ownership() {
 # Receipts are append-only because an older scope can still hold a daemon when a
 # later headless resume starts. The InvocationID makes a reused unit name safe:
 # cleanup may signal a unit only when it is still the invocation we created.
+tmux_cgroup_scope_unavailable_reason() {
+  command -v systemd-run >/dev/null 2>&1 || { printf 'systemd-run-missing\n'; return 0; }
+  command -v systemctl >/dev/null 2>&1 || { printf 'systemctl-missing\n'; return 0; }
+  [[ -n "${XDG_RUNTIME_DIR:-}" ]] || { printf 'xdg-runtime-dir-missing\n'; return 0; }
+  systemctl --user show-environment >/dev/null 2>&1 && return 1
+  [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]] || { printf 'dbus-session-bus-address-missing\n'; return 0; }
+  printf 'user-scope-bus-unavailable\n'
+  return 0
+}
+
 tmux_cgroup_scope_available() {
-  command -v systemd-run >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1 \
-    && systemctl --user show-environment >/dev/null 2>&1
+  ! tmux_cgroup_scope_unavailable_reason >/dev/null
 }
 
 _lane_cgroup_receipt_append_locked() {
@@ -726,6 +827,294 @@ tmux_record_lane_cgroup_fallback() {
   else
     _lane_cgroup_fallback_append_locked "$dir" "$execution" "$reason"
   fi
+}
+
+# `setsid` detaches login-shell hydration from tmux when user scopes are
+# unavailable. A pending journal closes the gap before the child can write its
+# post-setsid receipt. PID start ticks make PID reuse fail closed.
+_lane_pending_detached_launch_append_locked() {
+  local dir="$1" lane_uuid="$2" launch_id="$3" execution="$4" pid="$5" ticks="$6" sf="$dir/state.json" tmp
+  [[ "$lane_uuid" =~ ^[0-9A-Fa-f-]+$ && "$launch_id" =~ ^[0-9A-Fa-f-]+$ && "$pid" =~ ^[0-9]+$ && "$ticks" =~ ^[0-9]+$ ]] || return 1
+  tmp="$(mktemp "$dir/.state.XXXXXX")" || return 1
+  if jq -e --arg lane_uuid "$lane_uuid" --arg launch_id "$launch_id" --arg execution "$execution" --arg pid "$pid" --arg ticks "$ticks" '
+      select(.lane_uuid == $lane_uuid)
+      | .pending_detached_launches = ((.pending_detached_launches // []) | if type == "array" then . else [] end
+        | if any(.[]; .launch_id == $launch_id) then .
+          else . + [{lane_uuid:$lane_uuid,launch_id:$launch_id,execution:$execution,pid:$pid,start_ticks:$ticks,parent_started_at:(now | floor | tostring)}] end)
+      | .updated_at = (now | floor | tostring)
+    ' "$sf" >"$tmp" 2>/dev/null; then
+    mv "$tmp" "$sf"
+  else
+    rm -f "$tmp"; return 1
+  fi
+}
+
+tmux_record_pending_detached_launch() {
+  local lane="$1" lane_uuid="$2" launch_id="$3" execution="$4" pid="$5" ticks="$6" dir
+  dir="$(lane_dir "$lane")"; mkdir -p "$dir" || return 1
+  if command -v flock >/dev/null 2>&1; then
+    ( flock 9; _lane_pending_detached_launch_append_locked "$dir" "$lane_uuid" "$launch_id" "$execution" "$pid" "$ticks" ) 9>"$dir/.state.lock"
+  else
+    _lane_pending_detached_launch_append_locked "$dir" "$lane_uuid" "$launch_id" "$execution" "$pid" "$ticks"
+  fi
+}
+
+_lane_detached_session_receipt_append_locked() {
+  local dir="$1" execution="$2" pid="$3" pgid="$4" sid="$5" ticks="$6" lane_uuid="${7:-}" launch_id="${8:-}" sf="$dir/state.json" tmp
+  [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ticks" =~ ^[0-9]+$ ]] || return 1
+  [[ -z "$lane_uuid$launch_id" || "$lane_uuid" =~ ^[0-9A-Fa-f-]+$ && "$launch_id" =~ ^[0-9A-Fa-f-]+$ ]] || return 1
+  tmp="$(mktemp "$dir/.state.XXXXXX")" || return 1
+  if jq -e --arg execution "$execution" --arg pid "$pid" --arg pgid "$pgid" --arg sid "$sid" --arg ticks "$ticks" --arg lane_uuid "$lane_uuid" --arg launch_id "$launch_id" '
+      if $launch_id != "" then
+        select(.lane_uuid == $lane_uuid)
+        | select(((.pending_detached_launches // []) | if type == "array" then . else [] end
+            | any(.[]; .launch_id == $launch_id and .pid == $pid and .start_ticks == $ticks)))
+      else . end
+      | .detached_session_receipts = ((.detached_session_receipts // []) | if type == "array" then . else [] end
+        | if any(.[]; .pid == $pid and .start_ticks == $ticks) then .
+          else . + ([{execution:$execution,pid:$pid,pgid:$pgid,sid:$sid,start_ticks:$ticks}]
+            | if $launch_id == "" then . else map(. + {lane_uuid:$lane_uuid,launch_id:$launch_id}) end) end)
+      | if $launch_id == "" then . else
+          .pending_detached_launches = ((.pending_detached_launches // []) | if type == "array" then . else [] end
+            | map(select(.launch_id != $launch_id)))
+        end
+      | .updated_at = (now | floor | tostring)
+    ' "$sf" >"$tmp" 2>/dev/null; then
+    mv "$tmp" "$sf"
+  else
+    rm -f "$tmp"; return 1
+  fi
+}
+
+tmux_record_lane_detached_session() {
+  local lane="$1" execution="$2" pid="$3" pgid="$4" sid="$5" ticks="$6" lane_uuid="${7:-}" launch_id="${8:-}" dir
+  # A receipt can authorize a process-group signal only when it was written by
+  # the post-setsid session leader itself. Do not persist a parent-side sample.
+  [[ "$pid" == "$pgid" && "$pid" == "$sid" ]] || return 1
+  dir="$(lane_dir "$lane")"; mkdir -p "$dir" || return 1
+  if command -v flock >/dev/null 2>&1; then
+    ( flock 9; _lane_detached_session_receipt_append_locked "$dir" "$execution" "$pid" "$pgid" "$sid" "$ticks" "$lane_uuid" "$launch_id" ) 9>"$dir/.state.lock"
+  else
+    _lane_detached_session_receipt_append_locked "$dir" "$execution" "$pid" "$pgid" "$sid" "$ticks" "$lane_uuid" "$launch_id"
+  fi
+}
+
+tmux_lane_detached_session_receipts() {
+  local lane="$1" sf; sf="$(lane_state_file "$lane")"; [[ -f "$sf" ]] || return 0
+  jq -c '(.detached_session_receipts // []) | if type == "array" then .[] else empty end' "$sf" 2>/dev/null || true
+}
+
+tmux_lane_pending_detached_launches() {
+  local lane="$1" sf; sf="$(lane_state_file "$lane")"; [[ -f "$sf" ]] || return 0
+  jq -c '(.pending_detached_launches // []) | if type == "array" then .[] else empty end' "$sf" 2>/dev/null || true
+}
+
+tmux_detached_session_receipt_live() {
+  local receipt="$1" pid pgid sid ticks actual got_pgid got_sid
+  pid="$(jq -r '.pid // empty' <<<"$receipt")"; pgid="$(jq -r '.pgid // empty' <<<"$receipt")"
+  sid="$(jq -r '.sid // empty' <<<"$receipt")"; ticks="$(jq -r '.start_ticks // empty' <<<"$receipt")"
+  [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ticks" =~ ^[0-9]+$ ]] || return 1
+  [[ "$pid" == "$pgid" && "$pid" == "$sid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  actual="$(process_start_ticks "$pid" || true)"; [[ "$actual" == "$ticks" ]] || return 1
+  read -r got_pgid got_sid < <(ps -o pgid= -o sid= -p "$pid" 2>/dev/null)
+  [[ "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]]
+}
+
+# A detached receipt proves its leader identity at launch.  Once that leader
+# exits, a surviving group member is still potentially owned, but no longer has
+# the same strong proof.  Keep that distinction explicit: callers must retain
+# an uncertain group rather than treating a dead leader as an empty group.
+# Prints one of: live, uncertain, gone, invalid.
+tmux_detached_session_receipt_group_members() {
+  local receipt="$1" pid pgid sid ticks rows member got_pgid got_sid
+  pid="$(jq -r '.pid // empty' <<<"$receipt")"; pgid="$(jq -r '.pgid // empty' <<<"$receipt")"
+  sid="$(jq -r '.sid // empty' <<<"$receipt")"; ticks="$(jq -r '.start_ticks // empty' <<<"$receipt")"
+  [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ticks" =~ ^[0-9]+$ ]] || return 2
+  [[ "$pid" == "$pgid" && "$pid" == "$sid" ]] || return 2
+  rows="$(ps -eo pid=,pgid=,sid= 2>/dev/null)" || return 1
+  while read -r member got_pgid got_sid; do
+    [[ "$member" =~ ^[0-9]+$ && "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]] || continue
+    ticks="$(process_start_ticks "$member")" || {
+      # A member can exit after a successful group census. That is a safe
+      # disappearance, not an observation failure; a still-present unreadable
+      # proc entry remains uncertain and blocks retirement.
+      [[ ! -e "/proc/$member" ]] && continue
+      return 1
+    }
+    [[ "$ticks" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\t%s\n' "$member" "$ticks"
+  done <<<"$rows"
+}
+
+tmux_detached_session_receipt_member_matches() {
+  local receipt="$1" member="$2" expected_ticks="$3" pgid sid actual got_pgid got_sid
+  pgid="$(jq -r '.pgid // empty' <<<"$receipt")"; sid="$(jq -r '.sid // empty' <<<"$receipt")"
+  [[ "$member" =~ ^[0-9]+$ && "$expected_ticks" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$member" 2>/dev/null || return 1
+  actual="$(process_start_ticks "$member" || true)"
+  [[ "$actual" == "$expected_ticks" ]] || return 1
+  read -r got_pgid got_sid < <(ps -o pgid= -o sid= -p "$member" 2>/dev/null)
+  [[ "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]]
+}
+
+# A numeric PGID/SID is only a locator. It becomes authority to inspect a new
+# member set when an identity already authorized by the receipt brackets the
+# census. That prevents a recycled leader PID from donating its new session to
+# an old receipt.
+tmux_detached_session_receipt_continuity_anchors() {
+  local receipt="$1" trusted_members="$2" pid ticks
+  pid="$(jq -r '.pid // empty' <<<"$receipt")"
+  ticks="$(jq -r '.start_ticks // empty' <<<"$receipt")"
+  if tmux_detached_session_receipt_member_matches "$receipt" "$pid" "$ticks"; then
+    printf '%s\t%s\n' "$pid" "$ticks"
+  fi
+  while IFS=$'\t' read -r pid ticks; do
+    [[ -n "$pid" ]] || continue
+    tmux_detached_session_receipt_member_matches "$receipt" "$pid" "$ticks" \
+      && printf '%s\t%s\n' "$pid" "$ticks"
+  done <<<"$trusted_members"
+}
+
+# Print a member snapshot only if a receipt-proven identity was alive both
+# immediately before and immediately after its census.  `trusted_members` is
+# a union of earlier validated snapshots; members newly found here become
+# trusted only after this function returns successfully.
+tmux_detached_session_receipt_continuous_group_members() {
+  local receipt="$1" trusted_members="$2" members before after shared
+  before="$(tmux_detached_session_receipt_continuity_anchors "$receipt" "$trusted_members")"
+  if [[ -z "$before" ]]; then
+    # An identity-less observation can only prove absence.  Do not let a
+    # nonempty numeric group become authority after every trusted anchor died.
+    members="$(tmux_detached_session_receipt_group_members "$receipt")" || return 1
+    [[ -z "$members" ]] && return 0
+    return 2
+  fi
+  members="$(tmux_detached_session_receipt_group_members "$receipt")" || return 1
+  # An empty census cannot authorize a signal, so its direct observation is
+  # enough to establish gone even if its final member exits immediately after.
+  [[ -z "$members" ]] && return 0
+  after="$(tmux_detached_session_receipt_continuity_anchors "$receipt" "$trusted_members")"
+  shared="$(awk 'NR == FNR { seen[$0] = 1; next } seen[$0] { print; exit }' \
+    <(printf '%s\n' "$before") <(printf '%s\n' "$after"))"
+  [[ -n "$shared" ]] || return 2
+  printf '%s\n' "$members"
+}
+
+tmux_detached_session_receipt_member_union() {
+  local earlier="$1" later="$2"
+  awk -F $'\t' 'NF == 2 && !seen[$0]++ { print }' <<<"$earlier"$'\n'"$later"
+}
+
+tmux_detached_session_receipt_group_state() {
+  local receipt="$1" members
+  members="$(tmux_detached_session_receipt_continuous_group_members "$receipt" '')" || { printf 'uncertain\n'; return 2; }
+  [[ -n "$members" ]] || { printf 'gone\n'; return 1; }
+  printf 'live\n'; return 0
+}
+
+tmux_detached_session_receipt_signal_members() {
+  local receipt="$1" signal="$2" members="$3" member ticks
+  while IFS=$'\t' read -r member ticks; do
+    [[ -n "$member" ]] || continue
+    tmux_detached_session_receipt_member_matches "$receipt" "$member" "$ticks" || continue
+    kill "-$signal" "$member" 2>/dev/null || true
+  done <<<"$members"
+}
+
+tmux_kill_detached_session_receipt_if_owned() {
+  local lane="$1" receipt="$2" members trusted_members _
+  # The first snapshot is valid only while the receipt leader brackets it.
+  # Later snapshots may extend this set, but only while an earlier identity
+  # brackets their census.  Never acquire authority from PGID/SID alone.
+  members="$(tmux_detached_session_receipt_continuous_group_members "$receipt" '')" || {
+    warn "detached execution remains unretired: receipt identity continuity is uncertain; inspect lane '$lane' before cleanup"
+    return 1
+  }
+  [[ -n "$members" ]] || return 0
+  trusted_members="$members"
+  tmux_detached_session_receipt_signal_members "$receipt" TERM "$members"
+  for _ in 1 2 3 4 5; do
+    sleep 0.1
+    members="$(tmux_detached_session_receipt_continuous_group_members "$receipt" "$trusted_members")" || {
+      warn "detached execution remains unretired: receipt identity continuity is uncertain; inspect lane '$lane' before cleanup"
+      return 1
+    }
+    [[ -n "$members" ]] || return 0
+    trusted_members="$(tmux_detached_session_receipt_member_union "$trusted_members" "$members")"
+    tmux_detached_session_receipt_signal_members "$receipt" TERM "$members"
+  done
+  members="$(tmux_detached_session_receipt_continuous_group_members "$receipt" "$trusted_members")" || {
+    warn "detached execution remains unretired after TERM: receipt identity continuity is uncertain; inspect lane '$lane' before cleanup"
+    return 1
+  }
+  [[ -n "$members" ]] || return 0
+  tmux_detached_session_receipt_signal_members "$receipt" KILL "$members"
+  for _ in 1 2 3 4 5; do
+    sleep 0.1
+    # KILL removes every continuity anchor. An identity-less census may prove
+    # only that the numeric group is empty; a nonempty result is uncertain and
+    # must not trigger another signal.
+    members="$(tmux_detached_session_receipt_group_members "$receipt")" || {
+      warn "detached execution remains unretired after KILL: process enumeration failed; inspect lane '$lane' before cleanup"
+      return 1
+    }
+    [[ -z "$members" ]] && return 0
+  done
+  warn "detached execution remains unretired after TERM/KILL; inspect lane '$lane' before cleanup"
+  return 1
+}
+
+tmux_kill_pending_detached_launch_if_owned() {
+  local lane="$1" pending="$2" lane_uuid launch_id pid ticks actual
+  lane_uuid="$(jq -r '.lane_uuid // empty' <<<"$pending")"
+  launch_id="$(jq -r '.launch_id // empty' <<<"$pending")"
+  pid="$(jq -r '.pid // empty' <<<"$pending")"
+  ticks="$(jq -r '.start_ticks // empty' <<<"$pending")"
+  if [[ "$lane_uuid" != "$(lane_get "$lane" lane_uuid)" || ! "$launch_id" =~ ^[0-9A-Fa-f-]+$ || ! "$pid" =~ ^[0-9]+$ || ! "$ticks" =~ ^[0-9]+$ ]]; then
+    warn "detached launch remains unretired: pending journal identity is invalid; inspect lane '$lane' before cleanup"
+    return 1
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    actual="$(process_start_ticks "$pid" || true)"
+    if [[ "$actual" == "$ticks" ]]; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  fi
+  # A pending launch has not proven that its direct child became the recorded
+  # session leader. Never infer that its descendants are gone from one PID.
+  warn "detached launch remains unretired: pending launch '$launch_id' is uncertain; inspect lane '$lane' before cleanup"
+  return 1
+}
+
+tmux_kill_owned_lane_detached_sessions() {
+  local lane="$1" receipt pending rc=0
+  while IFS= read -r pending; do
+    [[ -z "$pending" ]] || tmux_kill_pending_detached_launch_if_owned "$lane" "$pending" || rc=1
+  done < <(tmux_lane_pending_detached_launches "$lane")
+  while IFS= read -r receipt; do
+    [[ -z "$receipt" ]] || tmux_kill_detached_session_receipt_if_owned "$lane" "$receipt" || rc=1
+  done < <(tmux_lane_detached_session_receipts "$lane")
+  return "$rc"
+}
+
+# Escalation launches the new arm before retiring the old one.  Preserve the
+# freshly-provisioned execution while retiring every older detached group.
+tmux_kill_owned_lane_detached_sessions_except_execution() {
+  local lane="$1" keep_execution="$2" receipt pending execution rc=0
+  while IFS= read -r pending; do
+    [[ -n "$pending" ]] || continue
+    execution="$(jq -r '.execution // empty' <<<"$pending")"
+    [[ "$execution" == "$keep_execution" ]] && continue
+    tmux_kill_pending_detached_launch_if_owned "$lane" "$pending" || rc=1
+  done < <(tmux_lane_pending_detached_launches "$lane")
+  while IFS= read -r receipt; do
+    [[ -n "$receipt" ]] || continue
+    execution="$(jq -r '.execution // empty' <<<"$receipt")"
+    [[ "$execution" == "$keep_execution" ]] && continue
+    tmux_kill_detached_session_receipt_if_owned "$lane" "$receipt" || rc=1
+  done < <(tmux_lane_detached_session_receipts "$lane")
+  return "$rc"
 }
 
 tmux_lane_scope_start_marker() {
@@ -834,35 +1223,12 @@ tmux_enter_lane_scope_and_capture() {
 # second unsupervised copy: return the failure instead. If scope creation itself
 # fails after preflight, run the original command and record the degraded truth.
 #
-# Intentional lane crash-noise, deliberately NOT suppressed here: some lanes
-# (e.g. pdpp's memory-capped OOM test oracle) deliberately SIGABRT as part of a
-# passing run, and systemd-coredump surfaces a "Service Crash" desktop
-# notification for that expected abort. A prior version of this function ran
-# `ulimit -c 0` in the wrapper shell before exec, on the theory that RLIMIT_CORE=0
-# would stop the dump. That was wrong: this host's core_pattern is a piped
-# handler (`|/usr/lib/systemd/systemd-coredump ...`), and with a piped handler
-# the kernel invokes the handler on any fatal signal regardless of RLIMIT_CORE —
-# the rlimit only bounds how large a core body the handler may write. A test
-# process confirmed this directly: `setrlimit(RLIMIT_CORE, {0,0})` then
-# `abort()` still produced a `coredumpctl` entry (core-less, but still the exact
-# event that triggers the notification). The rlimit approach therefore fixed
-# nothing.
-#
-# The mechanism that actually suppresses the event (not just the body) is
-# `prctl(PR_SET_DUMPABLE, 0)`, set per-process — confirmed directly: the same
-# `abort()` test with `PR_SET_DUMPABLE` cleared produced zero coredumpctl
-# entries. But this function has no narrower place to apply it: it wraps the
-# entire lane scope from the top (the agent CLI process itself), and the
-# process that actually does the intentional abort is several levels down
-# inside that CLI's own child tree (e.g. pdpp's test-harness.ts spawning a
-# Node test worker). Clearing PR_SET_DUMPABLE here would have to apply to the
-# whole scope's lifetime, which blinds coredump diagnostics for the other
-# ~100% of lane crashes that are NOT an intentional abort — an unexpected
-# agent-CLI crash or a real segfault in tooling — and that diagnostic signal
-# has real value for debugging waspflow itself. Removed rather than reimplemented
-# with the correct primitive: the narrow fix belongs at the process that has
-# visibility into which child is expected to abort, which is pdpp's own
-# test-harness.ts (tracked separately, in the pdpp repo), not this wrapper.
+  # Do not suppress core-dump diagnostics here. A lane test can deliberately
+  # SIGABRT, but `ulimit -c 0` does not suppress a piped core-pattern handler;
+  # it only limits the core body. `prctl(PR_SET_DUMPABLE, 0)` would suppress the
+  # handler, but this wrapper owns the whole lane scope and cannot know which
+  # descendant expects to abort. Applying it here would hide diagnostics for
+  # unrelated crashes. A narrower test-harness boundary must make that choice.
 # Args: lane cwd execution -- command [args...]
 tmux_run_owned_lane_command() {
   local lane="$1" cwd="$2" execution="$3" unit marker rc=0 run_dir="" startup="" state="" supervisor_pid="" supervisor_ticks="" parent_ref="${WASPFLOW_PARENT_REF:-}"
@@ -871,6 +1237,18 @@ tmux_run_owned_lane_command() {
   [[ "${1:-}" == "--" ]] || return 2
   shift
   [[ $# -gt 0 ]] || return 2
+  if [[ "$execution" == headless-revise ]]; then
+    local headless_ticks
+    headless_ticks="$(process_start_ticks "$$" || true)"
+    [[ "$headless_ticks" =~ ^[0-9]+$ ]] && lane_set "$lane" headless_revise_pid_start_ticks "$headless_ticks"
+    # Provider adapters invoke headless resumes directly, so give their login
+    # shell the same hydration-only watchdog as a fresh pane. The provider runs
+    # after readiness and is never subject to this startup deadline.
+    if [[ "${1:-}" == bash && "${2:-}" == -lc && -n "${3:-}" ]]; then
+      local headless_command="$3"
+      set -- bash -c "source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_lane_login_shell $(printf '%q' "$lane") $(printf '%q' "$headless_command")"
+    fi
+  fi
   case "$execution" in
     pane|escalation:*) child_environment=("WASPFLOW_PARENT_REF=$parent_ref") ;;
   esac
@@ -882,8 +1260,10 @@ tmux_run_owned_lane_command() {
     [[ "$revise_timeout" -eq 0 ]] || set -- timeout --kill-after=30 "$revise_timeout" "$@"
   fi
 
-  if ! tmux_cgroup_scope_available; then
-    tmux_record_lane_cgroup_fallback "$lane" "$execution" "scope-unavailable" || return 1
+  local scope_unavailable_reason=""
+  if scope_unavailable_reason="$(tmux_cgroup_scope_unavailable_reason)"; then
+    warn "systemd user scopes unavailable ($scope_unavailable_reason); continuing with tmux-only supervision"
+    tmux_record_lane_cgroup_fallback "$lane" "$execution" "scope-unavailable:$scope_unavailable_reason" || return 1
     ( cd "$cwd" && env "${child_environment[@]}" "PAGER=$WASPFLOW_LANE_PAGER" "GIT_PAGER=$WASPFLOW_LANE_PAGER" "$@" )
     return $?
   fi
@@ -995,7 +1375,9 @@ tmux_lane_provider_identity() {
 # Bound only login-shell startup, never the provider's task. The watchdog
 # watches readiness AFTER profile hydration and cleans only owned processes.
 tmux_lane_login_shell() {
-  local lane="$1" command_text="$2" ready watchdog rc=0 seconds ticks provider identity spawner
+  local lane="$1" execution="${2:-pane}" command_text="${3:-}" ready watchdog child rc=0 seconds ticks provider identity spawner detached=0 receipt_command lane_uuid launch_id gate child_ticks
+  # Keep the historical two-argument helper call shape for direct callers.
+  if [[ -z "$command_text" ]]; then command_text="$execution"; execution=pane; fi
   provider="$(lane_get "$lane" provider)"
   case "$provider" in antigravity) provider=agy ;; deepseek) provider=dsh ;; esac
   spawner="$(command -v "$provider" || true)"
@@ -1004,23 +1386,66 @@ tmux_lane_login_shell() {
   [[ "$seconds" -gt 0 ]] || { err "shell startup timeout must be positive"; return 1; }
   ready="$(mktemp "$(lane_dir "$lane")/.shell-ready.XXXXXX")" || return 1
   ticks=$((seconds * 10))
+  [[ -n "$command_text" ]] || return 2
+  receipt_command="printf ready >$(printf '%q' "$ready")"
+  if command -v setsid >/dev/null 2>&1; then
+    lane_uuid="$(lane_get "$lane" lane_uuid)"
+    if [[ ! "$lane_uuid" =~ ^[0-9A-Fa-f-]+$ ]]; then
+      lane_uuid="$(new_uuid)" && lane_set "$lane" lane_uuid "$lane_uuid" || return 1
+    fi
+    launch_id="$(new_uuid)" || return 1
+    gate="$(mktemp -u "$(lane_dir "$lane")/.pending-detached-gate.XXXXXX")" || return 1
+    # The wrapper waits behind the durable journal. Its PID remains the same
+    # across exec+setsid unless setsid forks; that exceptional case fails the
+    # pending-to-receipt CAS and cannot run the provider command.
+    receipt_command="( source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_record_lane_detached_session $(printf '%q' "$lane") $(printf '%q' "$execution") \"\$\$\" \"\$(ps -o pgid= -p \"\$\$\" | tr -d ' ')\" \"\$(ps -o sid= -p \"\$\$\" | tr -d ' ')\" \"\$(process_start_ticks \"\$\$\")\" $(printf '%q' "$lane_uuid") $(printf '%q' "$launch_id") ) || exit 125; printf ready >$(printf '%q' "$ready")"
+    detached=1
+  fi
+  local -a login_shell=(bash -lc "$receipt_command; bash -c $(printf '%q' "$identity") -- $(printf '%q' "$lane") \"\$(command -v $(printf '%q' "$provider") || true)\" \"\$(type -t $(printf '%q' "$provider") || true)\" $(printf '%q' "$spawner"); $command_text")
+  if [[ "$detached" -eq 1 ]]; then login_shell=(bash -c 'while [[ ! -f "$1" ]]; do sleep 0.01; done; shift; exec setsid "$@"' -- "$gate" "${login_shell[@]}"); fi
+  if ( : </dev/tty ) 2>/dev/null; then
+    "${login_shell[@]}" </dev/tty &
+  else
+    "${login_shell[@]}" </dev/null &
+  fi
+  child=$!
+  if [[ "$detached" -eq 1 ]]; then
+    child_ticks="$(process_start_ticks "$child" || true)"
+    if ! tmux_record_pending_detached_launch "$lane" "$lane_uuid" "$launch_id" "$execution" "$child" "$child_ticks"; then
+      kill -TERM "$child" 2>/dev/null || true
+      return 1
+    fi
+    : >"$gate"
+  fi
   (
     local i
     for ((i=0; i<ticks; i++)); do
-      [[ -s "$ready" ]] && exit 0
+      [[ -s "$ready" || -e "$ready.done" ]] && exit 0
       sleep 0.1
     done
-    [[ -s "$ready" ]] && exit 0
-    lane_set "$lane" status spawn_failed spawn_submitted false startup_blocker shell-hydration-timeout
-    err "lane '$lane': login-shell hydration timed out after ${seconds}s; stopping only its owned processes"
-    tmux_kill_owned_lane_scopes "$lane"
-    tmux_kill_owned_lane_window "$lane" || true
+    [[ -s "$ready" || -e "$ready.done" ]] && exit 0
+    if [[ "$execution" == escalation:* ]]; then
+      err "lane '$lane': provisional login-shell hydration timed out after ${seconds}s; preserving the committed lane"
+    else
+      lane_set "$lane" status spawn_failed spawn_submitted false startup_blocker shell-hydration-timeout
+      err "lane '$lane': login-shell hydration timed out after ${seconds}s; stopping only its owned processes"
+    fi
+    # Before the child has written a receipt, only the direct PID is safe.
+    kill "$child" 2>/dev/null || true
+    if [[ "$execution" != escalation:* ]]; then
+      tmux_kill_owned_lane_scopes "$lane"
+      tmux_kill_owned_lane_detached_sessions "$lane"
+      tmux_kill_owned_lane_window "$lane" || true
+    fi
   ) &
   watchdog=$!
-  command bash -lc "printf ready >$(printf '%q' "$ready"); bash -c $(printf '%q' "$identity") -- $(printf '%q' "$lane") \"\$(command -v $(printf '%q' "$provider") || true)\" \"\$(type -t $(printf '%q' "$provider") || true)\" $(printf '%q' "$spawner"); $command_text" || rc=$?
-  kill "$watchdog" 2>/dev/null || true
+  wait "$child" || rc=$?
+  # Signal the watchdog by file, not PID: it may already have exited and been
+  # reaped, and its PID could name an unrelated process by now.
+  : >"$ready.done"
+  [[ "$detached" -eq 0 ]] || rm -f "$gate"
   wait "$watchdog" 2>/dev/null || true
-  rm -f "$ready"
+  rm -f "$ready" "$ready.done"
   return "$rc"
 }
 
@@ -1028,8 +1453,8 @@ tmux_run_owned_lane_shell_command() {
   local lane="$1" cwd="$2" execution="$3" shell_command="$4"
   # Provider adapters already quote their single bash -lc argument. Preserve
   # that exact argument and the login environment; wrap only fresh pane starts.
-  if [[ "$execution" == pane && "$shell_command" == "bash -lc "* ]]; then
-    shell_command="source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_lane_login_shell $(printf '%q' "$lane") ${shell_command#bash -lc }"
+  if [[ ( "$execution" == pane || "$execution" == escalation:* ) && "$shell_command" == "bash -lc "* ]]; then
+    shell_command="source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_lane_login_shell $(printf '%q' "$lane") $(printf '%q' "$execution") ${shell_command#bash -lc }"
   fi
   tmux_run_owned_lane_command "$lane" "$cwd" "$execution" -- bash -c "$shell_command"
 }
@@ -1067,7 +1492,7 @@ waspflow_active_scope_snapshot() {
   local units
   command -v systemctl >/dev/null 2>&1 || return 1
   units="$(systemctl --user list-units --all --type=scope --state=active \
-    --no-legend --plain --full 'waspflow-*.scope')" || return 1
+    --no-legend --plain --full 'waspflow-*.scope' 2>/dev/null)" || return 1
   printf '%s\n' "$units" \
     | awk 'NF && $1 ~ /^waspflow-[A-Za-z0-9._-]+\.scope$/ { print $1 }' \
     | jq -Rsc 'split("\n") | map(select(length > 0)) | unique'
@@ -1088,11 +1513,16 @@ def waspflow_scope_units:
   | unique;
 def waspflow_scope_unavailable:
   ((.cgroup_fallbacks // []) | if type == "array" then . else [] end)
-  | any(.[]?; .reason? == "scope-unavailable");
+  | any(.[]?; (.reason? | type == "string" and startswith("scope-unavailable")));
 def waspflow_derived_lifecycle($active_scopes; $scope_query_available):
   waspflow_scope_units as $units
   | if (.status // "") == "spawn_failed" then "spawn_failed"
     elif ($units | any(.[]; . as $unit | ($active_scopes | index($unit)) != null)) then "live"
+    # A completed reap is authoritative once no recorded scope is active.  A
+    # historical scope-unavailable fallback explains why liveness could not be
+    # observed while the lane was live; it must not relabel final cleanup as
+    # unknown after every owned resource was reconciled.
+    elif (.status // "") == "reaped" then "reaped"
     elif ($scope_query_available | not) then "unknown"
     elif waspflow_scope_unavailable then "unknown"
     elif (.status // "") == "live" then "interrupted"
@@ -1154,26 +1584,35 @@ tmux_kill_owned_lane_scopes() {
 # names exist. If ownership capture fails, kill that exact id before returning.
 # Args: lane cwd shell_command. Echoes the exact window id.
 tmux_create_owned_lane_window() {
-  local lane="$1" cwd="$2" shell_command="$3" ownership="${4:-claim}" execution="${5:-pane}" window launcher window_lock lane_uuid lane_parent_ref=""
+  local lane="$1" cwd="$2" shell_command="$3" ownership="${4:-claim}" execution="${5:-pane}" window launcher window_lock lane_uuid lane_parent_ref="" provider session_id history_limit
   # tmux panes inherit the tmux SERVER's environment, not necessarily the
   # caller's current WASPFLOW_HOME. Export the lane runtime coordinates and
   # pager policy into the pane explicitly before it sources core, or its scope
   # receipt would be written to the operator's default state directory and an
   # explicit pager override would be lost to the tmux server environment.
   lane_uuid="$(lane_get "$lane" lane_uuid)"
+  if [[ ! "$lane_uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
+    # Legacy lane records predate lane_uuid. Ownership tagging needs one, so
+    # mint it now rather than creating an untagged window that cannot be claimed.
+    lane_uuid="$(new_uuid)" && lane_set "$lane" lane_uuid "$lane_uuid" || return 1
+  fi
   if [[ "$lane_uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
     lane_parent_ref="waspflow:$lane_uuid"
   fi
   launcher="export WASPFLOW_HOME=$(printf '%q' "$WASPFLOW_HOME") WASPFLOW_LIB=$(printf '%q' "$WASPFLOW_LIB") WASPFLOW_TMUX_SESSION=$(printf '%q' "$WASPFLOW_TMUX_SESSION") WASPFLOW_LANE_PAGER=$(printf '%q' "$WASPFLOW_LANE_PAGER") WASPFLOW_SHELL_STARTUP_TIMEOUT_SECONDS=$(printf '%q' "${WASPFLOW_SHELL_STARTUP_TIMEOUT_SECONDS:-20}") WASPFLOW_PARENT_REF=$(printf '%q' "$lane_parent_ref") PATH=$(printf '%q' "$PATH"); source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_run_owned_lane_shell_command $(printf '%q' "$lane") $(printf '%q' "$cwd") $(printf '%q' "$execution") $(printf '%q' "$shell_command")"
-  tmux_ensure_session
   # tmux chooses the next numeric window index inside the server. Concurrent
   # callers can observe the same free index and one then fails with "index in
   # use". Serialize only this allocation syscall; the panes run concurrently.
-  window_lock="$WASPFLOW_HOME/.tmux-window-create.lock"
-  mkdir -p "$WASPFLOW_HOME"
+  window_lock="$(tmux_session_allocation_lock)" || return 1
   local home instance
   home="$(cd "$WASPFLOW_HOME" && pwd -P)"
   instance="$(cat "$WASPFLOW_HOME/provenance-instance-id" 2>/dev/null || true)"
+  provider="$(lane_get "$lane" provider)"
+  session_id="$(lane_get "$lane" session_id)"
+  history_limit="$WASPFLOW_TMUX_HISTORY_LIMIT"
+  if [[ -z "$history_limit" && "$WASPFLOW_TMUX_HISTORY_LIMIT_EXPLICIT" != true ]]; then
+    history_limit=100000
+  fi
   _tmux_allocate_lane_window() {
     local indexes next=0 index
     indexes="$(tmux list-windows -t "$WASPFLOW_TMUX_SESSION" -F '#{window_index}' 2>/dev/null | sort -n)"
@@ -1185,20 +1624,29 @@ tmux_create_owned_lane_window() {
         break
       fi
     done <<<"$indexes"
+    if [[ -n "$history_limit" && "$history_limit" != 0 ]]; then
+      tmux set-window-option -t "$WASPFLOW_TMUX_SESSION:" history-limit "$history_limit"
+    else
+      tmux set-window-option -u -t "$WASPFLOW_TMUX_SESSION:" history-limit
+    fi
     tmux new-window -d -P -F '#{window_id}' -t "$WASPFLOW_TMUX_SESSION:$next" \
       -n "$lane" -c "$cwd" "bash -c $(printf '%q' "$launcher")" \
       \; set-option -w -t "$WASPFLOW_TMUX_SESSION:$next" @waspflow_home "$home" \
       \; set-option -w -t "$WASPFLOW_TMUX_SESSION:$next" @waspflow_lane_uuid "$lane_uuid" \
+      \; set-option -w -t "$WASPFLOW_TMUX_SESSION:$next" @waspflow_provider "$provider" \
+      \; set-option -w -t "$WASPFLOW_TMUX_SESSION:$next" @waspflow_session_id "$session_id" \
       \; set-option -w -t "$WASPFLOW_TMUX_SESSION:$next" @waspflow_instance "$instance"
   }
   if command -v flock >/dev/null 2>&1; then
     window="$(
       (
         flock -x 9
+        tmux_ensure_session >/dev/null 2>&1
         _tmux_allocate_lane_window
       ) 9>"$window_lock"
     )" || return 1
   else
+    tmux_ensure_session
     window="$(_tmux_allocate_lane_window)" || return 1
   fi
   unset -f _tmux_allocate_lane_window
@@ -1218,15 +1666,18 @@ tmux_create_owned_lane_window() {
 # tmux session. This is the ownership boundary used by park: a stale/reused
 # window id must be refused, never killed.
 tmux_owned_lane_window_target() {
-  local lane="$1" session window pane_pid got_session got_window got_pid
+  local lane="$1" session window pane_pid got_session got_window got_pid got_home got_uuid expected_home expected_uuid
   session="$(lane_get "$lane" tmux_session)"
   window="$(lane_get "$lane" tmux_window)"
   pane_pid="$(lane_get "$lane" tmux_pane_pid)"
-  [[ -n "$session" && -n "$window" && "$pane_pid" =~ ^[0-9]+$ ]] || return 1
-  IFS='|' read -r got_session got_window got_pid < <(
-    tmux display-message -p -t "$window" '#{session_name}|#{window_id}|#{pane_pid}' 2>/dev/null
+  expected_home="$(cd "$WASPFLOW_HOME" && pwd -P)"
+  expected_uuid="$(lane_get "$lane" lane_uuid)"
+  [[ "$session" == "$WASPFLOW_TMUX_SESSION" && -n "$window" && "$pane_pid" =~ ^[0-9]+$ && -n "$expected_uuid" ]] || return 1
+  IFS='|' read -r got_session got_window got_pid got_home got_uuid < <(
+    tmux display-message -p -t "$window" '#{session_name}|#{window_id}|#{pane_pid}|#{@waspflow_home}|#{@waspflow_lane_uuid}' 2>/dev/null
   ) || return 1
-  [[ "$got_session" == "$session" && "$got_window" == "$window" && "$got_pid" == "$pane_pid" ]] || return 1
+  [[ "$got_session" == "$session" && "$got_window" == "$window" && "$got_pid" == "$pane_pid" \
+    && "$got_home" == "$expected_home" && "$got_uuid" == "$expected_uuid" ]] || return 1
   printf '%s\n' "$window"
 }
 
@@ -1252,18 +1703,22 @@ tmux_kill_window_if_owned() {
 # Echo a provisional window only when it still names the exact session/pane
 # journaled by an escalation transition.
 tmux_window_if_owned() {
-  local ownership="$1" session window pane_pid got_session got_window got_pid
+  local ownership="$1" session window pane_pid home uuid got_session got_window got_pid got_home got_uuid
   session="$(jq -r '.tmux_session // empty' <<<"$ownership" 2>/dev/null)"
   window="$(jq -r '.tmux_window // empty' <<<"$ownership" 2>/dev/null)"
   pane_pid="$(jq -r '.tmux_pane_pid // empty' <<<"$ownership" 2>/dev/null)"
-  [[ -n "$session" && "$window" == @* && "$pane_pid" =~ ^[0-9]+$ ]] || {
+  home="$(jq -r '.waspflow_home // empty' <<<"$ownership" 2>/dev/null)"
+  uuid="$(jq -r '.waspflow_lane_uuid // empty' <<<"$ownership" 2>/dev/null)"
+  [[ "$session" == "$WASPFLOW_TMUX_SESSION" && "$window" == @* && "$pane_pid" =~ ^[0-9]+$ \
+    && "$home" == "$(cd "$WASPFLOW_HOME" && pwd -P)" && -n "$uuid" ]] || {
     err "tmux: refusing provisional cleanup with malformed ownership"
     return 1
   }
-  IFS='|' read -r got_session got_window got_pid < <(
-    tmux display-message -p -t "$window" '#{session_name}|#{window_id}|#{pane_pid}' 2>/dev/null
+  IFS='|' read -r got_session got_window got_pid got_home got_uuid < <(
+    tmux display-message -p -t "$window" '#{session_name}|#{window_id}|#{pane_pid}|#{@waspflow_home}|#{@waspflow_lane_uuid}' 2>/dev/null
   ) || return 1
-  [[ "$got_session" == "$session" && "$got_window" == "$window" && "$got_pid" == "$pane_pid" ]] || {
+  [[ "$got_session" == "$session" && "$got_window" == "$window" && "$got_pid" == "$pane_pid" \
+    && "$got_home" == "$home" && "$got_uuid" == "$uuid" ]] || {
     err "tmux: refusing provisional cleanup; recorded window identity no longer matches"
     return 1
   }
@@ -1312,18 +1767,21 @@ tmux_snapshot_has_lane() {
 # same-named window exists but cannot be proven the lane's (fail closed: the
 # caller must not report the lane exited and start a parallel headless resume).
 tmux_reconcile_lane_window() {
-  local lane="$1" session cwd matches window path home uuid
+  local lane="$1" session cwd matches window path home uuid provider session_id pane_command
   [[ -n "$(lane_get "$lane" tmux_window)" ]] || return 0
   tmux_owned_lane_window_exists "$lane" && return 0
   session="$(lane_get "$lane" tmux_session)"; [[ -n "$session" ]] || session="$WASPFLOW_TMUX_SESSION"
-  matches="$(tmux list-windows -t "$session" -F '#{window_id}|#{window_name}|#{pane_current_path}|#{@waspflow_home}|#{@waspflow_lane_uuid}' 2>/dev/null \
+  matches="$(tmux list-windows -t "=$session" -F '#{window_id}|#{window_name}|#{pane_current_path}|#{@waspflow_home}|#{@waspflow_lane_uuid}|#{@waspflow_provider}|#{@waspflow_session_id}|#{pane_current_command}' 2>/dev/null \
     | awk -F '|' -v n="$lane" '$2 == n')"
   [[ -n "$matches" ]] || return 0
   [[ "$(wc -l <<<"$matches")" -eq 1 ]] || return 3
-  IFS='|' read -r window _ path home uuid <<<"$matches"
-  if [[ ( -n "$home" && "$home" != "$(cd "$WASPFLOW_HOME" && pwd -P)" ) \
-    || ( -n "$uuid" && "$uuid" != "$(lane_get "$lane" lane_uuid)" ) ]]; then
-    err "tmux: lane '$lane' belongs to foreign home '$home'; refusing restoration"
+  IFS='|' read -r window _ path home uuid provider session_id pane_command <<<"$matches"
+  if [[ -z "$home" || -z "$uuid" || "$home" != "$(cd "$WASPFLOW_HOME" && pwd -P)" \
+    || "$uuid" != "$(lane_get "$lane" lane_uuid)" \
+    || "$provider" != "$(lane_get "$lane" provider)" \
+    || "$session_id" != "$(lane_get "$lane" session_id)" \
+    || "$pane_command" == sleep || "$pane_command" == cat ]]; then
+    err "tmux: lane '$lane' has no matching durable ownership tags; refusing restoration"
     return 3
   fi
   cwd="$(lane_get "$lane" cwd)"

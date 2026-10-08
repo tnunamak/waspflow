@@ -38,8 +38,8 @@ Full loop, with real worker output:
 4. **Rollout is created lazily on the first turn**, not at boot. So a freshly
    spawned-but-unsubmitted session has no file yet.
 5. **Match a session to a lane by `session_meta.cwd`, never by mtime.** A
-   background collector re-touches old rollout files (observed: a 410 MB month-
-   old file with a *current* mtime), so "newest by mtime" picks the wrong file.
+   background collector can re-touch old rollout files, so "newest by mtime"
+   can pick the wrong file.
    The rollout's first line records the originating `cwd` — that's the exact key.
 6. **Submit is racy.** `send-keys Enter` can land during hook output / `model:
    loading`, leaving the prompt unsubmitted in the composer. The adapter types
@@ -129,9 +129,8 @@ Full loop, with real worker output:
 isolated tmux socket.** A sandboxed `$HOME` does NOT isolate tmux: the tmux
 server is keyed by UID (`/tmp/tmux-<uid>/default`), so a test that runs
 `tmux new-session -s test-…` lands in the user's **production** tmux server —
-the one holding all their live waspflow lanes. A "cleanup" `tmux kill-server`
-then destroys every running agent session on the machine. This actually happened
-(five times, ~46 live sessions each) before it was caught.
+the one holding live waspflow lanes. A "cleanup" `tmux kill-server` can then
+destroy every running agent session on the machine.
 
 Rules for any tmux use in tests:
 
