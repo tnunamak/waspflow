@@ -88,7 +88,7 @@ tmux set-window-option -t unrelated:0 history-limit 500000
 tmux_ensure_session
 tmux_apply_owned_window_history_limit waspflow:0
 [[ "$(tmux show-window-options -v -t waspflow:0 history-limit)" == 100000 ]]
-[[ "$(tmux display-message -p -t unrelated:0 '#{history_limit}')" == 500000 ]]
+[[ "$(tmux show-window-options -v -t unrelated:0 history-limit)" == 500000 ]]
 WASPFLOW_TMUX_HISTORY_LIMIT=0 WASPFLOW_TMUX_HISTORY_LIMIT_EXPLICIT=true
 tmux_ensure_session
 inherited="$(tmux new-window -d -P -F '#{window_id}' -t waspflow:1 -n inherited)"
