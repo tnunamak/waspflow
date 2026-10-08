@@ -14,7 +14,7 @@
 
   # C1: a receipt whose PID and group have been reused but whose start ticks
   # differ cannot signal the unrelated setsid sentinel.
-  setsid bash -c 'while :; do sleep 1; done' &
+  setsid bash -c 'exec 9<> <(:); while :; do read -t 1 -u 9 || :; done' &
   reused_sentinel=$!
   sleep 0.05
   read -r reused_pgid reused_sid < <(ps -o pgid= -o sid= -p "$reused_sentinel")
@@ -44,13 +44,13 @@
   cat >"$r4/term-child.sh" <<'EOF'
 #!/usr/bin/env bash
 trap '' TERM
-while :; do sleep 1; done
+exec 9<> <(:); while :; do read -t 1 -u 9 || :; done
 EOF
   chmod +x "$r4/term-child.sh"
   setsid bash -c '
     bash "$1" &
     printf "%s %s\n" "$$" "$!" >"$2"
-    while :; do sleep 1; done
+    exec 9<> <(:); while :; do read -t 1 -u 9 || :; done
   ' -- "$r4/term-child.sh" "$r4/leader-and-child" &
   for _ in {1..100}; do [[ -s "$r4/leader-and-child" ]] && break; sleep 0.02; done
   read -r detached_leader detached_child <"$r4/leader-and-child"
