@@ -16,7 +16,8 @@ if [[ "${1:-}" == list-clients ]]; then
 fi
 exit 1
 EOF
-  chmod +x "$s7/bin/systemctl" "$s7/bin/tmux"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$s7/bin/codex"
+  chmod +x "$s7/bin/systemctl" "$s7/bin/tmux" "$s7/bin/codex"
 
   # Claude events follow the lane's profile when the global projects root is unset.
   source "$root/lib/core.sh"
@@ -68,8 +69,8 @@ EOF
   # consumers, and a retry after lease expiry remains possible.
   first="$(reconcile_event_emit live 1 completion)"; second="$(reconcile_event_emit live 2 completion)"
   [[ "$first" != "$second" ]]
-  reconcile_event_claim "$first" consumer-a 1 | jq -e '.ok == true' >/dev/null
-  reconcile_event_claim "$first" consumer-b 1 | jq -e '.ok == false and .reason == "claimed"' >/dev/null
+  reconcile_event_claim "$first" consumer-a 60 | jq -e '.ok == true' >/dev/null
+  reconcile_event_claim "$first" consumer-b 60 | jq -e '.ok == false and .reason == "claimed"' >/dev/null
   # A one-second sleep races the integer-second lease boundary. Expire the
   # fixture claim explicitly so the next assertion is deterministic.
   claims_file="$(reconcile_event_claims)"
