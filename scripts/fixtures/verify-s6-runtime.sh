@@ -137,7 +137,7 @@ timeout_rc=$?
 set -e
 [[ "$timeout_rc" -ne 0 && "$(lane_get startup startup_blocker)" == shell-hydration-timeout ]]
 printf ':\n' >"$fake_home/.bash_profile"
-HOME="$fake_home" WASPFLOW_SHELL_STARTUP_TIMEOUT_SECONDS=1 tmux_lane_login_shell startup 'sleep 2; printf done >'"$(printf '%q' "$fixture/done")"
+HOME="$fake_home" WASPFLOW_SHELL_STARTUP_TIMEOUT_SECONDS=5 tmux_lane_login_shell startup 'sleep 6; printf done >'"$(printf '%q' "$fixture/done")"
 [[ -s "$fixture/done" ]]
 
 )

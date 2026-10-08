@@ -1,5 +1,6 @@
 # S7: fleet reconciliation is conservative, bounded, and provider-free.
 (
+  trap 'rc=$?; if [[ "$-" == *e* ]]; then printf "verify: S7 fleet fixture failed at line %s: %s (exit %s)\n" "$LINENO" "$BASH_COMMAND" "$rc" >&2; exit "$rc"; fi' ERR
   s7="$(mktemp -d "$scratch/waspflow-s7-fleet-XXXXXX")"
   trap 'rm -rf "$s7"' EXIT
   export WASPFLOW_HOME="$s7/home" WASPFLOW_EVENT_TMPDIR="$s7/tmp" WASPFLOW_TMUX_SESSION="wf-test-$$"
