@@ -104,7 +104,10 @@ EOF
         || ! grep -Fxq -- "-TERM $child" "$signals" || ! grep -Fxq -- "-KILL $child" "$signals"; then
       echo 'r7 C1: late TERM-resistant fork was not admitted and escalated' >&2; exit 1
     fi
-    if builtin kill -0 "$child" 2>/dev/null || builtin kill -0 "$leader" 2>/dev/null; then
+    # kill -0 succeeds on a zombie whose parent has not reaped it; only a
+    # non-zombie process is still running.
+    r7_running() { local st; st="$(ps -o stat= -p "$1" 2>/dev/null)" || return 1; [[ -n "$st" && "$st" != Z* ]]; }
+    if r7_running "$child" || r7_running "$leader"; then
       echo 'r7 C1: late-fork group was not retired' >&2; exit 1
     fi
   )

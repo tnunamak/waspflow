@@ -932,9 +932,13 @@ tmux_detached_session_receipt_group_members() {
   sid="$(jq -r '.sid // empty' <<<"$receipt")"; ticks="$(jq -r '.start_ticks // empty' <<<"$receipt")"
   [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ticks" =~ ^[0-9]+$ ]] || return 2
   [[ "$pid" == "$pgid" && "$pid" == "$sid" ]] || return 2
-  rows="$(ps -eo pid=,pgid=,sid= 2>/dev/null)" || return 1
-  while read -r member got_pgid got_sid; do
+  rows="$(ps -eo pid=,pgid=,sid=,stat= 2>/dev/null)" || return 1
+  while read -r member got_pgid got_sid state; do
     [[ "$member" =~ ^[0-9]+$ && "$got_pgid" == "$pgid" && "$got_sid" == "$sid" ]] || continue
+    # A zombie is dead: it holds no resources and cannot fork or take signals.
+    # Its parent may reap it late (or never, under a non-reaping PID 1), so it
+    # must not keep the group "live".
+    [[ "$state" == Z* ]] && continue
     ticks="$(process_start_ticks "$member")" || {
       # A member can exit after a successful group census. That is a safe
       # disappearance, not an observation failure; a still-present unreadable
