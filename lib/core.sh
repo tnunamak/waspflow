@@ -1420,10 +1420,10 @@ tmux_lane_login_shell() {
   (
     local i
     for ((i=0; i<ticks; i++)); do
-      [[ -s "$ready" ]] && exit 0
+      [[ -s "$ready" || -e "$ready.done" ]] && exit 0
       sleep 0.1
     done
-    [[ -s "$ready" ]] && exit 0
+    [[ -s "$ready" || -e "$ready.done" ]] && exit 0
     if [[ "$execution" == escalation:* ]]; then
       err "lane '$lane': provisional login-shell hydration timed out after ${seconds}s; preserving the committed lane"
     else
@@ -1440,10 +1440,12 @@ tmux_lane_login_shell() {
   ) &
   watchdog=$!
   wait "$child" || rc=$?
-  kill "$watchdog" 2>/dev/null || true
+  # Signal the watchdog by file, not PID: it may already have exited and been
+  # reaped, and its PID could name an unrelated process by now.
+  : >"$ready.done"
   [[ "$detached" -eq 0 ]] || rm -f "$gate"
   wait "$watchdog" 2>/dev/null || true
-  rm -f "$ready"
+  rm -f "$ready" "$ready.done"
   return "$rc"
 }
 
