@@ -11,7 +11,7 @@
   # a recycled numeric PGID/SID would provide. The initial leader is valid; the
   # replacement sentinel must never receive a signal.
   (
-    setsid bash -c 'trap "" TERM; while :; do sleep 1; done' &
+    setsid bash -c 'trap "" TERM; exec 9<> <(:); while :; do read -t 1 -u 9 || :; done' &
     leader=$!
     for _ in {1..100}; do process_start_ticks "$leader" >/dev/null 2>&1 && break; sleep 0.02; done
     read -r pgid sid < <(ps -o pgid= -o sid= -p "$leader")
@@ -34,7 +34,7 @@
       while IFS=$'\t' read -r member ticks; do
         [[ -z "$member" ]] || builtin kill -KILL "$member" 2>/dev/null || true
       done <"$initial"
-      setsid bash -c 'trap "" TERM; while :; do sleep 1; done' >/dev/null 2>&1 &
+      setsid bash -c 'trap "" TERM; exec 9<> <(:); while :; do read -t 1 -u 9 || :; done' >/dev/null 2>&1 &
       sentinel=$!; printf '%s\n' "$sentinel" >"$r7/recycled.sentinel"
       for _ in {1..100}; do process_start_ticks "$sentinel" >/dev/null 2>&1 && break; sleep 0.02; done
       sentinel_ticks="$(process_start_ticks "$sentinel")"; printf '%s\n' "$sentinel_ticks" >"$r7/recycled.sentinel-ticks"
@@ -67,14 +67,14 @@
 #!/usr/bin/env bash
 trap '' TERM
 printf '%s\n' "$$" >"$1"
-while :; do sleep 1; done
+exec 9<> <(:); while :; do read -t 1 -u 9 || :; done
 EOF
     cat >"$r7/late-fork-leader.sh" <<'EOF'
 #!/usr/bin/env bash
 trap '' TERM
 trap 'bash "$1" "$2" & echo $! >"$3"' USR1
 printf '%s\n' "$$" >"$4"
-while :; do sleep 1; done
+exec 9<> <(:); while :; do read -t 1 -u 9 || :; done
 EOF
     chmod +x "$r7/ignore-term.sh" "$r7/late-fork-leader.sh"
     setsid "$r7/late-fork-leader.sh" "$r7/ignore-term.sh" "$r7/late-child-ready" "$r7/late-child" "$r7/late-leader" &
@@ -115,7 +115,7 @@ EOF
   # A fork that appears only after the final pre-KILL census cannot be safely
   # signalled. Its nonempty post-KILL census must keep retirement uncertain.
   (
-    setsid bash -c 'trap "" TERM; while :; do sleep 1; done' &
+    setsid bash -c 'trap "" TERM; exec 9<> <(:); while :; do read -t 1 -u 9 || :; done' &
     leader=$!
     for _ in {1..100}; do process_start_ticks "$leader" >/dev/null 2>&1 && break; sleep 0.02; done
     read -r pgid sid < <(ps -o pgid= -o sid= -p "$leader")
@@ -133,7 +133,7 @@ EOF
     tmux_detached_session_receipt_signal_members() {
       r7_post_kill_real_signal "$@"
       [[ "$2" == KILL && ! -e "$r7/post-kill-sentinel" ]] || return 0
-      setsid bash -c 'trap "" TERM; while :; do sleep 1; done' >/dev/null 2>&1 &
+      setsid bash -c 'trap "" TERM; exec 9<> <(:); while :; do read -t 1 -u 9 || :; done' >/dev/null 2>&1 &
       sentinel=$!; printf '%s\n' "$sentinel" >"$r7/post-kill-sentinel"
       for _ in {1..100}; do process_start_ticks "$sentinel" >/dev/null 2>&1 && break; sleep 0.02; done
       process_start_ticks "$sentinel" >"$r7/post-kill-sentinel-ticks"
@@ -173,7 +173,7 @@ EOF
 
   # B2 close path: an unreadable full census is uncertain, not a successful
   # stop. Other ps invocations remain real so this reaches detached cleanup.
-  setsid bash -c 'trap "" TERM; while :; do sleep 1; done' &
+  setsid bash -c 'trap "" TERM; exec 9<> <(:); while :; do read -t 1 -u 9 || :; done' &
   observed=$!
   for _ in {1..100}; do process_start_ticks "$observed" >/dev/null 2>&1 && break; sleep 0.02; done
   read -r pgid sid < <(ps -o pgid= -o sid= -p "$observed")
@@ -201,7 +201,7 @@ EOF
   # every other observation still use the host ps.
   source <(sed '$ d' "$root/bin/waspflow")
   source "$root/lib/escalation.sh"
-  setsid bash -c 'trap "" TERM; while :; do sleep 1; done' &
+  setsid bash -c 'trap "" TERM; exec 9<> <(:); while :; do read -t 1 -u 9 || :; done' &
   observed=$!
   for _ in {1..100}; do process_start_ticks "$observed" >/dev/null 2>&1 && break; sleep 0.02; done
   read -r pgid sid < <(command ps -o pgid= -o sid= -p "$observed")

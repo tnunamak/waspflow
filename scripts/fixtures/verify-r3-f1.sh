@@ -13,7 +13,7 @@
   cat >"$r3f1/child.sh" <<'EOF'
 #!/usr/bin/env bash
 trap '' TERM HUP
-while :; do sleep 1; done
+exec 9<> <(:); while :; do read -t 1 -u 9 || :; done
 EOF
   chmod +x "$r3f1/child.sh"
   setsid bash -c '

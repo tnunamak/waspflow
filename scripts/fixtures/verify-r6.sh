@@ -10,7 +10,7 @@
   # ticks) while a newer sentinel owns the numeric group. It cannot be made
   # literally leaderless without PID reuse, so the identity mismatch exercises
   # the safe path: no member signal and an uncertain remaining resource.
-  setsid bash -c 'while :; do sleep 1; done' &
+  setsid bash -c 'exec 9<> <(:); while :; do read -t 1 -u 9 || :; done' &
   sentinel=$!
   sleep 0.05
   read -r sentinel_pgid sentinel_sid < <(ps -o pgid= -o sid= -p "$sentinel")
@@ -30,13 +30,13 @@
   cat >"$r6/ignore-term.sh" <<'EOF'
 #!/usr/bin/env bash
 trap '' TERM
-while :; do sleep 1; done
+exec 9<> <(:); while :; do read -t 1 -u 9 || :; done
 EOF
   chmod +x "$r6/ignore-term.sh"
   setsid bash -c '
     bash "$1" &
     printf "%s %s\\n" "$$" "$!" >"$2"
-    while :; do sleep 1; done
+    exec 9<> <(:); while :; do read -t 1 -u 9 || :; done
   ' -- "$r6/ignore-term.sh" "$r6/leader-child" &
   for _ in {1..100}; do [[ -s "$r6/leader-child" ]] && break; sleep 0.02; done
   read -r leader child <"$r6/leader-child"
@@ -60,7 +60,7 @@ EOF
   source "$root/lib/turn-state.sh"
   source "$root/lib/artifacts.sh"
   lane_set ps-failed provider fake cwd "$r6" spawn_submitted true report "$r6/missing-report"
-  setsid bash -c 'while :; do sleep 1; done' &
+  setsid bash -c 'exec 9<> <(:); while :; do read -t 1 -u 9 || :; done' &
   observed=$!
   sleep 0.05
   read -r observed_pgid observed_sid < <(command ps -o pgid= -o sid= -p "$observed")
@@ -85,7 +85,7 @@ EOF
   lane_set stale provider fake cwd "$r6" lane_uuid "$(new_uuid)"
   stale_uuid="$(lane_get stale lane_uuid)"
   stale_launch="$(new_uuid)"
-  setsid bash -c 'while :; do sleep 1; done' &
+  setsid bash -c 'exec 9<> <(:); while :; do read -t 1 -u 9 || :; done' &
   stale_child=$!
   sleep 0.05
   read -r stale_pgid stale_sid < <(ps -o pgid= -o sid= -p "$stale_child")
@@ -108,7 +108,7 @@ EOF
   cat >"$r6/pending-ignore-term.sh" <<'EOF'
 #!/usr/bin/env bash
 trap '' TERM
-while :; do sleep 1; done
+exec 9<> <(:); while :; do read -t 1 -u 9 || :; done
 EOF
   chmod +x "$r6/pending-ignore-term.sh"
   setsid "$r6/pending-ignore-term.sh" &
