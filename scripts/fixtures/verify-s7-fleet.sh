@@ -1,6 +1,5 @@
 # S7: fleet reconciliation is conservative, bounded, and provider-free.
 (
-  trap 'rc=$?; if [[ "$-" == *e* ]]; then printf "verify: S7 fleet fixture failed at line %s: %s (exit %s)\n" "$LINENO" "$BASH_COMMAND" "$rc" >&2; exit "$rc"; fi' ERR
   s7="$(mktemp -d "$scratch/waspflow-s7-fleet-XXXXXX")"
   trap 'rm -rf "$s7"' EXIT
   export WASPFLOW_HOME="$s7/home" WASPFLOW_EVENT_TMPDIR="$s7/tmp" WASPFLOW_TMUX_SESSION="wf-test-$$"
@@ -17,7 +16,8 @@ if [[ "${1:-}" == list-clients ]]; then
 fi
 exit 1
 EOF
-  chmod +x "$s7/bin/systemctl" "$s7/bin/tmux"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$s7/bin/codex"
+  chmod +x "$s7/bin/systemctl" "$s7/bin/tmux" "$s7/bin/codex"
 
   # Claude events follow the lane's profile when the global projects root is unset.
   source "$root/lib/core.sh"
