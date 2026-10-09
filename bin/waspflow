@@ -576,6 +576,8 @@ cmd_spawn() {
     die "spawn: same-named window has no matching ownership receipt; refusing to adopt or stop it"
   fi
 
+  tmux_warn_provider_mismatch "$lane"
+
   if [[ "$spawn_rc" -ne 0 ]]; then
     lane_set "$lane" status "spawn_failed" spawn_submitted "false"
     err "spawn: lane '$lane' launched but the task was NOT confirmed submitted"
@@ -677,7 +679,7 @@ input_filename as $file |
 ($file | split("/") | .[-2]) as $lane |
 waspflow_derived_lifecycle($active_scopes; $scope_query_available) as $lifecycle |
 {lane:$lane,provider:(.provider // ""),lifecycle_state:$lifecycle,
- record_status:(.status // ""),outcome:(if (.outcome // "") == "" then "open" else .outcome end),result:(.result // ""),
+ record_status:(.status // ""),outcome:(if (.outcome // "") != "" then .outcome elif $lifecycle == "reaped" then "reaped" else "open" end),result:(.result // ""),
  cwd:(.cwd // ""),origin_cwd:(.origin_cwd // ""),repo_root:(.repo_root // ""),
  requested_model:(.model_requested // .model // ""),requested_effort:(.effort_requested // .effort // ""),
  runtime_model:(.runtime_model // ""),runtime_effort:(.runtime_effort // ""),
@@ -712,7 +714,7 @@ cmd_list_table_batch() {
 input_filename as $file |
 ($file | split("/") | .[-2]) as $lane |
 waspflow_derived_lifecycle($active_scopes; $scope_query_available) as $lifecycle |
-([ $lane, (.provider // ""), $lifecycle, (if (.outcome // "") == "" then "open" else .outcome end),
+([ $lane, (.provider // ""), $lifecycle, (if (.outcome // "") != "" then .outcome elif $lifecycle == "reaped" then "reaped" else "open" end),
    ((.model_requested // .model // "default") + "/" + (.effort_requested // .effort // "default") + " -> " +
     (if (.runtime_settings_state // "unknown") == "observed" then
       ((.runtime_model // "?") + "/" + (.runtime_effort // "?") + " " +
@@ -859,7 +861,8 @@ cmd_list() {
   local -a json_rows=()
   slow_lifecycle_jq_filter="$(waspflow_liveness_jq_defs)
 $(cat <<'JQ'
-[(.provider // ""),(.status // ""),(.cwd // ""),(if (.outcome // "") == "" then "open" else .outcome end),(.origin_cwd // ""),(.repo_root // ""),waspflow_derived_lifecycle($active_scopes; $scope_query_available)] | join("\u001f")
+waspflow_derived_lifecycle($active_scopes; $scope_query_available) as $lifecycle |
+[(.provider // ""),(.status // ""),(.cwd // ""),(if (.outcome // "") != "" then .outcome elif $lifecycle == "reaped" then "reaped" else "open" end),(.origin_cwd // ""),(.repo_root // ""),$lifecycle] | join("\u001f")
 JQ
 )"
   while IFS= read -r lane; do
@@ -2000,6 +2003,7 @@ _reap_cleanup() {
       if worktree_remove "$lane" "$wt" "$repo_root" "$force"; then
         resource_ledger_mark "$lane" "$wt" released \
           || errors="$(jq -c '. + ["worktree-ledger-release"]' <<<"$errors")"
+        worktree_prune_lane_branch "$lane" "$repo_root"
       else
         errors="$(jq -c '. + ["worktree-remove"]' <<<"$errors")"
       fi

@@ -4943,7 +4943,8 @@ SYSTEMCTL
   listed="$(WASPFLOW_HOME="$index_home" CODEX_SESSIONS_DIR="$index_poison" "$root/bin/waspflow" list --json --limit 1)"
   after="$(find "$index_home/lanes" -name state.json -print0 | sort -z | xargs -0 sha256sum | sha256sum)"
   jq -e 'length == 1 and .[0].runtime_model == "stored-model"' <<<"$listed" >/dev/null
-  jq -e '.[0].outcome == "open"' <<<"$listed" >/dev/null
+  # A reaped lane with no fan-in close reads "reaped", not open work.
+  jq -e '.[0].outcome == "reaped"' <<<"$listed" >/dev/null
   # The invariant is "list reads its durable index, never a provider log, and never
   # mutates state" — proven directly by the never-created poison file and the
   # unchanged state hash. (These replace a former wall-clock `< 5s` proxy that was
@@ -7704,4 +7705,5 @@ source "$root/scripts/fixtures/verify-r4.sh"
 source "$root/scripts/fixtures/verify-r3-f4.sh"
 source "$root/scripts/fixtures/verify-r6.sh"
 source "$root/scripts/fixtures/verify-r7.sh"
+source "$root/scripts/fixtures/verify-r8.sh"
 echo "waspflow verify: ok"

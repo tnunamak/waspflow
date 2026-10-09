@@ -590,7 +590,7 @@ help_usage_escalate() {
 Switch a failed lane to another operating point or provider arm.
 
 Usage:
-  waspflow escalate <lane> [--to <op-id|provider/model[/effort]>] [--handoff] [--reset-tree] [--force] [--ack-deprecated] [--note <text>] [--defer] [--json] [--resume-transition | --abort-transition]
+  waspflow escalate <lane> [--to <op-id|provider/model[/effort]>] [--handoff] [--reset-tree] [--force] [--ack-unknown-model] [--note <text>] [--defer] [--json] [--resume-transition | --abort-transition]
   waspflow escalate <lane> --cancel-deferred [--json]
 
 Flags:
@@ -598,7 +598,8 @@ Flags:
   --handoff                   Start the target as a fresh handoff instead of reusing the session.
   --reset-tree                Reset the worktree during a handoff.
   --force                     Escalate without an eligible failed checkpoint.
-  --ack-deprecated            Permit a deprecated target fallback; with --force, acknowledge an unknown Claude model.
+  --ack-unknown-model         With --force, try a Claude model name waspflow does not recognise.
+  --ack-deprecated            Older name for --ack-unknown-model; still accepted.
   --note <text>               Record an escalation note in the transition.
   --defer                     Record the switch as pending; the next revise applies it at a cold-cache boundary.
   --cancel-deferred           Drop the pending deferred switch; the lane keeps its current arm.

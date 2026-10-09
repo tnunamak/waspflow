@@ -105,6 +105,23 @@ worktree_remove() {
   return 0
 }
 
+# Delete a lane's waspflow/<lane> branch once its worktree is gone, but only
+# when every commit on it is already reachable from the repo's HEAD. A branch
+# with unique commits is kept (reap has already archived it) and says so.
+# Args: lane repo_root
+worktree_prune_lane_branch() {
+  local lane="$1" repo_root="$2" branch="waspflow/$1"
+  [[ -n "$repo_root" ]] || return 0
+  git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch" || return 0
+  if git -C "$repo_root" merge-base --is-ancestor "refs/heads/$branch" HEAD 2>/dev/null \
+     && git -C "$repo_root" branch -d "$branch" >/dev/null 2>&1; then
+    log "reap: deleted branch '$branch' (no commits beyond HEAD)"
+  else
+    log "reap: kept branch '$branch': it has commits not in HEAD (archived; delete it with 'git branch -D $branch' when done)"
+  fi
+  return 0
+}
+
 # Preserve a report before cleanup without hiding any real user changes.  A
 # tracked report stays in place: removing it would create a new dirty change,
 # and a modified tracked file must still make normal reap refuse deletion.
