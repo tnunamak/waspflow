@@ -1494,9 +1494,12 @@ tmux_lane_scope_receipts() {
 # records are unknown rather than silently assumed live or interrupted.
 waspflow_active_scope_snapshot() {
   local units
-  command -v systemctl >/dev/null 2>&1 || return 1
+  # On failure, still print a valid empty array: callers assign this output even
+  # when the status is non-zero, and an empty string breaks jq --argjson. The
+  # exit status alone says "query unavailable" (no systemd user session).
+  command -v systemctl >/dev/null 2>&1 || { echo '[]'; return 1; }
   units="$(systemctl --user list-units --all --type=scope --state=active \
-    --no-legend --plain --full 'waspflow-*.scope' 2>/dev/null)" || return 1
+    --no-legend --plain --full 'waspflow-*.scope' 2>/dev/null)" || { echo '[]'; return 1; }
   printf '%s\n' "$units" \
     | awk 'NF && $1 ~ /^waspflow-[A-Za-z0-9._-]+\.scope$/ { print $1 }' \
     | jq -Rsc 'split("\n") | map(select(length > 0)) | unique'
