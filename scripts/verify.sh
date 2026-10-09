@@ -4838,6 +4838,30 @@ fi
   rm -rf "$nosystemd_home" "$nosystemd_cwd"
 )
 
+# No systemd user session (macOS, containers, WSL, SSH without lingering):
+# `systemctl --user` fails. The scope snapshot must degrade to "no scopes" with
+# lifecycle `unknown`, not hand jq an empty --argjson value. (v1.9.2 regression)
+(
+  nosess_home="$(mktemp -d "$scratch/waspflow-nosession-home-XXXXXX")"
+  nosess_bin="$(mktemp -d "$scratch/waspflow-nosession-bin-XXXXXX")"
+  printf '#!/bin/sh\necho "Failed to connect to bus" >&2\nexit 1\n' >"$nosess_bin/systemctl"
+  chmod +x "$nosess_bin/systemctl"
+  mkdir -p "$nosess_home/lanes/orphan"
+  jq -n '{provider:"test",status:"live",cgroup_scope_receipts:[{unit:"waspflow-x.scope",invocation_id:"synthetic"}]}' \
+    >"$nosess_home/lanes/orphan/state.json"
+  nosess_status="$(PATH="$nosess_bin:$PATH" WASPFLOW_HOME="$nosess_home" "$root/bin/waspflow" status orphan 2>"$nosess_home/status.err")" \
+    || { echo "no-systemd-session: status failed: $(cat "$nosess_home/status.err")" >&2; exit 1; }
+  jq -e '.status == "unknown" and .record_status == "live"' <<<"$nosess_status" >/dev/null \
+    || { echo "no-systemd-session: status did not report unknown lifecycle" >&2; exit 1; }
+  nosess_list="$(PATH="$nosess_bin:$PATH" WASPFLOW_HOME="$nosess_home" "$root/bin/waspflow" list --json 2>"$nosess_home/list.err")" \
+    || { echo "no-systemd-session: list failed: $(cat "$nosess_home/list.err")" >&2; exit 1; }
+  jq -e 'length == 1 and .[0].lifecycle_state == "unknown"' <<<"$nosess_list" >/dev/null \
+    || { echo "no-systemd-session: list did not report unknown lifecycle" >&2; exit 1; }
+  ! grep -q 'argjson' "$nosess_home/status.err" "$nosess_home/list.err" \
+    || { echo "no-systemd-session: jq --argjson error leaked" >&2; exit 1; }
+  rm -rf "$nosess_home" "$nosess_bin"
+)
+
 # Liveness is derived from the active systemd scope set, never from a tmux pane
 # shell. The fake `systemctl` makes the fleet read deterministic and proves the
 # list path asks for that set once, even when it renders several lanes.
