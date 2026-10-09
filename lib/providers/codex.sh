@@ -1056,7 +1056,12 @@ _codex_current_turn_state() {
   jq -nce '
     reduce inputs as $row
       ({turn:"", started:false, outcome:"pending", tools:{}, completed:0};
-       if $row.type == "turn_context" then .turn="" | .started=false | .outcome="pending"
+       if $row.type == "turn_context" then
+         # Codex writes turn_context either before task_started (legacy) or
+         # after it, inside the same turn. A context row naming the turn that
+         # is already started is a settings record, not a new turn boundary.
+         if .started and .turn != "" and ($row.payload.turn_id // "") == .turn then .
+         else .turn="" | .started=false | .outcome="pending" end
        elif $row.type == "event_msg" then
          $row.payload as $p |
          if $p.type == "task_started" then .turn=($p.turn_id // "") | .started=true | .outcome="pending"

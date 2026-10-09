@@ -27,7 +27,7 @@ waspflow demo --provider codex --run
 
 Replace `codex` with `claude`, `grok`, or `antigravity` when that is the installed CLI. Antigravity uses the `agy` executable. The demo asks the provider not to edit files; run it in a disposable directory when edits must be impossible.
 
-If Codex displays an update or trust prompt on the first run, answer it in the pane yourself and rerun the command. Waspflow will not paste the demo prompt into an unresolved menu.
+If Codex displays an update or trust prompt on the first run, Waspflow will not paste the demo prompt into it. The lane stays recorded but never ran. Answer the prompt in the pane, run `waspflow reap <lane> --force`, then rerun the command.
 
 ## 4. Run a small task
 

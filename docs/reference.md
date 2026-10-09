@@ -9,7 +9,7 @@ continues but prints one suggestion to add `--accept-provider-default`. Set
 `WASPFLOW_SELECTION_GATE=enforce` to require `--op <id>`, an explicit `--model`,
 or `--accept-provider-default`; it exits 5 (`selection_required`) without
 launching anything. `--auto` selects an op fallback and requires `--op`;
-`--ack-deprecated` applies only to that selector path.
+`--ack-deprecated` applies only to that selector path. For `escalate`, `--force --ack-unknown-model` (older name: `--ack-deprecated`) allows a Claude model name waspflow does not recognise.
 
 ## Provenance gate
 
@@ -399,6 +399,18 @@ guess.
 captured at spawn, or `default`, for Claude-resume diagnostics. It is diagnostic
 state only; Waspflow does not change resume behavior or select credentials from
 this field.
+
+`status <lane>` also records which provider binary the lane resolved:
+`provider_binary_path` and `provider_binary_version` (from the lane's own login
+shell; a shell function or alias is resolved to the file on that shell's PATH),
+next to `spawner_binary_path` and `spawner_binary_version` (from the shell that
+ran `spawn`). When the two paths differ, `spawn` prints a warning, because the
+two shells may run different provider versions.
+
+`reap` of an `--isolate` lane deletes its `waspflow/<lane>` branch when every
+commit on it is already in the repo's checked-out branch. A branch with unique
+commits, a repo with a detached `HEAD`, and any `reap --force` keep the branch.
+`reap` says why; unique commits are archived first.
 
 ### Forensic provenance search roots
 

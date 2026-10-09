@@ -38,7 +38,7 @@ The installer uses `WASPFLOW_INSTALL_BIN` when set, so use that printed director
 
 ## First Codex launch
 
-Codex may show an update or trust prompt before its composer is ready. Resolve it in the tmux pane, then rerun the Waspflow command. Waspflow refuses to inject a task into that unresolved menu because it could activate its selected action.
+Codex may show an update or trust prompt before its composer is ready. Waspflow refuses to inject a task into that unresolved menu because it could activate its selected action, so the spawn exits 3 and the lane never runs. Answer the prompt in the tmux pane, run `waspflow reap <lane> --force` to clear the stopped lane, then rerun the Waspflow command.
 
 ## Verify
 

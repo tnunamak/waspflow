@@ -1367,24 +1367,46 @@ tmux_run_owned_lane_command() {
 # actual scope and fallback lifecycle.
 # Record what the hydrated lane actually resolves, rather than presenting the
 # spawner's PATH as evidence about another shell. Version probing is bounded.
+# A login shell can define the provider as a function or alias (a wrapper): the
+# probe cannot run those, so it uses the file the login PATH resolves instead
+# (arg 5, from `type -P` in that shell).
+# Args: lane resolved kind spawner [login_file [spawner_version]]
 tmux_lane_provider_identity() {
-  local lane="$1" resolved="$2" kind="$3" spawner="$4" version=unknown
-  if [[ "$kind" == file && -n "$resolved" ]] && command -v timeout >/dev/null 2>&1; then
+  local lane="$1" resolved="$2" kind="$3" spawner="$4" login_file="${5:-}" spawner_version="${6:-unknown}" version=unknown
+  [[ "$kind" == file || -z "$login_file" ]] || resolved="$login_file"
+  if [[ "$kind" == file || -n "$login_file" ]] && [[ -n "$resolved" ]] && command -v timeout >/dev/null 2>&1; then
     version="$(timeout --kill-after=1 2 "$resolved" --version 2>&1)" || version=unknown
   fi
-  lane_set "$lane" provider_binary_path "$resolved" provider_binary_kind "$kind" provider_binary_version "$version" spawner_binary_path "$spawner"
-  [[ "$resolved" == "$spawner" ]] || warn "lane '$lane': provider resolves to '$resolved' in its login shell (spawner: '$spawner')"
+  lane_set "$lane" provider_binary_path "$resolved" provider_binary_kind "$kind" provider_binary_version "$version" \
+    spawner_binary_path "$spawner" spawner_binary_version "$spawner_version"
+}
+
+# Tell the spawning terminal when the lane's login shell resolved a different
+# provider binary than the spawner's PATH. The identity record is written inside
+# the lane's pane, where a warning would never reach the caller.
+tmux_warn_provider_mismatch() {
+  local lane="$1" lane_path spawner_path lane_version spawner_version
+  lane_path="$(lane_get "$lane" provider_binary_path)"
+  spawner_path="$(lane_get "$lane" spawner_binary_path)"
+  [[ -n "$lane_path" && -n "$spawner_path" && "$lane_path" != "$spawner_path" ]] || return 0
+  lane_version="$(lane_get "$lane" provider_binary_version)"
+  spawner_version="$(lane_get "$lane" spawner_binary_version)"
+  warn "lane '$lane' runs '$lane_path' (${lane_version:-unknown}), not the spawner's '$spawner_path' (${spawner_version:-unknown}); its login shell resolves a different binary"
 }
 
 # Bound only login-shell startup, never the provider's task. The watchdog
 # watches readiness AFTER profile hydration and cleans only owned processes.
 tmux_lane_login_shell() {
-  local lane="$1" execution="${2:-pane}" command_text="${3:-}" ready watchdog child rc=0 seconds ticks provider identity spawner detached=0 receipt_command lane_uuid launch_id gate child_ticks
+  local lane="$1" execution="${2:-pane}" command_text="${3:-}" ready watchdog child rc=0 seconds ticks provider identity spawner spawner_version detached=0 receipt_command lane_uuid launch_id gate child_ticks
   # Keep the historical two-argument helper call shape for direct callers.
   if [[ -z "$command_text" ]]; then command_text="$execution"; execution=pane; fi
   provider="$(lane_get "$lane" provider)"
   case "$provider" in antigravity) provider=agy ;; deepseek) provider=dsh ;; esac
   spawner="$(command -v "$provider" || true)"
+  spawner_version=unknown
+  if [[ -n "$spawner" && -f "$spawner" ]] && command -v timeout >/dev/null 2>&1; then
+    spawner_version="$(timeout --kill-after=1 2 "$spawner" --version 2>&1 </dev/null)" || spawner_version=unknown
+  fi
   identity="source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_lane_provider_identity \"\$@\""
   seconds="$(numeric_knob WASPFLOW_SHELL_STARTUP_TIMEOUT_SECONDS 20)"
   [[ "$seconds" -gt 0 ]] || { err "shell startup timeout must be positive"; return 1; }
@@ -1405,7 +1427,7 @@ tmux_lane_login_shell() {
     receipt_command="( source $(printf '%q' "$WASPFLOW_LIB/core.sh"); tmux_record_lane_detached_session $(printf '%q' "$lane") $(printf '%q' "$execution") \"\$\$\" \"\$(ps -o pgid= -p \"\$\$\" | tr -d ' ')\" \"\$(ps -o sid= -p \"\$\$\" | tr -d ' ')\" \"\$(process_start_ticks \"\$\$\")\" $(printf '%q' "$lane_uuid") $(printf '%q' "$launch_id") ) || exit 125; printf ready >$(printf '%q' "$ready")"
     detached=1
   fi
-  local -a login_shell=(bash -lc "$receipt_command; bash -c $(printf '%q' "$identity") -- $(printf '%q' "$lane") \"\$(command -v $(printf '%q' "$provider") || true)\" \"\$(type -t $(printf '%q' "$provider") || true)\" $(printf '%q' "$spawner"); $command_text")
+  local -a login_shell=(bash -lc "$receipt_command; bash -c $(printf '%q' "$identity") -- $(printf '%q' "$lane") \"\$(command -v $(printf '%q' "$provider") || true)\" \"\$(type -t $(printf '%q' "$provider") || true)\" $(printf '%q' "$spawner") \"\$(type -P $(printf '%q' "$provider") || true)\" $(printf '%q' "$spawner_version"); $command_text")
   if [[ "$detached" -eq 1 ]]; then login_shell=(bash -c 'while [[ ! -f "$1" ]]; do sleep 0.01; done; shift; exec setsid "$@"' -- "$gate" "${login_shell[@]}"); fi
   if ( : </dev/tty ) 2>/dev/null; then
     "${login_shell[@]}" </dev/tty &

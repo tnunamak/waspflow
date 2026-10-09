@@ -50,7 +50,7 @@ waspflow exec --provider claude --accept-provider-default -- \
 
 Claude has the strongest completion detection: Waspflow waits for terminal turn events and vetoes completion while known child or background-shell work remains active. Codex correlates rollout events with the lane’s turn; very new Codex versions can still drift from that event shape. Grok and Antigravity deliberately fail closed when submission or completion evidence is insufficient.
 
-On first Codex use, resolve any update banner or trust prompt in the pane yourself, then run the command again. Waspflow refuses to paste into an unresolved startup menu because an Enter could select an unsafe menu item instead of submitting your task.
+On first Codex use, an update or trust menu can appear. Waspflow refuses to paste into an unresolved startup menu because an Enter could select an unsafe menu item instead of submitting your task, so the spawn exits 3 and the lane stays recorded but never ran. Answer the menu in the pane (`waspflow attach <lane>`), then run `waspflow reap <lane> --force` and spawn again. A lane stopped at a menu cannot be resumed in place, and its reap reports `report_missing`.
 
 ## Requirements
 

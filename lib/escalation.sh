@@ -113,7 +113,7 @@ escalate_select_target() {
     # attempting an unrecognised name.
     if [[ "$provider" == claude ]] && ! escalate_claude_model_known "$model" \
        && [[ "$force" != true || "$ack" != true ]]; then
-      ESC_REASON="target $(escalate_arm_label "$ESC_ARM") is not a known Claude model; retry only if intended with --force --ack-deprecated"
+      ESC_REASON="target $(escalate_arm_label "$ESC_ARM") is not a known Claude model; retry only if intended with --force --ack-unknown-model"
       ESC_CODE=1; return 1
     fi
     observation="$(selection_observe_availability "$provider" "$model" default)"
@@ -796,7 +796,7 @@ cmd_escalate() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --to) requested="${2:-}"; [[ -n "$requested" ]] || { escalate_emit "$json" 1 "--to requires a value" null null null; return; }; shift 2 ;;
-      --handoff) handoff=true; shift ;; --reset-tree) reset_tree=true; shift ;; --force) force=true; shift ;; --ack-deprecated) ack=true; shift ;;
+      --handoff) handoff=true; shift ;; --reset-tree) reset_tree=true; shift ;; --force) force=true; shift ;; --ack-deprecated|--ack-unknown-model) ack=true; shift ;;
       --note) note="${2:-}"; shift 2 ;; --json) json=true; shift ;; --resume-transition) resume=true; shift ;; --abort-transition) abort=true; shift ;;
       --defer) defer=true; shift ;; --cancel-deferred) cancel=true; shift ;;
       -*) escalate_emit "$json" 1 "unknown option '$1'" null null null; return ;;
