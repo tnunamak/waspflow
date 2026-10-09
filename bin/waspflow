@@ -2003,7 +2003,7 @@ _reap_cleanup() {
       if worktree_remove "$lane" "$wt" "$repo_root" "$force"; then
         resource_ledger_mark "$lane" "$wt" released \
           || errors="$(jq -c '. + ["worktree-ledger-release"]' <<<"$errors")"
-        worktree_prune_lane_branch "$lane" "$repo_root"
+        [[ "$force" == 1 ]] || worktree_prune_lane_branch "$lane" "$repo_root"
       else
         errors="$(jq -c '. + ["worktree-remove"]' <<<"$errors")"
       fi

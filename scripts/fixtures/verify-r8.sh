@@ -92,6 +92,16 @@
   worktree_prune_lane_branch r8-clean "$repo" >/dev/null 2>&1
   worktree_prune_lane_branch r8-merged "$repo" >/dev/null 2>&1
   keep_msg="$(worktree_prune_lane_branch r8-unique "$repo" 2>&1)"
+  # A detached repo HEAD must not count as "reachable": the commits would live only in the reflog.
+  git -C "$repo" branch waspflow/r8-det main
+  git -C "$repo" worktree add -q "$r8/wt-det" waspflow/r8-det
+  git -C "$r8/wt-det" commit -q --allow-empty -m det
+  git -C "$repo" worktree remove "$r8/wt-det"
+  git -C "$repo" checkout -q --detach waspflow/r8-det
+  det_msg="$(worktree_prune_lane_branch r8-det "$repo" 2>&1)"
+  git -C "$repo" show-ref --verify --quiet refs/heads/waspflow/r8-det && [[ "$det_msg" == *"HEAD is detached"* ]] \
+    || { echo "r8 LOW: branch was deleted while the repo HEAD is detached: $det_msg" >&2; exit 1; }
+  git -C "$repo" checkout -q main
   worktree_prune_lane_branch r8-none "$repo" >/dev/null 2>&1
   if git -C "$repo" show-ref --verify --quiet refs/heads/waspflow/r8-clean \
      || git -C "$repo" show-ref --verify --quiet refs/heads/waspflow/r8-merged; then

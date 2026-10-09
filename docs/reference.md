@@ -408,8 +408,9 @@ ran `spawn`). When the two paths differ, `spawn` prints a warning, because the
 two shells may run different provider versions.
 
 `reap` of an `--isolate` lane deletes its `waspflow/<lane>` branch when every
-commit on it is already in the repo's `HEAD`. A branch with unique commits is
-kept and `reap` says so; its commits are archived first.
+commit on it is already in the repo's checked-out branch. A branch with unique
+commits, a repo with a detached `HEAD`, and any `reap --force` keep the branch.
+`reap` says why; unique commits are archived first.
 
 ### Forensic provenance search roots
 
