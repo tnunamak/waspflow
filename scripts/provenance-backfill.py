@@ -161,102 +161,16 @@ def tool_command_fields(obj: dict[str, Any]) -> Iterable[tuple[str, str]]:
         yield "payload.input", custom_input
 
 
-SHELL_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
-
-
-def simple_command_words(command: str) -> list[tuple[str, str]] | None:
-    """Split one literal shell command into (value, raw source) words.
-
-    Follows shell quoting, backslash escapes, line continuations and
-    word-initial comments. Returns None for anything beyond one simple
-    command: unquoted control or redirection operators, command
-    substitution, a second line, or an unterminated quote.
-    """
-    words: list[tuple[str, str]] = []
-    value: list[str] = []
-    start: int | None = None
-    ended = False
-    index = 0
-
-    def finish(end: int) -> None:
-        nonlocal start
-        if start is not None:
-            words.append(("".join(value), command[start:end]))
-            value.clear()
-            start = None
-
-    while index < len(command):
-        char = command[index]
-        if ended and not char.isspace():
-            return None
-        if char == "\\" and command[index + 1:index + 2] == "\n":
-            index += 2
-            continue
-        if char in " \t\n":
-            finish(index)
-            ended = ended or char == "\n"
-            index += 1
-            continue
-        if char == "#" and start is None:
-            while index < len(command) and command[index] != "\n":
-                index += 1
-            continue
-        if char in ";&|()<>`":
-            return None
-        if start is None:
-            start = index
-        if char == "\\":
-            if index + 1 >= len(command):
-                return None
-            value.append(command[index + 1])
-            index += 2
-        elif char == "'":
-            close = command.find("'", index + 1)
-            if close < 0:
-                return None
-            value.append(command[index + 1:close])
-            index = close + 1
-        elif char == '"':
-            index += 1
-            while index < len(command) and command[index] != '"':
-                if command[index] == "\\" and command[index + 1:index + 2] in ('"', "\\", "$", "`", "\n"):
-                    if command[index + 1] != "\n":
-                        value.append(command[index + 1])
-                    index += 2
-                    continue
-                value.append(command[index])
-                index += 1
-            if index >= len(command):
-                return None
-            index += 1
-        else:
-            value.append(char)
-            index += 1
-    finish(len(command))
-    return words
-
-
 def lane_argument(command: str, lane: str) -> bool:
-    # Exact evidence is limited to a single, literal shell invocation. Shell
-    # control flow and wrapper interpreters require execution evidence that
-    # this offline reader does not have, so leave them unclassified.
-    words = simple_command_words(command)
-    if words is None:
+    if not SPAWN_RE.search(command):
         return False
-    while words and SHELL_ASSIGNMENT_RE.match(words[0][1]):
-        words = words[1:]
-    tokens = [word for word, _ in words]
-    if len(tokens) < 2 or Path(tokens[0]).name != "waspflow" or tokens[1] != "spawn":
-        return False
-    args = tokens[2:]
-    if "--" in args:
-        args = args[:args.index("--")]
-    for index, token in enumerate(args):
-        if token == "--lane" and index + 1 < len(args):
-            return args[index + 1] == lane
-        if token.startswith("--lane="):
-            return token[len("--lane="):] == lane
-    return False
+    escaped = re.escape(lane)
+    return bool(
+        re.search(
+            rf"--lane(?:=|\s+)(?:[\"'])?{escaped}(?:[\"'])?(?=\s|[\"',}})]|$)",
+            command,
+        )
+    )
 
 
 def lane_spawn_epoch(state_dir: Path, lane: str) -> int:

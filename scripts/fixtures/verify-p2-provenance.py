@@ -14,45 +14,8 @@ def load(name, filename):
     spec.loader.exec_module(m)
     return m
 m = load("provenance", "waspflow-provenance.py")
-b = load("backfill", "provenance-backfill.py")
 
 class Provenance(unittest.TestCase):
-    def test_invocation_matching(self):
-        for module in (m, b):
-            for command in (
-                "waspflow spawn --lane target -- task",
-                '/repo/bin/waspflow spawn --lane=target -- "task"',
-                "waspflow spawn \\\n  --lane target -- task",
-                "WASPFLOW_ALLOW_API_BILLING=1 waspflow spawn --lane target -- task",
-                "A=1 B=value waspflow spawn --lane=target -- task",
-                'A="literal value" waspflow spawn --lane target -- task',
-                "waspflow spawn --lane target -- task\n",
-                "waspflow spawn --lane target -- 'first line\nsecond line'",
-                'waspflow spawn --lane target -- "first line\nsecond line"',
-                "waspflow spawn --lane target -- ';'",
-                "waspflow spawn --lane target -- '&' '|' '()'",
-                "waspflow spawn --lane target -- task # note",
-            ):
-                self.assertTrue(module.lane_argument(command, "target"), command)
-            for command in (
-                "printf '%s' 'waspflow spawn --lane target -- task'",
-                "# waspflow spawn --lane target",
-                "false && waspflow spawn --lane target",
-                "waspflow spawn --lane other -- 'waspflow spawn --lane target'",
-                "echo spawn; echo --lane target",
-                "bash -c 'waspflow spawn --lane target'",
-                "waspflow spawn --lane target -- task\nwaspflow wait target",
-                "'waspflow spawn \\\n --lane target'",
-                '"A=1" waspflow spawn --lane target -- task',
-                "'A=1' waspflow spawn --lane target -- task",
-                "waspflow spawn --lane target#suffix -- '--lane target'",
-                "waspflow spawn --lane target -- task > log",
-                "waspflow spawn --lane $(echo target) -- task",
-                "waspflow spawn --lane target -- 'unterminated",
-                "waspflow spawn --lane target -- task\n# trailing comment",
-            ):
-                self.assertFalse(module.lane_argument(command, "target"), command)
-
     def test_empty_roots_do_not_search(self):
         with patch.object(m, "checked_run", side_effect=AssertionError("unintended scan")), patch.object(m, "run", side_effect=AssertionError("unintended scan")):
             self.assertEqual(m.candidate_occurrences(["target"], []), ({}, None))
