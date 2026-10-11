@@ -162,12 +162,64 @@ def tool_command_fields(obj: dict[str, Any]) -> Iterable[tuple[str, str]]:
         yield "payload.input", custom_input
 
 
+def join_shell_continuations(command: str) -> str:
+    """Remove shell backslash-newline pairs outside single-quoted strings."""
+    result: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote != "'" and index + 1 < len(command):
+            following = command[index + 1]
+            if following == "\n":
+                index += 2
+                continue
+            result.extend((char, following))
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def skip_leading_shell_assignments(command: str) -> str:
+    """Skip raw NAME=value words without treating quoted names as assignments."""
+    index = 0
+    while True:
+        while index < len(command) and command[index].isspace():
+            index += 1
+        start = index
+        quote: str | None = None
+        while index < len(command):
+            char = command[index]
+            if char == "\\" and quote != "'" and index + 1 < len(command):
+                index += 2
+                continue
+            if char in {"'", '"'}:
+                if quote is None:
+                    quote = char
+                elif quote == char:
+                    quote = None
+            elif quote is None and (char.isspace() or char in ";|&()<>"):
+                break
+            index += 1
+        if not re.match(r"[A-Za-z_][A-Za-z0-9_]*=", command[start:index]):
+            return command[start:]
+
+
 def lane_argument(command: str, lane: str) -> bool:
     # Exact evidence is limited to a single, literal shell invocation. Shell
     # control flow and wrapper interpreters require execution evidence that
     # this offline reader does not have, so leave them unclassified.
+    command = join_shell_continuations(command)
     if "\n" in command:
         return False
+    command = skip_leading_shell_assignments(command)
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
