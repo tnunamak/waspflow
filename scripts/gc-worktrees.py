@@ -344,7 +344,8 @@ def pr_for_sha(repo, sha):
 
 def resolve_prs(repo, rows):
     pending = [r for r in rows if r["disposition"] == "unknown" and r["head"]
-               and not r["reasons"] == ["git status failed"]]
+               and not r["reasons"] == ["git status failed"]
+               and not any(reason.startswith("scan error:") for reason in r["reasons"])]
     if not pending:
         return
     heads, truncated = merged_pr_heads(repo)
