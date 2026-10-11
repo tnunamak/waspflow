@@ -25,3 +25,17 @@ with tempfile.TemporaryDirectory() as directory:
     assert row["disposition"] != "removable", row
     m.resolve_prs(directory, [row])
     assert row["disposition"] != "removable", row
+
+    # Even unresolved rows must reject a HEAD change during their scan.
+    m.git_evidence = lambda *args: (None, ["no reachability proof"])
+    row = m.analyze(directory, {"worktree":directory,"HEAD":"old-pushed","branch":"refs/heads/fix"}, [], [], [], "origin/main")
+    assert row["disposition"] == "blocked", row
+
+    # A stable scan can become stale while the later merged-PR lookup runs.
+    m.git = lambda *args, **kwargs: (0, "old-pushed\n")
+    row = m.analyze(directory, {"worktree":directory,"HEAD":"old-pushed","branch":"refs/heads/fix"}, [], [], [], "origin/main")
+    assert row["disposition"] == "unknown", row
+    m.merged_pr_heads = lambda repo: ({"old-pushed"}, False)
+    m.git = lambda *args, **kwargs: (0, "new-unpushed\n")
+    m.resolve_prs(directory, [row])
+    assert row["disposition"] == "blocked", row
