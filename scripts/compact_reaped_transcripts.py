@@ -50,6 +50,7 @@ from ansi_strip import AnsiStripper, strip_bytes  # noqa: E402
 
 DEFAULT_LANES_DIR = os.path.expanduser("~/.local/state/waspflow/lanes")
 CHUNK_SIZE = 4 * 1024 * 1024  # 4 MiB read chunks
+WHOLE_BUFFER_CAP = 64 * 1024 * 1024  # verify by whole-buffer strip at or below this size
 ESC = 0x1B
 
 
@@ -161,18 +162,22 @@ def verify_compacted(original_path: str, compacted_path: str) -> tuple[bool, str
     plus a whole-buffer pass for files under a size cap."""
     orig_size = os.path.getsize(original_path)
     compacted_size = os.path.getsize(compacted_path)
-    if max(orig_size, compacted_size) <= 64 * 1024 * 1024:
+    if max(orig_size, compacted_size) <= WHOLE_BUFFER_CAP:
+        # Read at most cap+1 bytes: a file that grew after the size check falls
+        # through to the streaming path instead of being read whole.
         with open(compacted_path, "rb") as f:
-            compacted = f.read()
-        if has_esc(compacted):
-            return False, "residual ESC bytes present in compacted output"
-        # Small enough: do a true independent whole-buffer strip as reference.
+            compacted = f.read(WHOLE_BUFFER_CAP + 1)
         with open(original_path, "rb") as f:
-            original = f.read()
-        reference = strip_bytes(original)
-        if reference != compacted:
-            return False, "whole-buffer reference strip does not match streamed output"
-        return True, ""
+            original = f.read(WHOLE_BUFFER_CAP + 1)
+        if max(len(compacted), len(original)) <= WHOLE_BUFFER_CAP:
+            if has_esc(compacted):
+                return False, "residual ESC bytes present in compacted output"
+            # Small enough: do a true independent whole-buffer strip as reference.
+            reference = strip_bytes(original)
+            if reference != compacted:
+                return False, "whole-buffer reference strip does not match streamed output"
+            return True, ""
+        del compacted, original
 
     # Large file: re-run the streaming stripper with a DIFFERENT chunk size
     # (odd, small) as an independent cross-check that chunk boundaries didn't
