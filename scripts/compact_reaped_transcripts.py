@@ -299,18 +299,6 @@ def process_lane(lane_dir: str, active_scopes: set[str], apply: bool) -> Receipt
     tmp_path = None
     state_lock = None
     try:
-        # Use the lane store's existing lock so a normal lifecycle transition
-        # cannot reactivate this lane between the final check and replacement.
-        state_lock = open(os.path.join(lane_dir, ".state.lock"), "a")
-        fcntl.flock(state_lock, fcntl.LOCK_EX)
-        # Re-check eligibility ONE more time immediately before the write,
-        # since strip+verify of a >100MB file can take real wall-clock time
-        # during which this lane could transition (rule 2).
-        eligible, reason = lane_is_eligible_now(state_path, active_scopes)
-        if not eligible:
-            return Receipt(path=transcript_path, lane=lane, action="skip",
-                            reason=f"became ineligible before write: {reason}")
-
         original_stat = os.stat(transcript_path)
         tmp_path, after = stream_strip_to_tempfile(transcript_path, lane_dir_real)
 
@@ -322,6 +310,9 @@ def process_lane(lane_dir: str, active_scopes: set[str], apply: bool) -> Receipt
 
         # Final liveness uses a fresh scope census; an earlier snapshot cannot
         # prove that no writer became active while stripping and verifying.
+        # Keep the state-file lock only across this final check and replacement.
+        state_lock = open(os.path.join(lane_dir, ".state.lock"), "a")
+        fcntl.flock(state_lock, fcntl.LOCK_EX)
         eligible, reason = lane_is_eligible_now(state_path, get_active_waspflow_scopes())
         if not eligible:
             os.unlink(tmp_path)

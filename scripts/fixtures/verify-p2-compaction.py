@@ -63,13 +63,28 @@ class Compaction(unittest.TestCase):
         self.assertEqual(result.action, "skip")
         self.assertTrue(self.transcript.read_bytes().endswith(b"later append"))
 
-    def test_existing_lane_state_lock_is_held(self):
+    def assert_state_lock_held(self, expected_held):
+        with (self.lane / ".state.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                self.assertTrue(expected_held, "state lock unexpectedly held")
+            else:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                self.assertFalse(expected_held, "state lock unexpectedly free")
+
+    def test_state_lock_only_covers_final_replace(self):
         real_strip = m.stream_strip_to_tempfile
-        def locked(*args):
-            with (self.lane / ".state.lock").open("a") as lock:
-                with self.assertRaises(BlockingIOError): fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        real_replace = m.os.replace
+        def unlocked_during_strip(*args):
+            self.assert_state_lock_held(False)
             return real_strip(*args)
-        with patch.object(m, "stream_strip_to_tempfile", side_effect=locked), patch.object(m, "get_active_waspflow_scopes", return_value=set()):
+        def locked_during_replace(*args):
+            self.assert_state_lock_held(True)
+            return real_replace(*args)
+        with patch.object(m, "stream_strip_to_tempfile", side_effect=unlocked_during_strip), \
+             patch.object(m.os, "replace", side_effect=locked_during_replace), \
+             patch.object(m, "get_active_waspflow_scopes", return_value=set()):
             result = m.process_lane(str(self.lane), set(), apply=True)
         self.assertEqual(result.action, "compacted")
 
