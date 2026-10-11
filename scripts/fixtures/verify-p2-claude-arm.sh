@@ -15,6 +15,14 @@
   printf '%s\n' '{"type":"assistant","message":{"model":"claude-opus-5"}}' >>"$file"
   claude_refresh_runtime_settings arm
   [[ "$(lane_get arm runtime_settings_match_requested)" == false && "$(lane_get arm runtime_settings_error)" == multiple-models-observed ]]
+  # A non-object row between records must not reset the arm accumulator.
+  printf '%s\n' '{"type":"user","message":{"content":"WASPFLOW_ESCALATION_TRANSITION:test task"}}' '{"type":"assistant","message":{"model":"claude-sonnet-5"}}' '["WASPFLOW_ESCALATION_TRANSITION:test"]' '{"type":"assistant","message":{"model":"claude-opus-5"}}' >"$file"
+  claude_refresh_runtime_settings arm
+  [[ "$(lane_get arm runtime_settings_match_requested)" == false && "$(lane_get arm runtime_settings_error)" == multiple-models-observed ]]
+  lane_set arm runtime_settings_submission_nonce ''
+  printf '%s\n' '{"type":"assistant","message":{"model":"claude-sonnet-5"}}' '[{"model":"claude-haiku-5"}]' '{"type":"assistant","message":{"model":"claude-opus-5"}}' >"$file"
+  claude_refresh_runtime_settings arm
+  [[ "$(lane_get arm runtime_settings_match_requested)" == false && "$(lane_get arm runtime_settings_error)" == multiple-models-observed ]]
   lane_set arm runtime_settings_submission_nonce absent-marker
   claude_refresh_runtime_settings arm
   [[ "$(lane_get arm runtime_refresh_state)" == unknown ]]

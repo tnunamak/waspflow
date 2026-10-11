@@ -627,8 +627,8 @@ claude_refresh_runtime_settings() {
   command -v timeout >/dev/null 2>&1 && grep_cmd=(timeout 15 "${grep_cmd[@]}")
   models="$("${grep_cmd[@]}" 2>/dev/null \
     | jq -nr --arg nonce "$nonce" '
-      def user_text: .message.content | if type == "string" then . elif type == "array" then map(select(.type? == "text") | .text // "") | join("\n") else "" end;
-      foreach inputs as $row ({in_arm:($nonce == ""),model:null};
+      def user_text: .message.content? | if type == "string" then . elif type == "array" then map(select(.type? == "text") | .text // "") | join("\n") else "" end;
+      foreach (inputs | select(type == "object")) as $row ({in_arm:($nonce == ""),model:null};
         .model = null |
         if ($row.type? == "user" and ($row.isMeta? != true) and ($row | user_text | contains($nonce))) then .in_arm = true else . end |
         if .in_arm and $row.type? == "assistant" then .model = $row.message.model else . end;

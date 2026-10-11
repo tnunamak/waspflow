@@ -5817,6 +5817,8 @@ PROV
   jq -e 'keys == ["exit_class","from_arm","ok","reason","segment_index","suggested_argv","to_arm"] and .ok and .exit_class == "success" and .segment_index == 1' <<<"$success_json" >/dev/null
   jq -e '.status == "live" and .provider == "codex" and .model == "target" and .effort == "high" and .op_mode == "standard" and .arm_generation == "4" and .segment_index == "1" and .session_id == "esc-success-new-session" and .fake_launch_count == "1"' "$eschome/lanes/esc-success/state.json" >/dev/null \
     || { echo "escalate success: journaled provisional session was launched more than once" >&2; exit 1; }
+  jq -e '.runtime_settings_submission_nonce | startswith("WASPFLOW_ESCALATION_TRANSITION:")' "$eschome/lanes/esc-success/state.json" >/dev/null \
+    || { echo "escalate success: transition nonce was not persisted with the new arm" >&2; exit 1; }
   if tmux_cgroup_scope_available; then
     jq -e 'any(.cgroup_scope_receipts[]?; .execution | startswith("escalation:"))' "$eschome/lanes/esc-success/state.json" >/dev/null \
       || { echo "escalate scope: available scope was not journaled" >&2; exit 1; }
