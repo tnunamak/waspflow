@@ -27,6 +27,21 @@
   reconcile_lane_json life '[]' true | jq -e '.pending_events == 0 and .superseded_pending_events == 1' >/dev/null
   if reconcile_event_ack "$old" consumer; then exit 1; fi
 )
+# A pending event written before lane_uuid existed survives the upgrade.
+(
+  fixture="$(mktemp -d "$scratch/waspflow-p2-legacy-XXXXXX")"
+  trap 'rm -rf "$fixture"' EXIT
+  export WASPFLOW_HOME="$fixture/home" WASPFLOW_LIB="$root/lib"
+  source "$root/lib/core.sh"; source "$root/lib/reconcile.sh"; source "$root/lib/provenance.sh"
+  tmux_owned_lane_window_exists() { return 1; }
+  lane_set legacy provider fake status reaped lane_uuid u-123 cwd "$fixture"
+  mkdir -p "$(dirname "$(reconcile_event_ledger)")"
+  printf '%s\n' '{"schema":"waspflow-owner-event/v1","event_id":"legacy-event","lane":"legacy","generation":3,"kind":"completion","state":"pending","created_epoch":1}' >>"$(reconcile_event_ledger)"
+  reconcile_event_claim legacy-event consumer 60 >/dev/null
+  reconcile_lane_json legacy '[]' true | jq -e '.pending_events_state == "known" and .pending_events == 1' >/dev/null
+  reconcile_event_ack legacy-event consumer
+  reconcile_lane_json legacy '[]' true | jq -e '.pending_events == 0' >/dev/null
+)
 (
   fixture="$(mktemp -d "$scratch/waspflow-p2-handoff-XXXXXX")"
   trap 'rm -rf "$fixture"' EXIT

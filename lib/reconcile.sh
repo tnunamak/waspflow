@@ -88,9 +88,11 @@ reconcile_event_ack() (
   lane="$(jq -sr --arg id "$event_id" 'map(select(.event_id == $id)) | last | .lane // ""' "$ledger")" || return 1
   generation="$(jq -sr --arg id "$event_id" 'map(select(.event_id == $id)) | last | .generation // ""' "$ledger")" || return 1
   [[ -n "$lane" && "$generation" =~ ^[0-9]+$ ]] || return 1
-  lane_uuid="$(jq -sr --arg id "$event_id" 'map(select(.event_id == $id)) | last | .lane_uuid // ""' "$ledger")" || return 1
-  [[ "$lane_uuid" == "$(lane_get "$lane" lane_uuid)" ]] || return 1
-  latest="$(jq -sr --arg lane "$lane" --arg uuid "$lane_uuid" '[.[] | select(.lane == $lane and (.lane_uuid // "") == $uuid) | .generation] | max // -1' "$ledger")" || return 1
+  # Events written before lane_uuid was recorded have no such key. They keep
+  # the earlier lane-name scope, so they stay visible and acknowledgeable.
+  lane_uuid="$(lane_get "$lane" lane_uuid)"
+  jq -se --arg id "$event_id" --arg uuid "$lane_uuid" 'map(select(.event_id == $id)) | last | (has("lane_uuid") | not) or .lane_uuid == $uuid' "$ledger" >/dev/null || return 1
+  latest="$(jq -sr --arg lane "$lane" --arg uuid "$lane_uuid" '[.[] | select(.lane == $lane and ((has("lane_uuid") | not) or .lane_uuid == $uuid)) | .generation] | max // -1' "$ledger")" || return 1
   # A newer generation supersedes this obligation. An old completion cannot
   # acknowledge current work merely because the same consumer still has it.
   [[ "$latest" == "$generation" ]] || return 1
@@ -121,7 +123,7 @@ reconcile_lane_json() {
     else
       [[ -f "$claims_file" ]] || claims='{}'
       if ! event_summary="$(jq -cs --arg lane "$lane" --arg uuid "$(jq -r '.lane_uuid // ""' <<<"$record")" --argjson claims "$claims" '
-      [ .[] | select(.lane == $lane and (.lane_uuid // "") == $uuid) ] as $events |
+      [ .[] | select(.lane == $lane and ((has("lane_uuid") | not) or .lane_uuid == $uuid)) ] as $events |
       if any($events[]?; (.generation | type) != "number") then
         {state:"unknown",pending:null,superseded:null,reason:"invalid-event-generation"}
       else
