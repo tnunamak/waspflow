@@ -30,8 +30,8 @@ state = pathlib.Path(os.environ["FAKE_STATE"]); state.mkdir(exist_ok=True)
 mode = os.environ.get("MODE", "ok")
 if cmd == "spawn":
     lane = args[args.index("--lane") + 1]
-    if mode == "spawnfail": sys.exit(1)
     (state / lane).write_text(os.getcwd())
+    if mode == "spawnfail": sys.exit(1)
     if mode != "noedit":
         match = re.search(r"TOKEN_A_[\w-]+|T[\w-]+_A", " ".join(args))
         token = match.group()
@@ -58,6 +58,8 @@ elif cmd == "revise" and mode != "noedit":
     with (pathlib.Path((state / args[0]).read_text()) / "f.txt").open("a") as f: f.write(match.group() + "\n")
     if mode == "revisefail": sys.exit(1)
 elif cmd == "reap":
+    workdir = state / args[0]
+    if workdir.exists(): (state / (args[0] + ".reapdir")).write_text(str(pathlib.Path(workdir.read_text()).is_dir()))
     print("result=succeeded")
     if mode == "reapfail": sys.exit(1)
 ''')
@@ -181,6 +183,7 @@ elif cmd == "reap":
             lane = args[args.index("--lane") + 1] if cmd == "spawn" else args[0]
             by_lane.setdefault(lane, []).append(cmd)
         self.assertEqual(list(by_lane.values()), [["spawn", "reap"]] * 3)
+        self.assertEqual([(pathlib.Path(self.env["FAKE_STATE"]) / (lane + ".reapdir")).read_text() for lane in by_lane], ["True"] * 3)
         self.assertEqual(list((self.repo / "scratch").glob("soak-soak-*")), [])
 
 sys.argv = [sys.argv[0]]
