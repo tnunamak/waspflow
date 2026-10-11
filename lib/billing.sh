@@ -135,7 +135,13 @@ billing_report_auth() {
   if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
     echo "  [warn] claude auth: ANTHROPIC_API_KEY is set -> headless workers bill pay-as-you-go API rates, NOT your subscription. A fleet can run up large charges (see issue #37686). Unset it to use your subscription."
   else
-    echo "  [ok]   claude auth: subscription/Agent-SDK credit (no ANTHROPIC_API_KEY)"
+    local claude_route
+    claude_route="$(billing_path_v1 claude default false)"
+    if [[ "$(jq -r .path <<<"$claude_route")" == subscription_env_heuristic ]]; then
+      echo "  [info] claude auth: subscription/Agent-SDK credit heuristic (no provider overrides); verify configured auth"
+    else
+      echo "  [warn] claude auth: $(jq -r .path <<<"$claude_route") route ($(jq -r .evidence <<<"$claude_route")); verify billing before fleet use"
+    fi
   fi
 
   billing_codex_auth_notice report
