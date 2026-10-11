@@ -30,6 +30,10 @@ class Fixtures(unittest.TestCase):
                 log.write_text(signal + "\n")
                 result = subprocess.run(["bash", "-c", snippet], env={**os.environ,"signal_log":str(log)}, capture_output=True)
                 self.assertNotEqual(result.returncode, 0, signal)
+            for allowed in ("-0 123", "-9 123", "-TERM 123", "-KILL 123"):
+                log.write_text(allowed + "\n")
+                result = subprocess.run(["bash", "-c", snippet], env={**os.environ,"signal_log":str(log)}, capture_output=True)
+                self.assertEqual(result.returncode, 0, allowed)
             logger = re.search(r'kill\(\) \{ (.*?); builtin kill', text).group(1)
             result = subprocess.run(["bash", "-c", 'set -- -0 "$$"; ' + logger], env={**os.environ,"signal_log":str(log)}, capture_output=True)
             self.assertTrue(log.read_bytes().endswith(b"\n"), log.read_bytes())
