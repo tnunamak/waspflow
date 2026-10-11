@@ -40,10 +40,11 @@ one() {
     return 1
   fi
   local sub; sub="$(env -u OPENAI_API_KEY "$BF" status "$lane" 2>/dev/null | jq -r '.spawn_submitted // "na"')"
-  env -u OPENAI_API_KEY timeout 135 "$BF" wait "$lane" --timeout 130 >/dev/null 2>&1
+  local spawn_wait=0 revise_status=0 revise_wait=0
+  env -u OPENAI_API_KEY timeout 135 "$BF" wait "$lane" --timeout 130 >/dev/null 2>&1 || spawn_wait=$?
   local s=NO; grep -q "${tag}_A" "$d/f.txt" 2>/dev/null && s=YES
-  env -u OPENAI_API_KEY "$BF" revise "$lane" -- "Append ${tag}_B to f.txt then stop." >/dev/null 2>&1
-  env -u OPENAI_API_KEY timeout 135 "$BF" wait "$lane" --timeout 130 >/dev/null 2>&1
+  env -u OPENAI_API_KEY "$BF" revise "$lane" -- "Append ${tag}_B to f.txt then stop." >/dev/null 2>&1 || revise_status=$?
+  env -u OPENAI_API_KEY timeout 135 "$BF" wait "$lane" --timeout 130 >/dev/null 2>&1 || revise_wait=$?
   local r=NO; grep -q "${tag}_B" "$d/f.txt" 2>/dev/null && r=YES
   local rp; rp="$(env -u OPENAI_API_KEY "$BF" reap "$lane" --force 2>&1 | grep -oE 'result=[a-z_]+' | head -1)"
   # Isolation: the file must NOT contain any OTHER lane's tag. (Substring check,
@@ -55,7 +56,7 @@ one() {
     [[ "T$other" == "$tag" ]] && continue
     grep -qF "T${other}_" "$d/f.txt" 2>/dev/null && x="DIRTY_by_T$other"
   done
-  printf '%s sub=%s spawn=%s revise=%s %s iso=%s\n' "$lane($prov)" "$sub" "$s" "$r" "${rp:-none}" "$x" >> "$resfile"
+  printf '%s sub=%s spawn=%s revise=%s spawn_wait=%s revise_status=%s revise_wait=%s %s iso=%s\n' "$lane($prov)" "$sub" "$s" "$r" "$spawn_wait" "$revise_status" "$revise_wait" "${rp:-none}" "$x" >> "$resfile"
   rm -rf "$d"
 }
 
@@ -85,7 +86,7 @@ fi
 echo ""; echo "=== results ==="
 while IFS= read -r line; do
   echo "  $line"
-  if grep -qE 'sub=true spawn=YES revise=YES result=(succeeded|verified) iso=clean' <<<"$line"; then
+  if grep -qE 'sub=true spawn=YES revise=YES spawn_wait=0 revise_status=0 revise_wait=0 result=(succeeded|verified) iso=clean' <<<"$line"; then
     pass=$((pass+1))
   else
     fail=$((fail+1))
