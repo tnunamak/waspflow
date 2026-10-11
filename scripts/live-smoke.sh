@@ -47,14 +47,21 @@ one_lane() {
   if ! timeout 130 "$BF" wait "$lane" --timeout 120 >/dev/null 2>&1; then
     echo "SPAWN_WAIT_TIMEOUT" > "$log"; "$BF" reap "$lane" --force >/dev/null 2>&1; return
   fi
-  grep -qE "TOKEN_A_$id([^0-9]|$)" "$d/f.txt" 2>/dev/null && echo "SPAWN_OK" > "$log" || echo "SPAWN_NOEDIT" > "$log"
+  echo "SPAWN_WAIT_OK" >> "$log"
+  grep -qE "TOKEN_A_$id([^0-9]|$)" "$d/f.txt" 2>/dev/null && echo "SPAWN_OK" >> "$log" || echo "SPAWN_NOEDIT" >> "$log"
 
   # revise (the critical steer-the-live-pane path + the barrier under test)
   local mark_before mark_after
   mark_before="$(claude_turn_mark "$lane" 2>/dev/null || echo 0)"
-  "$BF" revise "$lane" -- "Now append a second line reading TOKEN_B_$id to f.txt, then stop." >/dev/null 2>&1
+  if "$BF" revise "$lane" -- "Now append a second line reading TOKEN_B_$id to f.txt, then stop." >/dev/null 2>&1; then
+    echo "REVISE_SENT" >> "$log"
+  else
+    echo "REVISE_FAILED" >> "$log"
+  fi
   if ! timeout 130 "$BF" wait "$lane" --timeout 120 >/dev/null 2>&1; then
     echo "REVISE_WAIT_TIMEOUT" >> "$log"
+  else
+    echo "REVISE_WAIT_OK" >> "$log"
   fi
   # Did a NEW turn actually run? (distinguishes barrier/quota from a bad instruction)
   mark_after="$(claude_turn_mark "$lane" 2>/dev/null || echo 0)"
@@ -99,6 +106,9 @@ for i in $(seq 1 "$N"); do
   [[ -n "$d" && -f "$d/_result" ]] || { bad "lane $i: no result file"; continue; }
   r="$(tr '\n' ',' < "$d/_result")"
   echo "  lane $i: $r"
+  grep -q SPAWN_WAIT_OK "$d/_result" && ok "lane $i spawn wait" || bad "lane $i spawn wait"
+  grep -q REVISE_SENT "$d/_result" && ok "lane $i revise command" || bad "lane $i revise command"
+  grep -q REVISE_WAIT_OK "$d/_result" && ok "lane $i revise wait" || bad "lane $i revise wait"
   grep -q SPAWN_OK    "$d/_result" && ok "lane $i spawn produced edit"    || bad "lane $i spawn edit"
   grep -q REVISE_OK   "$d/_result" && ok "lane $i revise produced edit"   || bad "lane $i revise edit (STEER)"
   grep -q 'REAP_result=succeeded\|REAP_result=verified' "$d/_result" && ok "lane $i reap result" || bad "lane $i reap result"

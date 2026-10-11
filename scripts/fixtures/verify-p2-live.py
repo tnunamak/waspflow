@@ -36,10 +36,15 @@ if cmd == "spawn":
         match = re.search(r"TOKEN_A_\d+|T\d+_A", " ".join(args))
         with pathlib.Path("f.txt").open("a") as f: f.write(match.group() + "\n")
 elif cmd == "status": print('{"spawn_submitted":true}')
-elif cmd == "wait" and mode == "timeout": sys.exit(1)
+elif cmd == "wait":
+    counter = state / (args[0] + ".waits")
+    count = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(count))
+    if mode == "timeout" or (mode == "secondtimeout" and count == 2): sys.exit(1)
 elif cmd == "revise" and mode != "noedit":
     match = re.search(r"TOKEN_B_\d+|T\d+_B", " ".join(args))
     with (pathlib.Path((state / args[0]).read_text()) / "f.txt").open("a") as f: f.write(match.group() + "\n")
+    if mode == "revisefail": sys.exit(1)
 elif cmd == "reap": print("result=succeeded")
 ''')
         fake.chmod(0o755)
@@ -81,6 +86,25 @@ elif cmd == "reap": print("result=succeeded")
         result = self.run_harness("live-smoke.sh", ["claude", "1"], "timeout")
         self.assertIn("SPAWN_WAIT_TIMEOUT", result.stdout)
         self.assertEqual(list((self.repo / "scratch").glob("wf-live-1-*")), [])
+
+    def test_soak_failed_lifecycle_commands(self):
+        for mode in ("timeout", "secondtimeout", "revisefail"):
+            with self.subTest(mode=mode):
+                result = self.run_harness("live-soak.sh", ["1"], mode)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertNotIn("LIVE SOAK: GREEN", result.stdout)
+                self.assertEqual(list((self.repo / "scratch").glob("soak-soak-*")), [])
+                self.assertEqual(len([cmd for cmd, _ in self.calls() if cmd == "reap"]), 3)
+                pathlib.Path(self.env["CALLS"]).unlink()
+
+    def test_smoke_failed_revision_commands(self):
+        for mode in ("secondtimeout", "revisefail"):
+            with self.subTest(mode=mode):
+                result = self.run_harness("live-smoke.sh", ["claude", "1"], mode)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertNotIn("LIVE MATRIX: GREEN", result.stdout)
+                self.assertEqual(list((self.repo / "scratch").glob("wf-live-1-*")), [])
+                self.assertIn("reap", [cmd for cmd, _ in self.calls()])
 
     def test_run_unique_labels(self):
         for _ in range(2): self.run_harness("live-smoke.sh", ["claude", "1"])
