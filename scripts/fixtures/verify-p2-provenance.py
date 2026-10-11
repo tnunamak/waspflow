@@ -26,6 +26,12 @@ class Provenance(unittest.TestCase):
                 "WASPFLOW_ALLOW_API_BILLING=1 waspflow spawn --lane target -- task",
                 "A=1 B=value waspflow spawn --lane=target -- task",
                 'A="literal value" waspflow spawn --lane target -- task',
+                "waspflow spawn --lane target -- task\n",
+                "waspflow spawn --lane target -- 'first line\nsecond line'",
+                'waspflow spawn --lane target -- "first line\nsecond line"',
+                "waspflow spawn --lane target -- ';'",
+                "waspflow spawn --lane target -- '&' '|' '()'",
+                "waspflow spawn --lane target -- task # note",
             ):
                 self.assertTrue(module.lane_argument(command, "target"), command)
             for command in (
@@ -39,6 +45,11 @@ class Provenance(unittest.TestCase):
                 "'waspflow spawn \\\n --lane target'",
                 '"A=1" waspflow spawn --lane target -- task',
                 "'A=1' waspflow spawn --lane target -- task",
+                "waspflow spawn --lane target#suffix -- '--lane target'",
+                "waspflow spawn --lane target -- task > log",
+                "waspflow spawn --lane $(echo target) -- task",
+                "waspflow spawn --lane target -- 'unterminated",
+                "waspflow spawn --lane target -- task\n# trailing comment",
             ):
                 self.assertFalse(module.lane_argument(command, "target"), command)
 
