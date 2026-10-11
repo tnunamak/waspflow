@@ -9,8 +9,17 @@
   old="$(reconcile_event_emit life 9 completion)"
   reconcile_event_claim "$old" consumer 60 >/dev/null
   reconcile_event_ack "$old" consumer
+  old_pending="$(reconcile_event_emit life 9 attention)"
+  reconcile_event_claim "$old_pending" consumer 60 >/dev/null
   lane_set life lane_uuid new-life
   new="$(reconcile_event_emit life 1 completion)"
+  new_attention="$(reconcile_event_emit life 1 attention)"
+  reconcile_event_claim "$new_attention" consumer 60 >/dev/null
+  reconcile_event_ack "$new_attention" consumer
+  reconcile_lane_json life '[]' true | jq -e '.pending_events == 1 and .superseded_pending_events == 0' >/dev/null
+  if reconcile_event_ack "$old_pending" consumer; then
+    echo 'reused lane acknowledged an unacked event from its previous life' >&2; exit 1
+  fi
   same_generation="$(reconcile_event_emit life 9 completion)"
   [[ "$old" != "$same_generation" ]]
   reconcile_event_claim "$same_generation" consumer 60 >/dev/null
