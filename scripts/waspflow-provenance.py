@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 import hashlib
@@ -281,6 +282,8 @@ def lane_search_pattern(names: Iterable[str]) -> str:
 def candidate_occurrences(
     names: Iterable[str], roots: list[str]
 ) -> tuple[dict[str, list[int]], str | None]:
+    if not roots:
+        return {}, None
     pattern = lane_search_pattern(names)
     output, scan_error = checked_run(
         ["rg", "--byte-offset", "-o", "--pcre2", "-e", pattern, "--glob", "*.jsonl", *roots],
@@ -300,6 +303,8 @@ def candidate_occurrences(
 
 
 def fixed_occurrences(needle: str, roots: list[str]) -> dict[str, list[int]]:
+    if not roots:
+        return {}
     output = run(
         ["rg", "--byte-offset", "-o", "-F", needle, "--glob", "*.jsonl", *roots],
         timeout=180,
@@ -362,15 +367,30 @@ def tool_commands(obj: dict[str, Any]) -> list[str]:
 
 
 def lane_argument(command: str, lane: str) -> bool:
-    if not SPAWN_RE.search(command):
+    # Exact evidence is limited to a single, literal shell invocation. Shell
+    # control flow and wrapper interpreters require execution evidence that
+    # this offline reader does not have, so leave them unclassified.
+    if "\n" in command:
         return False
-    escaped = re.escape(lane)
-    return bool(
-        re.search(
-            rf"--lane(?:=|\s+)(?:[\"'])?{escaped}(?:[\"'])?(?=\s|[\"',}})]|$)",
-            command,
-        )
-    )
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    if any(token and all(char in ";&|()<>" for char in token) for token in tokens):
+        return False
+    if len(tokens) < 2 or Path(tokens[0]).name != "waspflow" or tokens[1] != "spawn":
+        return False
+    args = tokens[2:]
+    if "--" in args:
+        args = args[:args.index("--")]
+    for index, token in enumerate(args):
+        if token == "--lane" and index + 1 < len(args):
+            return args[index + 1] == lane
+        if token.startswith("--lane="):
+            return token[len("--lane="):] == lane
+    return False
 
 
 def bounded_line_at(
@@ -440,7 +460,7 @@ def scan_spawns(
                     delta = abs(line_epoch - spawn_epoch) if line_epoch and spawn_epoch else None
                     hit = {
                             "root_harness": source.get("harness", ""),
-                            "root_session_id": source.get("session_id", "") or path.stem.replace("rollout-", ""),
+                            "root_session_id": source.get("session_id", "") or (UUID_RE.search(path.stem).group(1) if UUID_RE.search(path.stem) else path.stem.replace("rollout-", "")),
                             "root_project": source.get("project", ""),
                             "root_source_status": source.get("source_status", ""),
                             "root_path": filename,

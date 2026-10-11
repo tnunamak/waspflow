@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sqlite3
 import sys
 from datetime import datetime
@@ -162,15 +163,30 @@ def tool_command_fields(obj: dict[str, Any]) -> Iterable[tuple[str, str]]:
 
 
 def lane_argument(command: str, lane: str) -> bool:
-    if not SPAWN_RE.search(command):
+    # Exact evidence is limited to a single, literal shell invocation. Shell
+    # control flow and wrapper interpreters require execution evidence that
+    # this offline reader does not have, so leave them unclassified.
+    if "\n" in command:
         return False
-    escaped = re.escape(lane)
-    return bool(
-        re.search(
-            rf"--lane(?:=|\s+)(?:[\"'])?{escaped}(?:[\"'])?(?=\s|[\"',}})]|$)",
-            command,
-        )
-    )
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    if any(token and all(char in ";&|()<>" for char in token) for token in tokens):
+        return False
+    if len(tokens) < 2 or Path(tokens[0]).name != "waspflow" or tokens[1] != "spawn":
+        return False
+    args = tokens[2:]
+    if "--" in args:
+        args = args[:args.index("--")]
+    for index, token in enumerate(args):
+        if token == "--lane" and index + 1 < len(args):
+            return args[index + 1] == lane
+        if token.startswith("--lane="):
+            return token[len("--lane="):] == lane
+    return False
 
 
 def lane_spawn_epoch(state_dir: Path, lane: str) -> int:
