@@ -55,7 +55,7 @@ selection_observe_availability() {
   [[ -n "$model" ]] || { jq -cn --arg p "$provider" '{schema_version:1,provider:$p,model:"",state:"not_applicable",evidence_source:"none",query_scope:"not_applicable",observed_at:null,detail:""}'; return; }
   raw="$("${provider}_valid_models" 2>/dev/null || true)"
   header="$(head -n 1 <<<"$raw")"; source="${header#source=}"
-  case "$header" in source=live_query|source=local_cache|source=non_enumerable|source=none) ;; *) source=none ;; esac
+  case "$header" in source=live_query|source=local_cache|source=non_enumerable|source=none) ;; *) source=none; raw="" ;; esac
   valid="$(tail -n +2 <<<"$raw")"; grep -qxF "$model" <<<"$valid" && listed=true
   local state=unknown
   [[ "$listed" == true ]] && state=available
