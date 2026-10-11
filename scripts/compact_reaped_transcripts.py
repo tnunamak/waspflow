@@ -13,7 +13,7 @@ Safety model (all required):
      minutes on this host.
   3. A lane is additionally skipped if any of its recorded
      cgroup_scope_receipts[].unit appears in the currently-active systemd
-     --user scope set (queried once per run). tmux_pane_pid is NOT used as a
+     --user scope set (refreshed before replacement). tmux_pane_pid is NOT used as a
      liveness signal -- it is the pane shell PID and gives false-dead readings.
   4. Compaction writes to a temp file in the SAME directory, fsyncs, verifies,
      then os.rename()s over the original. Never truncates in place.
@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import argparse
 import glob
+import fcntl
+import hashlib
 import json
 import os
 import subprocess
@@ -48,6 +50,7 @@ from ansi_strip import AnsiStripper, strip_bytes  # noqa: E402
 
 DEFAULT_LANES_DIR = os.path.expanduser("~/.local/state/waspflow/lanes")
 CHUNK_SIZE = 4 * 1024 * 1024  # 4 MiB read chunks
+WHOLE_BUFFER_CAP = 64 * 1024 * 1024  # verify by whole-buffer strip at or below this size
 ESC = 0x1B
 
 
@@ -157,27 +160,37 @@ def verify_compacted(original_path: str, compacted_path: str) -> tuple[bool, str
     execution path across chunk boundaries (the documented failure mode is
     boundary-dependent, so varying the boundary is a real independent check)
     plus a whole-buffer pass for files under a size cap."""
-    with open(compacted_path, "rb") as f:
-        compacted = f.read()
-
-    if has_esc(compacted):
-        return False, "residual ESC bytes present in compacted output"
-
     orig_size = os.path.getsize(original_path)
-    if orig_size <= 64 * 1024 * 1024:
-        # Small enough: do a true independent whole-buffer strip as reference.
+    compacted_size = os.path.getsize(compacted_path)
+    if max(orig_size, compacted_size) <= WHOLE_BUFFER_CAP:
+        # Read at most cap+1 bytes: a file that grew after the size check falls
+        # through to the streaming path instead of being read whole.
+        with open(compacted_path, "rb") as f:
+            compacted = f.read(WHOLE_BUFFER_CAP + 1)
         with open(original_path, "rb") as f:
-            original = f.read()
-        reference = strip_bytes(original)
-        if reference != compacted:
-            return False, "whole-buffer reference strip does not match streamed output"
-        return True, ""
+            original = f.read(WHOLE_BUFFER_CAP + 1)
+        if max(len(compacted), len(original)) <= WHOLE_BUFFER_CAP:
+            if has_esc(compacted):
+                return False, "residual ESC bytes present in compacted output"
+            # Small enough: do a true independent whole-buffer strip as reference.
+            reference = strip_bytes(original)
+            if reference != compacted:
+                return False, "whole-buffer reference strip does not match streamed output"
+            return True, ""
+        del compacted, original
 
     # Large file: re-run the streaming stripper with a DIFFERENT chunk size
     # (odd, small) as an independent cross-check that chunk boundaries didn't
     # matter, then compare sizes and a content hash.
-    import hashlib
-    h1 = hashlib.sha256(compacted).hexdigest()
+    compacted_hash = hashlib.sha256()
+    compacted_size = 0
+    with open(compacted_path, "rb") as f:
+        while chunk := f.read(CHUNK_SIZE):
+            if has_esc(chunk):
+                return False, "residual ESC bytes present in compacted output"
+            compacted_hash.update(chunk)
+            compacted_size += len(chunk)
+    h1 = compacted_hash.hexdigest()
     stripper = AnsiStripper()
     h2 = hashlib.sha256()
     total = 0
@@ -194,7 +207,7 @@ def verify_compacted(original_path: str, compacted_path: str) -> tuple[bool, str
         if tail:
             h2.update(tail)
             total += len(tail)
-    if total != len(compacted) or h2.hexdigest() != h1:
+    if total != compacted_size or h2.hexdigest() != h1:
         return False, "alternate-chunk-size re-strip does not match streamed output"
     return True, ""
 
@@ -258,7 +271,12 @@ def process_lane(lane_dir: str, active_scopes: set[str], apply: bool) -> Receipt
         return Receipt(path=transcript_path, lane=lane, action="noop",
                         reason="empty file", bytes_before=0, bytes_after=0)
 
-    if already_compacted(transcript_path):
+    try:
+        clean = already_compacted(transcript_path)
+    except OSError as e:
+        return Receipt(path=transcript_path, lane=lane, action="error",
+                       reason=f"preflight read failed: {e}", bytes_before=before)
+    if clean:
         return Receipt(path=transcript_path, lane=lane, action="noop",
                         reason="no ESC bytes present (already compacted)",
                         bytes_before=before, bytes_after=before)
@@ -284,15 +302,9 @@ def process_lane(lane_dir: str, active_scopes: set[str], apply: bool) -> Receipt
     # --- apply path ---
     lane_dir_real = os.path.dirname(transcript_path)
     tmp_path = None
+    state_lock = None
     try:
-        # Re-check eligibility ONE more time immediately before the write,
-        # since strip+verify of a >100MB file can take real wall-clock time
-        # during which this lane could transition (rule 2).
-        eligible, reason = lane_is_eligible_now(state_path, active_scopes)
-        if not eligible:
-            return Receipt(path=transcript_path, lane=lane, action="skip",
-                            reason=f"became ineligible before write: {reason}")
-
+        original_stat = os.stat(transcript_path)
         tmp_path, after = stream_strip_to_tempfile(transcript_path, lane_dir_real)
 
         ok, why = verify_compacted(transcript_path, tmp_path)
@@ -301,12 +313,23 @@ def process_lane(lane_dir: str, active_scopes: set[str], apply: bool) -> Receipt
             return Receipt(path=transcript_path, lane=lane, action="skip",
                             reason=f"verification failed: {why}", bytes_before=before)
 
-        # Final liveness re-check immediately before the rename (rule 2/3).
-        eligible, reason = lane_is_eligible_now(state_path, active_scopes)
+        # Final liveness uses a fresh scope census; an earlier snapshot cannot
+        # prove that no writer became active while stripping and verifying.
+        # Keep the state-file lock only across this final check and replacement.
+        state_lock = open(os.path.join(lane_dir, ".state.lock"), "a")
+        fcntl.flock(state_lock, fcntl.LOCK_EX)
+        eligible, reason = lane_is_eligible_now(state_path, get_active_waspflow_scopes())
         if not eligible:
             os.unlink(tmp_path)
             return Receipt(path=transcript_path, lane=lane, action="skip",
                             reason=f"became ineligible before rename: {reason}")
+
+        current_stat = os.stat(transcript_path)
+        if (current_stat.st_dev, current_stat.st_ino, current_stat.st_size, current_stat.st_mtime_ns) != (
+            original_stat.st_dev, original_stat.st_ino, original_stat.st_size, original_stat.st_mtime_ns
+        ):
+            return Receipt(path=transcript_path, lane=lane, action="skip",
+                           reason="transcript changed during compaction", bytes_before=before)
 
         os.replace(tmp_path, transcript_path)  # atomic rename, same filesystem
         tmp_path = None
@@ -316,6 +339,8 @@ def process_lane(lane_dir: str, active_scopes: set[str], apply: bool) -> Receipt
         return Receipt(path=transcript_path, lane=lane, action="error",
                         reason=f"{e}\n{traceback.format_exc(limit=3)}", bytes_before=before)
     finally:
+        if state_lock:
+            state_lock.close()
         if tmp_path and os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)

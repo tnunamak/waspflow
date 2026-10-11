@@ -315,6 +315,11 @@ def analyze(repo, wt_entry, procs, panes, lanes, default_ref):
         row["reasons"] = [f"scan error: {exc}"]
     if not os.path.isdir(path):
         row.update(disposition="gone", reasons=[])
+    elif row["disposition"] in {"unknown", "removable"}:
+        rc, current_head = git(path, "rev-parse", "HEAD")
+        if rc != 0 or current_head.strip() != head:
+            row.update(disposition="blocked", evidence=None,
+                       reasons=["HEAD changed or unavailable since worktree enumeration"])
     return row
 
 
@@ -344,7 +349,8 @@ def pr_for_sha(repo, sha):
 
 def resolve_prs(repo, rows):
     pending = [r for r in rows if r["disposition"] == "unknown" and r["head"]
-               and not r["reasons"] == ["git status failed"]]
+               and not r["reasons"] == ["git status failed"]
+               and not any(reason.startswith("scan error:") for reason in r["reasons"])]
     if not pending:
         return
     heads, truncated = merged_pr_heads(repo)
@@ -359,6 +365,11 @@ def resolve_prs(repo, rows):
                 r["reasons"].append("merged-PR check unknown: gh search failed")
                 continue
         if found:
+            rc, current_head = git(r["path"], "rev-parse", "HEAD")
+            if rc != 0 or current_head.strip() != r["head"]:
+                r.update(disposition="blocked", evidence=None,
+                         reasons=["HEAD changed or unavailable during merged-PR check"])
+                continue
             r["disposition"], r["evidence"] = "removable", "merged-pr"
             r["reasons"] = ["merged PR head equals HEAD"]
         else:

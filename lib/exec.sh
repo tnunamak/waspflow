@@ -421,7 +421,12 @@ _exec_grok() {
   [[ -n "$model" ]] && model_args=(-m "$model")
   local -a effort_args=()
   case "$effort" in
-    low|medium|high|xhigh|max) effort_args=(--effort "$effort") ;;
+    "") ;;
+    none|minimal|low|medium|high|xhigh|max) effort_args=(--effort "$effort") ;;
+    *)
+      err "exec/grok: unsupported effort '$effort' (use none|minimal|low|medium|high|xhigh|max)"
+      return 1
+      ;;
   esac
 
   local log_file rc=0
