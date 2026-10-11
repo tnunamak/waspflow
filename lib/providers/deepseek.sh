@@ -159,12 +159,13 @@ deepseek_preflight() {
 #                      reading the session id off disk, BEFORE lane_set.
 #                      Survives crashes between discovery and state persistence.
 #   3. filesystem   — scans $DSH_HOME/sessions for exactly one session-*
-#                      directory newer than the spawn marker.  Last resort;
+#                      directory newer than the spawn marker, only after
+#                      invocation completion. Last resort;
 #                      the marker bounds it, but a concurrent dsh run started
 #                      in the same window would make it ambiguous (in which
 #                      case it deliberately returns nothing rather than guess).
 deepseek_discover_session() {
-  local lane="$1" sid sid_file marker root candidates
+  local lane="$1" invocation_complete="${2:-false}" sid sid_file marker root candidates
 
   sid="$(lane_get "$lane" session_id)"
   [[ -n "$sid" ]] && { printf '%s\n' "$sid"; return 0; }
@@ -179,6 +180,9 @@ deepseek_discover_session() {
     fi
   fi
 
+  # A sole candidate while this invocation is starting may belong to another
+  # run. Do not cache timestamp-only evidence before this provider exits.
+  [[ "$invocation_complete" == true ]] || return 0
   marker="$(lane_dir "$lane")/$DEEPSEEK_MARKER_NAME"
   [[ -f "$marker" ]] || return 0
   root="$(_deepseek_home)/sessions"
@@ -302,7 +306,7 @@ rc=${pipeline_rc[0]}
 tee_rc=${pipeline_rc[1]}
 DEEPSEEK_SCRIPT
   # Session discovery is filesystem-only: dsh prints no session id on stdout.
-  printf 'sid=$(deepseek_discover_session %q 2>/dev/null || true)\n' "$lane"
+  printf 'sid=$(deepseek_discover_session %q true 2>/dev/null || true)\n' "$lane"
   cat <<'DEEPSEEK_SCRIPT'
 outcome=failed
 if [[ "$rc" -eq 0 && "$tee_rc" -ne 0 ]]; then
