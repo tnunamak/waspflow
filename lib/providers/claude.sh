@@ -617,12 +617,22 @@ claude_refresh_runtime_settings() {
   # must not be forgeable from untrusted content. grep narrows candidate lines
   # (logs reach hundreds of MB), jq types them: only top-level assistant
   # records count. timeout guards reap against pathological files.
-  local models grep_cmd=(grep -a '"model":"claude-' "$file")
+  local models nonce grep_cmd
+  nonce="$(lane_get "$lane" runtime_settings_submission_nonce)"
+  grep_cmd=(grep -a -F -e '"model":"claude-')
+  [[ -z "$nonce" ]] || grep_cmd+=(-e "$nonce")
+  grep_cmd+=("$file")
   # When timeout exists it is the ONLY grep we run: a fallback rerun after an
   # expiry would be exactly the unbounded scan the guard exists to prevent.
   command -v timeout >/dev/null 2>&1 && grep_cmd=(timeout 15 "${grep_cmd[@]}")
   models="$("${grep_cmd[@]}" 2>/dev/null \
-    | jq -r 'select(type == "object" and .type? == "assistant") | .message.model // empty' 2>/dev/null | sort -u)"
+    | jq -nr --arg nonce "$nonce" '
+      def user_text: .message.content | if type == "string" then . elif type == "array" then map(select(.type? == "text") | .text // "") | join("\n") else "" end;
+      foreach inputs as $row ({in_arm:($nonce == ""),model:null};
+        .model = null |
+        if ($row.type? == "user" and ($row.isMeta? != true) and ($row | user_text | contains($nonce))) then .in_arm = true else . end |
+        if .in_arm and $row.type? == "assistant" then .model = $row.message.model else . end;
+        .model // empty)'  2>/dev/null | sort -u)"
   [[ -n "$models" ]] || { _claude_runtime_refresh_health unknown no-model-events; return 0; }
   if [[ "$(wc -l <<<"$models")" -gt 1 ]]; then
     # More than one model served this session (provider fallback, /model switch
