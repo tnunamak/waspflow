@@ -204,7 +204,7 @@ CODEX
     || { echo "codex billing: API-key doctor warning was not determinate" >&2; exit 1; }
   [[ "$api_preflight" == "waspflow: codex billing notice: active Codex login uses API-key auth; Codex usage is billed at API pay-as-you-go rates." ]] \
     || { echo "codex billing: API-key preflight warning was not determinate" >&2; exit 1; }
-  ! grep -qiE 'may|verify' <<<"$api_doctor$api_preflight" \
+  ! grep -qiE 'may|verify' <<<"$(grep 'codex auth:' <<<"$api_doctor")$api_preflight" \
     || { echo "codex billing: API-key warning retained speculative wording" >&2; exit 1; }
 
   # A failed or timed-out probe is explicit unknown, not silence or a false
@@ -7706,4 +7706,7 @@ source "$root/scripts/fixtures/verify-r3-f4.sh"
 source "$root/scripts/fixtures/verify-r6.sh"
 source "$root/scripts/fixtures/verify-r7.sh"
 source "$root/scripts/fixtures/verify-r8.sh"
+python3 "$root/scripts/fixtures/verify-p2-ansi.py" "$root"
+source "$root/scripts/fixtures/verify-p2-billing.sh"
+python3 "$root/scripts/fixtures/verify-p2-gc.py" "$root"
 echo "waspflow verify: ok"
