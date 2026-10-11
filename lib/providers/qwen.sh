@@ -27,7 +27,7 @@ qwen_valid_models() {
     printf 'source=none\n'; return 0
   }
   [[ -n "$models" ]] || { printf 'source=none\n'; return 0; }
-  printf '%s\n' 'source=settings_json'
+  printf '%s\n' 'source=local_cache'
   printf '%s\n' "$models" | awk 'NF && !seen[$0]++'
 }
 
