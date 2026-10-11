@@ -2,7 +2,17 @@
 # coverage in this slice uses a private socket.
 (
   r3f1="$(mktemp -d "$scratch/waspflow-r3-f1-XXXXXX")"
-  trap 'rm -rf "$r3f1"' EXIT
+  cleanup_r3f1() {
+    local pid ticks
+    for pid in "${child:-}" "${leader:-}"; do
+      [[ "$pid" =~ ^[0-9]+$ ]] || continue
+      if [[ "$pid" == "${child:-}" ]]; then ticks="${child_ticks:-}"; else ticks="${leader_ticks:-}"; fi
+      [[ -n "$ticks" && "$(process_start_ticks "$pid" 2>/dev/null || true)" == "$ticks" ]] || continue
+      kill -KILL "$pid" 2>/dev/null || true
+    done
+    rm -rf "$r3f1"
+  }
+  trap cleanup_r3f1 EXIT
   export WASPFLOW_HOME="$r3f1/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"
   mkdir -p "$WASPFLOW_HOME"
@@ -24,10 +34,12 @@ EOF
     while [[ ! -e "$release" ]]; do sleep 0.02; done
   ' -- "$r3f1/child.sh" "$release" "$r3f1/ready" &
   leader=$!
+  leader_ticks="$(process_start_ticks "$leader")"
   for _ in {1..100}; do [[ -s "$r3f1/ready.leader" && -s "$r3f1/ready.child" ]] && break; sleep 0.02; done
   [[ -s "$r3f1/ready.leader" && -s "$r3f1/ready.child" ]]
   recorded_leader="$(cat "$r3f1/ready.leader")"
   child="$(cat "$r3f1/ready.child")"
+  child_ticks="$(process_start_ticks "$child")"
   read -r recorded_pgid recorded_sid < <(ps -o pgid= -o sid= -p "$recorded_leader")
   lane_set descendants provider fake cwd "$r3f1" detached_session_receipts "[]"
   tmux_record_lane_detached_session descendants pane "$recorded_leader" "$recorded_pgid" "$recorded_sid" "$(process_start_ticks "$recorded_leader")"
@@ -116,6 +128,7 @@ EOF
   # B10: doctor treats an unavailable remote version probe as an advisory WARN.
   mkdir -p "$r3f1/bin"
   printf '#!/usr/bin/env bash\nexit 0\n' >"$r3f1/bin/codex"
+  export R3F1_REAL_GIT="$(type -P git)"
   cat >"$r3f1/bin/git" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
@@ -123,7 +136,7 @@ case "$*" in
   *'describe --tags'*) printf 'v0.0.0\n' ;;
   *'rev-list --count'*) printf '0\n' ;;
   *'ls-remote --tags --refs origin'*) exit 1 ;;
-  *) command git "$@" ;;
+  *) exec "$R3F1_REAL_GIT" "$@" ;;
 esac
 EOF
   chmod +x "$r3f1/bin/codex" "$r3f1/bin/git"
