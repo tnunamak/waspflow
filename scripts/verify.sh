@@ -4052,7 +4052,7 @@ PROV
     "$root/bin/waspflow" reap mcp-state --no-archive --force >/dev/null
   [[ "$(wc -l <"$mcphome/receipts.jsonl")" -eq 2 ]] \
     || { echo "receipt reuse: second lane life did not append a second receipt" >&2; exit 1; }
-  jq -s --arg first_receipt_id "$first_receipt_id" --arg first_lane_uuid "$first_lane_uuid" '
+  jq -es --arg first_receipt_id "$first_receipt_id" --arg first_lane_uuid "$first_lane_uuid" '
     length == 2 and .[1].receipt_id != $first_receipt_id and .[1].lane_uuid != $first_lane_uuid
   ' "$mcphome/receipts.jsonl" >/dev/null \
     || { echo "receipt reuse: receipt or lane UUID was reused" >&2; exit 1; }
@@ -7006,8 +7006,7 @@ DSH
 )
 # The generator must not silently drop a level it does not recognize: that is how
 # a newly-shipped provider level becomes an unexplained CLI rejection.
-grep -q 'extra = sorted(provider_efforts\[prov\] - set(ORDER))' "$root/scripts/gen_effort_whitelists.py" \
-  || { echo "effort: generator can still drop unknown levels" >&2; exit 1; }
+source "$root/scripts/fixtures/verify-p2-effort-generator.sh"
 
 # ULTRA REACHES EVERY REAL CODEX LAUNCH ARM. Constants are not proof: these
 # tests call the production functions, mock only their process/tmux boundaries,
@@ -7706,4 +7705,5 @@ source "$root/scripts/fixtures/verify-r3-f4.sh"
 source "$root/scripts/fixtures/verify-r6.sh"
 source "$root/scripts/fixtures/verify-r7.sh"
 source "$root/scripts/fixtures/verify-r8.sh"
+python3 "$root/scripts/fixtures/verify-p2-fixtures.py" "$root"
 echo "waspflow verify: ok"

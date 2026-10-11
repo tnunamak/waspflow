@@ -44,9 +44,11 @@ EOF
   lane_set direct provider fake cwd "$r6" detached_session_receipts '[]'
   tmux_record_lane_detached_session direct pane "$leader" "$leader_pgid" "$leader_sid" "$(process_start_ticks "$leader")"
   signal_log="$r6/signals"
-  kill() { printf '%s\\n' "$*" >>"$signal_log"; builtin kill "$@"; }
+  kill() { printf '%s\n' "$*" >>"$signal_log"; builtin kill "$@"; }
   tmux_kill_owned_lane_detached_sessions direct
-  if grep -Eq -- '(^| )--?-[0-9]+$' "$signal_log"; then
+  printf '%s\n' '-TERM -- -123' >"$r6/forbidden-signal"
+  grep -Eq -- '(^| )-[0-9]+( |$)' "$r6/forbidden-signal"
+  if grep -Eq -- '(^| )-[0-9]+( |$)' "$signal_log"; then
     echo 'r6 C1: cleanup used a negative process-group signal' >&2; exit 1
   fi
   if kill -0 "$leader" 2>/dev/null || kill -0 "$child" 2>/dev/null; then

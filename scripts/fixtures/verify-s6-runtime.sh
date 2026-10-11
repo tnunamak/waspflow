@@ -83,6 +83,7 @@ fi
 tmux kill-window -t "$untagged"
 
 # A lane session gets the conservative cap; an unrelated session remains alone.
+WASPFLOW_TMUX_HISTORY_LIMIT=100000 WASPFLOW_TMUX_HISTORY_LIMIT_EXPLICIT=true
 tmux set-option -g history-limit 500000
 tmux set-window-option -t unrelated:0 history-limit 500000
 tmux_ensure_session
