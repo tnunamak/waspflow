@@ -43,16 +43,17 @@ reconcile_fleet_health_json() {
 # Append a redacted delivery obligation. Event ids include the generation, so a
 # revised turn cannot acknowledge a previous turn's obligation.
 reconcile_event_emit() (
-  local lane="$1" generation="$2" kind="$3" event_id="${4:-}" ledger fd payload absent
+  local lane="$1" generation="$2" kind="$3" event_id="${4:-}" ledger fd payload absent lane_uuid
   [[ -n "$lane" && "$generation" =~ ^[0-9]+$ && "$kind" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
-  event_id="${event_id:-$(printf '%s' "$lane|$generation|$kind" | sha256sum | awk '{print substr($1,1,32)}')}"
+  lane_uuid="$(lane_get "$lane" lane_uuid)"
+  event_id="${event_id:-$(printf '%s' "$lane_uuid|$lane|$generation|$kind" | sha256sum | awk '{print substr($1,1,32)}')}"
   ledger="$(reconcile_event_ledger)"; mkdir -p -m 700 "$WASPFLOW_HOME" "$WASPFLOW_LOCKS_DIR" || return 1
   exec {fd}>"$WASPFLOW_LOCKS_DIR/events.lock" || return 1; flock -x "$fd" || return 1
   touch "$ledger" || { flock -u "$fd"; exec {fd}>&-; return 1; }
   absent="$(jq -sr --arg id "$event_id" '[.[] | select(.event_id == $id)] | length == 0' "$ledger")" || return 1
   if [[ "$absent" == true ]]; then
-    payload="$(jq -cn --arg id "$event_id" --arg lane "$lane" --arg kind "$kind" --argjson generation "$generation" \
-      '{schema:"waspflow-owner-event/v1",event_id:$id,lane:$lane,generation:$generation,kind:$kind,state:"pending",created_epoch:now}')" || return 1
+    payload="$(jq -cn --arg id "$event_id" --arg lane "$lane" --arg lane_uuid "$lane_uuid" --arg kind "$kind" --argjson generation "$generation" \
+      '{schema:"waspflow-owner-event/v1",event_id:$id,lane:$lane,lane_uuid:$lane_uuid,generation:$generation,kind:$kind,state:"pending",created_epoch:now}')" || return 1
     printf '%s\n' "$payload" >>"$ledger" || return 1
   fi
   printf '%s\n' "$event_id"
@@ -79,7 +80,7 @@ reconcile_event_claim() (
 )
 
 reconcile_event_ack() (
-  local event_id="$1" consumer="$2" claims ledger fd tmp lane generation latest
+  local event_id="$1" consumer="$2" claims ledger fd tmp lane generation latest lane_uuid
   claims="$(reconcile_event_claims)"; [[ -f "$claims" ]] || return 1
   ledger="$(reconcile_event_ledger)"; [[ -f "$ledger" ]] || return 1
   mkdir -p -m 700 "$WASPFLOW_HOME" "$WASPFLOW_LOCKS_DIR" || return 1
@@ -87,7 +88,9 @@ reconcile_event_ack() (
   lane="$(jq -sr --arg id "$event_id" 'map(select(.event_id == $id)) | last | .lane // ""' "$ledger")" || return 1
   generation="$(jq -sr --arg id "$event_id" 'map(select(.event_id == $id)) | last | .generation // ""' "$ledger")" || return 1
   [[ -n "$lane" && "$generation" =~ ^[0-9]+$ ]] || return 1
-  latest="$(jq -sr --arg lane "$lane" '[.[] | select(.lane == $lane) | .generation] | max // -1' "$ledger")" || return 1
+  lane_uuid="$(jq -sr --arg id "$event_id" 'map(select(.event_id == $id)) | last | .lane_uuid // ""' "$ledger")" || return 1
+  [[ "$lane_uuid" == "$(lane_get "$lane" lane_uuid)" ]] || return 1
+  latest="$(jq -sr --arg lane "$lane" --arg uuid "$lane_uuid" '[.[] | select(.lane == $lane and (.lane_uuid // "") == $uuid) | .generation] | max // -1' "$ledger")" || return 1
   # A newer generation supersedes this obligation. An old completion cannot
   # acknowledge current work merely because the same consumer still has it.
   [[ "$latest" == "$generation" ]] || return 1
@@ -117,8 +120,8 @@ reconcile_lane_json() {
       pending_events=null; superseded_pending_events=null; pending_events_state=unknown; pending_events_reason="unreadable-event-claims"
     else
       [[ -f "$claims_file" ]] || claims='{}'
-      if ! event_summary="$(jq -cs --arg lane "$lane" --argjson claims "$claims" '
-      [ .[] | select(.lane == $lane) ] as $events |
+      if ! event_summary="$(jq -cs --arg lane "$lane" --arg uuid "$(jq -r '.lane_uuid // ""' <<<"$record")" --argjson claims "$claims" '
+      [ .[] | select(.lane == $lane and (.lane_uuid // "") == $uuid) ] as $events |
       if any($events[]?; (.generation | type) != "number") then
         {state:"unknown",pending:null,superseded:null,reason:"invalid-event-generation"}
       else
@@ -203,7 +206,7 @@ EOF
 }
 
 _reconcile_adopt_locked() {
-  local lane="$1" owner="$2" state current record active='[]' scopes_ok=true classification
+  local lane="$1" owner="$2" state current record active='[]' scopes_ok=true classification revision
   record="$(cat "$(lane_state_file "$lane")" 2>/dev/null)" || return 1; jq -e type >/dev/null <<<"$record" || return 1
   if ! active="$(waspflow_active_scope_snapshot 2>/dev/null)"; then
     active='[]'; scopes_ok=false
@@ -212,6 +215,8 @@ _reconcile_adopt_locked() {
   [[ "$classification" != unknown ]] || { err "reconcile: lane '$lane' has uncertain identity; refusing adoption"; return 1; }
   current="$(lane_get "$lane" owner_ref)"; [[ "$current" == "$owner" ]] && { log "reconcile: lane '$lane' already owned by '$owner'"; return 0; }
   provenance_emit_owner_handoff "$lane" "$current" "$owner" || return 1
-  lane_set "$lane" owner_ref "$owner" owner_handoff_state recorded event_subscription_state pending
+  revision="$(lane_get "$lane" owner_handoff_revision)"
+  [[ "$revision" =~ ^[0-9]+$ ]] || revision=0
+  lane_set "$lane" owner_ref "$owner" owner_handoff_revision "$((revision+1))" owner_handoff_state recorded event_subscription_state pending
   log "reconcile: adopted '$lane' for '$owner' (no resources were stopped or removed)"
 }
