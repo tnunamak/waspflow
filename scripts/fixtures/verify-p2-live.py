@@ -33,8 +33,13 @@ if cmd == "spawn":
     if mode == "spawnfail": sys.exit(1)
     (state / lane).write_text(os.getcwd())
     if mode != "noedit":
-        match = re.search(r"TOKEN_A_\d+|T\d+_A", " ".join(args))
-        with pathlib.Path("f.txt").open("a") as f: f.write(match.group() + "\n")
+        match = re.search(r"TOKEN_A_[\w-]+|T[\w-]+_A", " ".join(args))
+        token = match.group()
+        if mode == "stale":
+            previous = state / ("first-" + lane.rsplit("-", 1)[-1])
+            if previous.exists(): token = previous.read_text()
+            else: previous.write_text(token)
+        with pathlib.Path("f.txt").open("a") as f: f.write(token + "\n")
 elif cmd == "status": print('{"spawn_submitted":true}')
 elif cmd == "wait":
     counter = state / (args[0] + ".waits")
@@ -42,10 +47,12 @@ elif cmd == "wait":
     counter.write_text(str(count))
     if mode == "timeout" or (mode == "secondtimeout" and count == 2): sys.exit(1)
 elif cmd == "revise" and mode != "noedit":
-    match = re.search(r"TOKEN_B_\d+|T\d+_B", " ".join(args))
+    match = re.search(r"TOKEN_B_[\w-]+|T[\w-]+_B", " ".join(args))
     with (pathlib.Path((state / args[0]).read_text()) / "f.txt").open("a") as f: f.write(match.group() + "\n")
     if mode == "revisefail": sys.exit(1)
-elif cmd == "reap": print("result=succeeded")
+elif cmd == "reap":
+    print("result=succeeded")
+    if mode == "reapfail": sys.exit(1)
 ''')
         fake.chmod(0o755)
         monitor = self.repo / "bin/clawmeter"
@@ -106,6 +113,27 @@ elif cmd == "reap": print("result=succeeded")
                 self.assertNotIn("LIVE MATRIX: GREEN", result.stdout)
                 self.assertEqual(list((self.repo / "scratch").glob("wf-live-1-*")), [])
                 self.assertIn("reap", [cmd for cmd, _ in self.calls()])
+                pathlib.Path(self.env["CALLS"]).unlink()
+
+    def test_failed_reap_never_reports_success_or_deletes_worker_directory(self):
+        for script, args, pattern in (("live-smoke.sh", ["claude", "1"], "wf-live-1-*"),
+                                       ("live-soak.sh", ["1"], "soak-soak-*")):
+            with self.subTest(script=script):
+                result = self.run_harness(script, args, "reapfail")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertNotIn("GREEN", result.stdout)
+                self.assertTrue(list((self.repo / "scratch").glob(pattern)), result.stdout)
+
+    def test_previous_run_edit_tokens_cannot_satisfy_current_run(self):
+        for script, args in (("live-smoke.sh", ["claude", "1"]), ("live-soak.sh", ["1"])):
+            with self.subTest(script=script):
+                for saved in pathlib.Path(self.env["FAKE_STATE"]).glob("first-*"): saved.unlink()
+                first = self.run_harness(script, args, "stale")
+                self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+                second = self.run_harness(script, args, "stale")
+                self.assertNotEqual(second.returncode, 0, second.stdout)
+                self.assertNotIn("GREEN", second.stdout)
+                for saved in pathlib.Path(self.env["FAKE_STATE"]).glob("first-*"): saved.unlink()
 
     def test_run_unique_labels(self):
         for _ in range(2): self.run_harness("live-smoke.sh", ["claude", "1"])

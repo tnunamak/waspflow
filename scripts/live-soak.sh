@@ -36,8 +36,11 @@ one() {
   if ! ( cd "$d" && env -u OPENAI_API_KEY "$BF" spawn --provider "$prov" "${mf[@]}" --lane "$lane" -- \
       "Append ${tag}_A to f.txt then stop." ) >/dev/null 2>&1; then
     printf '%s spawn=FAILED\n' "$lane($prov)" >> "$resfile"
-    env -u OPENAI_API_KEY "$BF" reap "$lane" --force >/dev/null 2>&1
-    rm -rf "$d"
+    if env -u OPENAI_API_KEY "$BF" reap "$lane" --force >/dev/null 2>&1; then
+      rm -rf "$d"
+    else
+      echo "  $lane reap command failed; preserving $d" >&2
+    fi
     return 1
   fi
   local sub; sub="$(env -u OPENAI_API_KEY "$BF" status "$lane" 2>/dev/null | jq -r '.spawn_submitted // "na"')"
@@ -47,18 +50,24 @@ one() {
   env -u OPENAI_API_KEY "$BF" revise "$lane" -- "Append ${tag}_B to f.txt then stop." >/dev/null 2>&1 || revise_status=$?
   env -u OPENAI_API_KEY timeout 135 "$BF" wait "$lane" --timeout 130 >/dev/null 2>&1 || revise_wait=$?
   local r=NO; grep -q "${tag}_B" "$d/f.txt" 2>/dev/null && r=YES
-  local rp; rp="$(env -u OPENAI_API_KEY "$BF" reap "$lane" --force 2>&1 | grep -oE 'result=[a-z_]+' | head -1)"
+  local reap_output reap_status=0 rp
+  reap_output="$(env -u OPENAI_API_KEY "$BF" reap "$lane" --force 2>&1)" || reap_status=$?
+  rp="$(grep -oE 'result=[a-z_]+' <<<"$reap_output" | head -1)"
   # Isolation: the file must NOT contain any OTHER lane's tag. (Substring check,
   # not whole-line: workers sometimes append without a trailing newline, which a
   # line-anchored regex mis-flags as dirty — that's a check artifact, not real
   # contamination. What matters is that no foreign tag leaked in.)
   local x=clean other
   for other in $(seq 1 $((PER*3))); do
-    [[ "T$other" == "$tag" ]] && continue
-    grep -qF "T${other}_" "$d/f.txt" 2>/dev/null && x="DIRTY_by_T$other"
+    [[ "T$run_id-$other" == "$tag" ]] && continue
+    grep -qF "T${run_id}-${other}_" "$d/f.txt" 2>/dev/null && x="DIRTY_by_T$other"
   done
-  printf '%s sub=%s spawn=%s revise=%s spawn_wait=%s revise_status=%s revise_wait=%s %s iso=%s\n' "$lane($prov)" "$sub" "$s" "$r" "$spawn_wait" "$revise_status" "$revise_wait" "${rp:-none}" "$x" >> "$resfile"
-  rm -rf "$d"
+  printf '%s sub=%s spawn=%s revise=%s spawn_wait=%s revise_status=%s revise_wait=%s reap_status=%s %s iso=%s\n' "$lane($prov)" "$sub" "$s" "$r" "$spawn_wait" "$revise_status" "$revise_wait" "$reap_status" "${rp:-none}" "$x" >> "$resfile"
+  if [[ "$reap_status" -eq 0 ]]; then
+    rm -rf "$d"
+  else
+    echo "  $lane reap command failed; preserving $d" >&2
+  fi
 }
 
 echo "=== waspflow LIVE SOAK: $PER lane(s) x 3 providers = $((PER*3)) concurrent lanes ==="
@@ -68,7 +77,7 @@ pids=(); n=0
 for p in 0 1 2; do
   for k in $(seq 1 "$PER"); do
     n=$((n+1))
-    one "soak-$run_id-$n" "${PROVIDERS[$p]}" "${MODELS[$p]}" "T$n" &
+    one "soak-$run_id-$n" "${PROVIDERS[$p]}" "${MODELS[$p]}" "T$run_id-$n" &
     pids+=("$!")
   done
 done
@@ -87,7 +96,7 @@ fi
 echo ""; echo "=== results ==="
 while IFS= read -r line; do
   echo "  $line"
-  if grep -qE 'sub=true spawn=YES revise=YES spawn_wait=0 revise_status=0 revise_wait=0 result=(succeeded|verified) iso=clean' <<<"$line"; then
+  if grep -qE 'sub=true spawn=YES revise=YES spawn_wait=0 revise_status=0 revise_wait=0 reap_status=0 result=(succeeded|verified) iso=clean' <<<"$line"; then
     pass=$((pass+1))
   else
     fail=$((fail+1))
