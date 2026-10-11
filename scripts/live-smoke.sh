@@ -41,7 +41,9 @@ one_lane() {
   # spawn
   if ! ( cd "$d" && "$BF" spawn --provider "$prov" --model "$model" --lane "$lane" -- \
       "Append a line reading TOKEN_A_$id to the file f.txt in this directory, then stop. Do nothing else." ) >/dev/null 2>&1; then
-    echo "SPAWN_FAILED" > "$log"; return 1
+    echo "SPAWN_FAILED" > "$log"
+    "$BF" reap "$lane" --force >/dev/null 2>&1
+    return 1
   fi
 
   if ! timeout 130 "$BF" wait "$lane" --timeout 120 >/dev/null 2>&1; then

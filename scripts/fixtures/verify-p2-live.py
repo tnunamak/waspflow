@@ -58,7 +58,7 @@ elif cmd == "reap": print("result=succeeded")
     def run_harness(self, name, args, mode="ok", drop_workers=False):
         script = self.repo / "scripts" / name
         if drop_workers:
-            text = script.read_text().replace('pids=(); n=0', 'one() { return 9; }\npids=(); n=0')
+            text = script.read_text().replace('pids=(); n=0', 'one() { return 0; }\npids=(); n=0')
             script.write_text(text)
         return subprocess.run(["bash", str(script), *args], env={**self.env, "MODE": mode},
                               capture_output=True, text=True, timeout=30)
@@ -75,6 +75,7 @@ elif cmd == "reap": print("result=succeeded")
     def test_missing_soak_workers(self):
         result = self.run_harness("live-soak.sh", ["1"], drop_workers=True)
         self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("expected 3 distinct worker results; got 0", result.stdout)
         self.assertNotIn("LIVE SOAK: GREEN", result.stdout)
 
     def test_ten_smoke_lanes(self):
@@ -113,7 +114,20 @@ elif cmd == "reap": print("result=succeeded")
 
     def test_failed_spawn_stops_lifecycle(self):
         self.run_harness("live-smoke.sh", ["claude", "1"], "spawnfail")
-        self.assertEqual([cmd for cmd, _ in self.calls()], ["spawn"])
+        self.assertEqual([cmd for cmd, _ in self.calls()], ["spawn", "reap"])
+
+    def test_soak_failed_spawn_reaps_before_removing_workdir(self):
+        result = self.run_harness("live-soak.sh", ["1"], "spawnfail")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        calls = self.calls()
+        self.assertEqual([cmd for cmd, _ in calls].count("spawn"), 3)
+        self.assertEqual([cmd for cmd, _ in calls].count("reap"), 3)
+        by_lane = {}
+        for cmd, args in calls:
+            lane = args[args.index("--lane") + 1] if cmd == "spawn" else args[0]
+            by_lane.setdefault(lane, []).append(cmd)
+        self.assertEqual(list(by_lane.values()), [["spawn", "reap"]] * 3)
+        self.assertEqual(list((self.repo / "scratch").glob("soak-soak-*")), [])
 
 sys.argv = [sys.argv[0]]
 unittest.main()

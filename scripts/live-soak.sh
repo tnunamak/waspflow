@@ -36,6 +36,7 @@ one() {
   if ! ( cd "$d" && env -u OPENAI_API_KEY "$BF" spawn --provider "$prov" "${mf[@]}" --lane "$lane" -- \
       "Append ${tag}_A to f.txt then stop." ) >/dev/null 2>&1; then
     printf '%s spawn=FAILED\n' "$lane($prov)" >> "$resfile"
+    env -u OPENAI_API_KEY "$BF" reap "$lane" --force >/dev/null 2>&1
     rm -rf "$d"
     return 1
   fi
