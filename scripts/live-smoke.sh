@@ -85,13 +85,13 @@ one_lane() {
   echo "REAP_EXIT_$reap_status" >> "$log"
   echo "REAP_${res:-none}" >> "$log"
   # Cross-contamination guard: this lane's file must contain ONLY its own tokens.
-  local other
-  for other in $(seq 1 "$N"); do
-    [[ "$other" == "$id" ]] && continue
-    if grep -qE "TOKEN_(A|B)_${run_id}_$other([^0-9]|$)" "$d/f.txt" 2>/dev/null; then
-      echo "CONTAMINATED_by_$other" >> "$log"
-    fi
-  done
+  local token
+  while IFS= read -r token; do
+    case "$token" in
+      "TOKEN_A_${run_id}_$id"|"TOKEN_B_${run_id}_$id") ;;
+      *) echo "CONTAMINATED_by_$token" >> "$log" ;;
+    esac
+  done < <(grep -oE 'TOKEN_[AB]_[[:alnum:]-]+_[0-9]+' "$d/f.txt" 2>/dev/null || true)
   # Result lives at a DETERMINISTIC path (no stdout capture race under concurrency).
   printf '%s\n' "$d" > "$rundir/lane-$id.dir"
 }

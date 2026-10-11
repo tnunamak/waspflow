@@ -57,11 +57,13 @@ one() {
   # not whole-line: workers sometimes append without a trailing newline, which a
   # line-anchored regex mis-flags as dirty — that's a check artifact, not real
   # contamination. What matters is that no foreign tag leaked in.)
-  local x=clean other
-  for other in $(seq 1 $((PER*3))); do
-    [[ "T$run_id-$other" == "$tag" ]] && continue
-    grep -qF "T${run_id}-${other}_" "$d/f.txt" 2>/dev/null && x="DIRTY_by_T$other"
-  done
+  local x=clean token
+  while IFS= read -r token; do
+    case "$token" in
+      "${tag}_A"|"${tag}_B") ;;
+      *) x="DIRTY_by_$token" ;;
+    esac
+  done < <(grep -oE 'T[[:alnum:]-]+-[0-9]+_[AB]' "$d/f.txt" 2>/dev/null || true)
   printf '%s sub=%s spawn=%s revise=%s spawn_wait=%s revise_status=%s revise_wait=%s reap_status=%s %s iso=%s\n' "$lane($prov)" "$sub" "$s" "$r" "$spawn_wait" "$revise_status" "$revise_wait" "$reap_status" "${rp:-none}" "$x" >> "$resfile"
   if [[ "$reap_status" -eq 0 ]]; then
     rm -rf "$d"

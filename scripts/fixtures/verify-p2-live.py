@@ -39,7 +39,14 @@ if cmd == "spawn":
             previous = state / ("first-" + lane.rsplit("-", 1)[-1])
             if previous.exists(): token = previous.read_text()
             else: previous.write_text(token)
-        with pathlib.Path("f.txt").open("a") as f: f.write(token + "\n")
+        extra = ""
+        if mode in ("foreignrun", "foreignrun_lane10"):
+            suffix = "10" if mode == "foreignrun_lane10" else ("2" if lane.rsplit("-", 1)[-1] == "1" else "1")
+            if token.startswith("TOKEN_A_"):
+                extra = " TOKEN_A_wf-live-run-OLD123_" + suffix
+            else:
+                extra = " Tsoak-res-OLD123-" + suffix + "_A"
+        with pathlib.Path("f.txt").open("a") as f: f.write(token + extra)
 elif cmd == "status": print('{"spawn_submitted":true}')
 elif cmd == "wait":
     counter = state / (args[0] + ".waits")
@@ -90,6 +97,12 @@ elif cmd == "reap":
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("CROSS-CONTAMINATED", result.stdout)
 
+    def test_twelve_soak_lanes(self):
+        result = self.run_harness("live-soak.sh", ["4"])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"soak-.*-12")
+        self.assertNotIn("DIRTY", result.stdout)
+
     def test_timeout_cleanup_receipt(self):
         result = self.run_harness("live-smoke.sh", ["claude", "1"], "timeout")
         self.assertIn("SPAWN_WAIT_TIMEOUT", result.stdout)
@@ -134,6 +147,19 @@ elif cmd == "reap":
                 self.assertNotEqual(second.returncode, 0, second.stdout)
                 self.assertNotIn("GREEN", second.stdout)
                 for saved in pathlib.Path(self.env["FAKE_STATE"]).glob("first-*"): saved.unlink()
+
+    def test_foreign_run_tokens_fail_isolation(self):
+        for script, args in (("live-smoke.sh", ["claude", "2"]), ("live-soak.sh", ["1"])):
+            with self.subTest(script=script):
+                result = self.run_harness(script, args, "foreignrun")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertNotIn("GREEN", result.stdout)
+
+    def test_foreign_run_lane_10_token_does_not_match_lane_1_prefix(self):
+        result = self.run_harness("live-smoke.sh", ["claude", "1"], "foreignrun_lane10")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("TOKEN_A_wf-live-run-OLD123_10", result.stdout)
+        self.assertNotIn("GREEN", result.stdout)
 
     def test_run_unique_labels(self):
         for _ in range(2): self.run_harness("live-smoke.sh", ["claude", "1"])
