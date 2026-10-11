@@ -570,13 +570,13 @@ artifacts_classify_pre_existing() {
     cleanup_baseline() { git -C "$repo_root" worktree remove --force "$tmp" >/dev/null 2>&1 || rm -rf "$tmp"; }
     trap cleanup_baseline EXIT INT TERM
     if [[ -n "$prepare_command" ]]; then
-      set +e; timeout "$timeout" bash -c "cd $(printf '%q' "$tmp") && $prepare_command" >/dev/null 2>&1; rc=$?; set -e
+      set +e; timeout --kill-after=1s "$timeout" bash -c "cd $(printf '%q' "$tmp") && $prepare_command" >/dev/null 2>&1; rc=$?; set -e
       [[ "$rc" -eq 0 ]] || { printf 'inconclusive\n'; exit 0; }
     fi
-    set +e; timeout "$timeout" bash -c "cd $(printf '%q' "$tmp") && $verify_command" >"$tmp/.waspflow-baseline-stdout" 2>"$tmp/.waspflow-baseline-stderr"; rc=$?; set -e
+    set +e; timeout --kill-after=1s "$timeout" bash -c "cd $(printf '%q' "$tmp") && $verify_command" >"$tmp/.waspflow-baseline-stdout" 2>"$tmp/.waspflow-baseline-stderr"; rc=$?; set -e
     case "$rc" in
       0) printf 'passed\n' ;;
-      124|126|127) printf 'inconclusive\n' ;;
+      124|137|126|127) printf 'inconclusive\n' ;;
       *) cat "$tmp/.waspflow-baseline-stdout" "$tmp/.waspflow-baseline-stderr" | cksum | awk '{print "failed:" $1 ":" $2}' ;;
     esac
   )"
@@ -937,7 +937,7 @@ _artifacts_run_command() {
   set +e
   if command -v timeout >/dev/null 2>&1; then
     timeout_available=1
-    (cd "$cwd" && timeout "$timeout_seconds" bash -c "$command") >"$stdout" 2>"$stderr"
+    (cd "$cwd" && timeout --kill-after=1s "$timeout_seconds" bash -c "$command") >"$stdout" 2>"$stderr"
     rc=$?
   else
     warn "verify: coreutils 'timeout' not found; running '$name' without a timeout"
@@ -948,7 +948,7 @@ _artifacts_run_command() {
   end="$(date +%s)"
   duration=$((end - start))
 
-  if [[ "$timeout_available" -eq 1 && "$rc" -eq 124 ]]; then
+  if [[ "$timeout_available" -eq 1 && ( "$rc" -eq 124 || "$rc" -eq 137 ) ]]; then
     state="timeout"
   elif [[ "$rc" -eq 0 ]]; then
     state="passed"

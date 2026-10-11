@@ -33,7 +33,7 @@ my $partial = qr/
     \e(?:[%#]|[\(\)\*\+\-\.\/])? |
     \e
   )\z
-/x;
+/xs;
 
 while (sysread(STDIN, my $chunk, $chunk_size)) {
     $buffer .= $chunk;

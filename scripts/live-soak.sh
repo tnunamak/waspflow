@@ -19,7 +19,9 @@ scratch="${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}"
 export WASPFLOW_HOME="${WASPFLOW_HOME:-$HOME/.local/state/waspflow}"
 
 pass=0; fail=0
+[[ "$PER" =~ ^[1-9][0-9]*$ ]] || { echo "n_per_provider must be a positive integer" >&2; exit 1; }
 resfile="$(mktemp "$scratch/soak-res-XXXXXX")"
+run_id="${resfile##*/}"
 
 # providers[i] paired with model[i]; empty model = provider default.
 PROVIDERS=(claude codex grok)
@@ -31,8 +33,12 @@ one() {
   ( cd "$d" && git init -q && git config user.email t@e.invalid && git config user.name T \
       && printf 'L0\n' > f.txt && git add -A && git commit -q -m init )
   local -a mf=(); [[ -n "$model" ]] && mf=(--model "$model") || mf=(--accept-provider-default)
-  ( cd "$d" && env -u OPENAI_API_KEY "$BF" spawn --provider "$prov" "${mf[@]}" --lane "$lane" -- \
-      "Append ${tag}_A to f.txt then stop." ) >/dev/null 2>&1
+  if ! ( cd "$d" && env -u OPENAI_API_KEY "$BF" spawn --provider "$prov" "${mf[@]}" --lane "$lane" -- \
+      "Append ${tag}_A to f.txt then stop." ) >/dev/null 2>&1; then
+    printf '%s spawn=FAILED\n' "$lane($prov)" >> "$resfile"
+    rm -rf "$d"
+    return 1
+  fi
   local sub; sub="$(env -u OPENAI_API_KEY "$BF" status "$lane" 2>/dev/null | jq -r '.spawn_submitted // "na"')"
   env -u OPENAI_API_KEY timeout 135 "$BF" wait "$lane" --timeout 130 >/dev/null 2>&1
   local s=NO; grep -q "${tag}_A" "$d/f.txt" 2>/dev/null && s=YES
@@ -60,11 +66,21 @@ pids=(); n=0
 for p in 0 1 2; do
   for k in $(seq 1 "$PER"); do
     n=$((n+1))
-    one "soak$n" "${PROVIDERS[$p]}" "${MODELS[$p]}" "T$n" &
+    one "soak-$run_id-$n" "${PROVIDERS[$p]}" "${MODELS[$p]}" "T$n" &
     pids+=("$!")
   done
 done
-for pid in "${pids[@]}"; do wait "$pid"; done
+for pid in "${pids[@]}"; do
+  if ! wait "$pid"; then
+    echo "  worker $pid exited before completing its lifecycle"
+    fail=$((fail+1))
+  fi
+done
+actual="$(cut -d ' ' -f1 "$resfile" | sort -u | wc -l)"
+if [[ "$actual" -ne "$((PER*3))" ]]; then
+  echo "  expected $((PER*3)) distinct worker results; got $actual"
+  fail=$((fail+1))
+fi
 
 echo ""; echo "=== results ==="
 while IFS= read -r line; do
@@ -80,3 +96,5 @@ rm -f "$resfile"
 echo ""; echo "capacity monitor after:"; clawmeter status --agent --plain 2>/dev/null | grep -oE '(Claude 5h|Codex 5h|Grok 7d)\(current=[0-9]+%' | head -3
 echo "=== SOAK TOTAL: pass=$pass fail=$fail ==="
 [[ "$fail" -eq 0 ]] && echo "LIVE SOAK: GREEN" || echo "LIVE SOAK: $fail FAILURES"
+
+[[ "$fail" -eq 0 ]]

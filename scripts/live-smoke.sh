@@ -31,20 +31,23 @@ bad()  { fail=$((fail+1)); printf '  ✗ %s\n' "$1"; }
 # One full lane lifecycle: spawn -> wait -> assert edit1 -> revise -> wait ->
 # assert edit2 -> reap -> assert result. Runs in its own repo. Backgrounded.
 one_lane() {
-  local id="$1"; local lane="sm-$id"
+  local id="$1"; local lane="sm-$run_id-$id"
   local d; d="$(mktemp -d "$scratch/wf-live-$id-XXXXXX")"
+  printf '%s\n' "$d" > "$rundir/lane-$id.dir"
   ( cd "$d" && git init -q && git config user.email t@e.invalid && git config user.name T \
       && printf 'L0\n' > f.txt && git add -A && git commit -q -m init )
   local log="$d/_result"
 
   # spawn
-  ( cd "$d" && "$BF" spawn --provider "$prov" --model "$model" --lane "$lane" -- \
-      "Append a line reading TOKEN_A_$id to the file f.txt in this directory, then stop. Do nothing else." ) >/dev/null 2>&1
+  if ! ( cd "$d" && "$BF" spawn --provider "$prov" --model "$model" --lane "$lane" -- \
+      "Append a line reading TOKEN_A_$id to the file f.txt in this directory, then stop. Do nothing else." ) >/dev/null 2>&1; then
+    echo "SPAWN_FAILED" > "$log"; return 1
+  fi
 
   if ! timeout 130 "$BF" wait "$lane" --timeout 120 >/dev/null 2>&1; then
-    echo "SPAWN_WAIT_TIMEOUT" > "$log"; "$BF" reap "$lane" --force >/dev/null 2>&1; echo "$d"; return
+    echo "SPAWN_WAIT_TIMEOUT" > "$log"; "$BF" reap "$lane" --force >/dev/null 2>&1; return
   fi
-  grep -q "TOKEN_A_$id" "$d/f.txt" 2>/dev/null && echo "SPAWN_OK" > "$log" || echo "SPAWN_NOEDIT" > "$log"
+  grep -qE "TOKEN_A_$id([^0-9]|$)" "$d/f.txt" 2>/dev/null && echo "SPAWN_OK" > "$log" || echo "SPAWN_NOEDIT" > "$log"
 
   # revise (the critical steer-the-live-pane path + the barrier under test)
   local mark_before mark_after
@@ -58,7 +61,7 @@ one_lane() {
   [[ "${mark_after:-0}" -gt "${mark_before:-0}" ]] && echo "REVISE_TURN_RAN" >> "$log" || echo "REVISE_NO_TURN" >> "$log"
   # Throttle detection: rate-limit banner in the pane?
   "$BF" peek "$lane" --lines 40 2>/dev/null | grep -qiE 'usage limit|rate limit|resets [0-9]|/upgrade' && echo "THROTTLED" >> "$log"
-  grep -q "TOKEN_B_$id" "$d/f.txt" 2>/dev/null && echo "REVISE_OK" >> "$log" || echo "REVISE_NOEDIT" >> "$log"
+  grep -qE "TOKEN_B_$id([^0-9]|$)" "$d/f.txt" 2>/dev/null && echo "REVISE_OK" >> "$log" || echo "REVISE_NOEDIT" >> "$log"
 
   # reap + result contract
   local res
@@ -68,7 +71,7 @@ one_lane() {
   local other
   for other in $(seq 1 "$N"); do
     [[ "$other" == "$id" ]] && continue
-    if grep -qE "TOKEN_A_$other|TOKEN_B_$other" "$d/f.txt" 2>/dev/null; then
+    if grep -qE "TOKEN_(A|B)_$other([^0-9]|$)" "$d/f.txt" 2>/dev/null; then
       echo "CONTAMINATED_by_$other" >> "$log"
     fi
   done
@@ -76,7 +79,9 @@ one_lane() {
   printf '%s\n' "$d" > "$rundir/lane-$id.dir"
 }
 
+[[ "$N" =~ ^[1-9][0-9]*$ ]] || { echo "n_parallel must be a positive integer" >&2; exit 1; }
 rundir="$(mktemp -d "$scratch/wf-live-run-XXXXXX")"
+run_id="${rundir##*/}"
 echo "=== waspflow LIVE smoke: provider=$prov, model=$model, $N parallel lanes ==="
 echo "capacity monitor before:"; clawmeter status --agent --plain 2>/dev/null | grep -oE 'Claude 5h\([^)]*\)' | head -1
 
@@ -85,7 +90,7 @@ for i in $(seq 1 "$N"); do
   one_lane "$i" &
   pids+=("$!")
 done
-for p in "${pids[@]}"; do wait "$p"; done
+for p in "${pids[@]}"; do wait "$p" || bad "worker $p exited before completing its lifecycle"; done
 
 echo ""
 echo "=== results ==="
@@ -106,3 +111,5 @@ echo "capacity monitor after:"; clawmeter status --agent --plain 2>/dev/null | g
 echo "=== SMOKE TOTAL: pass=$pass fail=$fail ==="
 rm -rf "$rundir" 2>/dev/null
 [[ "$fail" -eq 0 ]] && echo "LIVE MATRIX: GREEN" || echo "LIVE MATRIX: $fail FAILURES"
+
+[[ "$fail" -eq 0 ]]
