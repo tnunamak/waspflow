@@ -326,12 +326,15 @@ provenance_reconcile_lane() {
 }
 
 # Record a current-owner transition separately from launch provenance. The
-# event id is deterministic, so retrying the same handoff cannot duplicate it.
+# event id includes the next ownership revision. Retrying before the owner
+# state commits deduplicates, while a later repeated owner pair remains distinct.
 provenance_emit_owner_handoff() {
-  local lane="$1" from="$2" to="$3" lane_uuid provider event_id instance payload digest
+  local lane="$1" from="$2" to="$3" lane_uuid provider event_id instance payload digest revision
   lane_uuid="$(lane_get "$lane" lane_uuid)"; provider="$(lane_get "$lane" provider)"
   [[ -n "$lane_uuid" && -n "$provider" && -n "$to" ]] || return 1
-  digest="$(_provenance_sha256 "$lane_uuid|$from|$to")" || return 1
+  revision="$(lane_get "$lane" owner_handoff_revision)"
+  [[ "$revision" =~ ^[0-9]+$ ]] || revision=0
+  digest="$(_provenance_sha256 "$lane_uuid|$((revision+1))|$from|$to")" || return 1
   [[ -n "$digest" ]] || return 1
   event_id="owner-handoff-${digest:0:32}"
   instance="$(provenance_instance_id)" || return 1
