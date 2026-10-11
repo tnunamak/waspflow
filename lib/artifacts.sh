@@ -545,7 +545,7 @@ artifacts_run_verify_checkpoint() {
 # worktree. Run its configured commands without touching the lane's primary
 # receipts; every cleanup path removes the detached worktree.
 artifacts_classify_pre_existing() {
-  local lane="$1" fork repo_root tmp verify_command prepare_command timeout rc state="inconclusive"
+  local lane="$1" fork repo_root tmp verify_command prepare_command timeout rc state="inconclusive" start duration
   local recorded_root baseline_template baseline_signature candidate_signature WASPFLOW_WORKTREE_ROOT="${WASPFLOW_WORKTREE_ROOT:-}"
   recorded_root="$(lane_get "$lane" worktree_root)"; [[ -z "$recorded_root" ]] || WASPFLOW_WORKTREE_ROOT="$recorded_root"
   [[ "$(lane_get "$lane" verify_failure_class)" == task ]] || return 0
@@ -570,13 +570,22 @@ artifacts_classify_pre_existing() {
     cleanup_baseline() { git -C "$repo_root" worktree remove --force "$tmp" >/dev/null 2>&1 || rm -rf "$tmp"; }
     trap cleanup_baseline EXIT INT TERM
     if [[ -n "$prepare_command" ]]; then
-      set +e; timeout "$timeout" bash -c "cd $(printf '%q' "$tmp") && $prepare_command" >/dev/null 2>&1; rc=$?; set -e
+      set +e; timeout --kill-after=1s "$timeout" bash -c "cd $(printf '%q' "$tmp") && $prepare_command" >/dev/null 2>&1; rc=$?; set -e
       [[ "$rc" -eq 0 ]] || { printf 'inconclusive\n'; exit 0; }
     fi
-    set +e; timeout "$timeout" bash -c "cd $(printf '%q' "$tmp") && $verify_command" >"$tmp/.waspflow-baseline-stdout" 2>"$tmp/.waspflow-baseline-stderr"; rc=$?; set -e
+    start="$(_artifacts_now_ms)"
+    set +e; timeout --kill-after=1s "$timeout" bash -c "cd $(printf '%q' "$tmp") && $verify_command" >"$tmp/.waspflow-baseline-stdout" 2>"$tmp/.waspflow-baseline-stderr"; rc=$?; set -e
+    duration=$(( $(_artifacts_now_ms) - start ))
     case "$rc" in
       0) printf 'passed\n' ;;
       124|126|127) printf 'inconclusive\n' ;;
+      137)
+        if (( duration >= timeout * 1000 )); then
+          printf 'inconclusive\n'
+        else
+          cat "$tmp/.waspflow-baseline-stdout" "$tmp/.waspflow-baseline-stderr" | cksum | awk '{print "failed:" $1 ":" $2}'
+        fi
+        ;;
       *) cat "$tmp/.waspflow-baseline-stdout" "$tmp/.waspflow-baseline-stderr" | cksum | awk '{print "failed:" $1 ":" $2}' ;;
     esac
   )"
@@ -917,6 +926,18 @@ _artifacts_write_skipped_verify() {
   lane_set "$lane" verify_state "skipped" verify_exit_code "" verify_epoch "$start"
 }
 
+# Wall-clock milliseconds. Exit 137 counts as a deadline kill only when the
+# command ran at least its deadline; whole seconds would misclassify an early
+# SIGKILL that crosses a second boundary. Falls back to seconds without %N.
+_artifacts_now_ms() {
+  local now="${EPOCHREALTIME:-}"
+  if [[ "$now" =~ ^([0-9]+)[.,]([0-9]{6})$ ]]; then
+    echo "$(( BASH_REMATCH[1] * 1000 + 10#${BASH_REMATCH[2]} / 1000 ))"; return
+  fi
+  now="$(date +%s%N)"
+  if [[ "$now" =~ ^[0-9]{13,}$ ]]; then echo "$(( now / 1000000 ))"; else echo "$(( $(date +%s) * 1000 ))"; fi
+}
+
 # Run a shell command in cwd and write receipts with the given prefix:
 # <prefix>-command.txt, <prefix>-stdout.txt, <prefix>-stderr.txt,
 # <prefix>-result.json. Echoes passed|failed|timeout.
@@ -924,10 +945,10 @@ _artifacts_run_command() {
   local lane="$1" prefix="$2" name="$3" command="$4" cwd="$5" timeout_seconds="$6"
   local stdout="${prefix}-stdout.txt" stderr="${prefix}-stderr.txt"
   local command_file="${prefix}-command.txt" result_file="${prefix}-result.json"
-  local start end duration rc state timeout_available=0
+  local start end duration rc state timeout_available=0 start_ms
 
   printf '%s\n' "$command" >"$command_file"
-  start="$(date +%s)"
+  start="$(date +%s)"; start_ms="$(_artifacts_now_ms)"
   # Run in a NON-login shell (bash -c, not -lc). A login shell sources the user's
   # interactive profile (~/.bash_profile etc.), whose side effects are nondeterministic
   # under load — observed: an ssh/gpg-agent hook that prints errors and, in parallel,
@@ -937,7 +958,7 @@ _artifacts_run_command() {
   set +e
   if command -v timeout >/dev/null 2>&1; then
     timeout_available=1
-    (cd "$cwd" && timeout "$timeout_seconds" bash -c "$command") >"$stdout" 2>"$stderr"
+    (cd "$cwd" && timeout --kill-after=1s "$timeout_seconds" bash -c "$command") >"$stdout" 2>"$stderr"
     rc=$?
   else
     warn "verify: coreutils 'timeout' not found; running '$name' without a timeout"
@@ -949,6 +970,8 @@ _artifacts_run_command() {
   duration=$((end - start))
 
   if [[ "$timeout_available" -eq 1 && "$rc" -eq 124 ]]; then
+    state="timeout"
+  elif [[ "$timeout_available" -eq 1 && "$rc" -eq 137 ]] && (( $(_artifacts_now_ms) - start_ms >= timeout_seconds * 1000 )); then
     state="timeout"
   elif [[ "$rc" -eq 0 ]]; then
     state="passed"
