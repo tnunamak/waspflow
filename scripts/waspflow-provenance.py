@@ -281,6 +281,8 @@ def lane_search_pattern(names: Iterable[str]) -> str:
 def candidate_occurrences(
     names: Iterable[str], roots: list[str]
 ) -> tuple[dict[str, list[int]], str | None]:
+    if not roots:
+        return {}, None
     pattern = lane_search_pattern(names)
     output, scan_error = checked_run(
         ["rg", "--byte-offset", "-o", "--pcre2", "-e", pattern, "--glob", "*.jsonl", *roots],
@@ -300,6 +302,8 @@ def candidate_occurrences(
 
 
 def fixed_occurrences(needle: str, roots: list[str]) -> dict[str, list[int]]:
+    if not roots:
+        return {}
     output = run(
         ["rg", "--byte-offset", "-o", "-F", needle, "--glob", "*.jsonl", *roots],
         timeout=180,
@@ -440,7 +444,7 @@ def scan_spawns(
                     delta = abs(line_epoch - spawn_epoch) if line_epoch and spawn_epoch else None
                     hit = {
                             "root_harness": source.get("harness", ""),
-                            "root_session_id": source.get("session_id", "") or path.stem.replace("rollout-", ""),
+                            "root_session_id": source.get("session_id", "") or (UUID_RE.search(path.stem).group(1) if UUID_RE.search(path.stem) else path.stem.replace("rollout-", "")),
                             "root_project": source.get("project", ""),
                             "root_source_status": source.get("source_status", ""),
                             "root_path": filename,
