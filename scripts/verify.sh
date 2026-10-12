@@ -2664,6 +2664,12 @@ JSONL
   # harvested requires --into provenance.
   if ( fanin_close fi-close harvested "" "" ) 2>/dev/null; then
     echo "close: harvested without --into should fail" >&2; exit 1; fi
+  if ( fanin_close fi-close harvested reason x ) 2>/dev/null; then
+    echo "close: harvested with --reason should fail" >&2; exit 1; fi
+  if ( fanin_close fi-close superseded into x ) 2>/dev/null; then
+    echo "close: superseded with --into should fail" >&2; exit 1; fi
+  if ( fanin_close fi-close abandoned by x ) 2>/dev/null; then
+    echo "close: abandoned with --by should fail" >&2; exit 1; fi
   fanin_close fi-close harvested into "PR#42"
   [[ "$(lane_get fi-close outcome)" == "harvested" && "$(lane_get fi-close outcome_into)" == "PR#42" ]] \
     || { echo "close: harvested state not recorded" >&2; exit 1; }

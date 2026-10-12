@@ -59,9 +59,9 @@ fanin_close() {
   # Provenance is required for the terminal outcomes so the ledger is an audit
   # trail ("why is this reap-safe?") rather than a bare flag.
   case "$outcome" in
-    harvested)  [[ -n "$pval" ]] || die "close --status harvested requires --into <pr#|ref>" ;;
-    superseded) [[ -n "$pval" ]] || die "close --status superseded requires --by <lane|ref>" ;;
-    abandoned)  [[ -n "$pval" ]] || die "close --status abandoned requires --reason \"...\"" ;;
+    harvested)  [[ "$pkey" == into && -n "$pval" ]] || die "close --status harvested requires --into <pr#|ref>" ;;
+    superseded) [[ "$pkey" == by && -n "$pval" ]] || die "close --status superseded requires --by <lane|ref>" ;;
+    abandoned)  [[ "$pkey" == reason && -n "$pval" ]] || die "close --status abandoned requires --reason \"...\"" ;;
   esac
 
   lane_set "$lane" \
