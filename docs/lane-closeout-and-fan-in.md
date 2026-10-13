@@ -9,13 +9,16 @@ Implementation notes (where the doc and the code differ):
   NOT an extension of the lifecycle `status` field (live|reaped). Reap owns `status`; keeping
   them separate means reaping a lane never clobbers its closeout decision — a lane reads as
   `harvested` (outcome) AND `reaped` (status). `list --status` / `reap --status` filter on `outcome`.
-- `captured` checks signature tokens by KIND: new-file basenames by PATH presence in the ref,
-  added top-level symbols by CONTENT presence. Verdicts: CAPTURED (all present) / UNIQUE (none) /
-  PARTIAL (mixed — the unshipped tokens are the harvest candidates).
+- `captured` reports CAPTURED only when the lane and target have the same non-empty
+  binary diff from their merge base. Otherwise it reports UNKNOWN. Matching names
+  or symbols do not prove capture, and UNKNOWN does not prove the work is unique.
 - Bundles land in `$WASPFLOW_ARCHIVE_DIR` (default `$WASPFLOW_HOME/archive`), verified before any
   deletion; `reap --no-archive` opts out.
 
-## Thesis
+The sections below preserve the original proposal. Their signature-token heuristic
+and UNIQUE/PARTIAL verdicts are historical; they are not the current CLI contract.
+
+## Original proposal: thesis
 
 Waspflow makes **fan-out** cheap: `spawn` is one command, isolated, fast. It does not yet
 make **fan-in** cheap. When many lanes finish, the work of deciding *which produced unique
