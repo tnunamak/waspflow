@@ -31,8 +31,8 @@ done
   cp -R "$root/bin" "$root/lib" "$root/data" "$doctor_checkout/"
   git -C "$doctor_checkout" init -q
   git -C "$doctor_checkout" add bin lib
-  git -C "$doctor_checkout" -c user.name=verify -c user.email=verify@example.invalid commit -qm fixture
-  git -C "$doctor_checkout" tag v0.0.0
+  git -C "$doctor_checkout" -c commit.gpgsign=false -c user.name=verify -c user.email=verify@example.invalid commit -qm fixture
+  git -C "$doctor_checkout" -c tag.gpgsign=false tag v0.0.0
   printf '#!/usr/bin/env bash\nexit 0\n' >"$doctor_bin/codex"
   chmod +x "$doctor_bin/codex"
   touch -d '45 minutes ago' "$doctor_fixture/locks/old.lock"
