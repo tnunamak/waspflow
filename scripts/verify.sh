@@ -19,27 +19,35 @@ for syntax_file in "$root/scripts/verify.sh" "$root/bin/waspflow" "$root"/lib/*.
 done
 
 # Doctor is read-only: the fixture home and lock timestamps must survive both
-# a healthy scan and a stale-lock warning. Pin the remote tag probe locally.
+# a healthy scan and a stale-lock warning. Use a local release checkout because
+# sandbox runners can hide this checkout's Git metadata.
 (
   doctor_fixture="$(mktemp -d "$scratch/waspflow-doctor-XXXXXX")"
   doctor_bin="$doctor_fixture/bin"
   trap 'rm -rf "$doctor_fixture"' EXIT
   mkdir -p "$doctor_fixture/locks" "$doctor_bin"
+  doctor_checkout="$doctor_fixture/release"
+  mkdir -p "$doctor_checkout"
+  cp -R "$root/bin" "$root/lib" "$root/data" "$doctor_checkout/"
+  git -C "$doctor_checkout" init -q
+  git -C "$doctor_checkout" add bin lib
+  git -C "$doctor_checkout" -c user.name=verify -c user.email=verify@example.invalid commit -qm fixture
+  git -C "$doctor_checkout" tag v0.0.0
   printf '#!/usr/bin/env bash\nexit 0\n' >"$doctor_bin/codex"
   chmod +x "$doctor_bin/codex"
   touch -d '45 minutes ago' "$doctor_fixture/locks/old.lock"
   export WASPFLOW_HOME="$doctor_fixture" WASPFLOW_DOCTOR_LATEST_TAG=v999.0.0
   export WASPFLOW_DOCTOR_LOCK_AGE_MINUTES=30
-  doctor_output="$(PATH="$doctor_bin:$PATH" "$root/bin/waspflow" doctor)"
+  doctor_output="$(PATH="$doctor_bin:$PATH" "$doctor_checkout/bin/waspflow" doctor)"
   grep -q 'PASS tool python3' <<<"$doctor_output"
   grep -q 'PASS provider codex' <<<"$doctor_output"
   grep -q 'PASS state home writable' <<<"$doctor_output"
   grep -q 'WARN stale locks: 1 older than 30 minutes' <<<"$doctor_output"
-  grep -q 'WARN release version: .* (latest v999.0.0)' <<<"$doctor_output"
+  grep -Fq 'WARN release version: v0.0.0 (latest v999.0.0)' <<<"$doctor_output"
   [[ -f "$doctor_fixture/locks/old.lock" ]]
   [[ ! -e "$doctor_fixture/codex-auth-cache" ]]
   export WASPFLOW_DOCTOR_LOCK_AGE_MINUTES=not-a-number
-  if PATH="$doctor_bin:$PATH" "$root/bin/waspflow" doctor >"$doctor_fixture/invalid.out"; then
+  if PATH="$doctor_bin:$PATH" "$doctor_checkout/bin/waspflow" doctor >"$doctor_fixture/invalid.out"; then
     echo 'doctor: invalid lock age succeeded' >&2; exit 1
   fi
   grep -q 'FAIL lock age must be an integer' "$doctor_fixture/invalid.out"
