@@ -13,8 +13,14 @@
 # 402 from api.deepseek.com), but the available credential had zero balance, so
 # NO SUCCEEDING TURN was ever observed.  The success path — stdout carrying the
 # assistant text, exit 0 — is derived from the runner source, not from a live
-# green run.  The only live model ids are deepseek-v4-flash (the profile
-# default) and deepseek-v4-pro; deepseek-chat / deepseek-reasoner are retired.
+# green run.  That rc.6 probe reported deepseek-v4-flash (profile default)
+# and deepseek-v4-pro as its live model ids; this is historical harness evidence,
+# not a verified current catalog.
+# The official API currently identifies V4.1 Flash as deepseek-flash.  Its
+# deepseek-v4-flash and deepseek-v4-flash-vision-exp compatibility IDs route to
+# V4.1 Flash; deepseek-v4-pro also currently routes to V4.1 Flash pending the
+# V4.1-Pro launch.  An accepted API ID does not identify historical model weights.
+# deepseek-chat / deepseek-reasoner are retired.
 #
 # ── The interface, as observed (not as wished for) ─────────────────────────
 #
@@ -85,9 +91,11 @@ DEEPSEEK_PATCH_NAME=".deepseek-model.patch.yml"
 # The dsh harness home; $DSH_HOME wins, else ~/.dsh (verified: resolveDshHome).
 _deepseek_home() { printf '%s\n' "${DSH_HOME:-$HOME/.dsh}"; }
 
-# dsh ships no model-enumeration command and no on-disk catalog: the default
-# catalog (deepseek-v4-flash, deepseek-v4-pro) is a JS constant inside
-# @deepseek-ai/dsh-llm-deepseek, and a deployment may override it from the
+# In the rc.6 source inspected for this adapter, dsh ships no model-enumeration
+# command and no on-disk catalog: its default catalog was a JS constant inside
+# @deepseek-ai/dsh-llm-deepseek (deepseek-v4-flash, deepseek-v4-pro). This is
+# historical package-source evidence, not a claim about current API routing or
+# current dsh acceptance; a deployment may override it from the
 # `llm-deepseek` settings section.  A user-authored catalog IS enumerable, so
 # report it as local_cache; otherwise report non_enumerable rather than
 # pretending the hardcoded pair is authoritative.
