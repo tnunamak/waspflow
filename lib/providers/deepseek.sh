@@ -15,7 +15,7 @@
 # assistant text, exit 0 — is derived from the runner source, not from a live
 # green run.  That rc.6 probe reported deepseek-v4-flash (profile default)
 # and deepseek-v4-pro as its live model ids; this is historical harness evidence,
-# not a verified current catalog (dsh is not installed in the authoring host).
+# not a verified current catalog.
 # The official API currently identifies V4.1 Flash as deepseek-flash.  Its
 # deepseek-v4-flash and deepseek-v4-flash-vision-exp compatibility IDs route to
 # V4.1 Flash; deepseek-v4-pro also currently routes to V4.1 Flash pending the
