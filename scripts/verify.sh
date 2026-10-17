@@ -4345,6 +4345,9 @@ PROV
   lifesession="waspflow-life-$$"
   export WASPFLOW_LIB="$lifelib" WASPFLOW_HOME="$lifehome" WASPFLOW_TMUX_SESSION="$lifesession"
   tmux new-session -d -s "$lifesession" -n _home
+  # Stop this fixture's session on any exit, so a failed assertion cannot leave
+  # it running while the cleanup removes its socket directory.
+  trap 'tmux kill-session -t "$lifesession" 2>/dev/null || true' EXIT
 
   make_life_lane() {
     local lane="$1" idle="$2" resumable="$3" cwd="$4" spawned="$5" target session window pid transcript

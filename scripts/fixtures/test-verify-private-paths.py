@@ -64,6 +64,16 @@ failure_line=1; failure_command=x; WASPFLOW_TMUX_SESSION=s
         self.assertTrue(sibling and root_exists and evidence)
 
 
+def stub_env(tmp, log):
+    """PATH with a recording no-op tmux, and no inherited tmux or session variables."""
+    bin_dir = Path(tmp) / "stub-bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "tmux"
+    stub.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\n')
+    stub.chmod(0o755)
+    return {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp)}
+
+
 class FixtureTrapTests(unittest.TestCase):
     """Fixture-local EXIT traps must keep their directory when the run failed."""
 
@@ -93,8 +103,23 @@ class FixtureTrapTests(unittest.TestCase):
                     target.mkdir()
                     assign = "".join(f'{n}="$1"; ' for n in names)
                     script = f"{assign} trap '{body}' EXIT; exit {status}"
-                    subprocess.run(["bash", "-c", script, "t", str(target)], capture_output=True)
+                    log = Path(tmp) / "tmux.log"
+                    subprocess.run(["bash", "-c", script, "t", str(target)], capture_output=True,
+                                   env=stub_env(tmp, log))
                     self.assertEqual(target.exists(), expect_exists)
+
+    def test_lifecycle_fixture_stops_its_session_on_failure(self):
+        import re, subprocess, tempfile
+        text = (root / "scripts/verify.sh").read_text()
+        after = text.split('tmux new-session -d -s "$lifesession" -n _home', 1)[1]
+        match = re.search(r"trap '([^']*kill-session -t \"\$lifesession\"[^']*)' EXIT", after[:600])
+        self.assertIsNotNone(match, "no EXIT trap stops the lifecycle session")
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "tmux.log"
+            script = f"lifesession=waspflow-life-1; trap '{match.group(1)}' EXIT; exit 1"
+            subprocess.run(["bash", "-c", script], capture_output=True, env=stub_env(tmp, log))
+            self.assertEqual(log.read_text().strip(), "kill-session -t waspflow-life-1")
+
 
 if __name__ == "__main__":
     unittest.main()
