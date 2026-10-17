@@ -14,7 +14,6 @@ class PrivatePathTests(unittest.TestCase):
         self.assertNotIn(">/tmp/", self.text)
         self.assertNotIn(" /tmp/waspflow-", self.text)
         self.assertNotIn(" /tmp/wf-", self.text)
-        self.assertNotIn("$HOME/.tmp/wf-", self.text)
 
     def test_run_root_is_exported_and_removed_on_success(self):
         self.assertIn('scratch="$(mktemp -d "$scratch_parent/wf-XXXXXX")"', self.text)

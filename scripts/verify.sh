@@ -14,7 +14,8 @@ export WASPFLOW_SELECTION_GATE=off
 scratch_parent="${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}"
 mkdir -p "$scratch_parent"
 # Every run gets its own root, so concurrent runs on one host never share
-# output files. This isolates paths only; it is not a resource sandbox.
+# output files. tmux socket directories stay short and unique under $HOME/.tmp
+# (Unix socket paths are limited to ~107 bytes). This is not a resource sandbox.
 scratch="$(mktemp -d "$scratch_parent/wf-XXXXXX")"
 export WASPFLOW_TEST_TMPDIR="$scratch" TMPDIR="$scratch"
 early_cleanup() {
@@ -324,7 +325,7 @@ state_home="$(mktemp -d "$scratch/waspflow-state-XXXXXX")"
 # test cleanup can never kill a production tmux session.
 real_tmux="$(command -v tmux)"
 tmux_wrapper="$(mktemp -d "$scratch/waspflow-tmux-wrapper-XXXXXX")"
-tmux_socket_dir="$(mktemp -d "$scratch/t-XXXXXX")"
+tmux_socket_dir="$(mktemp -d "$HOME/.tmp/wf-tmux-XXXXXX")"
 export WASPFLOW_TMUX_SOCKET="wf-$$"
 export TMUX_TMPDIR="$tmux_socket_dir"
 # `-L` resolves this name below the isolated TMUX_TMPDIR. Keep the derived path
@@ -620,7 +621,7 @@ default_session_count() {
 }
 default_sessions_before="$(default_session_count)"
 for exit_mode in success failure; do
-  scoped_tmpdir="$(mktemp -d "$scratch/wf-exit-cleanup-XXXXXX")"
+  scoped_tmpdir="$(mktemp -d "$HOME/.tmp/wf-exit-cleanup-XXXXXX")"
   scoped_socket="wf-exit-cleanup-$$-$RANDOM"
   scoped_session="waspflow-exit-cleanup-$$-$RANDOM"
   scoped_socket_path="$scoped_tmpdir/tmux-$(id -u)/$scoped_socket"
@@ -852,7 +853,7 @@ done
 )
 
 (
-  capture_tmpdir="$(mktemp -d "$scratch/wf-plain-capture-XXXXXX")"
+  capture_tmpdir="$(mktemp -d "$HOME/.tmp/wf-plain-capture-XXXXXX")"
   capture_socket="wf-plain-capture-$$-$RANDOM"
   capture_session="waspflow-plain-capture-$$-$RANDOM"
   capture_socket_path="$capture_tmpdir/tmux-$(id -u)/$capture_socket"
