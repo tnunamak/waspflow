@@ -4945,10 +4945,7 @@ SYSTEMCTL
   index_home="$(mktemp -d "$scratch/waspflow-index-home-XXXXXX")"
   index_poison="$index_home/provider-log-must-not-be-read"
   mkdir -p "$index_home/lanes"
-  for i in $(seq 1 1600); do
-    lane="idx-$(printf '%04d' "$i")"; mkdir -p "$index_home/lanes/$lane"
-    jq -n --arg p "$index_poison/$lane.jsonl" '{provider:"codex",status:"reaped",rollout:$p,cwd:"/fixture",runtime_model:"stored-model",runtime_refresh_state:"observed"}' >"$index_home/lanes/$lane/state.json"
-  done
+  python3 "$root/scripts/fixtures/generate-list-lanes.py" index "$index_home"
   jq '.outcome = ""' "$index_home/lanes/idx-0001/state.json" >"$index_home/lanes/idx-0001/state.next" && mv "$index_home/lanes/idx-0001/state.next" "$index_home/lanes/idx-0001/state.json"
   jq '.outcome = "harvested"' "$index_home/lanes/idx-0002/state.json" >"$index_home/lanes/idx-0002/state.next" && mv "$index_home/lanes/idx-0002/state.next" "$index_home/lanes/idx-0002/state.json"
   jq '.outcome = "superseded"' "$index_home/lanes/idx-0003/state.json" >"$index_home/lanes/idx-0003/state.next" && mv "$index_home/lanes/idx-0003/state.next" "$index_home/lanes/idx-0003/state.json"
@@ -4993,10 +4990,7 @@ printf 'queried\n' >>"${WASPFLOW_SCOPE_QUERY_LOG:?}"
 exit 0
 SYSTEMCTL
   chmod +x "$batch_bin/systemctl"
-  for i in $(seq 1 240); do
-    lane="batch-$(printf '%04d' "$i")"; mkdir -p "$batch_home/lanes/$lane"
-    jq -n --arg cwd "/fixture/$i" '{provider:"codex",status:"reaped",cwd:$cwd,runtime_model:"saved"}' >"$batch_home/lanes/$lane/state.json"
-  done
+  python3 "$root/scripts/fixtures/generate-list-lanes.py" batch "$batch_home"
   real_jq="$(command -v jq)"
   cat >"$batch_bin/jq" <<'JQ'
 #!/usr/bin/env bash
@@ -5067,10 +5061,7 @@ SYSTEMCTL
 exec "${REAL_JQ:-/usr/bin/jq}" "$@"
 JQ
   chmod +x "$table_bin/jq"
-  for i in $(seq 1 240); do
-    lane="table-$(printf '%04d' "$i")"; mkdir -p "$table_home/lanes/$lane"
-    jq -n --arg cwd "/fixture/$i" '{provider:"codex",status:"reaped",cwd:$cwd}' >"$table_home/lanes/$lane/state.json"
-  done
+  python3 "$root/scripts/fixtures/generate-list-lanes.py" table "$table_home"
   : >"$jq_counter"
   PATH="$table_bin:$PATH" REAL_JQ="$real_jq" JQ_COUNTER_FILE="$jq_counter" WASPFLOW_HOME="$table_home" "$root/bin/waspflow" list >/dev/null
   [[ "$(wc -l <"$jq_counter" | tr -d ' ')" == 3 ]] \
@@ -7735,4 +7726,5 @@ source "$root/scripts/fixtures/verify-p2-deepseek-session.sh"
 python3 "$root/scripts/fixtures/verify-p2-provenance.py" "$root"
 python3 "$root/scripts/fixtures/verify-p2-fixtures.py" "$root"
 python3 "$root/scripts/fixtures/test-verify-workflows.py" "$root"
+python3 "$root/scripts/fixtures/test-list-lanes.py" "$root"
 echo "waspflow verify: ok"
