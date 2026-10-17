@@ -11,8 +11,22 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # the suite silently exercise a different worktree.
 unset WASPFLOW_LIB
 export WASPFLOW_SELECTION_GATE=off
-scratch="${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}"
-mkdir -p "$scratch"
+scratch_parent="${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}"
+mkdir -p "$scratch_parent"
+# Every run gets its own root, so concurrent runs on one host never share
+# output files. This isolates paths only; it is not a resource sandbox.
+scratch="$(mktemp -d "$scratch_parent/wf-XXXXXX")"
+export WASPFLOW_TEST_TMPDIR="$scratch" TMPDIR="$scratch"
+early_cleanup() {
+  local rc=$?
+  if (( rc == 0 )); then
+    rm -rf "$scratch"
+  else
+    printf 'waspflow verify: retained failed run %s\n' "$scratch" >&2
+  fi
+  return "$rc"
+}
+trap early_cleanup EXIT
 
 for syntax_file in "$root/scripts/verify.sh" "$root/bin/waspflow" "$root"/lib/*.sh "$root"/lib/providers/*.sh; do
   bash -n "$syntax_file"
@@ -310,7 +324,7 @@ state_home="$(mktemp -d "$scratch/waspflow-state-XXXXXX")"
 # test cleanup can never kill a production tmux session.
 real_tmux="$(command -v tmux)"
 tmux_wrapper="$(mktemp -d "$scratch/waspflow-tmux-wrapper-XXXXXX")"
-tmux_socket_dir="$(mktemp -d "$HOME/.tmp/wf-tmux-XXXXXX")"
+tmux_socket_dir="$(mktemp -d "$scratch/t-XXXXXX")"
 export WASPFLOW_TMUX_SOCKET="wf-$$"
 export TMUX_TMPDIR="$tmux_socket_dir"
 # `-L` resolves this name below the isolated TMUX_TMPDIR. Keep the derived path
@@ -338,6 +352,9 @@ cleanup() {
   if (( exit_status != 0 )); then
     printf 'waspflow verify: failed at line %s (exit %s): %s\n' \
       "$failure_line" "$exit_status" "$failure_command" >&2
+    printf 'waspflow verify: retained failed run %s\n' "$scratch" >&2
+  else
+    rm -rf "$scratch" || true
   fi
   return "$exit_status"
 }
@@ -603,7 +620,7 @@ default_session_count() {
 }
 default_sessions_before="$(default_session_count)"
 for exit_mode in success failure; do
-  scoped_tmpdir="$(mktemp -d "$HOME/.tmp/wf-exit-cleanup-XXXXXX")"
+  scoped_tmpdir="$(mktemp -d "$scratch/wf-exit-cleanup-XXXXXX")"
   scoped_socket="wf-exit-cleanup-$$-$RANDOM"
   scoped_session="waspflow-exit-cleanup-$$-$RANDOM"
   scoped_socket_path="$scoped_tmpdir/tmux-$(id -u)/$scoped_socket"
@@ -835,7 +852,7 @@ done
 )
 
 (
-  capture_tmpdir="$(mktemp -d "$HOME/.tmp/wf-plain-capture-XXXXXX")"
+  capture_tmpdir="$(mktemp -d "$scratch/wf-plain-capture-XXXXXX")"
   capture_socket="wf-plain-capture-$$-$RANDOM"
   capture_session="waspflow-plain-capture-$$-$RANDOM"
   capture_socket_path="$capture_tmpdir/tmux-$(id -u)/$capture_socket"
@@ -1127,19 +1144,19 @@ jq -e '
 
 mkdir -p tmp/workstreams .git/workstreams/blockers
 printf -- '- Status: CLOSED\n' > tmp/workstreams/current-state.md
-WASPFLOW_HOME="$state_home" "$root/bin/waspflow" check --no-fail --explain >/tmp/waspflow-verify-closed.txt
+WASPFLOW_HOME="$state_home" "$root/bin/waspflow" check --no-fail --explain >"$scratch/waspflow-verify-closed.txt"
 
 printf -- '- Status: OPEN\n' > tmp/workstreams/current-state.md
 printf 'blocked\n' > .git/workstreams/blockers/test
 set +e
-WASPFLOW_HOME="$state_home" "$root/bin/waspflow" check --explain >/tmp/waspflow-verify-open.txt
+WASPFLOW_HOME="$state_home" "$root/bin/waspflow" check --explain >"$scratch/waspflow-verify-open.txt"
 rc=$?
 set -e
 [[ "$rc" -eq 2 ]] || { echo "expected open check rc=2, got $rc" >&2; exit 1; }
-grep -q "mutex 'live-stack' is OPEN" /tmp/waspflow-verify-open.txt
-grep -q "found .*blockers/test" /tmp/waspflow-verify-open.txt
-grep -q "Open mutex:" /tmp/waspflow-verify-open.txt
-grep -q "Blocker file:" /tmp/waspflow-verify-open.txt
+grep -q "mutex 'live-stack' is OPEN" "$scratch/waspflow-verify-open.txt"
+grep -q "found .*blockers/test" "$scratch/waspflow-verify-open.txt"
+grep -q "Open mutex:" "$scratch/waspflow-verify-open.txt"
+grep -q "Blocker file:" "$scratch/waspflow-verify-open.txt"
 
 mkdir -p "$state_home/lanes/old-success"
 jq -n --arg cwd "$fixture" '{provider:"codex", status:"reaped", result:"succeeded", cwd:$cwd, origin_cwd:$cwd}' \
@@ -1204,7 +1221,7 @@ jq -n --arg cwd "$checkpoint_cwd" --arg fork "$checkpoint_fork" \
   '{provider:"codex", status:"exited", result:"", cwd:$cwd, origin_cwd:$cwd, worktree:$cwd, repo_root:$cwd, verify_fork_point:$fork, git_tracked:"true", verify_command:"test -f lane-marker", verify_name:"unit", verify_timeout:"5"}' \
   > "$state_home/lanes/checkpoint-fail/state.json"
 set +e
-WASPFLOW_HOME="$state_home" "$root/bin/waspflow" verify checkpoint-fail >/tmp/waspflow-checkpoint-fail.txt 2>&1
+WASPFLOW_HOME="$state_home" "$root/bin/waspflow" verify checkpoint-fail >"$scratch/waspflow-checkpoint-fail.txt" 2>&1
 rc=$?
 set -e
 [[ "$rc" -eq 2 ]] || { echo "expected checkpoint_fail verify rc=2, got $rc" >&2; exit 1; }
@@ -1223,7 +1240,7 @@ jq -n --arg cwd "$checkpoint_cwd" --arg fork "$checkpoint_fork" \
   '{provider:"codex",status:"exited",result:"",cwd:$cwd,origin_cwd:$cwd,worktree:$cwd,repo_root:$cwd,verify_fork_point:$fork,git_tracked:"true",verify_command:"false",verify_name:"unit",verify_timeout:"5"}' \
   > "$state_home/lanes/checkpoint-pre-existing/state.json"
 set +e
-WASPFLOW_HOME="$state_home" "$root/bin/waspflow" verify checkpoint-pre-existing >/tmp/waspflow-checkpoint-pre-existing.txt 2>&1
+WASPFLOW_HOME="$state_home" "$root/bin/waspflow" verify checkpoint-pre-existing >"$scratch/waspflow-checkpoint-pre-existing.txt" 2>&1
 rc=$?
 set -e
 [[ "$rc" -eq 2 ]] || { echo "expected pre_existing verify rc=2, got $rc" >&2; exit 1; }
@@ -1237,7 +1254,7 @@ jq -n --arg cwd "$checkpoint_cwd" --arg fork "$checkpoint_fork" \
   '{provider:"codex",status:"exited",result:"",cwd:$cwd,origin_cwd:$cwd,worktree:$cwd,repo_root:$cwd,verify_fork_point:$fork,git_tracked:"true",prepare_command:"test -f prepare-marker",verify_command:"false",verify_name:"unit",verify_timeout:"5"}' \
   > "$state_home/lanes/checkpoint-baseline-inconclusive/state.json"
 set +e
-WASPFLOW_HOME="$state_home" "$root/bin/waspflow" verify checkpoint-baseline-inconclusive >/tmp/waspflow-checkpoint-baseline-inconclusive.txt 2>&1
+WASPFLOW_HOME="$state_home" "$root/bin/waspflow" verify checkpoint-baseline-inconclusive >"$scratch/waspflow-checkpoint-baseline-inconclusive.txt" 2>&1
 rc=$?
 set -e
 [[ "$rc" -eq 2 ]] || { echo "expected baseline inconclusive verify rc=2, got $rc" >&2; exit 1; }
@@ -1251,7 +1268,7 @@ for invalid_rc in 126 127; do
     '{provider:"codex",status:"exited",result:"",cwd:$cwd,origin_cwd:$cwd,git_tracked:"true",verify_command:$command,verify_name:"unit",verify_timeout:"5"}' \
     > "$state_home/lanes/$invalid_lane/state.json"
   set +e
-  WASPFLOW_HOME="$state_home" "$root/bin/waspflow" verify "$invalid_lane" >/tmp/waspflow-$invalid_lane.txt 2>&1
+  WASPFLOW_HOME="$state_home" "$root/bin/waspflow" verify "$invalid_lane" >"$scratch/waspflow-$invalid_lane.txt" 2>&1
   rc=$?
   set -e
   [[ "$rc" -eq 2 ]] || { echo "expected invalid oracle $invalid_rc rc=2, got $rc" >&2; exit 1; }
@@ -1280,7 +1297,7 @@ jq -n \
   '{provider:"codex", status:"live", result:"", cwd:$cwd, origin_cwd:$cwd, no_recovery:"true", git_tracked:"true", verify_command:"false", verify_name:"unit", verify_timeout:"5"}' \
   > "$state_home/lanes/verify-false/state.json"
 set +e
-WASPFLOW_HOME="$state_home" "$root/bin/waspflow" reap verify-false --no-archive >/tmp/waspflow-verify-false.txt 2>&1
+WASPFLOW_HOME="$state_home" "$root/bin/waspflow" reap verify-false --no-archive >"$scratch/waspflow-verify-false.txt" 2>&1
 rc=$?
 set -e
 [[ "$rc" -eq 2 ]] || { echo "expected verify_false reap rc=2, got $rc" >&2; exit 1; }
@@ -1297,7 +1314,7 @@ if command -v timeout >/dev/null 2>&1; then
     '{provider:"codex", status:"live", result:"", cwd:$cwd, origin_cwd:$cwd, no_recovery:"true", git_tracked:"true", verify_command:"sleep 2", verify_name:"unit", verify_timeout:"1"}' \
     > "$state_home/lanes/verify-timeout/state.json"
   set +e
-  WASPFLOW_HOME="$state_home" "$root/bin/waspflow" reap verify-timeout --no-archive >/tmp/waspflow-verify-timeout.txt 2>&1
+  WASPFLOW_HOME="$state_home" "$root/bin/waspflow" reap verify-timeout --no-archive >"$scratch/waspflow-verify-timeout.txt" 2>&1
   rc=$?
   set -e
   [[ "$rc" -eq 2 ]] || { echo "expected verify_timeout reap rc=2, got $rc" >&2; exit 1; }
@@ -1311,7 +1328,7 @@ jq -n \
   '{provider:"codex", status:"live", result:"", cwd:$cwd, origin_cwd:$cwd, no_recovery:"true", git_tracked:"true", prepare_command:"false", verify_command:"true", verify_name:"unit", verify_timeout:"5"}' \
   > "$state_home/lanes/prepare-false/state.json"
 set +e
-WASPFLOW_HOME="$state_home" "$root/bin/waspflow" reap prepare-false --no-archive >/tmp/waspflow-prepare-false.txt 2>&1
+WASPFLOW_HOME="$state_home" "$root/bin/waspflow" reap prepare-false --no-archive >"$scratch/waspflow-prepare-false.txt" 2>&1
 rc=$?
 set -e
 [[ "$rc" -eq 2 ]] || { echo "expected prepare_false reap rc=2, got $rc" >&2; exit 1; }
@@ -3396,7 +3413,7 @@ grep -q 'corrupted state.json' "$root/bin/waspflow" || { echo "status: corrupt-j
   set +e
   t0="$(date +%s)"
   WASPFLOW_HOME="$state_home" WASPFLOW_STALL_SECONDS=3 \
-    "$root/bin/waspflow" wait stalled --timeout 30 --interval 1 >/tmp/wf-stall.txt 2>&1
+    "$root/bin/waspflow" wait stalled --timeout 30 --interval 1 >"$scratch/wf-stall.txt" 2>&1
   rc=$?; t1="$(date +%s)"
   set -e
   [[ "$rc" -eq 4 ]] || { echo "stall: generic stalled pane should return rc 4, got $rc" >&2; exit 1; }
@@ -3405,8 +3422,8 @@ grep -q 'corrupted state.json' "$root/bin/waspflow" || { echo "status: corrupt-j
   [[ $((t1 - t0)) -lt 27 ]] || { echo "stall: nearly ran out the 30s timeout instead of firing ($((t1-t0))s) — stall detection bug" >&2; exit 1; }
   [[ "$(jq -r '.wait_state // empty' "$state_home/lanes/stalled/state.json")" == "stalled" ]] \
     || { echo "stall: wait_state should be 'stalled'" >&2; exit 1; }
-  grep -q 'STALLED' /tmp/wf-stall.txt || { echo "stall: message should say STALLED" >&2; exit 1; }
-  grep -qi 'never auto-answer\|YOUR call' /tmp/wf-stall.txt || { echo "stall: must state it never auto-answers" >&2; exit 1; }
+  grep -q 'STALLED' "$scratch/wf-stall.txt" || { echo "stall: message should say STALLED" >&2; exit 1; }
+  grep -qi 'never auto-answer\|YOUR call' "$scratch/wf-stall.txt" || { echo "stall: must state it never auto-answers" >&2; exit 1; }
   tmux kill-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || true
 )
 # The prompt-shape HINT still works (nice-to-have, not the gate).
@@ -7727,4 +7744,5 @@ python3 "$root/scripts/fixtures/verify-p2-provenance.py" "$root"
 python3 "$root/scripts/fixtures/verify-p2-fixtures.py" "$root"
 python3 "$root/scripts/fixtures/test-verify-workflows.py" "$root"
 python3 "$root/scripts/fixtures/test-list-lanes.py" "$root"
+python3 "$root/scripts/fixtures/test-verify-private-paths.py" "$root"
 echo "waspflow verify: ok"
