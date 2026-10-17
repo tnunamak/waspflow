@@ -108,17 +108,34 @@ class FixtureTrapTests(unittest.TestCase):
                                    env=stub_env(tmp, log))
                     self.assertEqual(target.exists(), expect_exists)
 
-    def test_lifecycle_fixture_stops_its_session_on_failure(self):
+    def test_fixture_sessions_are_stopped_on_failure(self):
         import re, subprocess, tempfile
         text = (root / "scripts/verify.sh").read_text()
-        after = text.split('tmux new-session -d -s "$lifesession" -n _home', 1)[1]
-        match = re.search(r"trap '([^']*kill-session -t \"\$lifesession\"[^']*)' EXIT", after[:600])
-        self.assertIsNotNone(match, "no EXIT trap stops the lifecycle session")
+        for anchor, var in (('tmux new-session -d -s "$lifesession" -n _home', "lifesession"),
+                            ('tmux new-session -d -s "$sess" -n _h', "sess")):
+            with self.subTest(var=var):
+                after = text.split(anchor, 1)[1]
+                match = re.search(r"trap '([^']*kill-session -t \"\$%s\"[^']*)' EXIT" % var, after[:700])
+                self.assertIsNotNone(match, f"no EXIT trap stops ${var}")
+                with tempfile.TemporaryDirectory() as tmp:
+                    log = Path(tmp) / "tmux.log"
+                    script = f"{var}=waspflow-x-1; trap '{match.group(1)}' EXIT; exit 1"
+                    subprocess.run(["bash", "-c", script], capture_output=True, env=stub_env(tmp, log))
+                    self.assertEqual(log.read_text().strip(), "kill-session -t waspflow-x-1")
+
+    def test_custom_temp_parent_with_a_fresh_home_works(self):
+        import subprocess, tempfile
+        text = (root / "scripts/verify.sh").read_text()
+        head = text.split("trap early_cleanup EXIT", 1)[0]
         with tempfile.TemporaryDirectory() as tmp:
-            log = Path(tmp) / "tmux.log"
-            script = f"lifesession=waspflow-life-1; trap '{match.group(1)}' EXIT; exit 1"
-            subprocess.run(["bash", "-c", script], capture_output=True, env=stub_env(tmp, log))
-            self.assertEqual(log.read_text().strip(), "kill-session -t waspflow-life-1")
+            home = Path(tmp) / "fresh home"
+            home.mkdir()
+            custom = Path(tmp) / "custom parent"
+            script = head + 'mktemp -d "$HOME/.tmp/wf-tmux-XXXXXX" >/dev/null && echo SOCKET_PARENT_OK'
+            result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                                    env={"PATH": "/usr/bin:/bin", "HOME": str(home),
+                                         "WASPFLOW_TEST_TMPDIR": str(custom)})
+            self.assertIn("SOCKET_PARENT_OK", result.stdout, result.stderr)
 
 
 if __name__ == "__main__":

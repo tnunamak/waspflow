@@ -13,6 +13,8 @@ unset WASPFLOW_LIB
 export WASPFLOW_SELECTION_GATE=off
 scratch_parent="${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}"
 mkdir -p "$scratch_parent"
+# A caller-supplied temp parent can sit on a fresh HOME that has no ~/.tmp yet.
+mkdir -p "$HOME/.tmp"
 # Every run gets its own root, so concurrent runs on one host never share
 # output files. tmux socket directories stay short and unique under $HOME/.tmp
 # (Unix socket paths are limited to ~107 bytes). This is not a resource sandbox.
@@ -7154,6 +7156,9 @@ PROV
   export STEER_CTL="$sh_work/ctl" STEER_BIN="$root/bin/waspflow"; mkdir -p "$STEER_CTL"
   sess="wf-steer-$$"
   tmux new-session -d -s "$sess" -n _h
+  # Stop the steer session on any exit; a failed assertion must not leave it
+  # running after cleanup removes the socket directory.
+  trap 'tmux kill-session -t "$sess" 2>/dev/null || true' EXIT
   swf() { WASPFLOW_LIB="$sl" WASPFLOW_HOME="$sh_home" WASPFLOW_TMUX_SESSION="$sess" "$root/bin/waspflow" "$@"; }
   state_uuid_counter=0
   mkstate() { # lane status [extra-json]
