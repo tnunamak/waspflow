@@ -22,3 +22,12 @@ jobs:
 
       - name: verify.sh
         run: bash scripts/verify.sh
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: verify
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    uses: ./.github/workflows/release.yml
