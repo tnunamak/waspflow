@@ -349,13 +349,14 @@ cleanup() {
   # Kill only this suite's session on the exact isolated socket. With no
   # remaining sessions tmux exits on its own; never kill an entire server.
   verify_tmux kill-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || true
-  rm -rf "$fixture" "$state_home" "$tmux_wrapper" "$tmux_socket_dir" || true
+  rm -rf "$tmux_socket_dir" || true
   if (( exit_status != 0 )); then
     printf 'waspflow verify: failed at line %s (exit %s): %s\n' \
       "$failure_line" "$exit_status" "$failure_command" >&2
+    # Keep the fixture and state home inside the retained run root as evidence.
     printf 'waspflow verify: retained failed run %s\n' "$scratch" >&2
   else
-    rm -rf "$scratch" || true
+    rm -rf "$fixture" "$state_home" "$tmux_wrapper" "$scratch" || true
   fi
   return "$exit_status"
 }
