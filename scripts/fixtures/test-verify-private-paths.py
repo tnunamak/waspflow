@@ -37,7 +37,7 @@ scratch="$parent/wf-run"; mkdir -p "$scratch"
 fixture="$scratch/fixture"; state_home="$scratch/state"; tmux_wrapper="$scratch/wrap"
 tmux_socket_dir="$parent/socket"; mkdir -p "$fixture" "$state_home" "$tmux_wrapper" "$tmux_socket_dir"
 touch "$parent/sibling" "$state_home/evidence"
-verify_tmux() {{ :; }}
+verify_tmux() {{ echo "$*" >> "$parent/tmux.calls"; [[ "$1" == list-sessions ]] && printf 'wf-atomic\\nwf-steer-7\\n'; return 0; }}
 failure_line=1; failure_command=x; WASPFLOW_TMUX_SESSION=s
 {body}
 (exit {status}); {name}
@@ -58,6 +58,26 @@ failure_line=1; failure_command=x; WASPFLOW_TMUX_SESSION=s
                 self.assertTrue(sibling)
                 self.assertTrue(root_exists)
                 self.assertTrue(evidence)
+
+    def test_cleanup_stops_every_session_left_on_the_private_socket(self):
+        import subprocess, tempfile, re
+        text = (root / "scripts/verify.sh").read_text()
+        body = re.search(r"(?ms)^cleanup\(\) \{.*?^\}", text).group(0)
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            script = f"""
+parent=$1; scratch="$parent/run"; mkdir -p "$scratch"
+fixture=$scratch/f; state_home=$scratch/s; tmux_wrapper=$scratch/w; tmux_socket_dir=$parent/sock
+WASPFLOW_TMUX_SESSION=main; failure_line=1; failure_command=x
+verify_tmux() {{ echo "$*" >> "$parent/tmux.calls"; if [[ "$1" == list-sessions ]]; then printf 'wf-atomic\\nwf-steer-7\\n'; fi; return 0; }}
+{body}
+(exit 1); cleanup
+"""
+            subprocess.run(["bash", "-c", script, "t", str(parent)], capture_output=True)
+            calls = (parent / "tmux.calls").read_text().splitlines()
+            for name in ("main", "wf-atomic", "wf-steer-7"):
+                self.assertIn(f"kill-session -t {name}", calls)
+            self.assertNotIn("kill-server", " ".join(calls))
 
     def test_cleanup_handles_a_parent_path_with_spaces(self):
         sibling, root_exists, evidence, _ = self.run_cleanup("cleanup", 1, prefix="verify space ")

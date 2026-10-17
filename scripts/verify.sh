@@ -351,6 +351,13 @@ cleanup() {
   # Kill only this suite's session on the exact isolated socket. With no
   # remaining sessions tmux exits on its own; never kill an entire server.
   verify_tmux kill-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || true
+  # Fixtures start their own sessions on this same private socket and some
+  # only stop them on the success path. Stop every session left on it, by name,
+  # before the socket directory is removed.
+  while IFS= read -r leftover_session; do
+    [[ -n "$leftover_session" ]] || continue
+    verify_tmux kill-session -t "$leftover_session" 2>/dev/null || true
+  done < <(verify_tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
   rm -rf "$tmux_socket_dir" || true
   if (( exit_status != 0 )); then
     printf 'waspflow verify: failed at line %s (exit %s): %s\n' \
