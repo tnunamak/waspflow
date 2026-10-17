@@ -1,7 +1,7 @@
 # R4 release blockers: detached ownership, recovery, Codex receipt, and ledgers.
 (
   r4="$(mktemp -d "${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}/waspflow-r4-XXXXXX")"
-  trap 'jobs -pr | xargs -r kill -KILL 2>/dev/null || true; rm -rf "$r4"' EXIT
+  trap '__rc=$?; jobs -pr | xargs -r kill -KILL 2>/dev/null || true; { (( __rc == 0 )) && rm -rf "$r4"; }' EXIT
   export WASPFLOW_HOME="$r4/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"
 

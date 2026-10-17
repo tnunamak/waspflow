@@ -1,7 +1,7 @@
 # A live refresh cannot cache a foreign timestamp-only session candidate.
 (
   fixture="$(mktemp -d "$scratch/waspflow-p2-deepseek-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   export WASPFLOW_HOME="$fixture/home" WASPFLOW_LIB="$root/lib" DSH_HOME="$fixture/dsh"
   source "$root/lib/core.sh"; source "$root/lib/providers/deepseek.sh"
   lane_set lane provider deepseek cwd "$fixture" session_id ""

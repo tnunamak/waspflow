@@ -1,7 +1,7 @@
 # Headless Grok must preserve supported effort and reject unsupported effort.
 (
   fixture="$(mktemp -d "$scratch/waspflow-p2-grok-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   source "$root/lib/exec.sh"
   grok() { printf '%s\n' "$@" >"$fixture/argv"; printf 'answer\n'; }
   for effort in none minimal low medium high xhigh max; do

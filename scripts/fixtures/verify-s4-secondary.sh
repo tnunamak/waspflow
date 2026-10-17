@@ -2,7 +2,7 @@
 (
   s4="$(mktemp -d "${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}/waspflow-s4-XXXXXX")"
   s4_socket="wf-test-$$"
-  trap 'tmux -L "$s4_socket" kill-session -t s4-fixture 2>/dev/null || true; rm -rf "$s4"' EXIT
+  trap '__rc=$?; tmux -L "$s4_socket" kill-session -t s4-fixture 2>/dev/null || true; { (( __rc == 0 )) && rm -rf "$s4"; }' EXIT
   tmux -L "$s4_socket" new-session -d -s s4-fixture 'exec sleep 30'
 
   export WASPFLOW_HOME="$s4/state" WASPFLOW_LIB="$root/lib"

@@ -3,14 +3,15 @@
 (
   r3f1="$(mktemp -d "$scratch/waspflow-r3-f1-XXXXXX")"
   cleanup_r3f1() {
-    local pid ticks
+    local __rc=$? pid ticks
     for pid in "${child:-}" "${leader:-}"; do
       [[ "$pid" =~ ^[0-9]+$ ]] || continue
       if [[ "$pid" == "${child:-}" ]]; then ticks="${child_ticks:-}"; else ticks="${leader_ticks:-}"; fi
       [[ -n "$ticks" && "$(process_start_ticks "$pid" 2>/dev/null || true)" == "$ticks" ]] || continue
       kill -KILL "$pid" 2>/dev/null || true
     done
-    rm -rf "$r3f1"
+    (( __rc == 0 )) && rm -rf "$r3f1"
+    return "$__rc"
   }
   trap cleanup_r3f1 EXIT
   export WASPFLOW_HOME="$r3f1/home" WASPFLOW_LIB="$root/lib"

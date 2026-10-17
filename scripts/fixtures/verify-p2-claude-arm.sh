@@ -1,7 +1,7 @@
 # An intentional in-place arm switch starts model evidence at its user marker.
 (
   fixture="$(mktemp -d "$scratch/waspflow-p2-claude-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   export WASPFLOW_HOME="$fixture/home" WASPFLOW_LIB="$root/lib" CLAUDE_PROJECTS_DIR="$fixture/projects"
   source "$root/lib/core.sh"; source "$root/lib/providers/claude.sh"
   mkdir -p "$CLAUDE_PROJECTS_DIR/p"

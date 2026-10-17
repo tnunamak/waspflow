@@ -9,9 +9,11 @@ scratch="${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}"
 fixture="$(mktemp -d "$scratch/waspflow-s6-runtime-XXXXXX")"
 socket="wf-s6-$$-$RANDOM"
 cleanup() {
+  local __rc=$?
   command tmux -L "$socket" kill-session -t waspflow 2>/dev/null || true
   command tmux -L "$socket" kill-session -t unrelated 2>/dev/null || true
-  rm -rf "$fixture"
+  (( __rc == 0 )) && rm -rf "$fixture"
+  return "$__rc"
 }
 trap cleanup EXIT
 

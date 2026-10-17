@@ -1,7 +1,7 @@
 # r2-d: provider transcript, escalation, and Antigravity evidence hardening.
 (
   r2d="$(mktemp -d "${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}/waspflow-r2-d-XXXXXX")"
-  trap 'rm -rf "$r2d"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$r2d"; }' EXIT
   export WASPFLOW_HOME="$r2d/state" WASPFLOW_LIB="$root/lib" CLAUDE_PROJECTS_DIR="$r2d/claude-projects"
   source "$root/lib/core.sh"
   source "$root/lib/providers/claude.sh"

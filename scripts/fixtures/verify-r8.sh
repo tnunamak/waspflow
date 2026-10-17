@@ -1,7 +1,7 @@
 # R8: findings from the round-4 outsider journey on v1.9.3.
 (
   r8="$(mktemp -d "${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}/waspflow-r8-XXXXXX")"
-  trap 'rm -rf "$r8"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$r8"; }' EXIT
   export WASPFLOW_HOME="$r8/home" WASPFLOW_LIB="$root/lib" CODEX_SESSIONS_DIR="$r8/sessions"
   source "$root/lib/core.sh"
   source "$root/lib/providers/codex.sh"

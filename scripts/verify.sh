@@ -39,7 +39,7 @@ done
 (
   doctor_fixture="$(mktemp -d "$scratch/waspflow-doctor-XXXXXX")"
   doctor_bin="$doctor_fixture/bin"
-  trap 'rm -rf "$doctor_fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$doctor_fixture"; }' EXIT
   mkdir -p "$doctor_fixture/locks" "$doctor_bin"
   doctor_checkout="$doctor_fixture/release"
   mkdir -p "$doctor_checkout"
@@ -71,7 +71,7 @@ done
 # Wave 2 B: receipt correlation is independent of unrelated log growth.
 (
   fixture="$(mktemp -d "$scratch/waspflow-wave2-b-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   export WASPFLOW_HOME="$fixture/home" CLAUDE_PROJECTS_DIR="$fixture/projects"
   source "$root/lib/core.sh"; source "$root/lib/providers/claude.sh"
   mkdir -p "$CLAUDE_PROJECTS_DIR/p"
@@ -139,7 +139,7 @@ done
 # Cross-home names never authorize a foreign or ambiguous target.
 (
   fixture="$(mktemp -d "$scratch/waspflow-wave2-target-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   export WASPFLOW_HOME="$fixture/home"
   source "$root/lib/core.sh"
   mkdir -p "$WASPFLOW_HOME"
@@ -866,7 +866,7 @@ done
   capture_cleanup() {
     local exit_status=$?
     capture_tmux kill-session -t "$capture_session" 2>/dev/null || true
-    rm -rf "$capture_tmpdir" || true
+    (( exit_status == 0 )) && { rm -rf "$capture_tmpdir" || true; }
     return "$exit_status"
   }
   trap capture_cleanup EXIT
@@ -1098,7 +1098,7 @@ EOF
   launch_fixture="$(mktemp -d "$scratch/waspflow-unconfirmed-XXXXXX")"
   export WASPFLOW_HOME="$launch_fixture/home" WASPFLOW_LIB="$launch_fixture/lib"
   export WASPFLOW_TMUX_SESSION="wf-unconfirmed-$"
-  trap 'tmux kill-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || true; rm -rf "$launch_fixture"' EXIT
+  trap '__rc=$?; tmux kill-session -t "$WASPFLOW_TMUX_SESSION" 2>/dev/null || true; { (( __rc == 0 )) && rm -rf "$launch_fixture"; }' EXIT
   mkdir -p "$WASPFLOW_LIB/providers"
   cp "$root"/lib/*.sh "$WASPFLOW_LIB/"
   cp -r "$root/lib/generated" "$WASPFLOW_LIB/"
@@ -2036,7 +2036,7 @@ JSONL
   source "$root/lib/core.sh"
   source "$root/lib/exec.sh"
   d="$(mktemp -d "$scratch/waspflow-preflight-XXXXXX")"
-  trap 'rm -rf "$d"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$d"; }' EXIT
   split_after_ddash() {
     FLAGS=(); REST=(); local seen=0 a
     for a in "$@"; do
@@ -2082,7 +2082,7 @@ JSONL
 (
   d="$(mktemp -d "$scratch/waspflow-root-policy-XXXXXX")"
   export WASPFLOW_HOME="$d/state"
-  trap 'rm -rf "$d"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$d"; }' EXIT
   source "$root/lib/core.sh"
   source "$root/lib/worktree.sh"
   source "$root/lib/artifacts.sh"
@@ -5100,7 +5100,7 @@ JQ
   parity_cleanup() {
     local exit_status=$?
     parity_tmux kill-session -t "$parity_session" >/dev/null 2>&1 || true
-    rm -rf "$parity_home" || true
+    (( exit_status == 0 )) && { rm -rf "$parity_home" || true; }
     return "$exit_status"
   }
   trap parity_cleanup EXIT
@@ -7301,7 +7301,7 @@ PROV
 # partial failures. These fixtures never invoke a provider or production tmux.
 (
   rr="$(mktemp -d "$scratch/waspflow-reap-regression-XXXXXX")"
-  trap 'rm -rf "$rr"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$rr"; }' EXIT
   export WASPFLOW_HOME="$rr/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"
   source "$root/lib/artifacts.sh"
@@ -7573,7 +7573,7 @@ PY_REAP_GC
 (
   h="$(mktemp -d "$scratch/waspflow-hydration-XXXXXX")"
   h_session="wf-hydration-$$"
-  trap 'tmux kill-session -t "$h_session" 2>/dev/null || true; rm -rf "$h"' EXIT
+  trap '__rc=$?; tmux kill-session -t "$h_session" 2>/dev/null || true; { (( __rc == 0 )) && rm -rf "$h"; }' EXIT
   mkdir -p "$h/bin" "$h/lib" "$h/cwd"
   real_bash="$(command -v bash)"
   cp "$root"/lib/*.sh "$h/lib/"
@@ -7630,7 +7630,7 @@ EOF
 # Wave 2 A: bounded parsing, diagnostic locks, and evidence-only observations.
 (
   w2="$(mktemp -d "$scratch/waspflow-wave2-a-XXXXXX")"
-  trap 'rm -rf "$w2"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$w2"; }' EXIT
   export WASPFLOW_HOME="$w2/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"
   source "$root/lib/artifacts.sh"

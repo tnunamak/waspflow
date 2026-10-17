@@ -4,7 +4,7 @@
   fixture_home="$fixture/home"
   fixture_bin="$fixture/provider-bin"
   fixture_install_bin="$fixture/install bin"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   mkdir -p "$fixture_home" "$fixture_bin"
 
   # The provider commands are deliberately inert: doctor must not require a

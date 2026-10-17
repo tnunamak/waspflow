@@ -2,7 +2,7 @@
 # pending detached launches. Processes here are local fakes only.
 (
   r6="$(mktemp -d "${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}/waspflow-r6-XXXXXX")"
-  trap 'jobs -pr | xargs -r kill -KILL 2>/dev/null || true; rm -rf "$r6"' EXIT
+  trap '__rc=$?; jobs -pr | xargs -r kill -KILL 2>/dev/null || true; { (( __rc == 0 )) && rm -rf "$r6"; }' EXIT
   export WASPFLOW_HOME="$r6/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"
 

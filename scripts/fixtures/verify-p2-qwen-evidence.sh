@@ -1,7 +1,7 @@
 # Qwen configured models use the same evidence protocol as both consumers.
 (
   fixture="$(mktemp -d "$scratch/waspflow-p2-qwen-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   export WASPFLOW_HOME="$fixture/state" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"; source "$root/lib/selection.sh"; source "$root/lib/providers/qwen.sh"
   mkdir -p "$fixture/.qwen"

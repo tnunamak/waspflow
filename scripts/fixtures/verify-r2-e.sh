@@ -1,7 +1,7 @@
 # R2-E: reconcile lifecycle precedence, doctor prerequisites, and DeepSeek events.
 (
   fixture="$(mktemp -d "$scratch/waspflow-r2-e-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   export WASPFLOW_HOME="$fixture/home" WASPFLOW_LIB="$root/lib" WASPFLOW_EVENT_TMPDIR="$fixture/tmp"
   source "$root/lib/core.sh"
   source "$root/lib/reconcile.sh"
@@ -32,7 +32,7 @@
 
 (
   fixture="$(mktemp -d "$scratch/waspflow-r2-e-ledger-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   export WASPFLOW_HOME="$fixture/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"
   source "$root/lib/reconcile.sh"
@@ -56,7 +56,7 @@
 
 (
   fixture="$(mktemp -d "$scratch/waspflow-r2-e-events-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   export WASPFLOW_HOME="$fixture/home" WASPFLOW_LIB="$root/lib" WASPFLOW_EVENT_TMPDIR="$fixture/tmp"
   source "$root/lib/core.sh"
   source "$root/lib/events.sh"
@@ -77,7 +77,7 @@ EOF
 
 (
   fixture="$(mktemp -d "$scratch/waspflow-r2-e-doctor-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   mkdir -p "$fixture/bin" "$fixture/home"
   for tool in bash tmux jq awk python3 git flock timeout perl dirname find date sort tail head cat mkdir rm cksum grep sed; do
     ln -s "$(command -v "$tool")" "$fixture/bin/$tool"

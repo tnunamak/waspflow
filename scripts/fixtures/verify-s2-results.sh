@@ -2,7 +2,7 @@
 # S2: generation-scoped results and fresh exec output.
 (
   s2="$(mktemp -d "${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}/waspflow-s2-results-XXXXXX")"
-  trap 'rm -rf "$s2"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$s2"; }' EXIT
   export WASPFLOW_HOME="$s2/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"
   source "$root/lib/artifacts.sh"

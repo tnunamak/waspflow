@@ -23,16 +23,16 @@ class PrivatePathTests(unittest.TestCase):
 class CleanupBehaviorTests(unittest.TestCase):
     """Run the real cleanup functions from verify.sh with stubbed tmux."""
 
-    def run_cleanup(self, name, status):
+    def run_cleanup(self, name, status, prefix="tmp"):
         import subprocess, tempfile
         text = (root / "scripts/verify.sh").read_text()
         import re
         body = re.search(r"(?ms)^%s\(\) \{.*?^\}" % name, text).group(0)
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(prefix=prefix) as tmp:
             parent = Path(tmp)
             script = f"""
 set -u
-parent={parent}
+parent=$1
 scratch="$parent/wf-run"; mkdir -p "$scratch"
 fixture="$scratch/fixture"; state_home="$scratch/state"; tmux_wrapper="$scratch/wrap"
 tmux_socket_dir="$parent/socket"; mkdir -p "$fixture" "$state_home" "$tmux_wrapper" "$tmux_socket_dir"
@@ -42,7 +42,7 @@ failure_line=1; failure_command=x; WASPFLOW_TMUX_SESSION=s
 {body}
 (exit {status}); {name}
 """
-            result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+            result = subprocess.run(["bash", "-c", script, "test", str(parent)], capture_output=True, text=True)
             self.assertEqual(result.returncode, status, result.stderr)
             return (parent / "sibling").exists(), (parent / "wf-run").exists(), \
                 (parent / "wf-run/state/evidence").exists(), (parent / "socket").exists()
@@ -58,6 +58,43 @@ failure_line=1; failure_command=x; WASPFLOW_TMUX_SESSION=s
                 self.assertTrue(sibling)
                 self.assertTrue(root_exists)
                 self.assertTrue(evidence)
+
+    def test_cleanup_handles_a_parent_path_with_spaces(self):
+        sibling, root_exists, evidence, _ = self.run_cleanup("cleanup", 1, prefix="verify space ")
+        self.assertTrue(sibling and root_exists and evidence)
+
+
+class FixtureTrapTests(unittest.TestCase):
+    """Fixture-local EXIT traps must keep their directory when the run failed."""
+
+    def traps(self):
+        import re
+        found = []
+        for path in [root / "scripts/verify.sh", *sorted((root / "scripts/fixtures").glob("*.sh"))]:
+            for match in re.finditer(r"trap '([^']*rm -rf[^']*)' EXIT", path.read_text()):
+                found.append((path.name, match.group(1)))
+        return found
+
+    def test_every_removing_trap_is_conditional_on_success(self):
+        traps = self.traps()
+        self.assertGreater(len(traps), 20)
+        for name, body in traps:
+            with self.subTest(file=name, trap=body):
+                self.assertIn("__rc=$?", body)
+                self.assertIn("__rc == 0", body)
+
+    def test_trap_keeps_directory_on_failure_and_removes_on_success(self):
+        import re, subprocess, tempfile
+        for name, body in self.traps():
+            names = set(re.findall(r'rm -rf "\$(\w+)"', body))
+            for status, expect_exists in ((1, True), (0, False)):
+                with self.subTest(file=name, status=status), tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp) / "fixture dir"
+                    target.mkdir()
+                    assign = "".join(f'{n}="$1"; ' for n in names)
+                    script = f"{assign} trap '{body}' EXIT; exit {status}"
+                    subprocess.run(["bash", "-c", script, "t", str(target)], capture_output=True)
+                    self.assertEqual(target.exists(), expect_exists)
 
 if __name__ == "__main__":
     unittest.main()
