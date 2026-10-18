@@ -2,7 +2,7 @@
 # r2-b: revision-generation and exec-publication regressions.
 (
   r2b="$(mktemp -d "${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}/waspflow-r2-b-XXXXXX")"
-  trap 'rm -rf "$r2b"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$r2b"; }' EXIT
   export WASPFLOW_HOME="$r2b/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"
   source "$root/lib/artifacts.sh"

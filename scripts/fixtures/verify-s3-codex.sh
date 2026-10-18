@@ -3,7 +3,7 @@
 
 (
   fixture_home="$(mktemp -d "$scratch/waspflow-s3-codex-XXXXXX")"
-  trap 'rm -rf "$fixture_home"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture_home"; }' EXIT
   export WASPFLOW_HOME="$fixture_home/home" CODEX_SESSIONS_DIR="$fixture_home/sessions"
   source "$root/lib/core.sh"
   source "$root/lib/providers/codex.sh"

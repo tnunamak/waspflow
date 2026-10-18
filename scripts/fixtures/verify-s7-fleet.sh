@@ -1,7 +1,7 @@
 # S7: fleet reconciliation is conservative, bounded, and provider-free.
 (
   s7="$(mktemp -d "$scratch/waspflow-s7-fleet-XXXXXX")"
-  trap 'rm -rf "$s7"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$s7"; }' EXIT
   export WASPFLOW_HOME="$s7/home" WASPFLOW_EVENT_TMPDIR="$s7/tmp" WASPFLOW_TMUX_SESSION="wf-test-$$"
   mkdir -p "$s7/bin" "$s7/cwd" "$s7/projects/alternate/projects/p"
   cat >"$s7/bin/systemctl" <<'EOF'

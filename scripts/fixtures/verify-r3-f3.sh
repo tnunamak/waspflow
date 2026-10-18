@@ -3,7 +3,7 @@
 
 (
   fixture="$(mktemp -d "${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}/waspflow-r3-f3-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   export WASPFLOW_HOME="$fixture/home" CODEX_SESSIONS_DIR="$fixture/sessions"
   source "$root/lib/core.sh"
   source "$root/lib/providers/codex.sh"
@@ -101,7 +101,7 @@
   active_socket="wf-r3-f3-$$"; active_session="r3-f3-active"
   tmux -L "$active_socket" new-session -d -s "$active_session" -n active \
     "printf '1 shell still running\\n'; exec sleep 10"
-  trap 'tmux -L "$active_socket" kill-session -t "$active_session" 2>/dev/null || true; rm -rf "$fixture"' EXIT
+  trap '__rc=$?; tmux -L "$active_socket" kill-session -t "$active_session" 2>/dev/null || true; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   active_window="$(tmux -L "$active_socket" display-message -p -t "$active_session:active" '#{window_id}')"
   active_pid="$(tmux -L "$active_socket" display-message -p -t "$active_window" '#{pane_pid}')"
   active_uuid=11111111-2222-3333-4444-555555555556

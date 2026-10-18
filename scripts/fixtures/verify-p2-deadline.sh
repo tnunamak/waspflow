@@ -1,7 +1,7 @@
 # TERM-resistant verification must still finish with a timeout receipt.
 (
   fixture="$(mktemp -d "$scratch/waspflow-p2-deadline-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   export WASPFLOW_HOME="$fixture/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"
   source "$root/lib/artifacts.sh"
@@ -27,7 +27,7 @@
 # a wall-clock second boundary.
 (
   fixture="$(mktemp -d "$scratch/waspflow-p2-boundary-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   export WASPFLOW_HOME="$fixture/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"
   source "$root/lib/artifacts.sh"
@@ -43,7 +43,7 @@
 # for the baseline oracle instead of treating every 137 as timeout.
 (
   fixture="$(mktemp -d "$scratch/waspflow-p2-sigkill-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   export WASPFLOW_HOME="$fixture/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"
   source "$root/lib/artifacts.sh"

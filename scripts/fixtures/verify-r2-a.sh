@@ -4,8 +4,10 @@
   r2a="$(mktemp -d "$scratch/waspflow-r2-a-XXXXXX")"
   r2a_socket="wf-r2-a-$$-$RANDOM"
   cleanup_r2a() {
+    local __rc=$?
     command tmux -L "$r2a_socket" kill-session -t waspflow 2>/dev/null || true
-    rm -rf "$r2a"
+    (( __rc == 0 )) && rm -rf "$r2a"
+    return "$__rc"
   }
   trap cleanup_r2a EXIT
   export WASPFLOW_HOME="$r2a/home" WASPFLOW_TMUX_SESSION=waspflow WASPFLOW_LIB="$root/lib"

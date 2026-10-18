@@ -1,7 +1,7 @@
 # Reused lane labels and repeated owner pairs represent separate obligations.
 (
   fixture="$(mktemp -d "$scratch/waspflow-p2-owner-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   export WASPFLOW_HOME="$fixture/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"; source "$root/lib/reconcile.sh"; source "$root/lib/provenance.sh"
   tmux_owned_lane_window_exists() { return 1; }
@@ -30,7 +30,7 @@
 # A pending event written before lane_uuid existed survives the upgrade.
 (
   fixture="$(mktemp -d "$scratch/waspflow-p2-legacy-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   export WASPFLOW_HOME="$fixture/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"; source "$root/lib/reconcile.sh"; source "$root/lib/provenance.sh"
   tmux_owned_lane_window_exists() { return 1; }
@@ -44,7 +44,7 @@
 )
 (
   fixture="$(mktemp -d "$scratch/waspflow-p2-handoff-XXXXXX")"
-  trap 'rm -rf "$fixture"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$fixture"; }' EXIT
   export WASPFLOW_HOME="$fixture/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"; source "$root/lib/reconcile.sh"; source "$root/lib/provenance.sh"
   waspflow_active_scope_snapshot() { echo '[]'; }

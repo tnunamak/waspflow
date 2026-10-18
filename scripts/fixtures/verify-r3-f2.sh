@@ -2,7 +2,7 @@
 # r3-f2: replacement generation, generation-aware receipts, and exec output.
 (
   r3f2="$(mktemp -d "${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}/waspflow-r3-f2-XXXXXX")"
-  trap 'rm -rf "$r3f2"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$r3f2"; }' EXIT
   export WASPFLOW_HOME="$r3f2/home" WASPFLOW_LIB="$root/lib"
   source "$root/lib/core.sh"
   source "$root/lib/artifacts.sh"

@@ -2,7 +2,7 @@
 # Every process below is fixture-owned and cleaned by its recorded PID.
 (
   r7="$(mktemp -d "${WASPFLOW_TEST_TMPDIR:-$HOME/.tmp}/waspflow-r7-XXXXXX")"
-  trap 'jobs -pr | xargs -r kill -KILL 2>/dev/null || true; rm -rf "$r7"' EXIT
+  trap '__rc=$?; jobs -pr | xargs -r kill -KILL 2>/dev/null || true; { (( __rc == 0 )) && rm -rf "$r7"; }' EXIT
   export WASPFLOW_HOME="$r7/home" WASPFLOW_LIB="$root/lib" WASPFLOW_TMUX_SOCKET="wf-test-$$"
   source "$root/lib/core.sh"
 

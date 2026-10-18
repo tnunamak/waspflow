@@ -1,7 +1,7 @@
 # S5 cleanup fixtures: local Git only; no provider or ambient tmux server.
 (
   s5="$(mktemp -d "$scratch/waspflow-s5-cleanup-XXXXXX")"
-  trap 'rm -rf "$s5"' EXIT
+  trap '__rc=$?; { (( __rc == 0 )) && rm -rf "$s5"; }' EXIT
   export WASPFLOW_HOME="$s5/home" WASPFLOW_ARCHIVE_DIR="$s5/archive"
   source "$root/lib/core.sh"
   source "$root/lib/worktree.sh"
