@@ -273,7 +273,7 @@ billing_cost_currency() {
 }
 
 # Emit a QuotaObservation v1 envelope. The clawmeter contract is deliberately
-# narrow and checked at the parsing boundary; it is never a launch gate.
+# narrow and checked at the parsing boundary; missing forecasts retain usage.
 quota_observation_v1() {
   local provider="$1" provider_key raw version usage_error stale state reason source observation
   case "$provider" in codex) provider_key=openai ;; claude) provider_key=claude ;; antigravity) provider_key=antigravity ;; qwen) provider_key=alibaba ;; *)
@@ -323,8 +323,8 @@ quota_observation_v1() {
       (($u.windows // null) | type == "array") and
       (($u.stale // false) | type == "boolean") and
       (($u.fetched_at // null) | type == "string") and
-      (.providers[$p].forecast | type == "object") and
-      ((.providers[$p].forecast.windows // null) | type == "object") and
+      (.providers[$p].forecast | type == "null" or type == "object") and
+      (.providers[$p].forecast.windows | type == "null" or type == "object") and
       all($u.windows[]; type == "object" and ((.name // .display_name // null) | type == "string") and (.utilization | type == "number") and (.resets_at | type == "string"))
     end)' >/dev/null <<<"$raw" 2>/dev/null || {
     jq -cn --arg reason "clawmeter JSON has unsupported provider shape" --arg source "clawmeter@${version}" '{schema_version:1,state:"absent",reason:$reason,stale:false,source:$source,observation:null}'
@@ -343,7 +343,7 @@ quota_observation_v1() {
        windows:[(($provider.usage.windows // [])[] | {
          name:(.name // .display_name // ""),
          utilization_pct:(.utilization // null), resets_at:(.resets_at // null),
-         projected_pct:($provider.forecast.windows[(.name // .display_name // "")].projected_pct // null)
+         projected_pct:($provider.forecast.windows[(.name // .display_name // "")].projected_pct | if type == "number" then . else null end)
        })],
        reset_credits_available:(if $p == "openai" then ($provider.usage.reset_credits.available_count // null) else null end),
        fetched_at:($provider.usage.fetched_at // null)}' <<<"$raw" 2>/dev/null)" || observation=null

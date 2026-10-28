@@ -35,19 +35,21 @@ selection_is_subscription_billing() {
   case "$1" in chatgpt_subscription|subscription_env_heuristic|oauth_env_heuristic) return 0 ;; *) return 1 ;; esac
 }
 
-# True only for the five-condition quota predicate in SELECTION_V1. A malformed
-# observation is simply insufficient evidence, never a selection block.
+# Automatic selection needs fresh current utilization for the applicable billing
+# path. Unknown quota is filtered; explicit model/provider choices remain escapes.
 selection_quota_filtered() {
   local billing="$1" quota="$2" scope="$3" path fetched now
   path="$(jq -r '.path // "unknown"' <<<"$billing" 2>/dev/null)"
   selection_is_subscription_billing "$path" || { printf 'false\n'; return; }
   [[ "$scope" != mismatched ]] || { printf 'false\n'; return; }
-  jq -e '.state == "ok" and (.observation | type == "object") and (.observation.windows | type == "array" and length > 0) and all(.observation.windows[]; (.utilization_pct | type == "number") and (.utilization_pct >= 100)) and ((.observation.reset_credits_available == null) or (.observation.reset_credits_available == 0))' >/dev/null <<<"$quota" 2>/dev/null || { printf 'false\n'; return; }
+  jq -e '.state == "ok" and .stale != true and (.observation | type == "object") and (.observation.windows | type == "array" and length > 0) and all(.observation.windows[]; .utilization_pct | type == "number")' >/dev/null <<<"$quota" 2>/dev/null || { printf 'true\n'; return; }
   fetched="$(jq -r '.observation.fetched_at // empty' <<<"$quota")"
+  [[ -n "$fetched" ]] || { printf 'true\n'; return; }
   now="$(date -u +%s)"
   local fetched_epoch
   fetched_epoch="$(date -u -d "$fetched" +%s 2>/dev/null || true)"
-  [[ -n "$fetched_epoch" && $((now - fetched_epoch)) -ge 0 && $((now - fetched_epoch)) -le 600 ]] && printf 'true\n' || printf 'false\n'
+  [[ -n "$fetched_epoch" && $((now - fetched_epoch)) -ge 0 && $((now - fetched_epoch)) -le 600 ]] || { printf 'true\n'; return; }
+  jq -r 'all(.observation.windows[]; .utilization_pct >= 100) and ((.observation.reset_credits_available == null) or (.observation.reset_credits_available == 0))' <<<"$quota"
 }
 
 selection_observe_availability() {
