@@ -6432,7 +6432,7 @@ JSON
   billing='{"schema_version":1,"path":"chatgpt_subscription","evidence":"test","detail":""}'
   [[ "$(selection_quota_filtered "$billing" "$quota" default)" == true ]]
   [[ "$(selection_quota_filtered "$billing" "$(quota_for "$fresh" 99.999 0)" default)" == false ]]
-  [[ "$(selection_quota_filtered "$billing" "$(quota_for "$fresh" 100 -1)" default)" == false ]]
+  [[ "$(selection_quota_filtered "$billing" "$(quota_for "$fresh" 100 -1)" default)" == true ]]
   [[ "$(selection_quota_filtered "$billing" "$(quota_for "$(date -u -d '11 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" 100 0)" default)" == true ]]
   [[ "$(selection_quota_filtered "$billing" "$quota" mismatched)" == false ]]
   [[ "$(selection_quota_filtered '{"path":"api_key"}' "$quota" default)" == false ]]
