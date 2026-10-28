@@ -65,7 +65,7 @@ printf 'billing routes: 5 assertions passed\n'
   check_quota_case 'boolean credits' '.providers.openai.usage.reset_credits.available_count = false' absent true null null
   check_quota_case 'missing credits' 'del(.providers.openai.usage.reset_credits)' ok true 100 494
   check_quota_case 'null credits' '.providers.openai.usage.reset_credits.available_count = null' ok true 100 494
-  check_quota_case 'positive credits rescue' '.providers.openai.usage.reset_credits.available_count = 2' ok false 100 494
+  check_quota_case 'positive credits do not rescue' '.providers.openai.usage.reset_credits.available_count = 2' ok true 100 494
   check_quota_case 'negative utilization' '.providers.openai.usage.windows[0].utilization = -5' absent true null null
   check_quota_case 'over quota utilization' '.providers.openai.usage.windows[0].utilization = 250' ok true 250 494
   check_quota_case 'negative projection' '.providers.openai.forecast.windows["7d"].projected_pct = -20' ok true 100 null
@@ -107,9 +107,9 @@ printf 'billing routes: 5 assertions passed\n'
   [[ "$(selection_quota_filtered "$billing" "$(jq '.observation.reset_credits_available = "0"' <<<"$quota")" default)" == true ]]
   [[ "$(selection_quota_filtered "$billing" "$(jq '.observation.reset_credits_available = -1' <<<"$quota")" default)" == true ]]
   [[ "$(selection_quota_filtered "$billing" "$(jq '.observation.windows[0].utilization_pct = -5' <<<"$quota")" default)" == true ]]
-  # Billing-path observation remains advisory, as documented in billing_path_v1.
-  [[ "$(selection_quota_filtered '{"path":"unknown"}' "$quota" default)" == false ]]
-  [[ "$(selection_quota_filtered "$billing" "$quota" mismatched)" == false ]]
+  # Unknown billing and mismatched quota scope cannot establish headroom.
+  [[ "$(selection_quota_filtered '{"path":"unknown"}' "$quota" default)" == true ]]
+  [[ "$(selection_quota_filtered "$billing" "$quota" mismatched)" == true ]]
   quota_assertions=$((quota_assertions + 5))
 
   # Exercise the public selection gate with an available model and unknown quota.
@@ -135,7 +135,7 @@ printf 'billing routes: 5 assertions passed\n'
     [[ "$gate_out" == *"reason=$reason"* && "$gate_out" == *--accept-provider-default* ]] || { printf 'quota gate %s: missing reason/escape: %s\n' "$label" "$gate_out" >&2; exit 1; }
     quota_assertions=$((quota_assertions + 3))
   }
-  check_gate_case exhausted '.' ok 'all quota windows are exhausted without usable reset credits'
+  check_gate_case exhausted '.' ok 'all quota windows are exhausted'
   check_gate_case stale '.providers.openai.usage.stale = true' stale 'quota observation is stale'
   check_gate_case expired '.providers.openai.usage.fetched_at = "2000-01-01T00:00:00Z"' ok 'quota observation is older than 600 seconds'
   check_gate_case future '.providers.openai.usage.fetched_at = "2999-01-01T00:00:00Z"' ok 'quota fetched_at is in the future'

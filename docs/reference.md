@@ -11,6 +11,8 @@ or `--accept-provider-default`; it exits 5 (`selection_required`) without
 launching anything. `--auto` selects an op fallback and requires `--op`;
 `--ack-deprecated` applies only to that selector path. For `escalate`, `--force --ack-unknown-model` (older name: `--ack-deprecated`) allows a Claude model name waspflow does not recognise.
 
+In `enforce` mode, an op fallback is blocked when its billing path or applicable quota is unknown, stale, or exhausted. A quota observation from a mismatched provider scope cannot establish headroom. Reset credits do not count as headroom until a reset occurs. Window-end forecasts are informational: the gate uses current utilization because a forecast does not say when quota will run out. Grok has no quota mapping, so its subscription fallback is blocked; use an explicit model or provider default to proceed. The gate parses quota timestamps with the required `python3`. The `warn` and `off` modes do not enforce this gate.
+
 ## Provenance gate
 
 Parent provenance defaults to `warn` for one release: a spawn with no resolved

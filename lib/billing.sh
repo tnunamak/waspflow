@@ -206,8 +206,8 @@ billing_preflight_antigravity() { return 0; }
 billing_preflight_qwen() { return 0; }
 billing_preflight_deepseek() { return 0; }
 
-# Emit BillingPath v1. This is observational only: an uncertain billing path
-# never changes whether a lane may launch. Args: provider endpoint_profile raw_args
+# Emit BillingPath v1. The automatic selection gate rejects uncertain billing;
+# explicit model/provider choices remain available. Args: provider endpoint_profile raw_args
 billing_path_v1() {
   local provider="$1" endpoint_profile="${2:-default}" raw_args="${3:-false}"
   local path="unknown" evidence="none" detail="" mode="" principal=""
@@ -284,6 +284,10 @@ quota_observation_v1() {
     jq -cn '{schema_version:1,state:"absent",reason:"clawmeter not on PATH",stale:false,source:"",observation:null}'
     return 0
   }
+  if ! declare -F clawmeter >/dev/null && ! command -v timeout >/dev/null 2>&1; then
+    jq -cn '{schema_version:1,state:"absent",reason:"timeout unavailable for clawmeter",stale:false,source:"",observation:null}'
+    return 0
+  fi
   if declare -F clawmeter >/dev/null || ! command -v timeout >/dev/null 2>&1; then
     version="$(clawmeter --version 2>/dev/null || true)"
   else

@@ -32,7 +32,7 @@ selection_disposition() {
 }
 
 selection_is_subscription_billing() {
-  case "$1" in chatgpt_subscription|subscription_env_heuristic|oauth_env_heuristic) return 0 ;; *) return 1 ;; esac
+  case "$1" in chatgpt_subscription|subscription_env_heuristic|oauth_env_heuristic|oauth_quota_heuristic) return 0 ;; *) return 1 ;; esac
 }
 
 # Empty output means quota does not block selection. Keep the reason and the
@@ -40,8 +40,13 @@ selection_is_subscription_billing() {
 selection_quota_block_reason() {
   local billing="$1" quota="$2" scope="$3" path fetched now reason
   path="$(jq -r '.path // "unknown"' <<<"$billing" 2>/dev/null)"
+  if [[ -z "$path" || "$path" == unknown || "$path" == scoped_unknown ]]; then
+    reason="$(jq -r '.detail // empty' <<<"$billing" 2>/dev/null)"
+    printf 'billing path is unknown%s\n' "${reason:+: $reason}"
+    return 0
+  fi
   selection_is_subscription_billing "$path" || return 0
-  [[ "$scope" != mismatched ]] || return 0
+  [[ "$scope" != mismatched ]] || { printf 'quota scope does not match provider\n'; return; }
   reason="$(jq -r '
     if .state == "stale" or .stale == true then "quota observation is stale"
     elif .state != "ok" then (.reason | if type == "string" and length > 0 then . else "quota observation is not ok" end)
@@ -65,14 +70,16 @@ print(int(value.timestamp()))
   [[ -n "$fetched_epoch" ]] || { printf 'quota fetched_at is invalid\n'; return; }
   (( now - fetched_epoch >= 0 )) || { printf 'quota fetched_at is in the future\n'; return; }
   (( now - fetched_epoch <= 600 )) || { printf 'quota observation is older than 600 seconds\n'; return; }
-  if jq -e 'all(.observation.windows[]; .utilization_pct >= 100) and (.observation.reset_credits_available | (type == "number" and . > 0 and . == floor) | not)' >/dev/null <<<"$quota"; then
-    printf 'all quota windows are exhausted without usable reset credits\n'
+  # A reset credit is not headroom until a reset has actually happened.
+  if jq -e 'all(.observation.windows[]; .utilization_pct >= 100)' >/dev/null <<<"$quota"; then
+    printf 'all quota windows are exhausted\n'
   fi
   return 0
 }
 
 # Automatic selection needs fresh current utilization for the applicable billing
-# path. Unknown quota is filtered; explicit model/provider choices remain escapes.
+# path. Forecasts describe projected window-end usage, not current headroom,
+# and do not gate a run. Unknown quota is filtered; explicit choices remain escapes.
 selection_quota_filtered() {
   local reason
   reason="$(selection_quota_block_reason "$1" "$2" "$3")"

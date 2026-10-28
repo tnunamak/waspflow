@@ -6434,7 +6434,7 @@ JSON
   [[ "$(selection_quota_filtered "$billing" "$(quota_for "$fresh" 99.999 0)" default)" == false ]]
   [[ "$(selection_quota_filtered "$billing" "$(quota_for "$fresh" 100 -1)" default)" == true ]]
   [[ "$(selection_quota_filtered "$billing" "$(quota_for "$(date -u -d '11 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" 100 0)" default)" == true ]]
-  [[ "$(selection_quota_filtered "$billing" "$quota" mismatched)" == false ]]
+  [[ "$(selection_quota_filtered "$billing" "$quota" mismatched)" == true ]]
   [[ "$(selection_quota_filtered '{"path":"api_key"}' "$quota" default)" == false ]]
   [[ "$(selection_quota_filtered "$billing" "$(quota_for "$fresh" 100 0 absent)" default)" == true ]]
   jq '.observation.windows=[]' <<<"$quota" | { [[ "$(selection_quota_filtered "$billing" "$(cat)" default)" == true ]]; }
@@ -7749,6 +7749,14 @@ source "$root/scripts/fixtures/verify-r8.sh"
 python3 "$root/scripts/fixtures/verify-p2-live.py" "$root"
 python3 "$root/scripts/fixtures/verify-p2-ansi.py" "$root"
 source "$root/scripts/fixtures/verify-p2-billing.sh"
+bash "$root/scripts/fixtures/verify-round3-quota.sh" no_timeout
+bash "$root/scripts/fixtures/verify-round3-quota.sh" clawmeter_timeout
+bash "$root/scripts/fixtures/verify-round3-quota.sh" antigravity
+bash "$root/scripts/fixtures/verify-round3-quota.sh" credits
+bash "$root/scripts/fixtures/verify-round3-quota.sh" mismatch
+bash "$root/scripts/fixtures/verify-round3-quota.sh" unknown
+bash "$root/scripts/fixtures/verify-round3-quota.sh" grok
+bash "$root/scripts/fixtures/verify-round3-quota.sh" forecast
 python3 "$root/scripts/fixtures/verify-p2-gc.py" "$root"
 source "$root/scripts/fixtures/verify-p2-grok-effort.sh"
 source "$root/scripts/fixtures/verify-p2-qwen-evidence.sh"
