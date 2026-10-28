@@ -14,7 +14,8 @@ fi
     claude_line="$(grep 'claude auth:' <<<"$report")"
     [[ "$claude_line" != *subscription* && "$claude_line" == *"$setting"* ]]
   done
-  billing_report_auth | grep -q 'claude auth:.*heuristic'
+  report="$(billing_report_auth)"
+  grep -q 'claude auth:.*heuristic' <<<"$report"
 )
 printf 'billing routes: 5 assertions passed\n'
 

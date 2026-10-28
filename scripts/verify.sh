@@ -7757,6 +7757,9 @@ bash "$root/scripts/fixtures/verify-round3-quota.sh" mismatch
 bash "$root/scripts/fixtures/verify-round3-quota.sh" unknown
 bash "$root/scripts/fixtures/verify-round3-quota.sh" grok
 bash "$root/scripts/fixtures/verify-round3-quota.sh" forecast
+bash "$root/scripts/fixtures/verify-round4-quota.sh" pools
+bash "$root/scripts/fixtures/verify-round4-quota.sh" forecast
+bash "$root/scripts/fixtures/verify-round4-quota.sh" sigpipe
 python3 "$root/scripts/fixtures/verify-p2-gc.py" "$root"
 source "$root/scripts/fixtures/verify-p2-grok-effort.sh"
 source "$root/scripts/fixtures/verify-p2-qwen-evidence.sh"

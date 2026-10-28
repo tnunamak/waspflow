@@ -38,7 +38,7 @@ selection_is_subscription_billing() {
 # Empty output means quota does not block selection. Keep the reason and the
 # boolean gate on the same decision path so diagnostics describe the actual veto.
 selection_quota_block_reason() {
-  local billing="$1" quota="$2" scope="$3" path fetched now reason
+  local billing="$1" quota="$2" scope="$3" provider="${4:-}" model="${5:-}" path fetched now reason pool
   path="$(jq -r '.path // "unknown"' <<<"$billing" 2>/dev/null)"
   if [[ -z "$path" || "$path" == unknown || "$path" == scoped_unknown ]]; then
     reason="$(jq -r '.detail // empty' <<<"$billing" 2>/dev/null)"
@@ -70,6 +70,21 @@ print(int(value.timestamp()))
   [[ -n "$fetched_epoch" ]] || { printf 'quota fetched_at is invalid\n'; return; }
   (( now - fetched_epoch >= 0 )) || { printf 'quota fetched_at is in the future\n'; return; }
   (( now - fetched_epoch <= 600 )) || { printf 'quota observation is older than 600 seconds\n'; return; }
+  if [[ "$path" == oauth_quota_heuristic || "$provider" == antigravity ]]; then
+    case "$model" in
+      gemini-*) pool='7d Gemini' ;;
+      claude-*|gpt-*) pool='7d Claude + GPT' ;;
+      *) printf 'quota pool is unknown for selected model\n'; return ;;
+    esac
+    if ! jq -e --arg pool "$pool" 'any(.observation.windows[]; .name == $pool)' >/dev/null <<<"$quota"; then
+      printf 'quota observation has no window for selected model pool\n'
+      return
+    fi
+    if jq -e --arg pool "$pool" 'any(.observation.windows[]; .name == $pool and .utilization_pct >= 100)' >/dev/null <<<"$quota"; then
+      printf 'selected model quota pool is exhausted\n'
+    fi
+    return 0
+  fi
   # A reset credit is not headroom until a reset has actually happened.
   if jq -e 'all(.observation.windows[]; .utilization_pct >= 100)' >/dev/null <<<"$quota"; then
     printf 'all quota windows are exhausted\n'
@@ -82,7 +97,7 @@ print(int(value.timestamp()))
 # and do not gate a run. Unknown quota is filtered; explicit choices remain escapes.
 selection_quota_filtered() {
   local reason
-  reason="$(selection_quota_block_reason "$1" "$2" "$3")"
+  reason="$(selection_quota_block_reason "$1" "$2" "$3" "${4:-}" "${5:-}")"
   [[ -n "$reason" ]] && printf 'true\n' || printf 'false\n'
 }
 
@@ -140,7 +155,7 @@ selection_prepare_op() {
   availability="$(selection_observe_availability "$provider" "$model" "$scope")"
   quota="$(quota_observation_v1 "$provider")"
   edge="$(selection_edge_label "$provider" "$model")"
-  SELECTION_QUOTA_BLOCK_REASON="$(selection_quota_block_reason "$billing" "$quota" "$scope")"
+  SELECTION_QUOTA_BLOCK_REASON="$(selection_quota_block_reason "$billing" "$quota" "$scope" "$provider" "$model")"
   SELECTION_QUOTA_FILTERED=false
   [[ -z "$SELECTION_QUOTA_BLOCK_REASON" ]] || SELECTION_QUOTA_FILTERED=true
   disposition="$(selection_disposition "$(jq -r '.state' <<<"$availability")" "$bar" "$edge" none "$SELECTION_QUOTA_FILTERED" "$ack" true "$family")"
