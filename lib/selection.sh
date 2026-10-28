@@ -32,22 +32,73 @@ selection_disposition() {
 }
 
 selection_is_subscription_billing() {
-  case "$1" in chatgpt_subscription|subscription_env_heuristic|oauth_env_heuristic) return 0 ;; *) return 1 ;; esac
+  case "$1" in chatgpt_subscription|subscription_env_heuristic|oauth_env_heuristic|oauth_quota_heuristic) return 0 ;; *) return 1 ;; esac
 }
 
-# True only for the five-condition quota predicate in SELECTION_V1. A malformed
-# observation is simply insufficient evidence, never a selection block.
-selection_quota_filtered() {
-  local billing="$1" quota="$2" scope="$3" path fetched now
+# Empty output means quota does not block selection. Keep the reason and the
+# boolean gate on the same decision path so diagnostics describe the actual veto.
+selection_quota_block_reason() {
+  local billing="$1" quota="$2" scope="$3" provider="${4:-}" model="${5:-}" path fetched now reason pool
   path="$(jq -r '.path // "unknown"' <<<"$billing" 2>/dev/null)"
-  selection_is_subscription_billing "$path" || { printf 'false\n'; return; }
-  [[ "$scope" != mismatched ]] || { printf 'false\n'; return; }
-  jq -e '.state == "ok" and (.observation | type == "object") and (.observation.windows | type == "array" and length > 0) and all(.observation.windows[]; (.utilization_pct | type == "number") and (.utilization_pct >= 100)) and ((.observation.reset_credits_available == null) or (.observation.reset_credits_available == 0))' >/dev/null <<<"$quota" 2>/dev/null || { printf 'false\n'; return; }
+  if [[ -z "$path" || "$path" == unknown || "$path" == scoped_unknown ]]; then
+    reason="$(jq -r '.detail // empty' <<<"$billing" 2>/dev/null)"
+    printf 'billing path is unknown%s\n' "${reason:+: $reason}"
+    return 0
+  fi
+  selection_is_subscription_billing "$path" || return 0
+  [[ "$scope" != mismatched ]] || { printf 'quota scope does not match provider\n'; return; }
+  reason="$(jq -r '
+    if .state == "stale" or .stale == true then "quota observation is stale"
+    elif .state != "ok" then (.reason | if type == "string" and length > 0 then . else "quota observation is not ok" end)
+    elif (.observation | type != "object") or (.observation.windows | type != "array" or length == 0) then "quota observation has no windows"
+    elif any(.observation.windows[]; .utilization_pct | type != "number" or . < 0) then "quota observation has invalid utilization"
+    else "" end' <<<"$quota" 2>/dev/null)" || reason="invalid quota JSON"
+  [[ -z "$reason" ]] || { printf '%s\n' "$reason"; return; }
   fetched="$(jq -r '.observation.fetched_at // empty' <<<"$quota")"
+  [[ -n "$fetched" ]] || { printf 'quota fetched_at is missing\n'; return; }
   now="$(date -u +%s)"
   local fetched_epoch
-  fetched_epoch="$(date -u -d "$fetched" +%s 2>/dev/null || true)"
-  [[ -n "$fetched_epoch" && $((now - fetched_epoch)) -ge 0 && $((now - fetched_epoch)) -le 600 ]] && printf 'true\n' || printf 'false\n'
+  # Python is a required dependency; ISO parsing also works with BSD date.
+  fetched_epoch="$(python3 -c '
+from datetime import datetime
+import sys
+value = datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+if value.tzinfo is None:
+    raise ValueError("quota timestamp requires a timezone")
+print(int(value.timestamp()))
+' "$fetched" 2>/dev/null)" || fetched_epoch=""
+  [[ -n "$fetched_epoch" ]] || { printf 'quota fetched_at is invalid\n'; return; }
+  (( now - fetched_epoch >= 0 )) || { printf 'quota fetched_at is in the future\n'; return; }
+  (( now - fetched_epoch <= 600 )) || { printf 'quota observation is older than 600 seconds\n'; return; }
+  if [[ "$path" == oauth_quota_heuristic || "$provider" == antigravity ]]; then
+    case "$model" in
+      gemini-*) pool='7d Gemini' ;;
+      claude-*|gpt-*) pool='7d Claude + GPT' ;;
+      *) printf 'quota pool is unknown for selected model\n'; return ;;
+    esac
+    if ! jq -e --arg pool "$pool" 'any(.observation.windows[]; .name == $pool)' >/dev/null <<<"$quota"; then
+      printf 'quota observation has no window for selected model pool\n'
+      return
+    fi
+    if jq -e --arg pool "$pool" 'any(.observation.windows[]; .name == $pool and .utilization_pct >= 100)' >/dev/null <<<"$quota"; then
+      printf 'selected model quota pool is exhausted\n'
+    fi
+    return 0
+  fi
+  # A reset credit is not headroom until a reset has actually happened.
+  if jq -e 'all(.observation.windows[]; .utilization_pct >= 100)' >/dev/null <<<"$quota"; then
+    printf 'all quota windows are exhausted\n'
+  fi
+  return 0
+}
+
+# Automatic selection needs fresh current utilization for the applicable billing
+# path. Forecasts describe projected window-end usage, not current headroom,
+# and do not gate a run. Unknown quota is filtered; explicit choices remain escapes.
+selection_quota_filtered() {
+  local reason
+  reason="$(selection_quota_block_reason "$1" "$2" "$3" "${4:-}" "${5:-}")"
+  [[ -n "$reason" ]] && printf 'true\n' || printf 'false\n'
 }
 
 selection_observe_availability() {
@@ -92,7 +143,7 @@ selection_policy_validate() {
 selection_menu() {
   ops_load
   printf 'selection required: choose an operating point (unranked across task families):\n' >&2
-  jq -r '.operating_points | group_by(.task_family)[] | "  [" + .[0].task_family + "]", (.[] | "    \(.id)  constraint=\(.constraint_family) fallback=\(.expands_to.provider)/\(.expands_to.model // "(provider default)") quota=unknown")' <<<"$OPS_POLICY_JSON" >&2
+  jq -r '.operating_points | group_by(.task_family)[] | "  [" + .[0].task_family + "]", (.[] | "    \(.id)  constraint=\(.constraint_family) fallback=\(.expands_to.provider)/\(.expands_to.model // "(provider default)")")' <<<"$OPS_POLICY_JSON" >&2
   printf 'other models: any --model <id> proceeds; <provider> enumeration: waspflow doctor --models\n' >&2
   printf 'escapes: --op <id>; --model <id>; --accept-provider-default\n' >&2
 }
@@ -104,9 +155,12 @@ selection_prepare_op() {
   availability="$(selection_observe_availability "$provider" "$model" "$scope")"
   quota="$(quota_observation_v1 "$provider")"
   edge="$(selection_edge_label "$provider" "$model")"
-  disposition="$(selection_disposition "$(jq -r '.state' <<<"$availability")" "$bar" "$edge" none "$(selection_quota_filtered "$billing" "$quota" "$scope")" "$ack" true "$family")"
-  SELECTION_AVAILABILITY="$availability"; SELECTION_QUOTA_OBSERVATION="$quota"; SELECTION_QUOTA_FILTERED="$(selection_quota_filtered "$billing" "$quota" "$scope")"; SELECTION_DISPOSITION="$disposition"
-  export SELECTION_AVAILABILITY SELECTION_QUOTA_OBSERVATION SELECTION_QUOTA_FILTERED SELECTION_DISPOSITION
+  SELECTION_QUOTA_BLOCK_REASON="$(selection_quota_block_reason "$billing" "$quota" "$scope" "$provider" "$model")"
+  SELECTION_QUOTA_FILTERED=false
+  [[ -z "$SELECTION_QUOTA_BLOCK_REASON" ]] || SELECTION_QUOTA_FILTERED=true
+  disposition="$(selection_disposition "$(jq -r '.state' <<<"$availability")" "$bar" "$edge" none "$SELECTION_QUOTA_FILTERED" "$ack" true "$family")"
+  SELECTION_AVAILABILITY="$availability"; SELECTION_QUOTA_OBSERVATION="$quota"; SELECTION_DISPOSITION="$disposition"
+  export SELECTION_AVAILABILITY SELECTION_QUOTA_OBSERVATION SELECTION_QUOTA_FILTERED SELECTION_QUOTA_BLOCK_REASON SELECTION_DISPOSITION
 }
 
 selection_emit_warnings() {
@@ -129,7 +183,10 @@ selection_gate_op() {
   [[ "$(jq -r '.auto_selectable' <<<"$SELECTION_DISPOSITION")" == true ]] && return 0
   causes="$(jq -r --arg quota "$SELECTION_QUOTA_FILTERED" '(.warnings + [if $quota == "true" then "quota_filtered" else empty end]) | join(", ")' <<<"$SELECTION_DISPOSITION")"
   [[ -n "$causes" ]] || causes=not_auto_selectable
-  err "selection required: op '$op' fallback is not auto-selectable ($causes)"
+  err "selection required: op '$op' fallback provider=$provider availability_state=$(jq -r '.state' <<<"$SELECTION_AVAILABILITY") is not auto-selectable ($causes)"
+  if [[ "$SELECTION_QUOTA_FILTERED" == true ]]; then
+    err "  provider=$provider quota_state=$(jq -r '.state // "unknown"' <<<"$SELECTION_QUOTA_OBSERVATION") reason=$SELECTION_QUOTA_BLOCK_REASON"
+  fi
   if [[ "$SELECTION_QUOTA_FILTERED" == true || "$(jq -r '.warnings | index("availability_unknown") != null' <<<"$SELECTION_DISPOSITION")" == true ]]; then
     err "  retry: --model <id> or --accept-provider-default"
   fi

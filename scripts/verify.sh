@@ -6432,13 +6432,13 @@ JSON
   billing='{"schema_version":1,"path":"chatgpt_subscription","evidence":"test","detail":""}'
   [[ "$(selection_quota_filtered "$billing" "$quota" default)" == true ]]
   [[ "$(selection_quota_filtered "$billing" "$(quota_for "$fresh" 99.999 0)" default)" == false ]]
-  [[ "$(selection_quota_filtered "$billing" "$(quota_for "$fresh" 100 -1)" default)" == false ]]
-  [[ "$(selection_quota_filtered "$billing" "$(quota_for "$(date -u -d '11 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" 100 0)" default)" == false ]]
-  [[ "$(selection_quota_filtered "$billing" "$quota" mismatched)" == false ]]
+  [[ "$(selection_quota_filtered "$billing" "$(quota_for "$fresh" 100 -1)" default)" == true ]]
+  [[ "$(selection_quota_filtered "$billing" "$(quota_for "$(date -u -d '11 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" 100 0)" default)" == true ]]
+  [[ "$(selection_quota_filtered "$billing" "$quota" mismatched)" == true ]]
   [[ "$(selection_quota_filtered '{"path":"api_key"}' "$quota" default)" == false ]]
-  [[ "$(selection_quota_filtered "$billing" "$(quota_for "$fresh" 100 0 absent)" default)" == false ]]
-  jq '.observation.windows=[]' <<<"$quota" | { [[ "$(selection_quota_filtered "$billing" "$(cat)" default)" == false ]]; }
-  jq '.observation.windows=[]' <<<"$quota" | { [[ "$(selection_quota_filtered "$billing" "$(cat)" default)" == false ]]; }
+  [[ "$(selection_quota_filtered "$billing" "$(quota_for "$fresh" 100 0 absent)" default)" == true ]]
+  jq '.observation.windows=[]' <<<"$quota" | { [[ "$(selection_quota_filtered "$billing" "$(cat)" default)" == true ]]; }
+  jq '.observation.windows=[]' <<<"$quota" | { [[ "$(selection_quota_filtered "$billing" "$(cat)" default)" == true ]]; }
   export WASPFLOW_OPS_POLICY="$root/tests/fixtures/selection-policy-fallback.json"
   resolved="$(ops_resolve new --json)"
   jq -e '.resolve_schema_version == 2 and .expands_to.model == "fallback-only" and .requirements.ratified == false and .requirements.performance_axis == "placeholder"' <<<"$resolved" >/dev/null
@@ -7749,6 +7749,17 @@ source "$root/scripts/fixtures/verify-r8.sh"
 python3 "$root/scripts/fixtures/verify-p2-live.py" "$root"
 python3 "$root/scripts/fixtures/verify-p2-ansi.py" "$root"
 source "$root/scripts/fixtures/verify-p2-billing.sh"
+bash "$root/scripts/fixtures/verify-round3-quota.sh" no_timeout
+bash "$root/scripts/fixtures/verify-round3-quota.sh" clawmeter_timeout
+bash "$root/scripts/fixtures/verify-round3-quota.sh" antigravity
+bash "$root/scripts/fixtures/verify-round3-quota.sh" credits
+bash "$root/scripts/fixtures/verify-round3-quota.sh" mismatch
+bash "$root/scripts/fixtures/verify-round3-quota.sh" unknown
+bash "$root/scripts/fixtures/verify-round3-quota.sh" grok
+bash "$root/scripts/fixtures/verify-round3-quota.sh" forecast
+bash "$root/scripts/fixtures/verify-round4-quota.sh" pools
+bash "$root/scripts/fixtures/verify-round4-quota.sh" forecast
+bash "$root/scripts/fixtures/verify-round4-quota.sh" sigpipe
 python3 "$root/scripts/fixtures/verify-p2-gc.py" "$root"
 source "$root/scripts/fixtures/verify-p2-grok-effort.sh"
 source "$root/scripts/fixtures/verify-p2-qwen-evidence.sh"

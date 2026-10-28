@@ -206,8 +206,8 @@ billing_preflight_antigravity() { return 0; }
 billing_preflight_qwen() { return 0; }
 billing_preflight_deepseek() { return 0; }
 
-# Emit BillingPath v1. This is observational only: an uncertain billing path
-# never changes whether a lane may launch. Args: provider endpoint_profile raw_args
+# Emit BillingPath v1. The automatic selection gate rejects uncertain billing;
+# explicit model/provider choices remain available. Args: provider endpoint_profile raw_args
 billing_path_v1() {
   local provider="$1" endpoint_profile="${2:-default}" raw_args="${3:-false}"
   local path="unknown" evidence="none" detail="" mode="" principal=""
@@ -273,7 +273,7 @@ billing_cost_currency() {
 }
 
 # Emit a QuotaObservation v1 envelope. The clawmeter contract is deliberately
-# narrow and checked at the parsing boundary; it is never a launch gate.
+# narrow and checked at the parsing boundary; missing forecasts retain usage.
 quota_observation_v1() {
   local provider="$1" provider_key raw version usage_error stale state reason source observation
   case "$provider" in codex) provider_key=openai ;; claude) provider_key=claude ;; antigravity) provider_key=antigravity ;; qwen) provider_key=alibaba ;; *)
@@ -284,6 +284,10 @@ quota_observation_v1() {
     jq -cn '{schema_version:1,state:"absent",reason:"clawmeter not on PATH",stale:false,source:"",observation:null}'
     return 0
   }
+  if ! declare -F clawmeter >/dev/null && ! command -v timeout >/dev/null 2>&1; then
+    jq -cn '{schema_version:1,state:"absent",reason:"timeout unavailable for clawmeter",stale:false,source:"",observation:null}'
+    return 0
+  fi
   if declare -F clawmeter >/dev/null || ! command -v timeout >/dev/null 2>&1; then
     version="$(clawmeter --version 2>/dev/null || true)"
   else
@@ -323,9 +327,8 @@ quota_observation_v1() {
       (($u.windows // null) | type == "array") and
       (($u.stale // false) | type == "boolean") and
       (($u.fetched_at // null) | type == "string") and
-      (.providers[$p].forecast | type == "object") and
-      ((.providers[$p].forecast.windows // null) | type == "object") and
-      all($u.windows[]; type == "object" and ((.name // .display_name // null) | type == "string") and (.utilization | type == "number") and (.resets_at | type == "string"))
+      (if $p == "openai" then ($u.reset_credits.available_count | . == null or (type == "number" and . >= 0 and . == floor)) else true end) and
+      all($u.windows[]; type == "object" and ((.name // .display_name // null) | type == "string") and (.utilization | type == "number" and . >= 0) and (.resets_at | type == "string"))
     end)' >/dev/null <<<"$raw" 2>/dev/null || {
     jq -cn --arg reason "clawmeter JSON has unsupported provider shape" --arg source "clawmeter@${version}" '{schema_version:1,state:"absent",reason:$reason,stale:false,source:$source,observation:null}'
     return 0
@@ -343,7 +346,8 @@ quota_observation_v1() {
        windows:[(($provider.usage.windows // [])[] | {
          name:(.name // .display_name // ""),
          utilization_pct:(.utilization // null), resets_at:(.resets_at // null),
-         projected_pct:($provider.forecast.windows[(.name // .display_name // "")].projected_pct // null)
+         # Forecasts can exceed 100% when usage is on pace to exceed quota.
+         projected_pct:((try $provider.forecast.windows[(.name // .display_name // "")].projected_pct catch null) | if type == "number" and . >= 0 then . else null end)
        })],
        reset_credits_available:(if $p == "openai" then ($provider.usage.reset_credits.available_count // null) else null end),
        fetched_at:($provider.usage.fetched_at // null)}' <<<"$raw" 2>/dev/null)" || observation=null
